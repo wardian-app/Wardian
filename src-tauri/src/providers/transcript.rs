@@ -1,4 +1,7 @@
-use wardian_core::control::{WatchTranscriptMessage, WatchTranscriptProvenance};
+use sha2::{Digest, Sha256};
+use wardian_core::control::{
+    WatchMirrorIdentity, WatchTranscriptMessage, WatchTranscriptProvenance,
+};
 use wardian_core::models::AgentEvent;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -166,6 +169,7 @@ impl CodexWatchBindingState {
                         provider_session_id: provider_session_id.clone(),
                         source_path: source_path.clone(),
                         provider_turn_id,
+                        mirror: None,
                     });
                 }
             }
@@ -216,6 +220,7 @@ pub(crate) fn bind_pi_watch_message(
         provider_session_id: provider_session_id.to_string(),
         source_path: source_path.to_string(),
         provider_turn_id: provider_turn_id.to_string(),
+        mirror: None,
     });
 }
 
@@ -374,8 +379,100 @@ fn extract_mock(raw_line: &str) -> Option<WatchTranscriptMessage> {
             .and_then(|value| value.as_str())
             .map(str::to_string),
         source: Some(msg_type.to_string()),
-        provider_provenance: None,
+        provider_provenance: mock_mirror_provenance(&parsed),
     })
+}
+
+/// Preserve a well-shaped producer claim without trusting any JSON source path.
+/// The digest covers the parsed raw object, never a producer-supplied digest.
+pub(crate) fn mock_mirror_provenance(
+    parsed: &serde_json::Value,
+) -> Option<WatchTranscriptProvenance> {
+    let receipt = parsed.get("wardian_mirror")?.as_object()?;
+    let observation_id = receipt.get("observation_id")?.as_str()?;
+    let incarnation = receipt.get("incarnation")?.as_str()?;
+    let provider_session_id = receipt.get("provider_session_id")?.as_str()?;
+    if !valid_mock_mirror_identity(observation_id, incarnation)
+        || !valid_mock_receipt_id(provider_session_id)
+    {
+        return None;
+    }
+    Some(WatchTranscriptProvenance {
+        provider_session_id: provider_session_id.to_string(),
+        source_path: String::new(),
+        provider_turn_id: parsed
+            .get("turn_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string(),
+        mirror: Some(WatchMirrorIdentity {
+            observation_id: observation_id.to_string(),
+            incarnation: incarnation.to_string(),
+            logged: receipt.get("logged")?.as_bool()?,
+            payload_sha256: format!("{:x}", Sha256::digest(serde_json::to_vec(parsed).ok()?)),
+        }),
+    })
+}
+
+fn valid_mock_receipt_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn valid_mock_mirror_identity(observation_id: &str, incarnation: &str) -> bool {
+    if !valid_mock_receipt_id(observation_id) || !valid_mock_receipt_id(incarnation) {
+        return false;
+    }
+    let Ok(uuid) = uuid::Uuid::parse_str(incarnation) else {
+        return false;
+    };
+    if uuid.is_nil() || uuid.to_string() != incarnation {
+        return false;
+    }
+    let Some(sequence) = observation_id
+        .strip_prefix(incarnation)
+        .and_then(|suffix| suffix.strip_prefix(':'))
+    else {
+        return false;
+    };
+    sequence
+        .parse::<u64>()
+        .is_ok_and(|number| number > 0 && number.to_string() == sequence)
+}
+
+/// Bind a logged Mock claim to the callback's actual session and host-owned path.
+/// This remains a Watch observation until an acquired record verifies the claim.
+pub(crate) fn bind_mock_watch_message(
+    message: &mut WatchTranscriptMessage,
+    expected_provider_session: &str,
+    source_path: &str,
+) {
+    if !message.provider.eq_ignore_ascii_case("mock") {
+        return;
+    }
+    let Some(provenance) = message.provider_provenance.as_mut() else {
+        return;
+    };
+    // A rejected claim must not retain an earlier or JSON-supplied path.
+    provenance.source_path.clear();
+    let Some(mirror) = provenance.mirror.as_ref() else {
+        return;
+    };
+    if !mirror.logged
+        || !valid_mock_mirror_identity(&mirror.observation_id, &mirror.incarnation)
+        || mirror.payload_sha256.len() != 64
+        || !mirror
+            .payload_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !valid_mock_receipt_id(expected_provider_session)
+        || provenance.provider_session_id != expected_provider_session
+        || source_path.trim().is_empty()
+    {
+        return;
+    }
+    provenance.source_path = std::fs::canonicalize(source_path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| source_path.to_string());
 }
 
 fn extract_gemini(raw_line: &str) -> Option<WatchTranscriptMessage> {
@@ -548,6 +645,7 @@ mod tests {
                 provider_session_id: "codex-session".to_string(),
                 source_path: "codex-session.jsonl".to_string(),
                 provider_turn_id: "turn-a".to_string(),
+                mirror: None,
             })
         );
     }
@@ -715,6 +813,216 @@ mod tests {
         assert_eq!(message.turn_id.as_deref(), Some("turn-7"));
     }
 
+    fn mock_observation() -> serde_json::Value {
+        serde_json::json!({
+            "type": "model", "content": "Mock answer", "turn_id": "turn-7",
+            "wardian_mirror": {
+                "observation_id": "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc:1",
+                "incarnation": "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc",
+                "provider_session_id": "mock-session", "logged": true
+            }
+        })
+    }
+
+    #[test]
+    fn mock_receipts_preserve_claims_without_trusting_paths_or_digests() {
+        for kind in ["message", "model", "info"] {
+            let mut raw = mock_observation();
+            raw["type"] = serde_json::json!(kind);
+            raw["role"] = serde_json::json!("assistant");
+            raw["source_path"] = serde_json::json!("forged.jsonl");
+            raw["wardian_mirror"]["source_path"] = serde_json::json!("also-forged.jsonl");
+            raw["wardian_mirror"]["payload_sha256"] = serde_json::json!("untrusted digest");
+            let message = extract_transcript_message("mock", &raw.to_string()).unwrap();
+            assert_eq!(message.text, "Mock answer");
+            assert_eq!(message.turn_id.as_deref(), Some("turn-7"));
+            assert_eq!(message.source.as_deref(), Some(kind));
+            let provenance = message.provider_provenance.unwrap();
+            assert_eq!(provenance.provider_session_id, "mock-session");
+            assert_eq!(provenance.provider_turn_id, "turn-7");
+            assert!(provenance.source_path.is_empty());
+            let mirror = provenance.mirror.unwrap();
+            assert!(mirror.logged);
+            assert_eq!(
+                mirror.observation_id,
+                raw["wardian_mirror"]["observation_id"].as_str().unwrap()
+            );
+            assert_eq!(
+                mirror.payload_sha256,
+                format!("{:x}", Sha256::digest(serde_json::to_vec(&raw).unwrap()))
+            );
+
+            let mut conflicting = raw.clone();
+            conflicting["content"] = serde_json::json!("Different raw payload");
+            let conflict = mock_mirror_provenance(&conflicting)
+                .unwrap()
+                .mirror
+                .unwrap();
+            assert_eq!(conflict.observation_id, mirror.observation_id);
+            assert_ne!(conflict.payload_sha256, mirror.payload_sha256);
+            // Object key order and JSON whitespace do not define the digest.
+            let reordered: serde_json::Value =
+                serde_json::from_str(&serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+            assert_eq!(
+                mock_mirror_provenance(&reordered),
+                mock_mirror_provenance(&raw)
+            );
+        }
+        let mut without_turn = mock_observation();
+        without_turn.as_object_mut().unwrap().remove("turn_id");
+        without_turn["id"] = serde_json::json!("legacy-message-id");
+        assert_eq!(
+            mock_mirror_provenance(&without_turn)
+                .unwrap()
+                .provider_turn_id,
+            ""
+        );
+        assert_eq!(
+            extract_transcript_message("mock", &without_turn.to_string())
+                .unwrap()
+                .turn_id
+                .as_deref(),
+            Some("legacy-message-id")
+        );
+    }
+
+    #[test]
+    fn mock_missing_or_malformed_receipts_leave_genuine_output_unproved() {
+        let mut absent = mock_observation();
+        absent.as_object_mut().unwrap().remove("wardian_mirror");
+        let message = extract_transcript_message("mock", &absent.to_string()).unwrap();
+        assert!(message.provider_provenance.is_none());
+        assert_eq!(message.text, "Mock answer");
+        for (key, value) in [
+            ("observation_id", serde_json::json!("")),
+            ("observation_id", serde_json::json!("x".repeat(129))),
+            ("observation_id", serde_json::json!("other-incarnation:1")),
+            (
+                "observation_id",
+                serde_json::json!("c60e52bf-71f2-43f1-a313-9ea96fe2f7bc:0"),
+            ),
+            (
+                "observation_id",
+                serde_json::json!("c60e52bf-71f2-43f1-a313-9ea96fe2f7bc:01"),
+            ),
+            ("incarnation", serde_json::json!("not-a-uuid")),
+            (
+                "incarnation",
+                serde_json::json!("c60e52bf-71f2-43f1-a313-9ea96fe2f7bd"),
+            ),
+            ("provider_session_id", serde_json::json!("")),
+            ("provider_session_id", serde_json::json!("x".repeat(129))),
+            ("provider_session_id", serde_json::json!("mock session\n")),
+            ("provider_session_id", serde_json::json!(7)),
+            ("logged", serde_json::json!("true")),
+            ("logged", serde_json::Value::Null),
+        ] {
+            let mut raw = mock_observation();
+            raw["wardian_mirror"][key] = value;
+            let message = extract_transcript_message("mock", &raw.to_string()).unwrap();
+            assert!(message.provider_provenance.is_none(), "accepted {raw}");
+            assert_eq!(message.text, "Mock answer");
+        }
+        for key in [
+            "observation_id",
+            "incarnation",
+            "provider_session_id",
+            "logged",
+        ] {
+            let mut raw = mock_observation();
+            raw["wardian_mirror"].as_object_mut().unwrap().remove(key);
+            assert!(mock_mirror_provenance(&raw).is_none());
+        }
+        for receipt in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!(true),
+        ] {
+            let mut raw = mock_observation();
+            raw["wardian_mirror"] = receipt;
+            assert!(mock_mirror_provenance(&raw).is_none());
+        }
+        let mut boundary = mock_observation();
+        boundary["wardian_mirror"]["provider_session_id"] = serde_json::json!("x".repeat(128));
+        assert!(mock_mirror_provenance(&boundary).is_some());
+    }
+
+    #[test]
+    fn mock_binding_requires_logged_claim_exact_session_and_host_path() {
+        let raw = mock_observation();
+        let original = extract_transcript_message("mock", &raw.to_string()).unwrap();
+        let host_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers/transcript.rs");
+        let canonical = std::fs::canonicalize(&host_path).unwrap();
+        let mut message = original.clone();
+        bind_mock_watch_message(&mut message, "mock-session", host_path.to_str().unwrap());
+        assert_eq!(
+            message.provider_provenance.as_ref().unwrap().source_path,
+            canonical.to_string_lossy().as_ref()
+        );
+        assert_eq!(message.turn_id, original.turn_id);
+        assert_eq!(message.source, original.source);
+        assert_eq!(message.text, original.text);
+
+        let mut unavailable = original.clone();
+        let unavailable_path = host_path.with_extension("missing-mock-mirror");
+        bind_mock_watch_message(
+            &mut unavailable,
+            "mock-session",
+            unavailable_path.to_str().unwrap(),
+        );
+        assert_eq!(
+            unavailable.provider_provenance.unwrap().source_path,
+            unavailable_path.to_str().unwrap()
+        );
+        let mut missing_mirror = original.clone();
+        missing_mirror.provider_provenance.as_mut().unwrap().mirror = None;
+        bind_mock_watch_message(&mut missing_mirror, "mock-session", "host.jsonl");
+        assert!(missing_mirror
+            .provider_provenance
+            .unwrap()
+            .source_path
+            .is_empty());
+
+        for (session, path) in [
+            ("another-session", "host.jsonl"),
+            ("", "host.jsonl"),
+            ("mock-session", " "),
+        ] {
+            let mut rejected = message.clone();
+            bind_mock_watch_message(&mut rejected, session, path);
+            assert!(rejected.provider_provenance.unwrap().source_path.is_empty());
+        }
+        for field in ["logged", "observation_id", "incarnation", "payload_sha256"] {
+            let mut rejected = original.clone();
+            let mirror = rejected
+                .provider_provenance
+                .as_mut()
+                .unwrap()
+                .mirror
+                .as_mut()
+                .unwrap();
+            match field {
+                "logged" => mirror.logged = false,
+                "observation_id" => mirror.observation_id = "wrong:1".to_string(),
+                "incarnation" => mirror.incarnation = "malformed".to_string(),
+                _ => mirror.payload_sha256 = "unproved".to_string(),
+            }
+            bind_mock_watch_message(&mut rejected, "mock-session", "host.jsonl");
+            assert!(rejected.provider_provenance.unwrap().source_path.is_empty());
+        }
+        let mut unlogged = raw.clone();
+        unlogged["wardian_mirror"]["logged"] = serde_json::json!(false);
+        let mut unlogged = extract_transcript_message("mock", &unlogged.to_string()).unwrap();
+        bind_mock_watch_message(&mut unlogged, "mock-session", "host.jsonl");
+        assert!(unlogged.provider_provenance.unwrap().source_path.is_empty());
+        let mut other_provider = message.clone();
+        other_provider.provider = "pi".to_string();
+        let unchanged = other_provider.clone();
+        bind_mock_watch_message(&mut other_provider, "mock-session", "host.jsonl");
+        assert_eq!(other_provider, unchanged);
+    }
+
     #[test]
     fn opencode_text_part_extracts_assistant_text() {
         let line = r#"{"type":"text","sessionID":"ses_test","part":{"type":"text","text":"OpenCode answer"}}"#;
@@ -774,6 +1082,7 @@ mod tests {
                 provider_session_id: "pi-session".to_string(),
                 source_path: "pi-session.jsonl".to_string(),
                 provider_turn_id: "pi-entry".to_string(),
+                mirror: None,
             })
         );
 

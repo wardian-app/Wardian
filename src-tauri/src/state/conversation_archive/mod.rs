@@ -22,6 +22,7 @@ pub(crate) mod chat_read;
 mod chat_read_store;
 mod chat_source_index;
 mod compatibility_claims;
+mod mock_mirrors;
 pub(crate) mod provenance;
 mod records;
 mod repair;
@@ -288,10 +289,24 @@ impl ConversationCaptureState {
         })
     }
 
+    fn initial_source_is_unrestricted(
+        source: &crate::commands::provider_log_acquisition::ProviderLogCaptureState,
+    ) -> bool {
+        source.policy_generation == 0
+            && source.unknown_before_offset.unwrap_or(0) == 0
+            && source.disabled_spans.is_empty()
+            && source.open_disabled_from.is_none()
+    }
+
     fn recent_policy_stamp(&self) -> io::Result<String> {
         let sources = self
             .provider_log_sources
             .iter()
+            // The first unrestricted observation adds acquisition bookkeeping,
+            // not an exclusion for already observed Watch messages. The recent
+            // scope pins the actual file identity separately. Keep every real
+            // cutoff, disabled interval, and later policy generation in the fence.
+            .filter(|source| !Self::initial_source_is_unrestricted(source))
             .map(|source| {
                 serde_json::json!({
                     "key": source.provider_source_key, "identity": source.native_identity,
@@ -722,7 +737,17 @@ impl ConversationArchiveState {
         context: ConversationArchiveContext,
         events: &[AgentChatEvent],
     ) -> io::Result<usize> {
-        self.append_chat_events_bound(context, events, None)
+        self.append_chat_events_bound(context, events, None, None)
+    }
+
+    /// Admit Mock mirror correspondence only from the actual Watch capture pass.
+    pub(crate) fn append_chat_events_with_mock_watch(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+        watch: Option<&crate::commands::chat::MockWatchAuthority>,
+    ) -> io::Result<usize> {
+        self.append_chat_events_bound(context, events, None, watch)
     }
 
     pub(crate) fn append_chat_events_with_native_messages(
@@ -731,7 +756,7 @@ impl ConversationArchiveState {
         events: &[AgentChatEvent],
         authority: &crate::commands::chat_recent_database::MessageAuthority,
     ) -> io::Result<usize> {
-        self.append_chat_events_bound(context, events, Some(authority))
+        self.append_chat_events_bound(context, events, Some(authority), None)
     }
 
     fn append_chat_events_bound(
@@ -739,6 +764,7 @@ impl ConversationArchiveState {
         context: ConversationArchiveContext,
         events: &[AgentChatEvent],
         authority: Option<&crate::commands::chat_recent_database::MessageAuthority>,
+        watch: Option<&crate::commands::chat::MockWatchAuthority>,
     ) -> io::Result<usize> {
         if !events
             .iter()
@@ -759,7 +785,7 @@ impl ConversationArchiveState {
         let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
         let (count, candidate) =
-            self.append_chat_events_prepared_locked(context, events, None, authority)?;
+            self.append_chat_events_prepared_locked(context, events, None, authority, watch)?;
         if let Some(authority) = authority {
             authority.require_current()?;
         }
@@ -775,6 +801,7 @@ impl ConversationArchiveState {
         events: &[AgentChatEvent],
         capture: Option<CapturePreparation<'_>>,
         native_messages: Option<&crate::commands::chat_recent_database::MessageAuthority>,
+        watch: Option<&crate::commands::chat::MockWatchAuthority>,
     ) -> io::Result<(usize, Option<chat_read::Candidate>)> {
         let recovering = if let Some(capture) = capture.as_ref() {
             compatibility_claims::pending(capture.state, &context.agent_id)?
@@ -830,9 +857,10 @@ impl ConversationArchiveState {
                             authority.binding(&event);
                     }
                 }
-                event
+                mock_mirrors::bind(&context, &mut event, capture.as_ref(), watch)?;
+                Ok(event)
             })
-            .collect();
+            .collect::<io::Result<_>>()?;
         let events = sanitized.as_slice();
         let active_events = events
             .iter()
@@ -850,6 +878,12 @@ impl ConversationArchiveState {
         let mut existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
         let mut existing_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
+        let mut mirror_sources = capture_state.provider_log_sources.clone();
+        if let Some(capture) = capture.as_ref() {
+            mirror_sources
+                .retain(|source| source.provider_source_key != capture.next.provider_source_key);
+            mirror_sources.push(capture.next.clone());
+        }
         if let Some(authority) = native_messages {
             for current in events
                 .iter()
@@ -1013,8 +1047,8 @@ impl ConversationArchiveState {
             }
         }
         events_refreshed |= before_refresh_events != existing_events;
-        let records_refreshed = before_refresh_records != existing_records;
-        let refreshed = events_refreshed || records_refreshed;
+        let mut records_refreshed = before_refresh_records != existing_records;
+        let mut refreshed = events_refreshed || records_refreshed;
         let mut changed_observation_ids = provenance::changed_observation_ids(
             &before_refresh_events,
             &before_refresh_records,
@@ -1036,11 +1070,13 @@ impl ConversationArchiveState {
             &handle.conversation_id,
             &conversation_dir,
             &effective_context,
-            &existing_records,
+            &mut existing_records,
             &existing_events,
             Some(&durable_event_ids),
             &mut next_seq,
         )?;
+        records_refreshed |= before_refresh_records != existing_records;
+        refreshed |= records_refreshed;
         if let Some(authority) = native_messages {
             authority.require_current()?;
         }
@@ -1061,8 +1097,13 @@ impl ConversationArchiveState {
         let mut pending_publications: Vec<PendingChatPublication> = Vec::new();
         let mut cached_sources = None;
         let mut merged_existing_count = 0_usize;
+        let mock_mirrors = (effective_context.provider == "mock")
+            .then(|| {
+                mock_mirrors::MatchingSet::new(&existing_events, &batch_events, &mirror_sources)
+            })
+            .transpose()?;
 
-        for event in &batch_events {
+        for (batch_index, event) in batch_events.iter().enumerate() {
             let same_batch_mirror_matches = pending_publications
                 .iter()
                 .enumerate()
@@ -1133,12 +1174,16 @@ impl ConversationArchiveState {
             }
 
             let existing_event_index = matching_event_index(&existing_events, event)?;
+            let mirror_record = mock_mirrors
+                .as_ref()
+                .and_then(|mirrors| mirrors.matching_record(&existing_records, batch_index));
             let matching_record = matching_record_index_with_candidates(
                 &existing_records,
                 event,
                 &existing_events,
                 &batch_events,
-            )?;
+            )?
+            .or(mirror_record);
             let bound_codex_mirror = matching_record.is_some_and(|record_index| {
                 existing_events.iter().any(|archived| {
                     codex_archive_mirror_pair(
@@ -1155,6 +1200,7 @@ impl ConversationArchiveState {
                 && matching_record.is_some_and(|index| {
                     !is_bound_native_delivery(&existing_records[index], event)
                         && !bound_codex_mirror
+                        && mirror_record != Some(index)
                 })
             {
                 return Err(io::Error::new(
@@ -1482,6 +1528,34 @@ impl ConversationArchiveState {
     fn publish_chat_candidate(&self, mut candidate: chat_read::Candidate) -> io::Result<()> {
         let capture = read_capture_state(&candidate.context.agent_id)?;
         compatibility_claims::restore_candidate(&mut candidate, &capture)?;
+        if candidate.context.provider == "mock" {
+            let directory =
+                conversation_dir(&candidate.context.agent_id, &candidate.conversation_id)?;
+            let path = directory.join("conversation.jsonl");
+            let mut records = read_jsonl_records(&path)?;
+            if mock_mirrors::reconcile(
+                &mut records,
+                &mut candidate.events,
+                &capture.provider_log_sources,
+            )? {
+                // Evidence precedes its narrative, matching ordinary archive recovery.
+                write_jsonl_atomic(&directory.join("events.jsonl"), &candidate.events)?;
+                #[cfg(test)]
+                if self
+                    .fail_compatibility_stage
+                    .compare_exchange(5, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return Err(io::Error::other(
+                        "injected Mock reconciliation failure after events",
+                    ));
+                }
+                write_jsonl_atomic(&path, &records)?;
+                candidate.committed_output_bytes =
+                    std::fs::metadata(directory.join("events.jsonl"))?.len();
+            }
+            mock_mirrors::project(&mut candidate.events, &capture.provider_log_sources)?;
+        }
         candidate.source_epoch = capture
             .provider_log_sources
             .iter()
@@ -1669,13 +1743,16 @@ impl ConversationArchiveState {
             ));
         }
 
-        let recent_policy_changed = expected.is_none_or(|old| {
-            old.native_identity != next.native_identity
-                || old.policy_generation != next.policy_generation
-                || old.unknown_before_offset != next.unknown_before_offset
-                || old.disabled_spans != next.disabled_spans
-                || old.open_disabled_from != next.open_disabled_from
-        });
+        let recent_policy_changed = expected.map_or_else(
+            || !ConversationCaptureState::initial_source_is_unrestricted(next),
+            |old| {
+                old.native_identity != next.native_identity
+                    || old.policy_generation != next.policy_generation
+                    || old.unknown_before_offset != next.unknown_before_offset
+                    || old.disabled_spans != next.disabled_spans
+                    || old.open_disabled_from != next.open_disabled_from
+            },
+        );
         let _recent_boundary = recent_policy_changed
             .then(|| {
                 self.chat_projection
@@ -1707,6 +1784,7 @@ impl ConversationArchiveState {
                 source_proof,
             }),
             native_messages,
+            None,
         )?;
         if let Some(index) = current_index {
             capture_state.provider_log_sources[index] = next.clone();
@@ -1970,7 +2048,7 @@ impl ConversationArchiveState {
             &handle.conversation_id,
             &conversation_dir,
             &effective_context,
-            &existing_records,
+            &mut existing_records,
             &existing_events,
             None,
             &mut next_seq,

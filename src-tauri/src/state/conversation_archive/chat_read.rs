@@ -19,6 +19,8 @@ use super::ConversationArchiveContext;
 
 #[path = "chat_archive_bootstrap.rs"]
 mod cold_bootstrap;
+#[path = "chat_read_packed_recent.rs"]
+pub(super) mod packed_recent;
 
 pub(crate) const PAGE_ROWS: usize = 80;
 pub(crate) const PREVIEW_BYTES: usize = 1024;
@@ -192,12 +194,38 @@ pub(crate) struct Head {
     pub(crate) committed_output_bytes: u64,
     pub(crate) capture_stamp: String,
     pub(crate) progress: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_coverage: Option<CanonicalSourceCoverage>,
     parent: Option<String>,
     changes: Vec<String>,
     recent_start: usize,
     row_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    recent_page: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     bootstrap: Option<cold_bootstrap::Progress>,
+}
+
+/// Writer-produced native interval coverage, separate from archive byte extent
+/// and opaque capture fingerprints. Old checkpoints deliberately have no proof.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct CanonicalSourceCoverage {
+    pub(super) source_key: String,
+    pub(super) epoch: String,
+    pub(super) admission: String,
+    pub(super) extent: u64,
+    pub(super) normalizer_settled: bool,
+}
+
+impl CanonicalSourceCoverage {
+    fn matches(&self, current: &super::chat_source_index::Qualification) -> bool {
+        current.complete
+            && self.normalizer_settled
+            && current.source_key.as_deref() == Some(self.source_key.as_str())
+            && self.epoch == current.epoch
+            && self.admission == current.admission
+            && self.extent == current.extent
+    }
 }
 
 impl Head {
@@ -224,6 +252,7 @@ impl Head {
             self.changes
                 .iter()
                 .chain(self.parent.iter())
+                .chain(self.recent_page.iter())
                 .map(|reference| Dependency::Object(reference.clone())),
         );
         roots
@@ -1100,12 +1129,30 @@ fn recent_canonical_covers(
     let mut seeks = SeekCache::default();
     for binding in coverage {
         let identity = binding.native_key.as_ref().map_or_else(
-            || digest(binding.event_id.as_bytes()),
+            || {
+                if snapshot.provider == "mock" {
+                    // Verified mirror handoff records this namespace rather
+                    // than transferring the generic Watch identity. Avoid a
+                    // guaranteed extra tree walk for every mirrored header.
+                    digest(format!("mock-watch:{}", binding.event_id).as_bytes())
+                } else {
+                    digest(binding.event_id.as_bytes())
+                }
+            },
             |key| recent_native_index_key(key),
         );
-        let Some(row_ref) =
-            store.get_reusing_nodes(&published.identities, &identity, &mut seeks)?
-        else {
+        let row_ref = store.get_reusing_nodes(&published.identities, &identity, &mut seeks)?;
+        let row_ref =
+            if row_ref.is_none() && binding.native_key.is_none() && snapshot.provider == "mock" {
+                store.get_reusing_nodes(
+                    &published.identities,
+                    &digest(binding.event_id.as_bytes()),
+                    &mut seeks,
+                )?
+            } else {
+                row_ref
+            };
+        let Some(row_ref) = row_ref else {
             return Ok((false, store.bytes));
         };
         let row: Row = store.read(&row_ref)?;
@@ -1114,7 +1161,11 @@ fn recent_canonical_covers(
                 && row.event.metadata["chat_recent_native_version"].as_str()
                     == Some(binding.version.as_str())
         } else {
-            row.event.id == binding.event_id
+            (row.event.id == binding.event_id
+                || (row.event.provider == "mock"
+                    && row.event.metadata["mock_watch_alias"].as_str()
+                        == Some(binding.event_id.as_str())
+                    && row.event.metadata["chat_source_ref"].is_string()))
                 && row.event.metadata["chat_recent_key"].as_str() == Some(binding.key.as_str())
                 && row.event.metadata["chat_recent_version"].as_str()
                     == Some(binding.version.as_str())
@@ -1582,6 +1633,7 @@ pub(crate) fn header(event: &AgentChatEvent) -> AgentChatEvent {
         "chat_recent_version",
         "chat_recent_native_key",
         "chat_recent_native_version",
+        "mock_watch_alias",
         "chat_identity_resolution",
         "tool_name",
     ] {
@@ -1747,6 +1799,8 @@ impl ProjectionOwner {
 
     pub(super) fn committed(&self, candidate: Candidate, capture_stamp: String) -> io::Result<()> {
         let source_proof = super::chat_logical_index::source_proof(&candidate.context)?;
+        let source_coverage =
+            super::chat_logical_index::mock_canonical_coverage(&candidate.context)?;
         let signatures = candidate
             .events
             .iter()
@@ -1784,10 +1838,12 @@ impl ProjectionOwner {
             committed_output_bytes: candidate.committed_output_bytes,
             capture_stamp,
             progress: "indexing".into(),
+            source_coverage,
             parent: None,
             changes: Vec::new(),
             recent_start: candidate.events.len().saturating_sub(PAGE_ROWS),
             row_count: candidate.events.len(),
+            recent_page: None,
             bootstrap: None,
         };
         let agent_id = candidate.context.agent_id.clone();
@@ -1798,6 +1854,30 @@ impl ProjectionOwner {
             .work
             .lock()
             .map_err(|_| io::Error::other("chat projection owner poisoned"))?;
+        // Replaying an unchanged settled capture must preserve the opaque
+        // revision already held by a concurrent bounded source-renewal phase.
+        // Source-proof publishers retain their existing qualification path.
+        if source_proof.is_none()
+            && works.get(&agent_id).is_some_and(|old| {
+                old.source_proof.is_none()
+                    && old.head.progress == "ready"
+                    && old.todo.is_empty()
+                    && old.bodies.is_empty()
+                    && !old.head.logical.pending()
+                    && !old.head.logical.narrative_pending()
+                    && old.head.conversation_id == head.conversation_id
+                    && old.head.source_key == head.source_key
+                    && old.head.source_epoch == head.source_epoch
+                    && old.head.capture_stamp == head.capture_stamp
+                    && old.head.source_coverage == head.source_coverage
+                    && old.head.committed_output_bytes == head.committed_output_bytes
+                    && old.candidate.context == candidate.context
+                    && old.candidate.generated_input_bindings == candidate.generated_input_bindings
+                    && old.signatures == signatures
+            })
+        {
+            return Ok(());
+        }
         if let Some(old) = works.remove(&agent_id) {
             let compatible = old.head.conversation_id == head.conversation_id
                 && old.head.source_key == head.source_key
@@ -2049,6 +2129,8 @@ impl ProjectionOwner {
             head.parent = None;
         }
         head.changes = changes.into_values().take(PAGE_ROWS).collect();
+        head.recent_page = None;
+        head.recent_page = packed_recent::prepare(&mut store, &head)?;
         #[cfg(test)]
         self.checkpoint_fault(4)?;
         store.finish_checkpoint(&head.checkpoint_dependencies())?;
@@ -2156,6 +2238,8 @@ impl ProjectionOwner {
         head.row_count += 1;
         head.recent_start = head.row_count.saturating_sub(PAGE_ROWS);
         head.committed_output_bytes = extent;
+        head.recent_page = None;
+        head.recent_page = packed_recent::prepare(&mut store, &head)?;
         #[cfg(test)]
         self.checkpoint_fault(4)?;
         store.finish_checkpoint(&head.checkpoint_dependencies())?;
@@ -2198,6 +2282,18 @@ fn insert_row(store: &mut Store, head: &mut Head, row: &Row) -> io::Result<Strin
     if let Some(source_ref) = row.event.metadata["chat_source_ref"].as_str() {
         head.identities =
             Some(store.insert(&head.identities, &digest(source_ref.as_bytes()), &reference)?);
+    }
+    if row.event.provider == "mock" && row.event.metadata["chat_source_ref"].is_string() {
+        if let Some(alias) = row.event.metadata["mock_watch_alias"]
+            .as_str()
+            .filter(|alias| alias.len() <= 256)
+        {
+            head.identities = Some(store.insert(
+                &head.identities,
+                &digest(format!("mock-watch:{alias}").as_bytes()),
+                &reference,
+            )?);
+        }
     }
     if let Some(native) = row.event.metadata["chat_recent_native_key"]
         .as_str()
@@ -2403,13 +2499,36 @@ fn page_limited(
     before: Option<&str>,
     limit: usize,
 ) -> io::Result<(Vec<AgentChatEvent>, Option<String>)> {
-    let entries = store.page(&head.root, before, PAGE_ROWS + 1)?;
-    let has_older = entries.len() > PAGE_ROWS;
+    let (entries, has_older) =
+        if let Some(reference) = head.recent_page.as_deref().filter(|_| before.is_none()) {
+            let packed = packed_recent::read(store, reference, head)?;
+            (packed.entries, packed.has_older)
+        } else {
+            let physical = store.page(&head.root, before, PAGE_ROWS + 1)?;
+            let has_older = physical.len() > PAGE_ROWS;
+            let entries = physical
+                .into_iter()
+                .take(PAGE_ROWS)
+                .map(|(key, reference)| {
+                    let row = store.read(&reference)?;
+                    Ok(packed_recent::PackedEntry {
+                        key,
+                        reference,
+                        row,
+                    })
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            (entries, has_older)
+        };
     let mut events = Vec::new();
     let mut last = None;
     let mut emitted_keys = Vec::new();
-    for (key, reference) in entries.into_iter().take(PAGE_ROWS) {
-        let row: Row = store.read(&reference)?;
+    for packed_recent::PackedEntry {
+        key,
+        reference,
+        row,
+    } in entries
+    {
         if row.agent_id != head.agent_id || row.conversation_id != head.conversation_id {
             return Err(io::Error::other("foreign chat row"));
         }
@@ -3550,14 +3669,44 @@ fn read_with_recent_limit(
     }
     let source_scope_attempted = source_pointer.is_some();
     let mut source_scope_valid = !source_scope_attempted;
+    let mut mock_source_progress = None;
+    let mut qualified_mock_canonical = false;
+    if context.provider == "mock" && snapshot.log_path.is_some() && source_pointer.is_none() {
+        mock_source_progress = Some("indexing".to_owned());
+    }
     if let Some(reference) = &source_pointer {
         result.bytes_read += (2 * HEAD_BYTES + POLICY_BYTES) as usize;
         result.records_decoded += 2;
-        match super::chat_source_index::scope(snapshot, &mut store, reference) {
-            Ok((generation, epoch, _)) => {
+        match super::chat_source_index::qualification(snapshot, &mut store, reference) {
+            Ok(scope) => {
+                qualified_mock_canonical = context.provider == "mock"
+                    && current_head.as_ref().is_some_and(|published| {
+                        published.progress == "ready"
+                            && !published.logical.pending()
+                            && !published.logical.narrative_pending()
+                            && published.source_epoch.as_deref() == Some(scope.epoch.as_str())
+                            && published
+                                .source_coverage
+                                .as_ref()
+                                .is_some_and(|proof| proof.matches(&scope))
+                    });
+                if context.provider == "mock"
+                    && (!scope.complete || (current_head.is_some() && !qualified_mock_canonical))
+                {
+                    mock_source_progress = Some(
+                        if matches!(
+                            scope.progress.as_str(),
+                            "ready" | "provisional" | "no_admitted_rows"
+                        ) {
+                            "indexing".to_owned()
+                        } else {
+                            scope.progress.clone()
+                        },
+                    );
+                }
                 source_scope_valid = true;
-                result.generation = Some(generation);
-                result.source_epoch = Some(epoch);
+                result.generation = Some(scope.generation);
+                result.source_epoch = Some(scope.epoch);
             }
             Err(_) => {
                 source_scope_valid = false;
@@ -3660,6 +3809,11 @@ fn read_with_recent_limit(
             }
             result.bytes_read += store.bytes;
             result.records_decoded += store.objects;
+            if matches!(result.progress.as_str(), "ready" | "provisional") {
+                if let Some(progress) = &mock_source_progress {
+                    result.progress.clone_from(progress);
+                }
+            }
             return finish(result);
         }
     }
@@ -3965,7 +4119,9 @@ fn read_with_recent_limit(
                         .transpose()?
                         .flatten()
                 };
-            if let Some(mut delta) = delta {
+            let compatible_delta = delta.is_some();
+            let qualified_snapshot = qualified_mock_canonical && revision != Some(token.as_str());
+            if let Some(mut delta) = delta.filter(|_| !qualified_snapshot) {
                 delta.sort_by_key(|event| event.sequence);
                 result.events = delta;
                 let keys = store.page(&published.root, None, PAGE_ROWS + 1)?;
@@ -3977,7 +4133,7 @@ fn read_with_recent_limit(
                     None
                 };
             } else {
-                result.reset |= previous.is_some();
+                result.reset |= previous.is_some() && !compatible_delta;
                 (result.events, result.next_before) =
                     page_limited(&mut store, reference, published, None, limit)?;
             }
@@ -4680,6 +4836,22 @@ fn read_with_recent_limit(
         result.older_page = false;
     }
     project_display_result(&mut result);
+    // Qualification describes this canonical interval on both fresh and
+    // unchanged reads. A source page loaded for validation is independently
+    // provisional; it does not demote the canonical rows assembled above.
+    if qualified_mock_canonical
+        && cursor.is_none()
+        && detail_ref.is_none()
+        && !defer_source_page_for_unchecked_relation
+        && result.progress == "provisional"
+    {
+        result.progress = "ready".into();
+    }
+    if detail_ref.is_none() && matches!(result.progress.as_str(), "ready" | "provisional") {
+        if let Some(progress) = mock_source_progress {
+            result.progress = progress;
+        }
+    }
     result.bytes_read += store.bytes;
     result.records_decoded += store.objects;
     finish(result)

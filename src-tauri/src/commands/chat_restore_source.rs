@@ -13,10 +13,34 @@ use wardian_core::models::AgentConfig;
 const OWNERSHIP_HEADER_BYTES: u64 = 256 * 1024;
 
 fn saved_session(config: &AgentConfig) -> Option<&str> {
-    if !config.is_off || !matches!(config.provider.as_str(), "codex" | "claude") {
+    if !config.is_off {
         return None;
     }
-    let session = config.resume_session.as_deref()?.trim();
+    let session = match config.provider.as_str() {
+        "codex" | "claude" => config.resume_session.as_deref()?.trim(),
+        "mock" => {
+            let fresh = config
+                .fresh_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty());
+            let resume = config
+                .resume_session
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty());
+            // Launch and read callers use different precedence. A stopped
+            // source cannot choose between conflicting provider identities.
+            if fresh
+                .zip(resume)
+                .is_some_and(|(fresh, resume)| fresh != resume)
+            {
+                return None;
+            }
+            fresh.or(resume)?
+        }
+        _ => return None,
+    };
     uuid::Uuid::parse_str(session).ok()?;
     if config.provider == "codex"
         && config
@@ -44,6 +68,12 @@ fn source_roots(config: &AgentConfig, user_home: Option<&Path>) -> Vec<PathBuf> 
             roots.push(home.join(".codex").join("sessions"));
             roots.push(home.join(".codex").join("archived_sessions"));
         }
+    } else if config.provider == "mock" {
+        if let Some(agent_dir) = wardian_core::paths::agent_conversations_dir(&config.session_id)
+            .and_then(|dir| dir.parent().map(Path::to_path_buf))
+        {
+            roots.push(agent_dir);
+        }
     } else if config.provider == "claude" {
         let workspace = config
             .git_worktree_folder
@@ -64,6 +94,9 @@ fn filename_owned(path: &Path, provider: &str, session: &str) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
+    if provider == "mock" {
+        return name == "mock-transcript.jsonl";
+    }
     if provider == "claude" {
         return name.strip_suffix(".jsonl") == Some(session);
     }
@@ -95,10 +128,10 @@ fn validated_source(
         .iter()
         .filter_map(|root| root.canonicalize().ok())
         .any(|root| {
-            if config.provider == "claude" {
-                path.parent() == Some(root.as_path())
-            } else {
+            if config.provider == "codex" {
                 path.starts_with(&root)
+            } else {
+                path.parent() == Some(root.as_path())
             }
         })
         || !filename_owned(&path, &config.provider, session)
@@ -117,12 +150,16 @@ fn validated_source(
     BufReader::new(file.take(OWNERSHIP_HEADER_BYTES + 1))
         .read_until(b'\n', &mut header)
         .ok()?;
-    if header.len() > OWNERSHIP_HEADER_BYTES as usize {
+    if header.len() > OWNERSHIP_HEADER_BYTES as usize
+        || config.provider == "mock" && !header.ends_with(b"\n")
+    {
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(&header).ok()?;
     let owned = if config.provider == "codex" {
         value["type"] == "session_meta" && value["payload"]["id"].as_str() == Some(session)
+    } else if config.provider == "mock" {
+        value["type"] == "init" && value["session_id"].as_str() == Some(session)
     } else {
         // Claude can start with a file-history snapshot without sessionId.
         // Its exact filename, project root and persisted native proof own it;
@@ -156,6 +193,18 @@ async fn bind_for_background_in(
     session_id: &str,
     incarnation: Option<&Arc<Mutex<String>>>,
     user_home: Option<PathBuf>,
+) -> Result<(), String> {
+    bind_for_background_using(state, session_id, incarnation, user_home, validated_source).await
+}
+
+async fn bind_for_background_using(
+    state: &AppState,
+    session_id: &str,
+    incarnation: Option<&Arc<Mutex<String>>>,
+    user_home: Option<PathBuf>,
+    validate: impl FnOnce(&AgentConfig, &ProviderLogCaptureState, &[PathBuf]) -> Option<PathBuf>
+        + Send
+        + 'static,
 ) -> Result<(), String> {
     let (config_ref, path_ref, current_status) = {
         let agents = state.agents.lock().await;
@@ -199,11 +248,10 @@ async fn bind_for_background_in(
     };
     let roots = source_roots(&expected, user_home.as_deref());
     let validation_config = expected.clone();
-    let candidate = tokio::task::spawn_blocking(move || {
-        validated_source(&validation_config, &captured, &roots)
-    })
-    .await
-    .map_err(|_| "restored source validation unavailable")?;
+    let candidate =
+        tokio::task::spawn_blocking(move || validate(&validation_config, &captured, &roots))
+            .await
+            .map_err(|_| "restored source validation unavailable")?;
     let Some(candidate) = candidate else {
         return Ok(());
     };

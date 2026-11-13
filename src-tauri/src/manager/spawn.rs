@@ -8,7 +8,8 @@ use crate::providers::claude::{
 };
 use crate::providers::codex::CodexProvider;
 use crate::providers::transcript::{
-    bind_pi_watch_message, extract_transcript_message, CodexWatchBindingState,
+    bind_mock_watch_message, bind_pi_watch_message, extract_transcript_message,
+    CodexWatchBindingState,
 };
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
@@ -2974,10 +2975,37 @@ async fn spawn_agent_inner(
         return Err("Pi restored history baseline unavailable".into());
     }
 
+    // The lifecycle lease keeps this prediction stable until broker registration.
+    // Provider-input generations are independent and must not name mod assets.
+    let claude_mod_generation = if config.provider == "claude" {
+        let runtime_generation = app_state
+            .terminal_sessions
+            .next_runtime_generation(&config.session_id)
+            .await
+            .map_err(|error| format!("Failed to determine Claude runtime generation: {error}"))?;
+        match crate::delivery::claude_mod::materialize_launch(&config, runtime_generation).and_then(
+            |path| super::append_claude_plugin_dirs(cmd.get_env("CLAUDE_CODE_PLUGIN_DIRS"), &path),
+        ) {
+            Ok(plugin_dirs) => {
+                cmd.env("CLAUDE_CODE_PLUGIN_DIRS", plugin_dirs);
+                Some(runtime_generation)
+            }
+            Err(error) => {
+                log_debug(&format!(
+                    "[Wardian] Claude delivery mod unavailable for session {} runtime {}: {}; using terminal fallback",
+                    config.session_id, runtime_generation, error
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // The transition lease acquired before native owner preparation remains
     // held through PTY creation and publication.
     #[cfg(windows)]
-    let contained_job = if config.provider == "claude" {
+    let contained_job = if matches!(config.provider.as_str(), "claude" | "codex") {
         Some(crate::utils::process::RuntimeProcessJob::prepare(&mut cmd)?)
     } else {
         None
@@ -3115,6 +3143,15 @@ async fn spawn_agent_inner(
         .await
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
     child.runtime(app_state.terminal_sessions.clone(), runtime_generation);
+
+    if config.provider == "claude" {
+        crate::delivery::claude_mod::resume_observers(&app, &config, provider_generation);
+    }
+
+    if claude_mod_generation.is_some_and(|expected| expected != runtime_generation) {
+        log_debug("[Wardian] Claude delivery mod runtime generation mismatch; refusing session publication");
+        return Err("Claude delivery mod runtime generation changed during launch".into());
+    }
 
     if matches!(config.provider.as_str(), "opencode" | "antigravity") {
         let native_config = config.clone();
@@ -3273,6 +3310,7 @@ async fn spawn_agent_inner(
         )
     });
     let pty_config = config_lock.clone();
+    let mock_log_path_for_pty = log_path.clone();
     let auto_confirm_antigravity_workspace_trust = config.provider == "antigravity"
         && config
             .antigravity_config()
@@ -3345,6 +3383,14 @@ async fn spawn_agent_inner(
                         }
                     }
                     log_terminal_trace_note(&sid_for_pty, &provider_name_for_pty, "pty EOF");
+                    #[cfg(windows)]
+                    if provider_name_for_pty == "claude" {
+                        tauri::async_runtime::spawn(crate::delivery::claude_mod::finish_after_eof(
+                            pty_app.clone(),
+                            sid_for_pty.clone(),
+                            reader_runtime_generation,
+                        ));
+                    }
                     if provider_name_for_pty == "opencode" {
                         log_debug(&format!(
                             "[Wardian] OpenCode PTY EOF for session {} (had_output={})",
@@ -3999,10 +4045,26 @@ async fn spawn_agent_inner(
                                 Some(Ok(parsed)) => {
                                     // Use provider to classify the raw JSON into an AgentEvent
                                     let raw_line = parsed.to_string();
-                                    if let Some(message) = extract_transcript_message(
+                                    if let Some(mut message) = extract_transcript_message(
                                         &provider_name_for_pty,
                                         &raw_line,
                                     ) {
+                                        if provider_name_for_pty == "mock" {
+                                            if let (Ok(config), Ok(path)) =
+                                                (pty_config.lock(), mock_log_path_for_pty.lock())
+                                            {
+                                                if let (Some(expected), Some(path)) = (
+                                                    config.fresh_provider_session_id.as_deref(),
+                                                    path.as_ref(),
+                                                ) {
+                                                    bind_mock_watch_message(
+                                                        &mut message,
+                                                        expected,
+                                                        &path.to_string_lossy(),
+                                                    );
+                                                }
+                                            }
+                                        }
                                         if let Ok(mut watch_state) = watch_state_clone.lock() {
                                             watch_state.push_transcript(message);
                                         }

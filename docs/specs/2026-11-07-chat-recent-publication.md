@@ -22,6 +22,13 @@ runtime/Watch handles and still-current admission issue. A failed publication
 cannot erase a newer successful one. An unpublished slot cannot represent a
 qualified empty window.
 
+The initial provider-log policy record is acquisition bookkeeping when its
+generation is zero and it excludes no prefix or disabled interval. Creating
+that record preserves an otherwise valid Watch admission. The actual file
+identity remains independently pinned in the recent scope. A positive cutoff,
+an open or closed disabled interval, or any later policy generation continues
+to fence the admission, as do the existing logging and runtime boundaries.
+
 Watch observations use the normal provider extractor and original mapper
 identity. Canonical Watch coverage also binds the exact transcript cursor,
 because retained ordinals alone can reuse IDs. Gemini file-backed observations

@@ -203,25 +203,50 @@ async fn append_live_mock_cohort(state: &AppState, session: &str, path: &std::pa
             "Native acceptance completed assistant: the amber otter has finished.".into(),
         ),
     ]);
-    let (watch, last_modified) = {
+    let (watch, last_modified, native_session) = {
         let agents = state.agents.lock().await;
         let agent = agents.get(session).unwrap();
-        (agent.watch_state.clone(), agent.log_last_modified.clone())
+        let native_session = agent
+            .config
+            .lock()
+            .unwrap()
+            .fresh_provider_session_id
+            .clone()
+            .unwrap();
+        (
+            agent.watch_state.clone(),
+            agent.log_last_modified.clone(),
+            native_session,
+        )
     };
     let mut watch = watch.lock().unwrap();
     let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    let incarnation = uuid::Uuid::new_v4().to_string();
+    let mut observation = 0;
     for (turn, prompt, body) in turns {
-        for record in [
+        for mut record in [
             serde_json::json!({"type":"user", "turn_id":turn, "content":prompt}),
             serde_json::json!({"type":"model", "turn_id":turn, "content":body}),
             serde_json::json!({"type":"result", "turn_id":turn, "status":"success"}),
         ] {
+            if record["type"] == "model" {
+                observation += 1;
+                record["wardian_mirror"] = serde_json::json!({
+                    "observation_id": format!("{incarnation}:{observation}"),
+                    "incarnation": incarnation, "provider_session_id": native_session, "logged": true,
+                });
+            }
             let line = record.to_string();
             writeln!(file, "{line}").unwrap();
             // The live stdout transcript hook consumes this same raw grammar.
-            if let Some(message) =
+            if let Some(mut message) =
                 crate::providers::transcript::extract_transcript_message("mock", &line)
             {
+                crate::providers::transcript::bind_mock_watch_message(
+                    &mut message,
+                    &native_session,
+                    &path.to_string_lossy(),
+                );
                 watch.push_transcript(message);
             }
         }
@@ -337,6 +362,20 @@ async fn assert_live_cohort_handoff(state: &Arc<AppState>, session: &str) {
     )
     .await
     .unwrap();
+    if ordinary.progress != "ready" {
+        let diagnostics = std::env::var_os("WARDIAN_HOME")
+            .and_then(|root| {
+                std::fs::read_to_string(std::path::PathBuf::from(root).join("wardian_debug.log"))
+                    .ok()
+            })
+            .unwrap_or_default();
+        for line in diagnostics
+            .lines()
+            .filter(|line| line.contains("background conversation capture failed"))
+        {
+            eprintln!("CAPTURE_FAILURE: {line}");
+        }
+    }
     assert_eq!(
         ordinary.progress, "ready",
         "the real worker must publish canonical history"
@@ -365,6 +404,44 @@ async fn assert_live_cohort_handoff(state: &Arc<AppState>, session: &str) {
         0,
         "unchanged settled source cannot spawn another worker"
     );
+    let mut rows = canonical.events;
+    let mut cursor = canonical.next_before;
+    for _ in 0..8 {
+        let Some(before) = cursor.take() else {
+            break;
+        };
+        let older = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            state,
+            session.into(),
+            Some(before),
+            None,
+            None,
+            None,
+            crate::commands::chat::RecentChatRead::default(),
+        )
+        .await
+        .unwrap();
+        assert!(older.older_page);
+        rows.extend(older.events);
+        cursor = older.next_before;
+    }
+    assert!(
+        cursor.is_none(),
+        "the declared fixture exhausts its Older pages"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(
+                |row| row.role == Some(wardian_core::models::chat::AgentChatRole::Assistant)
+                    && row.text.as_deref()
+                        == Some(
+                            "These are two distinct completed assistant turns with equal text."
+                        )
+            )
+            .count(),
+        2,
+        "Watch and provider-log observations must not duplicate completed turn identities"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -373,6 +450,268 @@ async fn ordinary_live_first_source_covers_full_recent_cohort() {
     let (state, session, path) = registered_live_mock(&home).await;
     append_live_mock_cohort(&state, &session, &path).await;
     assert_live_cohort_handoff(&state, &session).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canonical_mock_headers_wait_for_source_renewal_qualification() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let (state, session, path) = registered_live_mock(&home).await;
+    append_live_mock_cohort(&state, &session, &path).await;
+    let request = crate::commands::chat::background_capture_request(&state, &session)
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 0..2 {
+        crate::commands::chat::archive_background_capture_pass(&state, &request)
+            .await
+            .unwrap();
+    }
+    // Canonical rows can finish before the independent bounded source replay.
+    for _ in 0..16 {
+        if !state
+            .conversation_archive
+            .chat_projection
+            .advance(&session)
+            .unwrap()
+        {
+            break;
+        }
+    }
+    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.clone(),
+        None,
+        None,
+        None,
+        None,
+        crate::commands::chat::RecentChatRead::default(),
+    )
+    .await
+    .unwrap();
+    assert!(!page.events.is_empty());
+    assert!(page
+        .events
+        .iter()
+        .any(|event| event.metadata["mock_watch_alias"].is_string()));
+    assert_eq!(
+        page.progress, "indexing",
+        "readable canonical headers do not complete source renewal"
+    );
+    let unchanged = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.clone(),
+        None,
+        Some(page.revision),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unchanged.progress, "indexing");
+    assert!(unchanged.unchanged);
+    assert_eq!(dispatch_live_capture(&state, &session).await, 1);
+    let ready = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.clone(),
+        None,
+        None,
+        None,
+        None,
+        crate::commands::chat::RecentChatRead::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ready.progress, "ready");
+    assert!(ready.next_before.is_some());
+    let polled = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.clone(),
+        None,
+        Some(unchanged.revision),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        polled.progress, "ready",
+        "source qualification must reach the polling consumer"
+    );
+    assert_eq!(
+        polled.events.len(),
+        80,
+        "the ready transition supplies a complete recent window"
+    );
+    assert!(polled.next_before.is_some());
+    let acknowledged = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.clone(),
+        None,
+        Some(polled.revision),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(acknowledged.progress, "ready");
+    assert!(acknowledged.unchanged);
+    let repeated = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.clone(),
+        None,
+        Some(acknowledged.revision),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(repeated.progress, "ready");
+    assert!(
+        repeated.unchanged && repeated.events.is_empty(),
+        "stable qualification does not emit endless snapshots"
+    );
+
+    let old_head = crate::state::conversation_archive::chat_read::head(&session).unwrap();
+    let agent_directory = home.path().join("agents").join(&session);
+    let objects = agent_directory.join("chat-read-objects");
+    let published: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(objects.join(old_head.as_ref().unwrap())).unwrap())
+            .unwrap();
+    assert!(published["source_coverage"].is_object());
+    for invalid in ["absent", "admission", "unsettled", "pending"] {
+        let mut header = published.clone();
+        header.as_object_mut().unwrap().remove("recent_page");
+        match invalid {
+            "absent" => {
+                header.as_object_mut().unwrap().remove("source_coverage");
+            }
+            "admission" => {
+                header["source_coverage"]["admission"] = serde_json::json!("f".repeat(64))
+            }
+            "unsettled" => {
+                header["source_coverage"]["normalizer_settled"] = serde_json::json!(false)
+            }
+            "pending" => header["progress"] = serde_json::json!("indexing"),
+            _ => unreachable!(),
+        }
+        // Authenticate a well-formed saved Head so this exercises coverage
+        // validation, rather than failing its ordinary content-hash check.
+        let bytes = serde_json::to_vec(&header).unwrap();
+        let reference = crate::commands::chat_recent_seed::hash(&bytes);
+        std::fs::write(objects.join(&reference), bytes).unwrap();
+        wardian_core::conversations::write_json_atomic(
+            &agent_directory.join("chat-read-head.json"),
+            &Some(reference),
+        )
+        .unwrap();
+        let withheld = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            &state,
+            session.clone(),
+            None,
+            None,
+            None,
+            None,
+            crate::commands::chat::RecentChatRead::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            withheld.progress, "indexing",
+            "{invalid} coverage cannot grant ready"
+        );
+    }
+    wardian_core::conversations::write_json_atomic(
+        &agent_directory.join("chat-read-head.json"),
+        &old_head,
+    )
+    .unwrap();
+    append_live_mock_cohort(&state, &session, &path).await;
+    let (snapshot, _) =
+        crate::commands::chat::chat_read_snapshot_for_state(&state, &session).unwrap();
+    let mut pending = true;
+    for _ in 0..64 {
+        pending =
+            crate::state::conversation_archive::chat_read::advance_source_index(&snapshot).unwrap();
+        if !pending {
+            break;
+        }
+    }
+    assert!(!pending, "the new source interval independently completes");
+    assert_eq!(
+        crate::state::conversation_archive::chat_read::head(&session).unwrap(),
+        old_head
+    );
+    let stale_canonical = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session,
+        None,
+        Some(repeated.revision),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stale_canonical.progress, "indexing",
+        "a ready old canonical Head cannot borrow coverage from a newer complete source interval"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_live_history_progresses_beside_saved_off_capture() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let (state, session, path) = registered_live_mock(&home).await;
+    let saved = super::tests::test_active_agent("saved-capture-competitor", "codex", "Off", None);
+    let saved_config = {
+        let mut config = saved.config.lock().unwrap();
+        config.is_off = true;
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.resume_session = Some("saved-provider-conversation".into());
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Enabled;
+        config.clone()
+    };
+    let saved_path = home.path().join("saved-competitor.jsonl");
+    std::fs::write(&saved_path, "").unwrap();
+    append_records(&saved_path, 4096);
+    *saved.log_path.lock().unwrap() = Some(saved_path);
+    crate::commands::agent::provider_log_tests::register_capture_test_agent(
+        &state,
+        &saved_config,
+        saved,
+    )
+    .await
+    .unwrap();
+    append_live_mock_cohort(&state, &session, &path).await;
+    let preview = queued_live_recent(&state, &session, None).await;
+    assert!(preview.recent_admission.is_some());
+
+    let (_, follow_up) = collect_agent_metrics_with_sampler(&state, live_sample).await;
+    assert_eq!(follow_up.background_captures.len(), 2);
+    let mut workers = Vec::new();
+    status::dispatch_capture_follow_up(&state, follow_up.background_captures, |claim| {
+        let state = state.clone();
+        workers.push(tokio::spawn(async move {
+            crate::commands::background_capture::run_background_capture(&state, claim).await;
+        }));
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for worker in workers {
+            worker.await.unwrap();
+        }
+    })
+    .await
+    .expect("both saved and live capture must finish");
+    let canonical = queued_live_recent(&state, &session, Some(preview.revision)).await;
+    assert_eq!(canonical.progress, "ready");
+    assert!(canonical.recent_admission.is_none());
+    assert!(canonical.next_before.is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -391,10 +730,11 @@ async fn ordinary_live_settled_append_covers_full_recent_cohort() {
             .unwrap();
     drop(claim);
     assert_eq!(dispatch_live_capture(&state, &session).await, 1);
-    assert!(!state
-        .background_capture
-        .observation_sessions()
-        .contains(&session));
+    assert_eq!(
+        dispatch_live_capture(&state, &session).await,
+        0,
+        "a settled unchanged source must not admit another capture"
+    );
     let before =
         crate::commands::provider_log_acquisition::observe_provider_log_source(&path).unwrap();
     append_live_mock_cohort(&state, &session, &path).await;

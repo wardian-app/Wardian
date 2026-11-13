@@ -93,22 +93,36 @@ pub(super) fn source_record_from_chat_event(
         .source
         .clone()
         .or_else(|| metadata_source_kind(&event.provider, &event.metadata))?;
+    // Bound watch projections have no native log position. Keep their source
+    // distinct from a later captured native row owning the same narrative.
+    let native_watch = event.metadata["provider_log"] == true
+        && event
+            .id
+            .starts_with(&format!("{}:watch_native:", event.session_id))
+        && event.metadata.get("transcript_cursor").is_some();
 
-    let source_id =
-        if event.provider.eq_ignore_ascii_case("codex") && event.metadata["provider_log"] == true {
-            let digest = Sha256::digest(event.id.as_bytes());
-            format!(
-                "src_codex_observation_{}",
-                digest
-                    .iter()
-                    .take(12)
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<Vec<_>>()
-                    .join("")
-            )
-        } else {
-            format!("src_{seq}")
-        };
+    let receipted_mock =
+        event.provider == "mock" && event.metadata["mock_observation_id"].is_string();
+    let source_id = if native_watch {
+        format!("watch:{}", event.id)
+    } else if (event.provider.eq_ignore_ascii_case("codex")
+        && event.metadata["provider_log"] == true)
+        || receipted_mock
+    {
+        let digest = Sha256::digest(event.id.as_bytes());
+        format!(
+            "src_{}_observation_{}",
+            if receipted_mock { "mock" } else { "codex" },
+            digest
+                .iter()
+                .take(12)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join("")
+        )
+    } else {
+        format!("src_{seq}")
+    };
     Some(ConversationSourceRecord {
         schema: CONVERSATION_SCHEMA,
         source_id,
@@ -122,8 +136,17 @@ pub(super) fn source_record_from_chat_event(
             .or_else(|| metadata_string(&event.metadata, "source_path"))
             .or_else(|| metadata_string(&event.metadata, "path"))
             .or_else(|| metadata_string(&event.metadata, "log_path")),
-        cursor: metadata_string(&event.metadata, "cursor")
-            .or_else(|| event.sequence.map(|sequence| sequence.to_string())),
+        cursor: if native_watch {
+            None
+        } else if receipted_mock {
+            // The producer receipt is stable when the live display is renumbered.
+            // A framed native row retains its actual physical coordinate instead.
+            metadata_string(&event.metadata, "chat_source_ref")
+                .or_else(|| metadata_string(&event.metadata, "mock_observation_id"))
+        } else {
+            metadata_string(&event.metadata, "cursor")
+                .or_else(|| event.sequence.map(|sequence| sequence.to_string()))
+        },
         offset: metadata_u64(&event.metadata, "offset"),
         row_id: metadata_string(&event.metadata, "part_id"),
         provider_event_type: metadata_string(&event.metadata, "raw_type")

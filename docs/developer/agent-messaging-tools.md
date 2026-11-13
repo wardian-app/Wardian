@@ -55,6 +55,15 @@ recorded remain context-only; migration never turns old stored FYIs into a
 startup wake backlog. Off, pause, session replacement, and provider changes
 remain authoritative fences.
 
+Reply continuations render carried context-only FYIs once, keeping the newest suffix
+of the claimed batch within ten messages and 32 KiB of serialized context.
+An omission notice points to Wardian message history. This is a provider prompt
+projection: canonical interactions and their literal bodies remain unchanged.
+The existing delivery claims settle the whole batch, including omitted entries,
+so a successfully delivered batch is not carried again on later turns. A proven
+failure before provider submission releases claims; uncertain submission does
+not authorize replay.
+
 An MCP tool error is returned with `isError: true`. A failed or lost send
 response can leave delivery uncertain; neither the server nor the caller
 should automatically replay it. Calls use bounded control exchanges. Timing

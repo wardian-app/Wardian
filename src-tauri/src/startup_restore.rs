@@ -4,6 +4,8 @@ use crate::state::{ActiveAgent, AppState};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
+pub(crate) mod prior_holds;
+
 /// Returns the exact lifecycle-transition lease that caused the failed restore
 /// attempt. Only resume operations and provider-spawn owners schedule the
 /// guarded retry; pause, removal, clear, and uncertain-provider ownership keep

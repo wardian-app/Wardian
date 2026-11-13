@@ -482,6 +482,88 @@ fn recent_owner_policy_change_rejects_inflight_publication() {
 }
 
 #[test]
+fn recent_owner_initial_unrestricted_source_preserves_watch_admission() {
+    let (_guard, temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let owner = &archive.chat_projection;
+    let context = context();
+    let mut source = snapshot(&context);
+    let path = temp.path().join("fresh-provider.jsonl");
+    std::fs::write(&path, "fresh source\n").unwrap();
+    source.log_path = Some(path.clone());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let admission = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(
+            &source,
+            &runtime,
+            &admission,
+            vec![event("observed", "current")],
+        )
+        .unwrap();
+    let first = owner.recent_reader(source.clone(), runtime.clone(), None, 80)()
+        .unwrap()
+        .unwrap();
+    let observed = crate::commands::provider_log_acquisition::observe_provider_log_policy_with_initial_absence(
+        &path, context.provider_source_key.as_deref().unwrap(), None, true, true,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(observed.next.unknown_before_offset.unwrap_or(0), 0);
+    assert_eq!(observed.next.policy_generation, 0);
+    let mut policy = super::super::ConversationCaptureState {
+        provider_log_sources: vec![observed.next],
+        ..Default::default()
+    };
+    archive
+        .append_provider_log_batch_with_context(
+            context.clone(),
+            &[],
+            None,
+            &policy.provider_log_sources[0],
+        )
+        .unwrap();
+    let unchanged =
+        owner.recent_reader(source.clone(), runtime.clone(), Some(first.revision), 80)()
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        unchanged.recent_admission, first.recent_admission,
+        "initial unrestricted acquisition must not blank a validated Watch preview"
+    );
+    assert!(unchanged.unchanged && !unchanged.reset);
+
+    let unrestricted = policy.provider_log_sources[0].clone();
+    for boundary in 0..4 {
+        policy.provider_log_sources[0] = unrestricted.clone();
+        match boundary {
+            0 => policy.provider_log_sources[0].unknown_before_offset = Some(1),
+            1 => policy.provider_log_sources[0].open_disabled_from = Some(0),
+            2 => policy.provider_log_sources[0].disabled_spans.push(
+                crate::commands::provider_log_acquisition::ProviderLogDisabledSpan {
+                    start: 0,
+                    end: 1,
+                },
+            ),
+            _ => policy.provider_log_sources[0].policy_generation = 1,
+        }
+        super::super::storage::write_capture_state(&source.session_id, &policy).unwrap();
+        let retired = owner.recent_reader(
+            source.clone(),
+            runtime.clone(),
+            Some(unchanged.revision.clone()),
+            80,
+        )()
+        .unwrap()
+        .unwrap();
+        assert!(
+            retired.reset && retired.recent_admission.is_none(),
+            "source cutoffs, disabled ranges, and later generations must still retire admission"
+        );
+    }
+}
+
+#[test]
 fn recent_owner_reads_and_retires_before_busy_legacy_work() {
     let (_guard, _temp) = isolated_home();
     let owner = Arc::new(ProjectionOwner::default());
@@ -979,6 +1061,26 @@ fn candidate(events: Vec<AgentChatEvent>) -> Candidate {
     }
 }
 
+#[test]
+fn unchanged_settled_capture_keeps_the_published_canonical_head() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let rows = vec![event("settled-row", "stable body")];
+    owner
+        .committed(candidate(rows.clone()), "same-capture".into())
+        .unwrap();
+    while owner.advance("agent-1").unwrap() {}
+    let first = head("agent-1").unwrap();
+    owner
+        .committed(candidate(rows), "same-capture".into())
+        .unwrap();
+    assert_eq!(
+        head("agent-1").unwrap(),
+        first,
+        "an unchanged settled capture must not invalidate an in-flight renewal revision"
+    );
+}
+
 fn cold_saved_remove_projection(temp: &Path) {
     let (pointer, objects) = locations("agent-1").unwrap();
     assert!(pointer.starts_with(temp) && objects.starts_with(temp));
@@ -1010,6 +1112,12 @@ fn cold_saved_restart_keeps_owned_inputs_and_partial_older_cursor() {
     assert!(ConversationArchiveState::default()
         .bootstrap_saved_chat(&context())
         .unwrap());
+    let partial_reference = head("agent-1").unwrap().unwrap();
+    let partial_head: Head = store("agent-1").unwrap().read(&partial_reference).unwrap();
+    assert!(
+        partial_head.recent_page.is_some(),
+        "cold checkpoints publish their packed recent page"
+    );
     let partial = read(&context(), &snapshot(&context()), None, None, None).unwrap();
     assert!(
         !partial.events.is_empty(),
@@ -1309,6 +1417,134 @@ fn recent_soft_limit_keeps_complete_physical_frames_and_certified_members() {
     let mut new = event("new-member", "different body");
     new.metadata = json!({"chat_display_member_ids":["old-member", "new-member"]});
     assert_eq!(recent_window_start(&[old, new], 1), 0);
+}
+
+#[test]
+fn packed_recent_publication_matches_legacy_windows_and_older_frontiers() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let rows = (0..96)
+        .map(|index| {
+            let mut row = event(&format!("packed-{index}"), &format!("physical row {index}"));
+            if index >= 84 {
+                row.metadata = json!({
+                    "chat_source_epoch": "one-frame", "chat_source_start": 100,
+                    "chat_source_end": 200,
+                });
+            }
+            row
+        })
+        .collect();
+    owner
+        .committed(candidate(rows), "packed-window".into())
+        .unwrap();
+    while owner.advance("agent-1").unwrap() {}
+    let reference = head("agent-1").unwrap().unwrap();
+    let published: Head = store("agent-1").unwrap().read(&reference).unwrap();
+    assert!(
+        published.recent_page.is_some(),
+        "ordinary publication must prepare its recent page"
+    );
+    let mut legacy = published.clone();
+    legacy.recent_page = None;
+    for limit in [1, 8, 24, 80] {
+        let mut packed_store = store("agent-1").unwrap();
+        let packed = page_limited(&mut packed_store, &reference, &published, None, limit).unwrap();
+        let mut legacy_store = store("agent-1").unwrap();
+        let old = page_limited(&mut legacy_store, &reference, &legacy, None, limit).unwrap();
+        assert_eq!(
+            serde_json::to_value(&packed).unwrap(),
+            serde_json::to_value(&old).unwrap()
+        );
+        assert!(
+            packed_store.objects <= PAGE_ROWS + 2,
+            "one pack, one fresh canonical root, and decoded headers share the normal budget"
+        );
+        assert!(packed_store.bytes <= super::super::chat_read_store::READ_BYTES);
+        let cursor = packed.1.as_deref().unwrap();
+        let (_, before) = cursor.split_once(':').unwrap();
+        let older = page_limited(
+            &mut store("agent-1").unwrap(),
+            &reference,
+            &published,
+            Some(before),
+            80,
+        )
+        .unwrap();
+        let old_older = page_limited(
+            &mut store("agent-1").unwrap(),
+            &reference,
+            &legacy,
+            Some(before),
+            80,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(older).unwrap(),
+            serde_json::to_value(old_older).unwrap()
+        );
+    }
+}
+
+#[test]
+fn legacy_head_without_a_packed_page_uses_the_tree() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    owner
+        .committed(
+            candidate(vec![event("legacy", "existing checkpoint")]),
+            "legacy".into(),
+        )
+        .unwrap();
+    while owner.advance("agent-1").unwrap() {}
+    let reference = head("agent-1").unwrap().unwrap();
+    let mut legacy: Head = store("agent-1").unwrap().read(&reference).unwrap();
+    legacy.recent_page = None;
+    let encoded = serde_json::to_value(&legacy).unwrap();
+    assert!(encoded.get("recent_page").is_none());
+    let old_reference = store("agent-1").unwrap().put(&legacy).unwrap();
+    write_json_atomic(&locations("agent-1").unwrap().0, &Some(old_reference)).unwrap();
+    let page = read(&context(), &snapshot(&context()), None, None, None).unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].text.as_deref(), Some("existing checkpoint"));
+}
+
+#[test]
+fn referenced_packed_page_corruption_does_not_fall_back_to_valid_rows() {
+    let (_guard, temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    owner
+        .committed(
+            candidate(vec![event("packed", "authenticated header")]),
+            "packed".into(),
+        )
+        .unwrap();
+    while owner.advance("agent-1").unwrap() {}
+    let reference = head("agent-1").unwrap().unwrap();
+    let published: Head = store("agent-1").unwrap().read(&reference).unwrap();
+    let (_, objects) = locations("agent-1").unwrap();
+    assert!(objects.starts_with(temp.path()));
+    let path = objects.join(published.recent_page.as_deref().unwrap());
+    let original = fs::read(&path).unwrap();
+    assert_eq!(
+        read(&context(), &snapshot(&context()), None, None, None)
+            .unwrap()
+            .events
+            .len(),
+        1
+    );
+    fs::write(&path, &original[..original.len() / 2]).unwrap();
+    assert!(read(&context(), &snapshot(&context()), None, None, None).is_err());
+    fs::write(&path, &original).unwrap();
+    assert_eq!(
+        read(&context(), &snapshot(&context()), None, None, None)
+            .unwrap()
+            .events
+            .len(),
+        1
+    );
+    fs::remove_file(&path).unwrap();
+    assert!(read(&context(), &snapshot(&context()), None, None, None).is_err());
 }
 
 #[test]
@@ -1753,6 +1989,10 @@ fn generated_input_pointer_failure_keeps_the_previous_in_memory_head() {
     let works = owner.work.lock().unwrap();
     let work = &works[&ctx.agent_id];
     assert_eq!(work.head.row_count, 2);
+    assert!(
+        work.head.recent_page.is_some(),
+        "generated input republishes the packed recent page"
+    );
     assert_eq!(work.head.committed_output_bytes, text.len() as u64);
     assert_eq!(work.signatures.len(), 2);
 }
@@ -2513,6 +2753,162 @@ fn recent_seed_source_end_includes_lf_and_crlf_without_extending_detail_payload(
         assert_eq!(detail.text, text);
         assert!(detail.complete);
     }
+}
+
+#[test]
+fn source_checkpoint_flushes_replay_queue_and_recovers_each_publication_boundary() {
+    use super::super::chat_source_index as source;
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("source-checkpoint-restart.jsonl");
+    let mut contents = format!(
+        "{}\n{}\n{}\n",
+        json!({"type":"session_meta","payload":{"id":"one"}}),
+        commentary_context_line(),
+        json!({"type":"response_item","payload":{
+            "type":"message","id":"pending-context","role":"user",
+            "content":[{"type":"input_text","text":"Context awaiting its request root."}],
+            "internal_chat_message_metadata_passthrough":{
+                "turn_id":"commentary-provider-turn","content_item_kinds":["agents_md.instructions"]
+            }
+        }}),
+    );
+    for index in 0..180 {
+        contents.push_str(&commentary_item_line_with_text(
+            &format!("pending-{index}"),
+            &format!("queued source row {index}"),
+        ));
+        contents.push('\n');
+    }
+    // Each acquisition admits at most 80 records. A real deferred request
+    // context retains earlier observations across those persisted batches,
+    // then this matching user root releases a queue larger than one page.
+    contents.push_str(&format!(
+        "{}\n",
+        json!({"type":"response_item","payload":{
+            "type":"message","id":"pending-request","role":"user",
+            "content":[{"type":"input_text","text":"The owned request root."}],
+            "internal_chat_message_metadata_passthrough":{
+                "turn_id":"commentary-provider-turn","content_item_kinds":["user.text"]
+            }
+        }})
+    ));
+    let (snapshot, _) = owned_native_source(&path, &contents);
+    assert!(advance_source_index(&snapshot).unwrap());
+    let mut old = source_index_page(&snapshot);
+    for _ in 0..8 {
+        if !old.events.is_empty() {
+            break;
+        }
+        assert!(advance_source_index(&snapshot).unwrap());
+        old = source_index_page(&snapshot);
+    }
+    assert!(!old.events.is_empty() && old.events.len() <= PAGE_ROWS);
+    let (_, directory) = locations("agent-1").unwrap();
+    let mut reader = Store::writer(&directory);
+    let head: serde_json::Value = reader.read(&old.reference).unwrap();
+    let mut next = head["replay_state"].as_str().map(str::to_owned);
+    let mut checkpoint_bytes = Vec::new();
+    while let Some(reference) = next {
+        let chunk: serde_json::Value = reader.read(&reference).unwrap();
+        let hex = chunk["hex"].as_str().unwrap();
+        checkpoint_bytes.extend(
+            (0..hex.len())
+                .step_by(2)
+                .map(|offset| u8::from_str_radix(&hex[offset..offset + 2], 16).unwrap()),
+        );
+        next = chunk["next"].as_str().map(str::to_owned);
+    }
+    let checkpoint: serde_json::Value = serde_json::from_slice(&checkpoint_bytes).unwrap();
+    assert!(checkpoint["pending_count"].as_u64().unwrap() > PAGE_ROWS as u64);
+    let queued = checkpoint["pending_root"].as_str().unwrap().to_owned();
+    assert!(
+        !Store::writer(&directory)
+            .page(&Some(queued), None, PAGE_ROWS + 1)
+            .unwrap()
+            .is_empty(),
+        "the hex-encoded queue link must survive without writer memory"
+    );
+    drop(reader);
+
+    source::CHECKPOINT_FAILURE.with(|stage| stage.set(1));
+    assert!(advance_source_index(&snapshot).is_err());
+    assert_eq!(
+        source::pointer("agent-1").unwrap().as_deref(),
+        Some(old.reference.as_str())
+    );
+    assert_eq!(source_index_page(&snapshot).events, old.events);
+    let blocked = source::FAILED_CHECKPOINT_ROOT
+        .with(|root| root.borrow().clone())
+        .unwrap();
+    let blocked_path = directory.join(blocked);
+    assert!(!blocked_path.exists());
+    let files_before = fs::read_dir(&directory).unwrap().count();
+    fs::create_dir(&blocked_path).unwrap();
+    assert!(advance_source_index(&snapshot).is_err());
+    assert!(
+        fs::read_dir(&directory).unwrap().count() > files_before + 1,
+        "the real target collision occurs after some child nodes flush"
+    );
+    assert_eq!(
+        source::pointer("agent-1").unwrap().as_deref(),
+        Some(old.reference.as_str())
+    );
+    assert_eq!(source_index_page(&snapshot).events, old.events);
+    fs::remove_dir(&blocked_path).unwrap();
+
+    assert!(advance_source_index(&snapshot).unwrap());
+    let mut middle = source_index_page(&snapshot);
+    for _ in 0..8 {
+        if middle.next_before.is_some() {
+            break;
+        }
+        assert!(advance_source_index(&snapshot).unwrap());
+        middle = source_index_page(&snapshot);
+    }
+    assert_ne!(middle.reference, old.reference);
+    let cursor = middle
+        .next_before
+        .clone()
+        .expect("more than one visible page");
+    let frontier = source_index_page_with_cursor(&snapshot, Some(&cursor));
+    source::CHECKPOINT_FAILURE.with(|stage| stage.set(2));
+    assert!(advance_source_index(&snapshot).is_err());
+    assert_eq!(
+        source::pointer("agent-1").unwrap().as_deref(),
+        Some(middle.reference.as_str())
+    );
+    assert_eq!(source_index_page(&snapshot).events, middle.events);
+    finish_source_index(&snapshot);
+    let complete = source_index_page(&snapshot);
+    assert!(complete.counts_complete);
+    assert_eq!(complete.generation, old.generation);
+    assert_eq!(complete.epoch, old.epoch);
+    assert_eq!(complete.admission, old.admission);
+    let resumed = source_index_page_with_cursor(&snapshot, Some(&cursor));
+    assert!(!resumed.reset);
+    assert_eq!(
+        resumed.events, frontier.events,
+        "a pinned frontier stays exact"
+    );
+    let mut page = complete;
+    let mut ids = std::collections::HashSet::new();
+    let mut intended = 0;
+    loop {
+        for event in page.events {
+            assert!(ids.insert(event.id));
+            intended += usize::from(
+                event
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with("queued source row ")),
+            );
+        }
+        let Some(cursor) = page.next_before else {
+            break;
+        };
+        page = source_index_page_with_cursor(&snapshot, Some(&cursor));
+    }
+    assert_eq!(intended, 180);
 }
 
 #[test]

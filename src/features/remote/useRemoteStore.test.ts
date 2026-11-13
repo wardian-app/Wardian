@@ -267,8 +267,9 @@ describe("useRemoteStore watchlists", () => {
       workspace: "<absolute-workspace-path>", status: "Off", latest_text: null };
     vi.mocked(remoteClient.listAgents).mockResolvedValue([agent]);
     vi.mocked(remoteClient.loadAgentChatPage)
-      .mockResolvedValueOnce({ ...chatPageFields, progress: "indexing", events: [chatMessage("latest", "Latest", 1)], next_before: null })
-      .mockResolvedValue({ ...chatPageFields, unchanged: true, events: [], next_before: null });
+      .mockResolvedValueOnce({ ...chatPageFields, progress: "indexing", events: [chatMessage("latest", "Latest", 1)], next_before: "retained-cursor" })
+      .mockResolvedValue({ ...chatPageFields, unchanged: true, events: [], next_before: null,
+        bytes_read: 1234, records_decoded: 7 });
     useRemoteStore.setState({ activeAgentViewModesById: { "agent-1": "chat" } });
     await useRemoteStore.getState().load();
     await useRemoteStore.getState().openAgent("agent-1");
@@ -277,6 +278,9 @@ describe("useRemoteStore watchlists", () => {
     expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(6);
     expect(useRemoteStore.getState().chatPage?.progress).toBe("ready");
     expect(useRemoteStore.getState().chatEvents).toBe(rows);
+    expect(useRemoteStore.getState().chatPage).toMatchObject({ bytes_read: 1234, records_decoded: 7, next_before: "retained-cursor" });
+    expect(useRemoteStore.getState().chatHasOlder).toBe(true);
+    expect(useRemoteStore.getState().chatNextBefore).toBe("retained-cursor");
   });
 
   it("discards hidden roster hints and resumes only one visible Chat read", async () => {

@@ -29,6 +29,8 @@ pub(crate) struct TranscriptNormalizationState {
     request_root_id: Option<String>,
     codex_provider_turn_id: Option<String>,
     #[serde(default)]
+    mock_provider_session: Option<String>,
+    #[serde(default)]
     codex_user_mirror_pending: bool,
     #[serde(default)]
     codex_user_mirror_identity: Option<CodexUserMirrorIdentity>,
@@ -44,6 +46,7 @@ impl Default for TranscriptNormalizationState {
             next_sequence: 1,
             request_root_id: None,
             codex_provider_turn_id: None,
+            mock_provider_session: None,
             codex_user_mirror_pending: false,
             codex_user_mirror_identity: None,
             pending_events: Vec::new(),
@@ -63,6 +66,11 @@ struct CodexUserMirrorIdentity {
 }
 
 impl TranscriptNormalizationState {
+    /// Actual Mock log header identity, independent of producer mirror claims.
+    pub(crate) fn mock_provider_session(&self) -> Option<&str> {
+        self.mock_provider_session.as_deref()
+    }
+
     pub(crate) fn validate_serialized_size(&self) -> Result<(), String> {
         if serde_json::to_vec(self)
             .map_err(|error| error.to_string())?
@@ -216,6 +224,21 @@ pub(crate) fn normalize_chat_lines_with_state(
         let sequence = state.next_sequence;
         state.next_sequence = state.next_sequence.saturating_add(1);
         let raw_line = line.as_ref();
+        if normalized_provider == "mock" {
+            if let Ok(parsed) = serde_json::from_str::<Value>(raw_line) {
+                if parsed.get("type").and_then(Value::as_str) == Some("init") {
+                    state.mock_provider_session = parsed
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .filter(|session| {
+                            !session.is_empty()
+                                && session.len() <= 128
+                                && session.bytes().all(|byte| byte.is_ascii_graphic())
+                        })
+                        .map(str::to_string);
+                }
+            }
+        }
         let codex_turn_context = if normalized_provider == "codex" {
             serde_json::from_str::<Value>(raw_line)
                 .ok()
@@ -2113,7 +2136,7 @@ fn normalize_mock(
     sequence: u64,
 ) -> Option<AgentChatEvent> {
     let msg_type = str_field(parsed, "type")?;
-    match msg_type {
+    let mut normalized = match msg_type {
         "init" => Some(status_event(
             session_id,
             provider,
@@ -2214,7 +2237,20 @@ fn normalize_mock(
             },
         )),
         _ => None,
+    }?;
+    if matches!(msg_type, "message" | "model" | "info") {
+        if let Some(provenance) = super::transcript::mock_mirror_provenance(parsed) {
+            if let Some(mirror) = provenance.mirror {
+                normalized.metadata["mock_observation_id"] = json!(mirror.observation_id);
+                normalized.metadata["mock_provider_incarnation"] = json!(mirror.incarnation);
+                normalized.metadata["mock_provider_session_id"] =
+                    json!(provenance.provider_session_id);
+                normalized.metadata["mock_mirror_logged"] = json!(mirror.logged);
+                normalized.metadata["mock_observation_digest"] = json!(mirror.payload_sha256);
+            }
+        }
     }
+    Some(normalized)
 }
 
 fn normalize_fallback_json(
@@ -5178,6 +5214,181 @@ mod tests {
         assert_eq!(event.metadata["input_purpose"], "request");
         assert_eq!(event.metadata["context_observation"], "unreported");
         assert_ne!(event.metadata["input_origin"], "context_injection");
+    }
+
+    fn mock_receipt_line(kind: &str, turn: &str, incarnation: &str, sequence: u64) -> Value {
+        json!({
+            "type": kind, "role": "assistant", "content": "Equal answer", "turn_id": turn,
+            "wardian_mirror": {
+                "observation_id": format!("{incarnation}:{sequence}"),
+                "incarnation": incarnation, "provider_session_id": "actual-mock-session",
+                "logged": true
+            }
+        })
+    }
+
+    #[test]
+    fn mock_normalization_preserves_each_observation_and_locally_derived_digest() {
+        let incarnation = "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc";
+        let restarted = "f21f4e4e-8d11-4a64-9052-4f71052af686";
+        let lines = [
+            mock_receipt_line("message", "same-turn", incarnation, 1),
+            mock_receipt_line("model", "same-turn", incarnation, 2),
+            mock_receipt_line("info", "distinct-turn", incarnation, 3),
+            mock_receipt_line("model", "same-turn", restarted, 1),
+        ];
+        let events = normalize_chat_lines("agent-1", "mock", lines.iter().map(Value::to_string));
+        assert_eq!(events.len(), lines.len());
+        let mut ids = HashSet::new();
+        for (event, raw) in events.iter().zip(&lines) {
+            let watch =
+                super::super::transcript::extract_transcript_message("mock", &raw.to_string())
+                    .unwrap();
+            let claim = watch.provider_provenance.unwrap();
+            let mirror = claim.mirror.unwrap();
+            assert!(ids.insert(event.metadata["mock_observation_id"].as_str().unwrap()));
+            assert_eq!(event.metadata["mock_observation_id"], mirror.observation_id);
+            assert_eq!(
+                event.metadata["mock_provider_incarnation"],
+                mirror.incarnation
+            );
+            assert_eq!(
+                event.metadata["mock_provider_session_id"],
+                claim.provider_session_id
+            );
+            assert_eq!(event.metadata["mock_mirror_logged"], true);
+            assert_eq!(
+                event.metadata["mock_observation_digest"],
+                mirror.payload_sha256
+            );
+            assert_eq!(event.text.as_deref(), Some("Equal answer"));
+            assert_eq!(event.turn_id.as_deref(), raw["turn_id"].as_str());
+            assert_eq!(event.source.as_deref(), raw["type"].as_str());
+            assert!(event.metadata.get("provider_log").is_none());
+        }
+        let mut forged = lines[0].clone();
+        forged["wardian_mirror"]["payload_sha256"] = json!("forged");
+        let event = one("mock", &forged.to_string());
+        assert_eq!(
+            event.metadata["mock_observation_digest"],
+            format!("{:x}", Sha256::digest(serde_json::to_vec(&forged).unwrap()))
+        );
+        let original_digest = event.metadata["mock_observation_digest"].clone();
+        forged["content"] = json!("A conflicting raw body");
+        let conflict = one("mock", &forged.to_string());
+        assert_eq!(
+            conflict.metadata["mock_observation_id"],
+            event.metadata["mock_observation_id"]
+        );
+        assert_ne!(
+            conflict.metadata["mock_observation_digest"],
+            original_digest
+        );
+    }
+
+    #[test]
+    fn mock_normalization_keeps_unlogged_output_and_ignores_unproved_receipts() {
+        let mut raw =
+            mock_receipt_line("model", "turn-1", "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc", 1);
+        raw["wardian_mirror"]["logged"] = json!(false);
+        let unlogged = one("mock", &raw.to_string());
+        assert_eq!(unlogged.metadata["mock_mirror_logged"], false);
+        assert_eq!(unlogged.text.as_deref(), Some("Equal answer"));
+        assert!(unlogged.metadata.get("provider_log").is_none());
+        for receipt in [
+            Value::Null,
+            json!({}),
+            json!({
+                "observation_id": "wrong:1", "incarnation": "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc",
+                "provider_session_id": "actual-mock-session", "logged": true
+            }),
+        ] {
+            raw["wardian_mirror"] = receipt;
+            let event = one("mock", &raw.to_string());
+            assert_eq!(event.text.as_deref(), Some("Equal answer"));
+            for key in [
+                "mock_observation_id",
+                "mock_provider_incarnation",
+                "mock_provider_session_id",
+                "mock_mirror_logged",
+                "mock_observation_digest",
+            ] {
+                assert!(event.metadata.get(key).is_none(), "accepted {key}");
+            }
+        }
+        raw.as_object_mut().unwrap().remove("wardian_mirror");
+        assert!(one("mock", &raw.to_string())
+            .metadata
+            .get("mock_observation_id")
+            .is_none());
+    }
+
+    #[test]
+    fn mock_actual_header_session_survives_split_batches_and_state_restart() {
+        let mut state = TranscriptNormalizationState::default();
+        assert_eq!(state.mock_provider_session(), None);
+        let raw = mock_receipt_line("model", "turn-1", "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc", 1)
+            .to_string();
+        normalize_chat_lines_with_state("agent-1", "mock", [&raw], &mut state, false, true)
+            .unwrap();
+        assert_eq!(state.mock_provider_session(), None);
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "mock",
+            [r#"{"type":"init","session_id":"owned-header-session"}"#],
+            &mut state,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(state.mock_provider_session(), Some("owned-header-session"));
+        let serialized = serde_json::to_vec(&state).unwrap();
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(restored, state);
+        let events =
+            normalize_chat_lines_with_state("agent-1", "mock", [&raw], &mut restored, true, true)
+                .unwrap();
+        assert_eq!(
+            events[0].metadata["mock_provider_session_id"],
+            "actual-mock-session"
+        );
+        assert_eq!(
+            restored.mock_provider_session(),
+            Some("owned-header-session")
+        );
+        for session in [
+            Value::Null,
+            json!(""),
+            json!("x".repeat(129)),
+            json!("invalid session"),
+        ] {
+            restored = state.clone();
+            let invalid = json!({"type": "init", "session_id": session}).to_string();
+            normalize_chat_lines_with_state(
+                "agent-1",
+                "mock",
+                [&invalid],
+                &mut restored,
+                true,
+                true,
+            )
+            .unwrap();
+            assert_eq!(restored.mock_provider_session(), None);
+        }
+        let mut legacy = serde_json::to_value(state).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("mock_provider_session");
+        assert_eq!(
+            serde_json::from_value::<TranscriptNormalizationState>(legacy)
+                .unwrap()
+                .mock_provider_session(),
+            None
+        );
+        restored = TranscriptNormalizationState::default();
+        assert_eq!(restored.mock_provider_session(), None);
     }
 
     #[test]

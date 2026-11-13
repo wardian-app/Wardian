@@ -10,7 +10,7 @@ use wardian_core::conversations::write_json_atomic;
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind};
 
 use super::chat_read::{locations, PAGE_ROWS};
-use super::chat_read_store::{valid_ref, Store};
+use super::chat_read_store::{valid_ref, Dependency, Store};
 use crate::commands::chat::{
     conversation_archive_context_from_snapshot, AgentArchiveCaptureSnapshot,
 };
@@ -21,6 +21,12 @@ const SOURCE_INDEX_VERSION: u8 = 5;
 // stores the pinned acquisition identity, policy spans and cursor metadata.
 const REPLAY_STATE_MAX_BYTES: usize = 1024 * 1024 + 64 * 1024;
 const REPLAY_STATE_CHUNK_BYTES: usize = 7 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static CHECKPOINT_FAILURE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    pub(super) static FAILED_CHECKPOINT_ROOT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 struct SourceHead {
@@ -513,7 +519,7 @@ pub(crate) fn advance(snapshot: &AgentArchiveCaptureSnapshot) -> io::Result<bool
     let Ok((epoch, admission, extent, modified)) = source_scope(snapshot) else {
         return Ok(false);
     };
-    let mut store = Store::bounded_writer(&locations(&context.agent_id)?.1);
+    let mut store = Store::checkpoint_writer(&locations(&context.agent_id)?.1);
     let previous =
         pointer(&context.agent_id)?.and_then(|reference| store.read::<SourceHead>(&reference).ok());
     let mut head = previous
@@ -1249,6 +1255,28 @@ fn save_head_checkpoint(
         return Ok(());
     }
     head.replay_state = Some(save_replay_checkpoint(store, checkpoint)?);
+    #[cfg(test)]
+    if CHECKPOINT_FAILURE.with(|stage| stage.get() == 1 && stage.replace(0) == 1) {
+        FAILED_CHECKPOINT_ROOT.with(|root| root.replace(head.root.clone()));
+        return Err(io::Error::other(
+            "injected source failure before node flush",
+        ));
+    }
+    // The replay queue's root is encoded inside durable checkpoint chunks.
+    // Enumerate it explicitly; payload text is never scanned for tree links.
+    let roots = head
+        .root
+        .iter()
+        .map(String::as_str)
+        .chain(head.logical.node_roots())
+        .chain(checkpoint.pending_root.as_deref())
+        .map(|root| Dependency::Node(root.to_owned()))
+        .collect::<Vec<_>>();
+    store.finish_checkpoint(&roots)?;
+    #[cfg(test)]
+    if CHECKPOINT_FAILURE.with(|stage| stage.get() == 2 && stage.replace(0) == 2) {
+        return Err(io::Error::other("injected source failure after node flush"));
+    }
     publish(store, head)
 }
 
@@ -1539,8 +1567,53 @@ pub(super) fn scope(
     store: &mut Store,
     reference: &str,
 ) -> io::Result<(String, String, String)> {
-    let (head, _) = admitted_head(snapshot, store, reference)?;
-    Ok((head.generation, head.epoch, head.progress))
+    let (generation, epoch, progress, _) = scope_with_completion(snapshot, store, reference)?;
+    Ok((generation, epoch, progress))
+}
+
+/// Return renewal readiness from the same admitted head and aggregate budget.
+pub(super) fn scope_with_completion(
+    snapshot: &AgentArchiveCaptureSnapshot,
+    store: &mut Store,
+    reference: &str,
+) -> io::Result<(String, String, String, bool)> {
+    let scope = qualification(snapshot, store, reference)?;
+    Ok((
+        scope.generation,
+        scope.epoch,
+        scope.progress,
+        scope.complete,
+    ))
+}
+
+pub(super) struct Qualification {
+    pub(super) generation: String,
+    pub(super) epoch: String,
+    pub(super) source_key: Option<String>,
+    pub(super) admission: String,
+    pub(super) extent: u64,
+    pub(super) progress: String,
+    pub(super) complete: bool,
+}
+
+/// Compare canonical coverage against the actual current interval and privacy
+/// admission without opening another Store or resetting its aggregate budget.
+pub(super) fn qualification(
+    snapshot: &AgentArchiveCaptureSnapshot,
+    store: &mut Store,
+    reference: &str,
+) -> io::Result<Qualification> {
+    let (head, extent) = admitted_head(snapshot, store, reference)?;
+    let complete = coverage_complete(&head, extent);
+    Ok(Qualification {
+        generation: head.generation,
+        epoch: head.epoch,
+        source_key: head.source_key,
+        admission: head.admission,
+        extent,
+        progress: head.progress,
+        complete,
+    })
 }
 
 /// Find whether older provisional observations remain without decoding a page.

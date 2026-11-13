@@ -4,6 +4,26 @@ The authority is `crates/wardian-core/src/memory.rs`. It opens the Wardian-home
 `memory.db` with WAL, foreign keys, a busy timeout, and transactional lifecycle
 operations. The CLI and Tauri commands call the same store.
 
+Direct `MemoryStore::save` calls enforce `ACTIVE_MEMORY_CAP` (25) per agent and
+exact normalized workspace, with null representing agent scope. Stable and
+current kinds share the cap. The count and insert use an immediate write
+transaction; matching idempotent saves return before the count check. Updates
+and removals remain available above the cap, and existing records are preserved.
+Batch consolidation and operator maintenance retain their existing policies.
+
+CLI save/update validate prose separately from `normalize_text`, which remains
+shared by batch and maintenance writers. Reject whitespace-separated tokens over
+48 characters, contiguous ASCII hexadecimal runs of at least 16 characters, or
+four identifier-like words within any eight words. After trimming outer
+non-alphanumeric characters, an identifier-like word contains an ASCII digit,
+dot, hyphen, underscore, path separator, `::`, or lowercase-to-uppercase
+transition. Evidence and sources are exempt. These are simple heuristics, not
+sentence parsing; the error asks for one to three plain sentences.
+
+CLI list adds `scope_counts`, derived from the returned active records, with
+`workspace`, `active_count`, and `cap` for agent scope and the selected normalized
+workspace (including zero counts). Its existing `memories` array is unchanged.
+
 Provider-integrated memory is gated by the global `memory_enabled` app setting,
 which defaults to false while the feature matures. When it is disabled, startup
 recall, direct-retention instructions, managed capabilities, and

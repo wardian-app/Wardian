@@ -9,8 +9,12 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
+use super::chat_read::packed_recent::{PackedPage, NODE_BYTES, PACKED_BYTES, TREE_HEIGHT};
+use super::chat_read::PAGE_ROWS;
+
 pub(super) const READ_BYTES: usize = 1024 * 1024;
 pub(super) const READ_OBJECTS: usize = 512;
+pub(super) const OBJECT_BYTES: usize = 16 * 1024;
 
 pub(super) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -173,8 +177,9 @@ impl Store {
         }
         // Read the pinned extent only. Growth cannot extend the request budget.
         let mut bytes = Vec::with_capacity(len);
-        (&mut file).take(len as u64).read_to_end(&mut bytes)?;
+        let result = (&mut file).take(len as u64).read_to_end(&mut bytes);
         self.bytes += bytes.len();
+        result?;
         if bytes.len() != len || digest(&bytes) != reference {
             return Err(io::Error::other("chat read object changed"));
         }
@@ -182,21 +187,27 @@ impl Store {
     }
 
     pub(super) fn read<T: DeserializeOwned>(&mut self, reference: &str) -> io::Result<T> {
-        serde_json::from_slice(&self.read_bytes(reference, 16 * 1024)?).map_err(io::Error::other)
+        serde_json::from_slice(&self.read_bytes(reference, OBJECT_BYTES)?).map_err(io::Error::other)
     }
 
     fn account_write(&self, bytes: &[u8]) -> io::Result<()> {
-        if bytes.len() > 16 * 1024 {
+        if bytes.len() > OBJECT_BYTES {
             return Err(io::Error::other("oversized chat index object"));
         }
+        self.account_write_extent(bytes.len())
+    }
+
+    // Shared attempt accounting is private. Only the typed packed-page path can
+    // spend a larger extent; ordinary object methods retain OBJECT_BYTES.
+    fn account_write_extent(&self, len: usize) -> io::Result<()> {
         if self.bounded_writes {
             if self.write_objects.get() >= self.object_limit
-                || bytes.len() > self.byte_limit.saturating_sub(self.write_bytes.get())
+                || len > self.byte_limit.saturating_sub(self.write_bytes.get())
             {
                 return Err(io::Error::other("chat projection write budget exhausted"));
             }
             self.write_objects.set(self.write_objects.get() + 1);
-            self.write_bytes.set(self.write_bytes.get() + bytes.len());
+            self.write_bytes.set(self.write_bytes.get() + len);
         }
         Ok(())
     }
@@ -237,25 +248,30 @@ impl Store {
         dependencies: Vec<Dependency>,
     ) -> io::Result<String> {
         let reference = self.put(value)?;
+        self.register_links(&reference, dependencies)?;
+        Ok(reference)
+    }
+
+    fn register_links(&mut self, reference: &str, dependencies: Vec<Dependency>) -> io::Result<()> {
         let Some(pending) = self.pending.as_mut() else {
-            return Ok(reference);
+            return Ok(());
         };
         if dependencies.is_empty() {
-            return Ok(reference);
+            return Ok(());
         }
         if dependencies.iter().any(|link| !valid_ref(link.reference())) {
             return Err(io::Error::other("invalid chat checkpoint dependency"));
         }
-        if let Some(previous) = pending.links.get(&reference) {
+        if let Some(previous) = pending.links.get(reference) {
             if previous != &dependencies {
                 return Err(io::Error::other(
                     "chat checkpoint payload dependencies changed",
                 ));
             }
-            return Ok(reference);
+            return Ok(());
         }
         let ram = PENDING_ENTRY_RAM
-            + reference.capacity()
+            + reference.len()
             + dependencies.capacity() * std::mem::size_of::<Dependency>()
             + dependencies
                 .iter()
@@ -264,8 +280,122 @@ impl Store {
                 })
                 .sum::<usize>();
         pending.reserve(ram)?;
-        pending.links.insert(reference.clone(), dependencies);
-        Ok(reference)
+        pending.links.insert(reference.to_owned(), dependencies);
+        Ok(())
+    }
+
+    /// Reserve the worst valid recent traversal, bounded encoding attempt, typed
+    /// links, and one ordinary Head write without changing any Store allowance.
+    pub(super) fn can_prepare_packed_recent(&self) -> bool {
+        let nodes = PAGE_ROWS + 1 + TREE_HEIGHT;
+        let dependencies = 1 + PAGE_ROWS + 1 + PAGE_ROWS;
+        let link_ram =
+            PENDING_ENTRY_RAM + 64 + dependencies * (std::mem::size_of::<Dependency>() + 64);
+        nodes + PAGE_ROWS < self.object_limit.saturating_sub(self.objects)
+            && nodes * NODE_BYTES + PAGE_ROWS * OBJECT_BYTES + PACKED_BYTES
+                <= self.byte_limit.saturating_sub(self.bytes)
+            && (!self.bounded_writes
+                || (2 <= self.object_limit.saturating_sub(self.write_objects.get())
+                    && PACKED_BYTES + 1 + OBJECT_BYTES
+                        <= self.byte_limit.saturating_sub(self.write_bytes.get())))
+            && self.pending.as_ref().is_none_or(|pending| {
+                pending.nodes.len() + pending.links.len() < pending.object_limit
+                    && link_ram <= pending.ram_limit.saturating_sub(pending.ram_bytes)
+            })
+    }
+
+    /// The only larger-object writer accepts an authenticated recent-page type.
+    /// Even an oversized serialization spends its attempted object and bounded
+    /// bytes. I/O, dependency, and budget errors propagate to the publisher.
+    pub(super) fn put_packed_recent(&mut self, page: &PackedPage) -> io::Result<Option<String>> {
+        let (bytes, oversized) = page.encode()?;
+        self.account_write_extent(bytes.len())?;
+        if oversized {
+            return Ok(None);
+        }
+        let reference = self.persist_bytes(&bytes)?;
+        // persist_bytes may find an existing target. Validate that target too,
+        // and retain these read attempts if an orphan was damaged or replaced.
+        if self.read_bytes(&reference, PACKED_BYTES)? != bytes {
+            return Err(io::Error::other("chat packed page is not durable"));
+        }
+        self.register_links(&reference, page.dependencies())?;
+        Ok(Some(reference))
+    }
+
+    /// Packed bytes are hash-checked afresh; embedded header decodes spend the
+    /// same object budget as original Row reads. Their bytes are already charged
+    /// by the enclosing packed file and are not charged a second time.
+    pub(super) fn read_packed_recent(&mut self, reference: &str) -> io::Result<PackedPage> {
+        let bytes = self.read_bytes(reference, PACKED_BYTES)?;
+        PackedPage::decode(self, &bytes)
+    }
+
+    pub(super) fn account_packed_header(&mut self) -> io::Result<()> {
+        if self.objects >= self.object_limit {
+            return Err(io::Error::other("chat packed header budget exhausted"));
+        }
+        self.objects += 1;
+        Ok(())
+    }
+
+    fn packed_node(&mut self, reference: &str) -> io::Result<Node> {
+        let node: Node = serde_json::from_slice(&self.read_bytes(reference, NODE_BYTES)?)
+            .map_err(io::Error::other)?;
+        if node.key.len() != 20
+            || !node.key.bytes().all(|byte| byte.is_ascii_digit())
+            || !valid_ref(&node.value)
+            || node.height == 0
+            || node.height as usize > TREE_HEIGHT
+            || node
+                .left
+                .iter()
+                .chain(&node.right)
+                .any(|child| !valid_ref(child))
+        {
+            return Err(io::Error::other("invalid packed chat canonical node"));
+        }
+        Ok(node)
+    }
+
+    /// Reopen the canonical root on every packed request, even when this Store
+    /// previously served the same pack. No interior-node/Row cache is involved.
+    pub(super) fn validate_packed_root(&mut self, root: &Option<String>) -> io::Result<()> {
+        if let Some(reference) = root {
+            self.packed_node(reference)?;
+        }
+        Ok(())
+    }
+
+    /// Equivalent to page(root, None, PAGE_ROWS + 1) for canonical AVL trees.
+    /// Canonical keys bound a valid tree's height, and each visited node has a
+    /// small fixed representation. Enforcing both bounds makes preflight sound.
+    pub(super) fn packed_recent_entries(
+        &mut self,
+        root: &Option<String>,
+    ) -> io::Result<Vec<(String, String)>> {
+        let mut current = root.clone();
+        let mut stack = Vec::new();
+        let mut out = Vec::new();
+        let mut visited = 0;
+        while current.is_some() || !stack.is_empty() {
+            while let Some(reference) = current.take() {
+                if visited >= PAGE_ROWS + 1 + TREE_HEIGHT || stack.len() >= TREE_HEIGHT {
+                    return Err(io::Error::other("packed chat canonical traversal exceeded"));
+                }
+                let node = self.packed_node(&reference)?;
+                current = node.right.clone();
+                stack.push(node);
+                visited += 1;
+            }
+            let node = stack.pop().expect("a traversed canonical node is queued");
+            current = node.left;
+            out.push((node.key, node.value));
+            if out.len() == PAGE_ROWS + 1 {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// Durably flush only private nodes reachable through typed final roots.
@@ -541,3 +671,53 @@ struct Node {
 #[cfg(test)]
 #[path = "chat_read_store_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod packed_budget_tests {
+    use super::*;
+
+    #[test]
+    fn packed_preflight_respects_existing_read_write_and_pending_caps() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::checkpoint_writer(temp.path());
+        assert!(store.can_prepare_packed_recent());
+        let byte_limit = store.byte_limit;
+        let object_limit = store.object_limit;
+        store.bytes = byte_limit - PAGE_ROWS * OBJECT_BYTES;
+        assert!(!store.can_prepare_packed_recent());
+        assert_eq!(store.bytes, byte_limit - PAGE_ROWS * OBJECT_BYTES);
+        store.bytes = 0;
+        store.objects = object_limit - PAGE_ROWS;
+        assert!(!store.can_prepare_packed_recent());
+        store.objects = 0;
+        store.write_bytes.set(byte_limit - PACKED_BYTES);
+        assert!(!store.can_prepare_packed_recent());
+        assert_eq!(store.write_bytes.get(), byte_limit - PACKED_BYTES);
+        store.write_bytes.set(0);
+        store.write_objects.set(object_limit - 1);
+        assert!(
+            !store.can_prepare_packed_recent(),
+            "reserve the eventual Head too"
+        );
+        store.write_objects.set(0);
+        let pending = store.pending.as_mut().unwrap();
+        let ram_limit = pending.ram_limit;
+        pending.ram_bytes = ram_limit - 1;
+        assert!(!store.can_prepare_packed_recent());
+        assert_eq!(store.pending.as_ref().unwrap().ram_limit, ram_limit);
+        assert_eq!(
+            (store.byte_limit, store.object_limit),
+            (byte_limit, object_limit)
+        );
+    }
+
+    #[test]
+    fn failed_persistence_keeps_actual_write_attempts() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked = temp.path().join("not-a-directory");
+        fs::write(&blocked, b"block").unwrap();
+        let store = Store::checkpoint_writer(&blocked);
+        assert!(store.put_bytes(b"payload").is_err());
+        assert_eq!((store.write_objects.get(), store.write_bytes.get()), (1, 7));
+    }
+}

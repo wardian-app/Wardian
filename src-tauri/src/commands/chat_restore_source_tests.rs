@@ -45,7 +45,8 @@ impl Fixture {
             session_name: "Captured restore fixture".into(),
             agent_class: "Coder".into(),
             provider: provider.into(),
-            resume_session: Some(native_id.clone()),
+            resume_session: (provider != "mock").then(|| native_id.clone()),
+            fresh_provider_session_id: (provider == "mock").then(|| native_id.clone()),
             is_off: true,
             folder: root.join("workspace").to_string_lossy().into_owned(),
             conversation_logging: AgentConversationLoggingSetting::Enabled,
@@ -60,6 +61,12 @@ impl Fixture {
                 .parent()
                 .unwrap()
                 .join("habitat/.codex/sessions/2026/01/01")
+        } else if provider == "mock" {
+            wardian_core::paths::agent_conversations_dir(&agent_id)
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf()
         } else {
             user_home.join(".claude/projects").join(
                 crate::manager::claude::claude_project_dir_name(&config.folder),
@@ -68,12 +75,16 @@ impl Fixture {
         std::fs::create_dir_all(&directory).unwrap();
         let filename = if provider == "codex" {
             format!("rollout-2026-01-01T00-00-00-{native_id}.jsonl")
+        } else if provider == "mock" {
+            "mock-transcript.jsonl".to_owned()
         } else {
             format!("{native_id}.jsonl")
         };
         let path = directory.join(filename);
         let header = if provider == "codex" {
             serde_json::json!({"type":"session_meta","payload":{"id":native_id,"cwd":config.folder}})
+        } else if provider == "mock" {
+            serde_json::json!({"type":"init","session_id":native_id})
         } else {
             serde_json::json!({"type":"user","sessionId":native_id,"cwd":config.folder,
                 "message":{"role":"user","content":"Owned fixture request"}})
@@ -223,6 +234,11 @@ async fn normal_background_request_binds_off_codex_without_foreground_discovery(
     assert_eq!(fixture.cached().await, Some(canonical));
     assert_eq!(std::fs::read(&fixture.path).unwrap(), source_before);
     fixture.assert_capture_unchanged();
+    let snapshot =
+        super::super::agent_archive_capture_snapshot(&fixture.state, &fixture.config.session_id)
+            .await
+            .unwrap();
+    assert!(crate::commands::chat_recent_seed::source_scope(&snapshot).is_ok());
     let agents = fixture.state.agents.lock().await;
     let agent = agents.get(&fixture.config.session_id).unwrap();
     assert!(agent.child_process.is_none());
@@ -244,11 +260,47 @@ async fn background_binding_binds_off_claude_with_exact_project_and_persisted_po
 }
 
 #[tokio::test]
+async fn normal_background_request_binds_off_mock_from_persisted_native_receipt() {
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let root = tempfile::tempdir().unwrap();
+    let _home = TestHome::set(root.path());
+    let fixture = Fixture::new(root.path(), "mock", false).await;
+    let source_before = std::fs::read(&fixture.path).unwrap();
+    assert!(fixture.cached().await.is_none());
+    let request =
+        super::super::background_capture_request(&fixture.state, &fixture.config.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        request.source_path,
+        Some(fixture.path.canonicalize().unwrap())
+    );
+    assert_eq!(
+        request.source.unwrap().native_identity,
+        fixture.captured.native_identity
+    );
+    assert_eq!(std::fs::read(&fixture.path).unwrap(), source_before);
+    fixture.assert_capture_unchanged();
+    let agents = fixture.state.agents.lock().await;
+    let agent = agents.get(&fixture.config.session_id).unwrap();
+    assert!(agent.child_process.is_none());
+    assert!(agent.process_id.is_none());
+    assert!(agent.config.lock().unwrap().is_off);
+    drop(agents);
+    let snapshot =
+        super::super::agent_archive_capture_snapshot(&fixture.state, &fixture.config.session_id)
+            .await
+            .unwrap();
+    assert!(crate::commands::chat_recent_seed::source_scope(&snapshot).is_ok());
+}
+
+#[tokio::test]
 async fn restored_binding_rejects_wrong_agent_session_and_storage_root() {
     let _lock = crate::utils::wardian_test_env_lock_async().await;
     let root = tempfile::tempdir().unwrap();
     let _home = TestHome::set(root.path());
-    for provider in ["codex", "claude"] {
+    for provider in ["codex", "claude", "mock"] {
         let fixture = Fixture::new(root.path(), provider, false).await;
         let mut other = fixture.config.clone();
         other.session_id = uuid::Uuid::new_v4().to_string();
@@ -301,7 +353,7 @@ async fn restored_binding_rejects_missing_replaced_and_rewritten_sources() {
     let _lock = crate::utils::wardian_test_env_lock_async().await;
     let root = tempfile::tempdir().unwrap();
     let _home = TestHome::set(root.path());
-    for provider in ["codex", "claude"] {
+    for provider in ["codex", "claude", "mock"] {
         for mode in ["missing", "replacement", "continuity"] {
             let fixture = Fixture::new(root.path(), provider, false).await;
             let bytes = std::fs::read(&fixture.path).unwrap();
@@ -342,16 +394,21 @@ async fn retired_background_incarnation_cannot_cache_the_restored_source() {
     let _lock = crate::utils::wardian_test_env_lock_async().await;
     let root = tempfile::tempdir().unwrap();
     let _home = TestHome::set(root.path());
-    let fixture = Fixture::new(root.path(), "codex", false).await;
-    let retired = Arc::new(Mutex::new("Off".to_string()));
-    bind_for_background_in(
-        &fixture.state,
-        &fixture.config.session_id,
-        Some(&retired),
-        Some(fixture.user_home.clone()),
-    )
-    .await
-    .unwrap();
-    assert!(fixture.cached().await.is_none());
-    fixture.assert_capture_unchanged();
+    for provider in ["codex", "mock"] {
+        let fixture = Fixture::new(root.path(), provider, false).await;
+        let retired = Arc::new(Mutex::new("Off".to_string()));
+        bind_for_background_in(
+            &fixture.state,
+            &fixture.config.session_id,
+            Some(&retired),
+            Some(fixture.user_home.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(fixture.cached().await.is_none());
+        fixture.assert_capture_unchanged();
+    }
 }
+
+#[path = "chat_restore_mock_tests.rs"]
+mod mock_tests;

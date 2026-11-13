@@ -711,6 +711,11 @@ pub fn run() {
                     if let Ok(data) = std::fs::read_to_string(state_path) {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {
                             let selected_configs = configs.clone();
+                            if let Ok(leases) = &startup_leases {
+                                startup_restore::prior_holds::report_unverified_holds(
+                                    &app_handle, &state, &selected_configs, leases,
+                                ).await;
+                            }
                             let mut seen_names = std::collections::HashSet::new();
                             // Fetch latest status from DB for all agents
                             let db_agents = wardian_core::db::get_all_agents().unwrap_or_default();

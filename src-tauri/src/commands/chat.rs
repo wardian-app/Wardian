@@ -319,6 +319,77 @@ pub(crate) struct ArchiveCaptureResult {
     pub(crate) context: ConversationArchiveContext,
     pub(crate) continue_immediately: bool,
     pub(crate) background_stop: CaptureStop,
+    pub(crate) watch_mirrors: Option<MockWatchAuthority>,
+}
+
+/// This pass's actual owned Watch observations. Stream metadata alone cannot
+/// construct the archive's durable mirror binding.
+pub(crate) struct MockWatchAuthority {
+    agent_id: String,
+    source_key: Option<String>,
+    rows: Vec<AgentChatEvent>,
+}
+
+impl MockWatchAuthority {
+    fn from_watch(snapshot: &AgentArchiveCaptureSnapshot, rows: &[AgentChatEvent]) -> Option<Self> {
+        let expected = snapshot.fresh_provider_session_id.as_deref()?;
+        let path = std::fs::canonicalize(snapshot.log_path.as_ref()?).ok()?;
+        let path = path.to_string_lossy();
+        let rows = rows
+            .iter()
+            .filter(|event| {
+                snapshot.provider == "mock"
+                    && event.provider == "mock"
+                    && event.session_id == snapshot.session_id
+                    && event.metadata["provider_log"] != true
+                    && event.metadata["mock_mirror_logged"] == true
+                    && event.metadata["mock_provider_session_id"].as_str() == Some(expected)
+                    && event.metadata["log_path"].as_str() == Some(path.as_ref())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        (!rows.is_empty()).then(|| Self {
+            agent_id: snapshot.session_id.clone(),
+            source_key: conversation_archive_context_from_snapshot(snapshot).provider_source_key,
+            rows,
+        })
+    }
+
+    pub(crate) fn proves(
+        &self,
+        context: &ConversationArchiveContext,
+        event: &AgentChatEvent,
+    ) -> bool {
+        context.agent_id == self.agent_id
+            && context.provider == "mock"
+            && context.provider_source_key == self.source_key
+            && self
+                .rows
+                .iter()
+                .filter(|row| {
+                    row.id == event.id
+                        && row.session_id == event.session_id
+                        && row.provider == event.provider
+                        && row.kind == event.kind
+                        && row.role == event.role
+                        && row.source == event.source
+                        && row.turn_id == event.turn_id
+                        && row.text == event.text
+                        && [
+                            "mock_observation_id",
+                            "mock_provider_incarnation",
+                            "mock_provider_session_id",
+                            "mock_mirror_logged",
+                            "mock_observation_digest",
+                            "log_path",
+                            "transcript_cursor",
+                        ]
+                        .iter()
+                        .all(|key| row.metadata.get(*key) == event.metadata.get(*key))
+                })
+                .count()
+                == 1
+    }
 }
 
 fn provider_log_source_is_fresh(
@@ -751,6 +822,7 @@ fn collect_agent_chat_events_with_provider_events(
         include_terminal_output: !provider_has_transcript,
     });
 
+    let watch_mirrors = MockWatchAuthority::from_watch(snapshot, &watch_events);
     let events = merge_chat_events(watch_events, provider_events);
     let context = conversation_archive_context_from_snapshot(snapshot);
 
@@ -759,6 +831,7 @@ fn collect_agent_chat_events_with_provider_events(
         context,
         continue_immediately,
         background_stop: CaptureStop::More,
+        watch_mirrors,
     })
 }
 
@@ -866,6 +939,7 @@ async fn archive_agent_chat_events_bound(
                 context,
                 continue_immediately: true,
                 background_stop: CaptureStop::More,
+                watch_mirrors: None,
             });
         }
     }
@@ -1057,7 +1131,11 @@ async fn archive_agent_chat_events_bound(
             if logging_enabled {
                 state
                     .conversation_archive
-                    .append_chat_events_with_context(context, &watch_only)
+                    .append_chat_events_with_mock_watch(
+                        context,
+                        &watch_only,
+                        result.watch_mirrors.as_ref(),
+                    )
                     .map_err(|error| AgentChatTranscriptFailure {
                         stage: ChatTranscriptFailureStage::ArchiveWrite,
                         message: format!("conversation archive watch append failed: {error}"),
@@ -1079,6 +1157,7 @@ async fn archive_agent_chat_events_bound(
                 context,
                 continue_immediately: false,
                 background_stop: CaptureStop::Retired,
+                watch_mirrors: None,
             });
         }
     }
@@ -1117,7 +1196,11 @@ async fn archive_agent_chat_events_bound(
         } else {
             state
                 .conversation_archive
-                .append_chat_events_with_context(result.context.clone(), &result.events)
+                .append_chat_events_with_mock_watch(
+                    result.context.clone(),
+                    &result.events,
+                    result.watch_mirrors.as_ref(),
+                )
         };
         append.map_err(|error| AgentChatTranscriptFailure {
             stage: ChatTranscriptFailureStage::ArchiveWrite,
@@ -1270,7 +1353,7 @@ fn publish_watch_recent(
                         .source
                         .as_ref()
                         .is_some_and(|source| source.len() > 128)
-                    || message.provider_provenance.is_some()
+                    || (message.provider != "mock" && message.provider_provenance.is_some())
                 {
                     return;
                 }
@@ -2853,7 +2936,10 @@ fn merge_chat_events(
         let identified_codex_assistant = event.provider == "codex"
             && event.role == Some(AgentChatRole::Assistant)
             && (event.metadata["provider_log"] == true || event.turn_id.is_some());
+        let receipted_mock_observation =
+            event.provider == "mock" && event.metadata["mock_observation_id"].is_string();
         if !identified_codex_assistant
+            && !receipted_mock_observation
             && chat_message_text_key(&event)
                 .as_ref()
                 .is_some_and(|key| provider_message_text_seen.contains(key))
@@ -3522,13 +3608,51 @@ fn message_event_from_transcript(
             );
         }
     }
+    if message.provider == "mock" {
+        if let Some(provenance) = message.provider_provenance.as_ref() {
+            if let Some(mirror) = provenance.mirror.as_ref() {
+                metadata["mock_observation_id"] = serde_json::json!(mirror.observation_id);
+                metadata["mock_provider_incarnation"] = serde_json::json!(mirror.incarnation);
+                metadata["mock_provider_session_id"] =
+                    serde_json::json!(provenance.provider_session_id);
+                metadata["mock_mirror_logged"] = serde_json::json!(mirror.logged);
+                metadata["mock_observation_digest"] = serde_json::json!(mirror.payload_sha256);
+                if !provenance.source_path.is_empty() {
+                    metadata["log_path"] = serde_json::json!(provenance.source_path);
+                }
+            }
+        }
+    }
 
-    AgentChatEvent {
-        id: event_id(
+    // Window ordinals can already belong to unbound historical observations.
+    // Native binding must never reuse those IDs or attach them as aliases.
+    let id = if metadata["provider_log"] == true {
+        let mut hash = Sha256::new();
+        for value in [
+            session_id,
+            provider.as_str(),
+            metadata["provider_session_id"].as_str().unwrap_or_default(),
+            metadata["log_path"].as_str().unwrap_or_default(),
+            metadata["provider_turn_id"].as_str().unwrap_or_default(),
+            source.as_deref().unwrap_or_default(),
+            message.turn_id.as_deref().unwrap_or_default(),
+            message.role.as_str(),
+            message.text.as_str(),
+        ] {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+        format!("{session_id}:watch_native:{:x}", hash.finalize())
+    } else {
+        event_id(
             session_id,
             sequence,
             source.as_deref().unwrap_or("transcript"),
-        ),
+        )
+    };
+
+    AgentChatEvent {
+        id,
         session_id: session_id.to_string(),
         provider,
         kind: AgentChatEventKind::Message,
@@ -4014,6 +4138,7 @@ mod tests {
                 provider_session_id: "codex-session".to_string(),
                 source_path: "codex-session.jsonl".to_string(),
                 provider_turn_id: "turn-a".to_string(),
+                mirror: None,
             }),
         };
         let bound_event = message_event_from_transcript(
@@ -4073,6 +4198,7 @@ mod tests {
                 provider_session_id: "1f2a5d81-5ca6-46bf-b15a-78c6295d64b7".to_string(),
                 source_path: "pi-session.jsonl".to_string(),
                 provider_turn_id: "118bf261".to_string(),
+                mirror: None,
             }),
         };
         let bound_event = message_event_from_transcript(
@@ -6603,6 +6729,108 @@ Do you want to proceed?
         assert_eq!(
             merge_chat_events(Vec::new(), vec![rooted_stream, rooted_completion]).len(),
             2
+        );
+    }
+
+    #[test]
+    fn bound_watch_projection_does_not_reuse_legacy_ordinal_identity() {
+        let env_lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _home_guard = WardianHomeGuard::set(&env_lock, temp.path());
+        let archive = crate::state::conversation_archive::ConversationArchiveState::default();
+        let mut message = WatchTranscriptMessage {
+            role: "assistant".into(),
+            text: "Closing answer".into(),
+            provider: "codex".into(),
+            turn_id: None,
+            source: Some("event_msg".into()),
+            provider_provenance: None,
+        };
+        let transcript = WatchTranscript {
+            cursor: "agent-1:0000000000000100".into(),
+            messages: vec![],
+            latest_text: String::new(),
+            truncated: false,
+            omitted_bytes: 0,
+        };
+        let legacy = message_event_from_transcript("agent-1", "codex", 3, &message, &transcript);
+        archive
+            .append_chat_events("agent-1", std::slice::from_ref(&legacy))
+            .unwrap();
+        message.provider_provenance = Some(wardian_core::control::WatchTranscriptProvenance {
+            provider_session_id: "native-session".into(),
+            source_path: "session.jsonl".into(),
+            provider_turn_id: "native-turn".into(),
+            mirror: None,
+        });
+        let bound = message_event_from_transcript("agent-1", "codex", 3, &message, &transcript);
+        archive
+            .append_chat_events("agent-1", std::slice::from_ref(&bound))
+            .unwrap();
+        assert_ne!(legacy.id, bound.id);
+        let shifted = message_event_from_transcript("agent-1", "codex", 27, &message, &transcript);
+        assert_eq!(
+            bound.id, shifted.id,
+            "watch window position is not native identity"
+        );
+        archive.append_chat_events("agent-1", &[shifted]).unwrap();
+        let saved = archive.chat_events_for_agent("agent-1").unwrap();
+        assert_eq!(
+            saved.len(),
+            2,
+            "retain legacy evidence without claiming it is native"
+        );
+        assert_ne!(
+            saved
+                .iter()
+                .find(|event| event.id == legacy.id)
+                .unwrap()
+                .metadata["provider_log"],
+            true,
+            "legacy evidence must not inherit a later native binding"
+        );
+        let mut captured = bound.clone();
+        captured.id = "agent-1:provider_log:captured".into();
+        captured.sequence = Some(345);
+        captured
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("transcript_cursor");
+        captured.metadata["legacy_event_ids"] = serde_json::json!([bound.id]);
+        // Copied binding metadata and a caller-supplied alias do not prove
+        // correspondence between identity-less native observations.
+        for _ in 0..2 {
+            archive
+                .append_chat_events("agent-1", std::slice::from_ref(&captured))
+                .unwrap();
+            let after = archive.chat_events_for_agent("agent-1").unwrap();
+            assert_eq!(
+                after.len(),
+                saved.len() + 1,
+                "unproved capture stays separate; retry adds no observation"
+            );
+            for previous in &saved {
+                assert_eq!(
+                    after.iter().find(|event| event.id == previous.id),
+                    Some(previous),
+                    "unproved alias must not enrich either saved observation"
+                );
+            }
+            assert_eq!(
+                after.iter().filter(|event| event.id == captured.id).count(),
+                1
+            );
+        }
+        message
+            .provider_provenance
+            .as_mut()
+            .unwrap()
+            .provider_turn_id = "another-turn".into();
+        let another = message_event_from_transcript("agent-1", "codex", 3, &message, &transcript);
+        assert_ne!(
+            bound.id, another.id,
+            "equal answers from distinct turns stay distinct"
         );
     }
 

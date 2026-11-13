@@ -262,12 +262,10 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
               const fresh = applyChatPage([], next, "recent");
               latest.current = next; setPage(next); setEvents(fresh); setError(null);
               setBrowsingOlder(false); setLoadingOlder(false);
-              // A new admitted preview replaces the window, not its opening
-              // budget. This branch returns before the ordinary scheduler below.
-              if (latest.current.recent_admission != null) {
-                schedule(chatRecentRefreshDelay(pollInterval.current, openedAt.current, Date.now(),
-                  eventWindow.current.length > 0, true));
-              }
+              // Replacement returns before the ordinary scheduler below. Keep
+              // polling canonical capture too, while ending its preview burst.
+              schedule(chatRecentRefreshDelay(pollInterval.current, openedAt.current, Date.now(),
+                fresh.length > 0, next.recent_admission != null));
             } else {
               latest.current = null; setPage(null); setEvents([]); setError(null);
               setBrowsingOlder(false); setLoadingOlder(false); setLoading(true);
@@ -349,6 +347,10 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
             if (!next.unchanged) {
               if (next.reset || olderCursor.current?.generation !== next.generation) olderCursor.current = null;
               const updated = olderCursor.current ? { ...next, next_before: olderCursor.current.before } : next;
+              latest.current = updated; setPage(updated);
+            } else if (latest.current) {
+              const updated = { ...latest.current, progress: next.progress,
+                bytes_read: next.bytes_read, records_decoded: next.records_decoded };
               latest.current = updated; setPage(updated);
             }
             setError(null);

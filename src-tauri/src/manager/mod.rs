@@ -141,7 +141,38 @@ pub(crate) async fn terminate_rotated_agent_process(
         agent.process_id = None;
         agent.memory_capability.take();
         clear_agent_interrupted(&agent.current_status);
-        match job.stop_and_join(child.as_mut()).await {
+        let claude_identity = agent
+            .config
+            .lock()
+            .ok()
+            .filter(|config| config.provider == "claude")
+            .map(|config| config.clone())
+            .zip(agent.runtime_generation);
+        let stopped = if let Some((config, generation)) = &claude_identity {
+            match job
+                .stop_and_join_for_claude_mod(&config.session_id, *generation, child.as_mut())
+                .await
+            {
+                Ok(receipt) => {
+                    if let Err(error) = crate::delivery::claude_mod::resolve_generation_exit(
+                        config,
+                        *generation,
+                        &receipt,
+                    )
+                    .await
+                    {
+                        log_debug(&format!(
+                            "[Wardian] Claude mod exit reconciliation failed: {error}"
+                        ));
+                    }
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            job.stop_and_join(child.as_mut()).await
+        };
+        match stopped {
             Ok(()) => {
                 if let Some(hold) = hold {
                     wardian_core::conversation_lease::release_lease_owner_persisted(hold)?;
@@ -752,11 +783,18 @@ pub(crate) fn emit_agent_turn_completed(
             "session_id": session_id,
         }),
     );
-    tauri::async_runtime::spawn(turn_completion::publish_transcript_turn_completion(
-        app.clone(),
-        session_id.to_string(),
-        reporting_status.clone(),
-    ));
+    if let Some(claim) = app
+        .state::<AppState>()
+        .transcript_completion
+        .notify(session_id, reporting_status)
+    {
+        tauri::async_runtime::spawn(turn_completion::publish_transcript_turn_completion(
+            app.clone(),
+            session_id.to_string(),
+            reporting_status.clone(),
+            claim,
+        ));
+    }
 
     // Change snapshots run off the turn boundary; this keeps the provider's
     // completion path short and lets the snapshot coalesce per workspace.
@@ -1711,6 +1749,19 @@ pub(crate) fn apply_process_provider_runtime_env(
     Ok(())
 }
 
+/// Append the generation's mod without losing existing platform-native plugin paths.
+pub(crate) fn append_claude_plugin_dirs(
+    existing: Option<&std::ffi::OsStr>,
+    mod_path: &std::path::Path,
+) -> Result<std::ffi::OsString, String> {
+    let mut paths = existing
+        .map(|value| std::env::split_paths(value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    paths.push(mod_path.to_path_buf());
+    std::env::join_paths(paths)
+        .map_err(|error| format!("Failed to append Claude delivery mod plugin directory: {error}"))
+}
+
 pub(crate) fn claude_terminal_runtime_env() -> [(&'static str, &'static str); 2] {
     [
         ("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1"),
@@ -1786,6 +1837,50 @@ pub(crate) fn display_log_path(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn claude_plugin_dirs_appends_without_existing_value() {
+        let path = Path::new("delivery/7/mod");
+        let value = append_claude_plugin_dirs(None, path).unwrap();
+        assert_eq!(
+            std::env::split_paths(&value).collect::<Vec<_>>(),
+            vec![path]
+        );
+    }
+
+    #[test]
+    fn claude_plugin_dirs_preserves_existing_paths_and_order() {
+        let paths = [
+            Path::new("plugin one"),
+            Path::new("plugin-two"),
+            Path::new(""),
+        ];
+        let existing = std::env::join_paths(paths).unwrap();
+        let path = Path::new("delivery/7/mod");
+        let value = append_claude_plugin_dirs(Some(&existing), path).unwrap();
+        assert_eq!(
+            std::env::split_paths(&value).collect::<Vec<_>>(),
+            paths.into_iter().chain([path]).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn claude_plugin_dirs_rejects_unrepresentable_mod_path() {
+        #[cfg(windows)]
+        let path = Path::new("invalid\"plugin");
+        #[cfg(not(windows))]
+        let path = Path::new("invalid:plugin");
+        assert!(append_claude_plugin_dirs(None, path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_plugin_dirs_preserves_non_unicode_paths() {
+        use std::os::unix::ffi::OsStrExt;
+        let existing = std::ffi::OsStr::from_bytes(b"plugin-\xff");
+        let value = append_claude_plugin_dirs(Some(existing), Path::new("mod")).unwrap();
+        assert_eq!(value.as_encoded_bytes(), b"plugin-\xff:mod");
+    }
 
     /// Models an independently admitted snapshot writer for persistence fixtures.
     pub(crate) fn try_save_state_snapshot(configs: &[AgentConfig]) -> Result<(), String> {

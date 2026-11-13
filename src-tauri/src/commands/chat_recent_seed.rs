@@ -82,6 +82,7 @@ fn ownership(snapshot: &AgentArchiveCaptureSnapshot, header: &[u8]) -> bool {
         }
         "pi" => value["type"] == "session" && value["id"].as_str() == Some(expected),
         "claude" => value["sessionId"].as_str() == Some(expected),
+        "mock" => value["type"] == "init" && value["session_id"].as_str() == Some(expected),
         _ => false,
     }
 }

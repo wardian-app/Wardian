@@ -714,10 +714,33 @@ pub(super) struct SourceProof {
 pub(super) fn source_proof(
     context: &ConversationArchiveContext,
 ) -> io::Result<Option<SourceProof>> {
-    use std::io::Read;
     if !matches!(context.provider.as_str(), "codex" | "pi") {
         return Ok(None);
     }
+    checked_source_proof(context)
+}
+
+/// Capture publication calls this only after its required native cursor and
+/// policy commit. This records coverage; it grants no display relation claims.
+pub(super) fn mock_canonical_coverage(
+    context: &ConversationArchiveContext,
+) -> io::Result<Option<super::chat_read::CanonicalSourceCoverage>> {
+    if context.provider != "mock" {
+        return Ok(None);
+    }
+    Ok(
+        checked_source_proof(context)?.map(|proof| super::chat_read::CanonicalSourceCoverage {
+            source_key: context.provider_source_key.clone().unwrap_or_default(),
+            epoch: proof.epoch,
+            admission: proof.admission,
+            extent: proof.watermark,
+            normalizer_settled: proof.narrative_complete,
+        }),
+    )
+}
+
+fn checked_source_proof(context: &ConversationArchiveContext) -> io::Result<Option<SourceProof>> {
+    use std::io::Read;
     let state = super::read_capture_state(&context.agent_id)?;
     let Some(source) = state
         .provider_log_sources
@@ -766,6 +789,8 @@ pub(super) fn source_proof(
         header["payload"]["id"].as_str()
     } else if context.provider == "pi" && header["type"] == "session" {
         header["id"].as_str()
+    } else if context.provider == "mock" && header["type"] == "init" {
+        header["session_id"].as_str()
     } else {
         None
     };

@@ -111,6 +111,8 @@ pub struct AppState {
     pub conversation_capture_policy_lock: crate::state::capture_policy_gate::CapturePolicyGate,
     pub conversation_archive: ConversationArchiveState,
     pub(crate) background_capture: crate::state::background_capture::BackgroundCaptureCoordinator,
+    pub(crate) transcript_completion:
+        crate::state::transcript_completion::TranscriptCompletionCoordinator,
     /// Agents whose New Session is running, so a repeated request is refused
     /// instead of queueing behind the first one. A std mutex because the
     /// claim's `Drop` cannot await; it is never held across an await.
@@ -542,6 +544,7 @@ impl Default for AppState {
             conversation_capture_policy_lock: Default::default(),
             conversation_archive: ConversationArchiveState::default(),
             background_capture: Default::default(),
+            transcript_completion: Default::default(),
             clears_in_flight: Default::default(),
             change_snapshots: ChangeSnapshotRuntime::new(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),

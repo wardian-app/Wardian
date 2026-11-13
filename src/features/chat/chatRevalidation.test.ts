@@ -351,6 +351,22 @@ describe("bounded Chat source revalidation", () => {
     )).toBe("changed");
   });
 
+  it("admits an owned indexing snapshot after an empty unavailable source", () => {
+    const pending: AgentChatPage = {
+      ...scope, conversation_id: null, generation: null, source_epoch: null,
+      revision: "unavailable", events: [], next_before: null, progress: "source_unavailable",
+    };
+    const canonical: AgentChatPage = {
+      ...scope, source_epoch: null, reset: true, progress: "indexing",
+      events: [{ ...sourceEvent(92), id: "saved-header", metadata: {} }],
+    };
+    expect(chatPageScopeRelation(pending, canonical, [], false)).toBe("bootstrap");
+    expect(chatPageScopeRelation(pending, { ...canonical, reset: false }, [], false)).toBe("unknown");
+    expect(chatPageScopeRelation(pending, { ...canonical, source_epoch: scope.source_epoch }, [], false)).toBe("unknown");
+    expect(chatPageScopeRelation(pending, { ...canonical, events: [sourceEvent(93)] }, [], false)).toBe("unknown");
+    expect(chatPageScopeRelation(pending, canonical, [], true)).toBe("unknown");
+  });
+
   it("publishes only a first complete owned page from an empty pending bootstrap", () => {
     const pending: AgentChatPage = {
       ...scope, conversation_id: null, generation: null, source_epoch: null,

@@ -245,7 +245,7 @@ fn verified_coalesced_narrative_sequences(
     records: &[ConversationNarrativeRecord],
     events: &[AgentChatEvent],
 ) -> io::Result<HashSet<u64>> {
-    let mut retired = HashSet::new();
+    let mut retired = super::mock_mirrors::retired_sequences(records, events)?;
     for mirror in events {
         let Some(markers) = mirror.metadata.get(COALESCED_NARRATIVE_SEQUENCES) else {
             continue;
@@ -596,13 +596,14 @@ pub(super) fn recover_unlinked_observations(
     conversation_id: &str,
     directory: &Path,
     context: &ConversationArchiveContext,
-    records: &[ConversationNarrativeRecord],
+    records: &mut Vec<ConversationNarrativeRecord>,
     events: &[AgentChatEvent],
     recover_only_ids: Option<&HashSet<String>>,
     next_seq: &mut u64,
 ) -> io::Result<Vec<RecoveredObservation>> {
+    super::mock_mirrors::recover_pending(context, directory, records, events)?;
     let mut occupied_sequences = HashSet::new();
-    for record in records {
+    for record in records.iter() {
         if !occupied_sequences.insert(record.seq) {
             return Err(recoverable_recovery_error(format!(
                 "duplicate narrative sequence {} prevents recovery",

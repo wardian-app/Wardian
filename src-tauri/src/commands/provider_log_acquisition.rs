@@ -94,6 +94,7 @@ pub(crate) struct ProviderLogSourceProof {
     previous: String,
     next: String,
     rows: Vec<AgentChatEvent>,
+    mock_provider_session: Option<String>,
 }
 
 fn capture_fingerprint(state: &ProviderLogCaptureState) -> io::Result<String> {
@@ -109,6 +110,10 @@ impl ProviderLogBatch {
 }
 
 impl ProviderLogSourceProof {
+    pub(crate) fn mock_provider_session(&self) -> Option<&str> {
+        self.mock_provider_session.as_deref()
+    }
+
     pub(crate) fn matches_capture(
         &self,
         previous: Option<&ProviderLogCaptureState>,
@@ -146,6 +151,11 @@ impl ProviderLogSourceProof {
                         "tool_name",
                         "tool_input",
                         "tool_input_text",
+                        "mock_observation_id",
+                        "mock_provider_incarnation",
+                        "mock_provider_session_id",
+                        "mock_mirror_logged",
+                        "mock_observation_digest",
                     ]
                     .iter()
                     .all(|key| row.metadata.get(*key) == event.metadata.get(*key))
@@ -730,7 +740,7 @@ fn acquire_provider_log_batch_bounded(
 
     let policy_boundary_pending = next_disabled_start(&state, readable_extent)
         .is_some_and(|start| start == state.committed_offset);
-    let source_proof = if emit_source_proof && provider == "codex" {
+    let source_proof = if emit_source_proof && matches!(provider, "codex" | "mock") {
         previous
             .as_ref()
             .map(|previous| {
@@ -741,9 +751,10 @@ fn acquire_provider_log_batch_bounded(
                             positions.contains_key(&sequence)
                                 || recovered_pending_rows.contains_key(&sequence)
                         }) && event.metadata["chat_source_ref"].is_string()
-                            && super::chat::archive_identity::requires_provider_log_row_identity(
-                                event,
-                            )
+                            && (provider == "mock"
+                                || super::chat::archive_identity::requires_provider_log_row_identity(
+                                    event,
+                                ))
                     })
                     .cloned()
                     .collect();
@@ -751,6 +762,7 @@ fn acquire_provider_log_batch_bounded(
                     previous: capture_fingerprint(previous)?,
                     next: capture_fingerprint(&state)?,
                     rows,
+                    mock_provider_session: state.normalizer.mock_provider_session().map(str::to_owned),
                 })
             })
             .transpose()?

@@ -40,6 +40,14 @@ pub enum ControlRequest {
     AgentNewSession {
         target: String,
     },
+    /// Explicit operator authorization; a negative process scan is not exit proof.
+    AgentReleaseHold {
+        target: String,
+        acquisition_id: String,
+        operator_verified_exit: bool,
+        #[serde(default)]
+        origin: Option<MessageOrigin>,
+    },
     AgentPause {
         target: String,
     },
@@ -631,6 +639,18 @@ pub struct OkResponse {
     pub ok: bool,
 }
 
+/// Exact hold released after a durable operator authorization was recorded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentReleaseHoldResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub agent_id: String,
+    pub provider: String,
+    pub resume_session: String,
+    pub acquisition_id: String,
+    pub authorization_id: String,
+}
+
 impl OkResponse {
     pub fn new() -> Self {
         Self {
@@ -922,6 +942,17 @@ pub struct WatchOutput {
     pub omitted_bytes: usize,
 }
 
+/// Producer claim of one mirrored observation, requiring host session/source
+/// verification and a verified acquired record before it can be paired.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchMirrorIdentity {
+    pub observation_id: String,
+    pub incarnation: String,
+    pub logged: bool,
+    /// Locally derived raw-object digest used only to reject conflicting claims.
+    pub payload_sha256: String,
+}
+
 /// Provider session, source, and turn identity binding for a watched message.
 /// Absence of this value leaves the watch observation unbound to native logs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -929,6 +960,8 @@ pub struct WatchTranscriptProvenance {
     pub provider_session_id: String,
     pub source_path: String,
     pub provider_turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<WatchMirrorIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1064,6 +1097,29 @@ pub fn socket_path() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_provenance_defaults_absent_mirror_and_round_trips_claim() {
+        let legacy = serde_json::json!({
+            "provider_session_id": "mock-session", "source_path": "", "provider_turn_id": ""
+        });
+        let mut provenance: WatchTranscriptProvenance =
+            serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(provenance.mirror, None);
+        assert_eq!(serde_json::to_value(&provenance).unwrap(), legacy);
+
+        provenance.mirror = Some(WatchMirrorIdentity {
+            observation_id: "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc:1".to_string(),
+            incarnation: "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc".to_string(),
+            logged: false,
+            payload_sha256: "a".repeat(64),
+        });
+        let restored = serde_json::from_value::<WatchTranscriptProvenance>(
+            serde_json::to_value(&provenance).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored, provenance);
+    }
 
     #[test]
     fn artifact_present_request_serializes_origin_and_repeated_addresses() {
@@ -1215,6 +1271,25 @@ mod tests {
         assert!(
             serde_json::from_str::<ControlRequest>(r#"{"command":"agent_new_session"}"#).is_err()
         );
+    }
+
+    #[test]
+    fn release_hold_wire_contract_requires_exact_authorization_fields() {
+        let value = serde_json::json!({"command":"agent_release_hold", "target":"coder-a1",
+            "acquisition_id":"exact", "operator_verified_exit":true});
+        let request: ControlRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            matches!(request, ControlRequest::AgentReleaseHold { ref acquisition_id, operator_verified_exit: true, origin: None, .. } if acquisition_id == "exact")
+        );
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["command"],
+            "agent_release_hold"
+        );
+        for field in ["target", "acquisition_id", "operator_verified_exit"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ControlRequest>(missing).is_err());
+        }
     }
 
     #[test]

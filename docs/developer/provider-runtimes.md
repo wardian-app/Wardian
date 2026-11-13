@@ -27,8 +27,20 @@ a prompt is recorded as committed only after its Inbox item is persisted.
 - Retrying the same unbound watch observation preserves its first published fallback source cursor, including after reopening the archive. Provider events can change the observation's display sequence without changing its source identity. Explicit cursors and native log provenance still require an exact source match.
 - Historical Codex rows can gain physical source coordinates only through a verified acquisition receipt and one unique archive owner. Acquisition validates the saved native file identity, continuity anchor, bounded row bytes, and sequence; an alias alone cannot bridge an unframed row to a physical observation. The archive retains its canonical event ID, publishes the coordinate reservation and archive update before advancing the cursor, and recovers the same owner after a publication failure or restart. Missing proof, duplicate owners, generated rows, changed source identity, and conflicting coordinates stop migration without advancing the cursor. Codex continuation state compacts raw JSON lines; legacy pending-row recovery verifies the actual source row against the saved normalized event.
 - Saved Codex rows with untagged ordinal cursors retain their historical rows and every distinct native observation. An alias requires positive proof of the original ordinal origin, epoch, and covered interval. A current display sequence, matching content, or trusted current capture cursor cannot supply missing origin evidence.
+- Native-bound watch transcript observations use their provider session, source,
+  and native turn to identify the observation independently of its position in
+  the watch window. Older unbound ordinal observations remain separate archive
+  evidence. A lifecycle replay must not promote an ordinal reference into native
+  provenance merely because the watch window reused its position.
 - Fresh Mock sessions retain their launch-owned session ID through registration so enabled conversation capture includes the first request. Prefix trust requires the matching runtime-only ID; restored sessions and disabled logging spans remain excluded from initial capture.
+- Mock stdout/log mirrors carry per-observation incarnation and receipt IDs. The actual Watch pass and verified native acquisition must establish one source-bound pair before the archive joins their narratives or hands recent coverage to the native row. Equal text and a shared turn do not establish correspondence. Failed log writes retain explicitly unlogged Watch observations.
+- Mock canonical readiness binds a published capture-coverage summary to the current complete source interval and privacy admission. The first qualified revision returns a bounded recent snapshot and Older frontier; later unchanged replies retain the same progress. A stale ready archive Head cannot borrow a newer source interval's qualification. Both clients preserve loaded rows and Older cursors when refreshing unchanged metadata.
+- Background restore can locate a stopped Mock's exact owned transcript from its persisted capture receipt. Matching provider-session identity, native file identity, committed extent, continuity, and the bounded init header are required. Binding the path leaves capture cursors, privacy spans, and source renewal unchanged; conflicting launch and resume identities remain unbound.
 - Ordinary telemetry observations of eligible stopped agents schedule durable JSONL capture independently of the status parser's modification watermark. Background capture from telemetry, restored startup, and status changes shares an incarnation-bound coordinator; Chat reads retain one bounded pass and lifecycle boundaries retain their priority lane. Each background pass revalidates the agent, provider conversation, and opened source identity after acquiring the capture policy gate. Pending records, request roots, and incomplete sources keep their acquisition reasons. Errors and cancellation retry on a later eligible observation, while quiet serviced sources do not repeatedly drain. Disabled logging records its existing cutoff and excluded span, then suspends background draining until a later policy or source observation.
+- Background archive passes take FIFO turns in a separate admission queue. A large saved-agent backlog cannot repeatedly reacquire the capture policy gate ahead of another waiting agent. Lifecycle and logging-policy callers bypass that queue and retain priority over background work.
+- Source-index replay checkpoints stage intermediate AVL nodes and finish only the reachable visible, logical, and pending replay trees before replacing the Head pointer. Payloads stay durable, all attempted operations retain their original budget charges, and a failed publication resumes from the previous checkpoint.
+- Transcript-derived completion notifications share one polling worker per actual runtime status cell. A burst records one pending latest notification while the current bounded read, persistence, and emission round finishes. This preserves the existing best-effort latest-answer behavior; it does not promise an Inbox card for every intermediate turn in a burst. Replacement fences both evidence acceptance and persistence, including runtimes without a generation number. Cancellation releases its exact worker; a later notification can retry.
+- A canonical Head may publish a separately authenticated packed recent page, capped at 80 headers and 256 KiB. Initial recent reads validate that page and the current canonical root instead of opening every header file. Existing Heads without the optional reference use the tree; a referenced but invalid pack fails closed. Older and detail continue validating their original objects. The generic object limit and aggregate read/write budgets remain unchanged.
 - Provider delivery profiles are responsible for translating Wardian input into the provider's native submit behavior, including short prompts, pasted multiline prompts, long prompts, slash-command-shaped text, and inputs that already end with a newline.
 - Delivery recognizers must fail closed. If Wardian cannot recognize that a provider prompt is ready, that a paste bracket has settled, or that a command was submitted, it should avoid sending more input instead of guessing and corrupting the provider TUI state.
 - Approval prompt state must be fresh. A stale recognizer hit, old transcript event, or previous terminal buffer line must not keep an agent in `action_required` or trigger a delivery retry for a new turn.
@@ -181,6 +193,26 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 - This avoids a bootstrap phase just to discover the provider session ID.
 - Resume launches use `--resume <session_id>` and do not resend `--session-id` or `--name`.
 - Fresh resume of an existing Wardian agent uses a new transient Claude provider session ID while keeping the Wardian agent ID stable. After launch, Wardian stores the transient Claude ID as the next `resume_session`.
+
+### Peer delivery mod
+
+Interactive Claude launches load the bundled `wardian` mod through
+`CLAUDE_CODE_PLUGIN_DIRS`, preserving existing entries. Rust owns immutable
+assets and launch identity under
+`<wardian-home>/agents/<agent-id>/claude/delivery/<runtime-generation>/mod/`
+and atomically publishes peer prompts into the sibling `inbox/pending/`.
+The mod queues prompts through Claude's prompt API, preserving terminal drafts.
+User composer submissions and approval keys retain their existing paths.
+
+New deliveries use the mod only with a matching readiness record and a heartbeat
+at most five seconds old. Terminal fallback records `mod_not_loaded`,
+`session_mismatch`, `generation_mismatch`, or `heartbeat_stale`. Once published,
+a delivery remains owned by that generation even if its heartbeat stops.
+Inspect the native delivery record for "waiting on the Claude delivery mod"
+and its age. A claim without an outcome remains uncertain and is never replayed.
+Parsed rejection or verified Windows containment exit with no claim permits
+recovery. Transcript reconciliation searches the mod's session history and
+Wardian-attributed sessions, including prompts that enter after `/clear`.
 
 ### Instruction and skill discovery
 

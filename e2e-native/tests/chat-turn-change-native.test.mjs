@@ -1108,8 +1108,21 @@ async function exerciseHistory(driver, sessionId, fixture) {
     await driver.actions({ async: true }).scroll(0, 0, 0, -10000, scroll).perform();
     const buttons = await surface.findElements(By.xpath('.//button[contains(., "Load older transcript")]'));
     if (buttons.length && await buttons[0].isDisplayed()) await buttons[0].click();
-    await driver.wait(async () => canonicalHistoryReceipts((await readObservation(driver)).receipts, sessionId)
-      .filter((receipt) => receipt.older === true).length > count,
+    await driver.wait(async () => {
+      const received = canonicalHistoryReceipts((await readObservation(driver)).receipts, sessionId)
+        .filter((receipt) => receipt.older === true);
+      if (received.length <= count) return false;
+      // The RPC receipt precedes bounded renewal of the whole candidate.
+      // Another gesture before its UI commit is the same pending demand.
+      return driver.executeScript((root, revision) => {
+        const raw = root.querySelector('[data-testid="agent-chat-scroll-region"]')
+          ?.getAttribute("data-chat-page-scope");
+        const scope = raw ? JSON.parse(raw) : null;
+        return scope?.revision === revision && !root.querySelector('[role="alert"]')
+          && !Array.from(root.querySelectorAll("button"))
+            .some((button) => button.textContent.includes("Loading older transcript"));
+      }, surface, received.at(-1).revision);
+    },
     10_000, "trusted Older demand produced no normal page");
   }
   const state = await readObservation(driver);
@@ -1136,12 +1149,23 @@ async function exerciseHistory(driver, sessionId, fixture) {
   const detailButtons = await longRow.findElements(By.xpath('.//button[normalize-space()="Show full details"]'));
   assert.equal(detailButtons.length, 1, "long body did not retain lazy details");
   await detailButtons[0].click();
-  const detailBound = Math.ceil(Buffer.byteLength(fixture.longBody) / 65536) + 1;
+  // The 64 KiB retained UI window is delivered in bounded 16 KiB chunks.
+  const detailBound = Math.ceil(Buffer.byteLength(fixture.longBody) / (16 * 1024)) + 1;
   for (let index = 0; index < detailBound; index += 1) {
-    const pre = await visible(driver, "pre", longRow);
-    if (await pre.getText() === fixture.longBody) break;
+    const pre = await driver.wait(async () => {
+      // Opening creates the pre immediately; each continuation leaves its old
+      // text visible until the next chunk is accepted.
+      const loading = await longRow.findElements(By.xpath('.//button[normalize-space()="Loading details..."]'));
+      if (loading.length) return false;
+      for (const element of await longRow.findElements(By.css("pre"))) {
+        if (await element.isDisplayed()) return element;
+      }
+      return false;
+    }, 10_000, "bounded detail request did not settle");
+    const bodyText = await pre.getText();
+    if (bodyText === fixture.longBody) break;
     const more = await longRow.findElements(By.xpath('.//button[normalize-space()="Read more"]'));
-    assert.equal(more.length, 1, "full-body window incomplete without continuation");
+    assert.equal(more.length, 1, `full-body window incomplete without continuation (${bodyText.length} characters)`);
     await more[0].click();
   }
   assert.equal(await (await visible(driver, "pre", longRow)).getText(), fixture.longBody);

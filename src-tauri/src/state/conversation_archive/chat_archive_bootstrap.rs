@@ -298,10 +298,12 @@ fn select(
                 committed_output_bytes: 0,
                 capture_stamp: "saved-archive".into(),
                 progress: "indexing".into(),
+                source_coverage: None,
                 parent: None,
                 changes: Vec::new(),
                 recent_start: 0,
                 row_count: 0,
+                recent_page: None,
                 bootstrap: Some(progress),
             }),
             true,
@@ -686,6 +688,8 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
         .validate(&directory.join("manifest.json"))?;
     progress.narrative.validate(&narrative_path)?;
     progress.events.validate(&event_path)?;
+    published.recent_page = None;
+    published.recent_page = super::packed_recent::prepare(&mut store, &published)?;
     store.finish_checkpoint(&published.checkpoint_dependencies())?;
     let reference = store.put(&published)?;
     // LAST: cursors, provenance roots, rows and body chunks are durable together.

@@ -96,6 +96,12 @@ Wardian assigns fresh Claude session IDs up front and uses explicit resume flags
 
 Visible Claude agents run through Claude Code's interactive mode. Do not pass `--input-format stream-json` or `--output-format stream-json` to interactive launches; Claude Code treats those as print-mode flags. Wardian keeps stream-json output only for headless/bootstrap flows that also pass `--print`.
 
+Peer messages and task replies use the bundled Wardian delivery mod when it is
+ready. It queues prompts through Claude's API and preserves text being drafted
+in the terminal. If the mod is unavailable, Wardian uses terminal delivery and
+records the reason. A published delivery with no receipt remains "waiting on
+the Claude delivery mod"; Wardian does not replay an uncertain submission.
+
 Startup readiness requires a composer and its footer on the current terminal
 screen. A user-authored external `CLAUDE.md` import consent menu is `Action Needed`, not an
 idle composer. Queued prompts remain pending until the consent is resolved and

@@ -139,7 +139,12 @@ function pageHasProducerEvidence(page: AgentChatPage): boolean {
 }
 
 function usableBootstrapPage(page: AgentChatPage): boolean {
-  if ((page.progress !== "ready" && page.progress !== "provisional")
+  // A saved archive publishes authenticated canonical headers before its
+  // older backfill finishes. An initial empty miss must not strand that page
+  // merely because its owned snapshot still reports indexing.
+  const canonicalIndexingSnapshot = page.progress === "indexing" && page.reset
+    && page.source_epoch === null;
+  if ((page.progress !== "ready" && page.progress !== "provisional" && !canonicalIndexingSnapshot)
     || page.unchanged || page.events.length === 0
     || (page.revalidated_ids !== undefined && page.revalidated_ids !== null)
     || page.events.some((event) => event.session_id !== page.session_id)) return false;

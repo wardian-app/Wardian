@@ -385,12 +385,13 @@ describe("normal Chat page polling", () => {
     hook.unmount(); empty.unmount();
   });
 
-  it("stops preview burst eligibility after the current page becomes canonical", async () => {
+  it.each(["ready", "indexing"] as const)("continues ordinary polling after a %s canonical reset ends the preview burst", async (progress) => {
     vi.useFakeTimers();
     const preview = page("agent", { conversation_id: null, generation: null, source_epoch: null,
       recent_admission: "preview", progress: "provisional", events: [row("preview")] });
-    const canonical = page("agent", { reset: true, progress: "ready", events: [row("canonical")] });
-    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(preview).mockResolvedValue(canonical);
+    const canonical = page("agent", { reset: true, progress, events: [row("canonical")] });
+    const ready = { ...canonical, reset: false, progress: "ready" as const, revision: "ready", next_before: "older" };
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(preview).mockResolvedValueOnce(canonical).mockResolvedValue(ready);
     const hook = renderHook(() => useChatPages("agent", loader, 3_000, 0));
     await act(async () => {});
     await act(async () => { await vi.advanceTimersByTimeAsync(100); });
@@ -398,6 +399,13 @@ describe("normal Chat page polling", () => {
     expect(hook.result.current.page?.recent_admission).toBeUndefined();
     await act(async () => { await vi.advanceTimersByTimeAsync(900); });
     expect(loader).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_099); });
+    expect(loader).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(loader).toHaveBeenCalledTimes(3);
+    expect(hook.result.current.page?.progress).toBe("ready");
+    expect(hook.result.current.page?.next_before).toBe("older");
+    expect(hook.result.current.error).toBeNull();
     hook.unmount();
   });
 
@@ -647,7 +655,10 @@ describe("normal Chat page polling", () => {
     hook.rerender({ reload: 2 });
     await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
     expect(loader).toHaveBeenCalledTimes(1);
-    await act(async () => { first.resolve(page("agent", { events: [row("first")], progress: "ready" })); });
+    const retained = { ...row("first"), metadata: { chat_detail_ref: "retained-detail" } };
+    await act(async () => { first.resolve(page("agent", {
+      events: [retained], progress: "indexing", next_before: "retained-older-cursor",
+    })); });
     expect(hook.result.current.waiting).toBe(false);
     expect(hook.result.current.loading).toBe(false);
     expect(hook.result.current.events.map((event) => event.id)).toEqual(["first"]);
@@ -657,8 +668,17 @@ describe("normal Chat page polling", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
     expect(hook.result.current.waiting).toBe(false);
     expect(loader).toHaveBeenCalledTimes(2);
-    await act(async () => { refresh.resolve(page("agent", { unchanged: true })); });
+    const visible = hook.result.current.events;
+    await act(async () => { refresh.resolve(page("agent", {
+      unchanged: true, progress: "ready", bytes_read: 1234, records_decoded: 7,
+    })); });
     expect(hook.result.current.events.map((event) => event.id)).toEqual(["first"]);
+    expect(hook.result.current.events).toBe(visible);
+    expect(hook.result.current.events[0].metadata.chat_detail_ref).toBe("retained-detail");
+    expect(hook.result.current.page).toMatchObject({
+      progress: "ready", bytes_read: 1234, records_decoded: 7,
+      next_before: "retained-older-cursor", events: [retained],
+    });
     hook.unmount();
   });
 

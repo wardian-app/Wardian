@@ -36,29 +36,49 @@
 const fs = require("node:fs");
 const readline = require("node:readline");
 const { spawnSync } = require("node:child_process");
+const { randomUUID } = require("node:crypto");
 
 const transcriptLog = process.env.WARDIAN_MOCK_LOG || "";
 
 const scenario = process.env.WARDIAN_MOCK_SCENARIO || "basic";
 const delay = parseInt(process.env.WARDIAN_MOCK_DELAY_MS || "100", 10);
 const sessionId = process.env.WARDIAN_MOCK_SESSION_ID || "mock-session-001";
+const incarnation = randomUUID();
+let observationSequence = 0;
 
 // Check for --print flag (headless mode)
 const isPrint = process.argv.includes("--print");
 
 function emit(obj) {
-  const line = JSON.stringify(obj) + "\n";
-  process.stdout.write(line);
+  const record = ["message", "model", "info"].includes(obj.type)
+    ? {
+        ...obj,
+        wardian_mirror: {
+          observation_id: `${incarnation}:${++observationSequence}`,
+          incarnation,
+          provider_session_id: sessionId,
+          logged: Boolean(transcriptLog),
+        },
+      }
+    : obj;
+  let line = JSON.stringify(record) + "\n";
   // Real providers are observed through a log they own, and the chat
   // transcript reads normalized events back from that log rather than from the
   // terminal. Mirroring here gives the mock provider the same surface.
+  // Append first so a logged observation cannot outrun its mirror on stdout.
   if (transcriptLog) {
     try {
       fs.appendFileSync(transcriptLog, line);
     } catch {
       // The log is test scaffolding; losing it must never stop the run.
+      // Keep the observation identity, but do not claim the mirror was saved.
+      if (record.wardian_mirror) {
+        record.wardian_mirror.logged = false;
+        line = JSON.stringify(record) + "\n";
+      }
     }
   }
+  process.stdout.write(line);
 }
 
 function sleep(ms) {
