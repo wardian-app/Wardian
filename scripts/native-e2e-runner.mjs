@@ -1,4 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,6 +10,7 @@ import {
   acquireHomeLock,
   releaseHomeLock,
   resolveRunNativeHome,
+  readHomeLock,
 } from "../e2e-native/lib/sessionHome.mjs";
 
 const NODE_TEST_ARGS = ["--test", "--test-concurrency=1"];
@@ -23,9 +26,9 @@ export function createNativeE2eRunPlans({ requestedTargets, defaultTargets }) {
   }));
 }
 
-function runChild(plan, env) {
+function runChild(plan, env, receipt) {
   return new Promise((resolve) => {
-    const spawnPlan = process.platform === "win32" ? createWindowsSupervisorPlan(plan) : plan;
+    const spawnPlan = process.platform === "win32" ? createWindowsSupervisorPlan(plan, "win32", receipt) : plan;
     const child = spawn(spawnPlan.command, spawnPlan.args, {
       stdio: "inherit",
       env,
@@ -47,11 +50,11 @@ function runChild(plan, env) {
  * closing it after the root exits terminates descendants that outlived their
  * parent instead of relying on a post-exit PID tree walk.
  */
-export function createWindowsSupervisorPlan(plan, platform = process.platform) {
+export function createWindowsSupervisorPlan(plan, platform = process.platform, receipt) {
   if (platform !== "win32") {
     return plan;
   }
-  return {
+  const produced = {
     command: "powershell.exe",
     args: [
       "-NoProfile",
@@ -65,6 +68,64 @@ export function createWindowsSupervisorPlan(plan, platform = process.platform) {
       JSON.stringify(plan.args),
     ],
   };
+  if (receipt) {
+    if (!path.isAbsolute(receipt.path) || typeof receipt.runId !== "string" || !receipt.runId
+      || receipt.runId.length > 256 || /[\x00-\x1f]/.test(receipt.runId)
+      || !Number.isSafeInteger(receipt.targetIndex) || receipt.targetIndex < 0 || receipt.targetIndex > 2147483647) {
+      throw new Error("Invalid inner-supervisor receipt binding");
+    }
+    const targetSha256 = createHash("sha256").update(plan.command).update("\0").update(JSON.stringify(plan.args)).digest("hex");
+    produced.args.push("-ReceiptPath", receipt.path, "-ReceiptRunId", receipt.runId,
+      "-ReceiptTargetIndex", String(receipt.targetIndex), "-ReceiptTargetSha256", targetSha256);
+  }
+  return produced;
+}
+
+/** Optional diagnostics use a caller-owned fresh output directory outside the
+ * resettable home. The existing harness resets home; lock release removes its lock. */
+export function createWindowsSupervisorReceipts({ directory, home, runId, plans, platform = process.platform }) {
+  if (!directory || platform !== "win32") return plans.map(() => undefined);
+  const root = path.resolve(home);
+  const output = path.resolve(directory);
+  const relative = path.relative(root, output);
+  if (!path.isAbsolute(directory) || !relative || (!path.isAbsolute(relative) && !relative.split(path.sep).includes(".."))
+    || readHomeLock(root)?.runId !== runId || path.resolve(fs.realpathSync(root)) !== root) {
+    throw new Error("Inner-supervisor receipts require the current owned run and fresh output outside its resettable home");
+  }
+  // The grant supplies the owned output parent. Create only its new final
+  // directory, exclusively, and refuse any link on that exact output route.
+  let current = path.dirname(output);
+  while (true) {
+    if (!fs.lstatSync(current).isDirectory() || fs.lstatSync(current).isSymbolicLink()) {
+      throw new Error("Inner-supervisor receipt directory traverses a link");
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  fs.mkdirSync(output);
+  return plans.map((_, targetIndex) => ({ path: path.join(output, `target-${targetIndex}.json`), runId, targetIndex }));
+}
+
+/** Necessary inner evidence from a caller-proven fresh file only. The matching
+ * outer phase/root/EOF/Job receipt is still required; this never grants PASS. */
+export function innerSupervisorReceiptIsClean(receipt, expected) {
+  return Boolean(receipt && expected && receipt.schema === 1 && receipt.kind === "native-e2e-inner-supervisor"
+    && typeof receipt.run_id === "string" && receipt.run_id.length > 0 && receipt.run_id.length <= 256
+    && !/[\x00-\x1f]/.test(receipt.run_id)
+    && receipt.run_id === expected.runId && Number.isSafeInteger(receipt.target_index) && receipt.target_index >= 0
+    && receipt.target_index === expected.targetIndex
+    && receipt.target_sha256 === expected.targetSha256 && /^[a-f0-9]{64}$/.test(receipt.target_sha256)
+    && receipt.writer_finished === true && receipt.observations_complete === true && receipt.run_returned === true
+    && receipt.error_type === null && receipt.job_assigned === true && receipt.root_resumed === true
+    && Number.isSafeInteger(receipt.root_pid) && receipt.root_pid > 0
+    && typeof receipt.root_birth_filetime === "string" && /^[1-9][0-9]{0,19}$/.test(receipt.root_birth_filetime)
+    && typeof receipt.root_birth_utc === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{7}Z$/.test(receipt.root_birth_utc)
+    && receipt.birth_error === null && receipt.wait_result === 0 && receipt.wait_error === null
+    && receipt.joined === true && receipt.root_exit_code === 0 && receipt.root_terminate_before_join === false
+    && receipt.job_query_error === null && receipt.active_processes_before_close === 0
+    && receipt.kill_on_close_residue_requested === false && receipt.job_close_called === true
+    && receipt.job_close_succeeded === true && receipt.stdio_eof === "not_observed_inherited");
 }
 
 /**
@@ -137,8 +198,10 @@ export async function runNativeE2eTargets({
   const runEnv = { ...env, [NATIVE_E2E_HOME_ENV]: home, [NATIVE_E2E_RUN_ID_ENV]: runId };
 
   try {
-    for (const plan of plans) {
-      const { result, pid } = await runChild(plan, runEnv);
+    const receipts = createWindowsSupervisorReceipts({ directory: env.WARDIAN_NATIVE_INNER_RECEIPT_DIRECTORY,
+      home, runId, plans });
+    for (const [index, plan] of plans.entries()) {
+      const { result, pid } = await runChild(plan, runEnv, receipts[index]);
       // End only the tree we started, and only after it has exited, so a child
       // that leaked the app or driver cannot outlive the run.
       terminateOwnedTree(pid);

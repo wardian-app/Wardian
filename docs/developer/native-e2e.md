@@ -789,6 +789,231 @@ For OpenCode rendering runs, the lab defaults to the free remote OpenCode model 
 The lab fails the run for obvious Wardian-side evidence problems before manual screenshot inspection: non-empty screenshot requirements, missing fixed audit text after resize, unchanged columns when a resize state expects a geometry change, screen rectangle mismatch against xterm cell metrics, paused-buffer mismatch, and rendered rows that do not stabilize before the settle timeout. Outside-terminal parity is still captured separately with `scripts/capture-outside-provider-rendering.ps1` when side-by-side native Windows Terminal evidence is needed.
 ## Windows WebView2 profile isolation
 
+The maintained `chat-turn-change-native` case uses the opt-in Mock
+`chat_acceptance` scenario. Its ordinary plain Roster click reveals the agent in
+Agents Overview; explicit Open is a separate route that can create an AgentSession.
+The driver and passive observer share one exact-owner container resolver for the
+visible Overview card or actual AgentSession. It verifies the current workbench,
+surface and selected tab/tabpanel linkage, and rejects hidden, detached, stale,
+foreign or ambiguous containers. Closing and reopening uses that actual parent
+tab and the normal Roster action. No context-menu Open substitutes for the timed
+primary click, and no transcript/page prewarm occurs. The normal build publishes
+an inert, versioned, owner-bound page-loader subscription before React mounts.
+With no matching subscriber it retains no history and attaches no Promise handlers.
+The stable loader invokes the SDK once and returns its exact Promise. An active
+passive observer receives the original arguments and Promise, records actual scope
+and row identity, and requires positive activation before the trusted Roster action.
+It does not replace Tauri's immutable internal invoke function. Subscriber faults
+are isolated from the product and exposed as an explicit failure count. Disposal
+releases the subscription and DOM listeners and retires late settlements and frames.
+Runtime coverage is `PAGE_LOADER_ONLY`; a separate source call-site inventory
+checks ordinary routing. Broader legacy/all-IPC runtime coverage is `UNOBSERVED`.
+An empty page-call ledger cannot qualify no-prewarm or admitted-body evidence.
+Passive markers on the existing Chat scroll region and message row expose the
+page actually admitted by the consumer and its rendered event/member identity.
+The observer matches these markers to the actual response, including conversation,
+generation, nullable source epoch, opaque window revision and admission. A returned
+response alone cannot qualify an unadmitted page. Both animation-frame witnesses
+also retain the same actual container, panel and tab nodes; reused body/scroll
+nodes cannot hide a container replacement. Any display-slot alias requires
+the response's actual alias proof.
+Usability freshly validates the same painted node and row identity, scope, members,
+window and DOM references through both frames. Another equal-text row becoming first
+cannot replace that subject. `matchingBodySlots` remains a reported diagnostic count;
+it is neither identity nor a unique-body-slot claim. Changes to unrelated matching
+rows do not invalidate an otherwise valid latched subject.
+Durable scope requires real conversation and generation IDs. A validated recent
+preview instead uses its producer-issued recent admission and retains every actual
+nullable canonical hint. The original preview receipt and current consumer DOM must
+match owner, admission, revision and the complete nullable tuple. Missing admission
+does not make null durable IDs valid. Preview paint proves recent-capability scope;
+it does not grant canonical-ready, Older, detail or renewal authority. A matching
+empty unchanged response can retain the original current target receipt while its
+actual admitted scope stays the same.
+Readable timing retains the independent full raw assistant body/hash in the RPC
+proof. Before App startup, the existing Markdown parser prepares a bounded
+rendered-text witness; plain Mock text retains whole-text matching. The actual
+witness text range must intersect the Chat viewport through two animation frames.
+A body without a safe independent witness fails fixture eligibility before App
+startup, rather than being reported as a UI latency failure.
+
+Off agents normally open directly in Chat. The explicit-toggle timestamp remains
+null for that route, with a separate observed automatic-exposure timestamp. Live
+Terminal measurements retain the trusted Chat toggle. The original trusted Roster
+selection/open clock must satisfy both readable and usable endpoints in less than
+one second; neither route resets it. Usability requires trusted unsent composer
+input, or actual scrolling when the owned viewport has overflow. The owned visible
+enabled empty composer is preferred even for overflowing Saved views. Only the
+unsent probe is typed, without Enter, clearing or overwriting a draft, submission,
+model discovery or wake. If no safe composer exists, an overflowing owned viewport
+uses a trusted wheel. Its baseline comes from the existing DOM metadata read before
+the action, so compositor scrolling before the event handler cannot erase it.
+Both an actual trusted event inside that region and an offset change are required.
+There is no retry or fallback after a failed probe; no safe control fails honestly.
+The fixture never toggles Off Chat away or loads history to manufacture activation
+or overflow. Both paint and trusted interaction retain the same admitted body and
+scope through two animation frames. Live cold/warm and small Mock Saved-Off cold/warm
+reopens are separate measurements. Each reopen uses the normal Roster action.
+Raw log inspection warms the
+filesystem, so these measurements do not establish OS-cold performance.
+
+Desktop and remote/PWA Chat keep their existing opening refresh burst for an
+already validated, admitted recent preview even when it contains earlier rows.
+Two provisional rows do not establish that the recent window is complete. Both
+consumers use the same existing minimum-of-interval-and-100ms spacing and original
+first-second budget; canonical nonempty windows keep their ordinary cadence and
+remote backoff. Preview admission comes from the current selected recent window,
+without granting Older authority or restarting the clock on unchanged responses,
+visibility changes or rejected foreign pages. This intentionally permits more
+bounded recent metadata requests. Hook/store fake-timer checks and one public
+React/Dockview partial-preview integration establish consumer behavior; they do
+not establish native latency sufficiency, unchanged physical IO or provider speed.
+
+Ordinary telemetry also offers valid live JSONL source observations to the existing
+background capture coordinator, independently of the status transition and parser
+mtime watermark. The coordinator admits first or changed observations, coalesces
+in-flight work, suppresses workers for unchanged settled sources, and retains
+failed work for a later ordinary tick. Capture keeps runtime, source identity and
+logging-policy revalidation. Backend regressions exercise live sampled processes,
+the raw Mock history fixture and the normal queued recent prelude with the full
+80-row preview cohort. Canonical handoff still requires exact current-head coverage
+and a real Older cursor. The proof reuses hash-validated seek nodes within one
+request under the existing read limits; a deeper-history regression also covers
+a real head with at least 1,000 headers. These checks do not establish a historical native failure
+cause or native timing acceptance.
+
+Roster click, container lookup and mode lookup failures retain bounded failure-only
+registry and container/tab ownership/visibility metadata, including ambiguity.
+This capture reads no Chat body, performs no prewarm and preserves the original
+exception and unmeasured endpoints even if the secondary capture fails.
+Toggle, paint, input, usability and assertion failures also retain bounded DOM-only
+metadata: mode, mounted Chat or suspended placeholder, ownership/tab geometry,
+scope/member presence, observer activation and request/settlement/error counters.
+These later captures make no registry or other IPC request, preserve the original
+exception and NULL endpoints, and do not retry or extend the measurement deadline.
+They also retain the chosen control and reason, planned/current composer flags,
+latched-subject validity versus the current first candidate, and actual wheel
+baseline/event/after offsets with received/changed flags, without body or draft text.
+Failure-only candidate facts also retain the bounded actual DOM scope and field
+presence, scope mode, first rejection gate, target presence/index, real scroll and
+text-range intersection. Member counts distinguish the total from the first 64
+captured rows and report truncation; 64 is a diagnostic bound, not a renderer limit.
+These facts use the existing write-boundary redaction once and cannot set endpoints,
+move the viewport or dispatch another request.
+The same result also retains passive timing diagnostics. `commandTiming` is the
+current measurement's bounded record, including a failed measurement; successful
+phases retain that record as `controllerTiming` and in the at-most-six-entry
+`phaseTimings` map before returning, so a later failure preserves earlier actual
+page/controller timing. No missing historical record is reconstructed.
+Its nine fixed `spans` cover the
+paint wait, scroll lookup, interaction planner, displayed/enabled/value checks,
+complete `sendKeys`, wheel action and usability wait. Each has controller-monotonic
+`startedAt`, `finishedAt` and `durationMs`, with `finally` recording rejected
+operations. Unused or unavailable values remain null. `endpointObservation` is
+`EVENT_NOTIFICATION`: `waits.paintAt` and `waits.usableAt` retain actual bounded
+async callback wait counts and controller durations. Owned surface/mode discovery
+also uses one `executeAsyncScript` call (`controlDiscovery: OWNED_DOM_NOTIFICATION`).
+Its six `preToggle` spans retain Roster lookup/click, discovery, native displayed
+wait, title read and conditional native click, including rejected operations.
+`discovery` records actual attempts, native displayed predicate checks and page
+capture time. Unused operations remain null. The full input probe,
+display/enabled/value checks, wheel alternative and original two-frame guards
+are preserved. Global Selenium timeout and polling settings are unchanged.
+
+The existing observer installs one waiter and checks an already accepted endpoint
+in the same WebView turn. It binds owner, facade version/token, current phase
+object, ordinal/label and endpoint field. Only original accepted publication can
+complete it; the compact acknowledgement grants no body or scope authority.
+Rearm, disposal, observer fault, duplicate waiter and expiry fail closed and clear
+timer/callback references before completion. Each sequential wait uses the
+remaining original absolute five-second controller budget, checked again after
+transport returns; the page timer only bounds callback lifetime. It never resets
+that deadline, samples a body, dispatches input, or adds a frame/request.
+
+Discovery shares that single waiter and requires the original trusted finite
+Roster timestamp plus the same exact owner/facade/token/phase binding. It checks
+already-ready state synchronously, then uses the existing DOM observer's normal
+notifications. It returns only the unique current selected visible owned surface
+and mode button as real Element references. Missing, hidden, ambiguous, foreign,
+stale, reset or retired controls cannot qualify. Normal React/Dockview mounting
+provides the child-list notification; no separate signal or polling loop is added.
+After transport, the controller still runs the actual native `isDisplayed` wait,
+reads the actual title, requires the live Terminal toggle and conditionally calls
+the native click. Serialization or stale-element failures remain failures, with
+no selector fallback or JavaScript click. Browser coverage exercises the serialized
+callback against real DOM and preserves both references; native transport and
+subsecond acceptance require their separate native run.
+
+Page-clock `captureAtPage` is appended to the existing observation read;
+`page.paintCaptureAtPage` and `page.usableCaptureAtPage` retain each wait's last
+owned-phase capture. `plannedAtPage` comes from the existing interaction planner.
+`completeTrustedProbeAt` records the existing trusted, owned, focused full-input
+acceptance; it alone proves neither a stable body nor usability. `trustedWheelAt`
+belongs only to the existing trusted wheel path. `usableFrame1At` is captured in
+the first existing usability frame and published only when the original second
+frame accepts the same phase/body. `usableFrame2At` aliases that original usable
+endpoint timestamp. Reset, stale and disposed callbacks cannot publish those
+frame stamps into another phase. Failure metadata retains the same page scalars.
+Compare page timestamps only with page timestamps, and controller durations only
+within their controller clock. Spans can overlap page frames and must not be
+summed with them. These scalar diagnostics contain no body or draft text, use the
+existing single redaction boundary, and never replace an original result or error.
+Structural tests establish unchanged commands, guards and frame scheduling;
+they do not establish zero instrumentation overhead or native latency improvement.
+At existing realm teardown, the one disposal operation returns a separate actual
+post-unsubscribe token/status and callback/error counters before closing the realm.
+The last pre-disposal observation is retained separately. Missing historical
+acknowledgements and unassigned historical wheel failures remain unobserved; a new
+controlled green does not establish the cause or success of an older native case.
+
+After timing, genuine wheel/button actions load Older pages through opaque
+cursors and expand the declared 60,000-byte body. The fixture preserves both
+Edit/work turns and distinct equal-text assistant turns. Preview retirement is
+reported only when actually observed; a canonical-first response leaves that
+transition unrun. Startup and cleanup errors fail the case. App-free tests in
+`harness-invoke.test.mjs` check observer boundaries and raw fixture grammar;
+they do not establish native normalization, latency, saved-Off, UI, or provider
+acceptance. Native execution still requires a matching built App/CLI bundle and
+exclusive owned runtime resources. Results stay in the isolated home's
+`artifacts/chat-normal-flow/` directory with identity strings hashed.
+
+The same case accepts an optional `WARDIAN_CHAT_SAVED_FIXTURE_MANIFEST` value of
+`<absolute-fixture-manifest>`. This external data-only Saved witness is labelled
+separately from the small Mock restart. Its bounded manifest, selected configuration,
+independent recent-body oracle, original identities and every archive/index/artifact
+hash are validated before staging into a freshly claimed home, before the first
+app start. The source archive and index remain unchanged. The staged configuration
+is Off, uses the owned fixture folder and Test class, and retains its source logging
+policy. The agent array is staged at `<owned-home>/settings/state.json` for normal
+startup restore. Empty owned `CODEX_HOME` and `CLAUDE_CONFIG_DIR` directories
+isolate the fixture's provider configuration; no original native source, user
+configuration, auth, junction or logging override is imported. Directory overrides
+do not establish zero internal credential-store reads. Effective
+policy is recorded after measurement. Validation/staging warms the filesystem.
+The independent target must be visible naturally; a final-80 eligibility declaration
+alone cannot qualify a viewport, and the test never scrolls the target into view
+before timing. Missing lineage, scope or viewport proof fails honestly.
+
+If the Roster selection fails, the case captures bounded registry and Roster DOM
+metadata after that failure. Its two-second passive registry deadline cannot
+replace the original error, retry the activation, or produce a timing sample.
+Explicit native run IDs matching the owned home claim also enable bounded
+`[native-provider-discovery]` records in `wardian_debug.log`. They describe the
+existing command, original child identity when known, and actual outcome without
+logging provider output or unexpected argument values. These diagnostics confer
+no readiness or authorization. Missing identity or witness evidence leaves
+provider isolation unqualified.
+
+Final native qualification also requires the approved caller's original process
+handle/full birth identity, bounded actual exit, positive stdout/stderr EOF and
+owned Job-empty closure receipts. The existing harness termination timer and
+kill-on-close supervisor do not provide that complete receipt. This ownership hook
+must be resolved before a qualification run; the case's private result labels
+observed endpoints separately from unproved closure. A timer-only cleanup cannot
+establish PASS. This fixture does not establish OS-cold or real-provider performance,
+greater-than-64-KiB body continuation, native finite-renewal ACK/physical-read counts,
+HTTPS conformance or PWA behavior; those retain their existing verification layers.
+
 Every Windows session started by the native harness creates a unique
 `.webview2-*` directory beneath its locked native test home. The driver child
 receives `WEBVIEW2_USER_DATA_FOLDER` pointing there; the parent environment and

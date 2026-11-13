@@ -1,0 +1,23 @@
+[
+  {
+    "session_id": "fixture-agent",
+    "session_name": "Saved Fixture",
+    "description": "",
+    "agent_class": "TestClass",
+    "folder": "<owned-workspace>",
+    "git_worktree": null,
+    "git_worktree_source": null,
+    "git_worktree_folder": null,
+    "resume_session": "fixture-native",
+    "is_off": true,
+    "provider": "codex",
+    "debug": null,
+    "model": "fixture-model",
+    "include_directories": [],
+    "system_include_directories": [],
+    "custom_args": null,
+    "session_persistence": "resume",
+    "conversation_logging": "default",
+    "provider_config": { "type": "codex" }
+  }
+]

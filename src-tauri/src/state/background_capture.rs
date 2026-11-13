@@ -149,21 +149,6 @@ impl BackgroundCaptureCoordinator {
             });
     }
 
-    /// Existing stopped/error owners remain observable through ordinary ticks,
-    /// including status-triggered owners whose runtime is currently active.
-    pub(crate) fn observation_sessions(&self) -> std::collections::HashSet<String> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .entries
-            .iter()
-            .filter(|(_, entry)| {
-                entry.retry || entry.await_observation || entry.serviced_epoch != entry.epoch
-            })
-            .map(|(session, _)| session.clone())
-            .collect()
-    }
-
     /// A successful owner hands a newer request forward without waiting for a
     /// second trigger. Retry intent is excluded: errors only retry on a tick.
     pub(crate) fn take_pending(&self, session_id: &str) -> Option<CaptureClaim> {

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use wardian_core::models::chat::{
     AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
 };
@@ -16,6 +17,11 @@ pub(crate) const MAX_TOOL_REQUEST_ROOTS: usize = 1_024;
 const MAX_SEEN_GEMINI_MESSAGES: usize = 4_096;
 const MAX_NORMALIZATION_STATE_BYTES: usize = 1024 * 1024;
 pub(crate) const PROVIDER_RAW_LINE_METADATA_KEY: &str = "_wardian_provider_raw_line";
+const CODEX_DISPLAY_TEXT_SHA256: &str = "codex_display_text_sha256";
+const CODEX_DISPLAY_TEXT_BYTES: &str = "codex_display_text_bytes";
+pub(crate) const CODEX_DISPLAY_IDENTITY_SHA256: &str = "chat_display_identity_sha256";
+pub(crate) const PROVIDER_LOG_ROW_OFFSET_METADATA_KEY: &str = "provider_log_row_offset";
+pub(crate) const PROVIDER_EVENT_ID_METADATA_KEY: &str = "provider_event_id";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TranscriptNormalizationState {
@@ -23,7 +29,11 @@ pub(crate) struct TranscriptNormalizationState {
     request_root_id: Option<String>,
     codex_provider_turn_id: Option<String>,
     #[serde(default)]
+    mock_provider_session: Option<String>,
+    #[serde(default)]
     codex_user_mirror_pending: bool,
+    #[serde(default)]
+    codex_user_mirror_identity: Option<CodexUserMirrorIdentity>,
     pending_events: Vec<AgentChatEvent>,
     pending_context_indices: Vec<usize>,
     tool_request_roots: HashMap<String, ToolRequestRootState>,
@@ -36,7 +46,9 @@ impl Default for TranscriptNormalizationState {
             next_sequence: 1,
             request_root_id: None,
             codex_provider_turn_id: None,
+            mock_provider_session: None,
             codex_user_mirror_pending: false,
+            codex_user_mirror_identity: None,
             pending_events: Vec::new(),
             pending_context_indices: Vec::new(),
             tool_request_roots: HashMap::new(),
@@ -45,10 +57,124 @@ impl Default for TranscriptNormalizationState {
     }
 }
 
+/// Binds one identified request to its mirror without persisting prompt text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CodexUserMirrorIdentity {
+    provider_turn_id: String,
+    request_root_id: String,
+    text_sha256: String,
+}
+
 impl TranscriptNormalizationState {
+    /// Actual Mock log header identity, independent of producer mirror claims.
+    pub(crate) fn mock_provider_session(&self) -> Option<&str> {
+        self.mock_provider_session.as_deref()
+    }
+
+    pub(crate) fn validate_serialized_size(&self) -> Result<(), String> {
+        if serde_json::to_vec(self)
+            .map_err(|error| error.to_string())?
+            .len()
+            > MAX_NORMALIZATION_STATE_BYTES
+        {
+            return Err("provider transcript continuation-state byte limit exceeded".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    /// Keep source coordinates with deferred rows across a cursor commit.
+    pub(crate) fn visit_pending_events(&mut self, visit: &mut impl FnMut(&mut AgentChatEvent)) {
+        for event in &mut self.pending_events {
+            visit(event);
+        }
+    }
+
     pub(crate) fn has_pending_events(&self) -> bool {
         !self.pending_events.is_empty()
     }
+
+    pub(crate) fn pending_events(&self) -> &[AgentChatEvent] {
+        &self.pending_events
+    }
+
+    pub(crate) fn pending_events_mut(&mut self) -> &mut [AgentChatEvent] {
+        &mut self.pending_events
+    }
+
+    pub(crate) fn attach_pending_row_offsets(&mut self, row_offsets: &[u64], first_sequence: u64) {
+        for event in &mut self.pending_events {
+            if event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY].is_number() {
+                continue;
+            }
+            if let Some(offset) = event
+                .sequence
+                .and_then(|sequence| sequence.checked_sub(first_sequence))
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| row_offsets.get(index))
+            {
+                event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY] = json!(offset);
+            }
+        }
+    }
+}
+
+fn pending_codex_context_turn_id(state: &TranscriptNormalizationState) -> Option<String> {
+    let mut turn_id: Option<String> = None;
+    for index in &state.pending_context_indices {
+        let context_turn_id = state
+            .pending_events
+            .get(*index)
+            .and_then(|context| metadata_string(&context.metadata, "provider_turn_id"))?;
+        if turn_id
+            .as_deref()
+            .is_some_and(|known_turn_id| known_turn_id != context_turn_id)
+        {
+            return None;
+        }
+        turn_id.get_or_insert(context_turn_id);
+    }
+    turn_id
+}
+
+fn release_codex_pending_events_before_turn_context(
+    state: &mut TranscriptNormalizationState,
+    next_turn_id: Option<&str>,
+) -> Vec<AgentChatEvent> {
+    let pending_context_indices = state
+        .pending_context_indices
+        .drain(..)
+        .collect::<HashSet<_>>();
+    let mut released = Vec::new();
+    let mut retained = Vec::new();
+    let mut retained_context_indices = Vec::new();
+
+    for (index, mut event) in std::mem::take(&mut state.pending_events)
+        .into_iter()
+        .enumerate()
+    {
+        let is_context = pending_context_indices.contains(&index);
+        let matches_next_turn = next_turn_id.is_some_and(|turn_id| {
+            metadata_string(&event.metadata, "provider_turn_id").as_deref() == Some(turn_id)
+        });
+        if matches_next_turn {
+            if is_context {
+                retained_context_indices.push(retained.len());
+            }
+            retained.push(event);
+        } else {
+            if is_context {
+                event.role = Some(AgentChatRole::System);
+            }
+            released.push(event);
+        }
+    }
+
+    state.pending_events = retained;
+    state.pending_context_indices = retained_context_indices;
+    released
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,8 +202,17 @@ pub(crate) fn normalize_chat_lines_with_state(
     enforce_limits: bool,
 ) -> Result<Vec<AgentChatEvent>, String> {
     let normalized_provider = normalize_provider(provider);
+    let batch_start_sequence = state.next_sequence;
     let uses_tool_request_roots = normalized_provider == "claude";
     if !uses_tool_request_roots {
+        // Only Claude archive identity is derived from its exact provider
+        // line. Compact legacy pending Codex state before the bounded-size
+        // check so historical copies do not exhaust the continuation budget.
+        for event in &mut state.pending_events {
+            if let Some(metadata) = event.metadata.as_object_mut() {
+                metadata.remove(PROVIDER_RAW_LINE_METADATA_KEY);
+            }
+        }
         // Older saved Codex/Pi/etc. states may contain roots from the former
         // provider-agnostic cache. Clear only that obsolete correlation data;
         // request, pending-event, sequence, and native-turn state remain live.
@@ -89,6 +224,21 @@ pub(crate) fn normalize_chat_lines_with_state(
         let sequence = state.next_sequence;
         state.next_sequence = state.next_sequence.saturating_add(1);
         let raw_line = line.as_ref();
+        if normalized_provider == "mock" {
+            if let Ok(parsed) = serde_json::from_str::<Value>(raw_line) {
+                if parsed.get("type").and_then(Value::as_str) == Some("init") {
+                    state.mock_provider_session = parsed
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .filter(|session| {
+                            !session.is_empty()
+                                && session.len() <= 128
+                                && session.bytes().all(|byte| byte.is_ascii_graphic())
+                        })
+                        .map(str::to_string);
+                }
+            }
+        }
         let codex_turn_context = if normalized_provider == "codex" {
             serde_json::from_str::<Value>(raw_line)
                 .ok()
@@ -97,22 +247,43 @@ pub(crate) fn normalize_chat_lines_with_state(
             None
         };
         let codex_turn_context_id = codex_turn_context.as_ref().and_then(|value| {
-            first_string(&[
-                value.get("turn_id"),
-                value
-                    .get("payload")
-                    .and_then(|payload| payload.get("turn_id")),
-            ])
+            let top_level = value.get("turn_id").and_then(value_to_string);
+            let payload = value
+                .get("payload")
+                .and_then(|payload| payload.get("turn_id"))
+                .and_then(value_to_string);
+            match (top_level, payload) {
+                (Some(top_level), Some(payload)) if top_level != payload => None,
+                (Some(turn_id), _) | (_, Some(turn_id)) => Some(turn_id),
+                (None, None) => None,
+            }
         });
         if normalized_provider == "codex" && codex_turn_context.is_some() {
-            // Every new Codex turn is a fail-closed boundary. A malformed
-            // context record must clear the previous native identity.
-            state.request_root_id = None;
-            state.codex_provider_turn_id = None;
-            state.codex_user_mirror_pending = false;
-            if let Some(turn_id) = codex_turn_context_id {
-                state.codex_provider_turn_id = Some(turn_id);
-                state.codex_user_mirror_pending = true;
+            let pending_context_turn_id = pending_codex_context_turn_id(state);
+            let repeats_current_turn = codex_turn_context_id.as_deref().is_some_and(|turn_id| {
+                state.codex_provider_turn_id.as_deref() == Some(turn_id)
+                    || (state.codex_provider_turn_id.is_none()
+                        && pending_context_turn_id.as_deref() == Some(turn_id))
+            });
+            if !repeats_current_turn {
+                // Keep explicitly matching next-turn rows; the new turn
+                // context may follow its host context in the provider log.
+                events.extend(release_codex_pending_events_before_turn_context(
+                    state,
+                    codex_turn_context_id.as_deref(),
+                ));
+                state.request_root_id = None;
+                state.codex_provider_turn_id = codex_turn_context_id.clone();
+                state.codex_user_mirror_pending = codex_turn_context_id.is_some();
+                state.codex_user_mirror_identity = None;
+            } else if state.codex_provider_turn_id.is_none() {
+                // Startup host context can precede its first turn_context.
+                // Its explicit native turn ID is enough to establish this
+                // binding without releasing the pending context.
+                state.request_root_id = None;
+                state.codex_provider_turn_id = codex_turn_context_id.clone();
+                state.codex_user_mirror_pending = codex_turn_context_id.is_some();
+                state.codex_user_mirror_identity = None;
             }
         }
         let Some(mut event) =
@@ -120,12 +291,14 @@ pub(crate) fn normalize_chat_lines_with_state(
         else {
             continue;
         };
-        if enforce_limits {
+        if enforce_limits && normalized_provider == "claude" {
             set_metadata_string(
                 &mut event.metadata,
                 PROVIDER_RAW_LINE_METADATA_KEY,
                 raw_line,
             );
+        } else if let Some(metadata) = event.metadata.as_object_mut() {
+            metadata.remove(PROVIDER_RAW_LINE_METADATA_KEY);
         }
 
         if normalized_provider == "gemini"
@@ -146,11 +319,42 @@ pub(crate) fn normalize_chat_lines_with_state(
         let mut provider_turn_id = metadata_string(&event.metadata, "provider_turn_id");
         let mut inherited_provider_turn_id = false;
         if normalized_provider == "codex"
+            && input_origin.as_deref() == Some("human_input")
+            && event.kind == AgentChatEventKind::Message
+            && event.role == Some(AgentChatRole::User)
+            && matches!(event.source.as_deref(), Some("response_item" | "event_msg"))
+        {
+            if let Some(text) = event.text.as_deref() {
+                set_metadata_string(
+                    &mut event.metadata,
+                    "codex_user_text_sha256",
+                    &codex_user_text_sha256(text),
+                );
+            }
+        }
+        if normalized_provider == "codex"
+            && event.kind == AgentChatEventKind::Message
+            && event.role == Some(AgentChatRole::Assistant)
+            && matches!(event.source.as_deref(), Some("response_item" | "event_msg"))
+        {
+            if let Some(text) = event.text.as_deref() {
+                set_metadata_string(
+                    &mut event.metadata,
+                    "codex_assistant_text_sha256",
+                    &codex_content_sha256(text),
+                );
+            }
+        }
+        if normalized_provider == "codex"
             && event.kind == AgentChatEventKind::Message
             && event.role == Some(AgentChatRole::Assistant)
             && event.source.as_deref() == Some("event_msg")
             && event.turn_id.is_none()
-            && metadata_string(&event.metadata, "raw_type").as_deref() == Some("agent_message")
+            && matches!(
+                metadata_string(&event.metadata, "raw_type").as_deref(),
+                Some("agent_message" | "assistant_message")
+            )
+            && metadata_string(&event.metadata, "provider_turn_id").is_none()
         {
             // Codex's assistant event_msg is an identity-less mirror. Reuse
             // the active turn binding already established for its user input;
@@ -159,59 +363,133 @@ pub(crate) fn normalize_chat_lines_with_state(
                 set_metadata_string(&mut event.metadata, "provider_turn_id", current_turn_id);
             }
         }
+        let has_codex_user_mirror_identity = state.codex_user_mirror_identity.is_some();
+        let codex_user_mirror_identity = state
+            .codex_user_mirror_identity
+            .as_ref()
+            .filter(|identity| {
+                normalized_provider == "codex"
+                    && input_origin.as_deref() == Some("human_input")
+                    && event.kind == AgentChatEventKind::Message
+                    && event.role == Some(AgentChatRole::User)
+                    && event.source.as_deref() == Some("event_msg")
+                    && state.codex_user_mirror_pending
+                    && provider_turn_id
+                        .as_deref()
+                        .is_none_or(|turn_id| turn_id == identity.provider_turn_id)
+                    && event
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| codex_user_text_sha256(text) == identity.text_sha256)
+            })
+            .cloned();
+        let is_bound_codex_user_mirror = codex_user_mirror_identity.is_some();
+        let is_unbound_codex_event_msg_user = normalized_provider == "codex"
+            && input_origin.as_deref() == Some("human_input")
+            && event.kind == AgentChatEventKind::Message
+            && event.role == Some(AgentChatRole::User)
+            && event.source.as_deref() == Some("event_msg")
+            && !is_bound_codex_user_mirror
+            && (has_codex_user_mirror_identity
+                || (state.request_root_id.is_some() && state.pending_context_indices.is_empty()));
+        if is_unbound_codex_event_msg_user {
+            state.codex_user_mirror_identity = None;
+            state.codex_user_mirror_pending = false;
+        }
         if normalized_provider == "codex"
             && input_origin.as_deref() == Some("human_input")
             && event.kind == AgentChatEventKind::Message
             && event.role == Some(AgentChatRole::User)
             && event.source.as_deref() == Some("event_msg")
             && provider_turn_id.is_none()
-            && state.codex_user_mirror_pending
+            && is_bound_codex_user_mirror
         {
-            // Codex writes the same human input as a response_item and an
-            // event_msg. The latter omits the provider turn ID, so carry the
-            // explicit native identity from the current turn state. This is
-            // source provenance, not text or timing based deduplication.
-            if let Some(current_turn_id) = state.codex_provider_turn_id.as_deref() {
-                set_metadata_string(&mut event.metadata, "provider_turn_id", current_turn_id);
-                provider_turn_id = Some(current_turn_id.to_string());
-                inherited_provider_turn_id = true;
+            // Codex gives the two exact observations different roots: Wardian
+            // owns the response_item root, while event_msg carries its native
+            // message ID. Keep that native root as provenance and use the
+            // uniquely bound Wardian request root for the canonical input.
+            let current_turn_id = &codex_user_mirror_identity
+                .as_ref()
+                .expect("bound Codex mirror has an identity")
+                .provider_turn_id;
+            if let Some(mirror_root) = metadata_string(&event.metadata, "request_root_id") {
+                event.metadata["provider_mirror_request_root_ids"] =
+                    serde_json::json!([mirror_root]);
             }
+            set_metadata_string(&mut event.metadata, "provider_turn_id", current_turn_id);
+            provider_turn_id = Some(current_turn_id.clone());
+            inherited_provider_turn_id = true;
         }
         if matches!(input_origin.as_deref(), Some("human_input" | "agent_input")) {
-            let root_id = metadata_string(&event.metadata, "request_root_id")
+            let codex_user_mirror_root = codex_user_mirror_identity
+                .as_ref()
+                .map(|identity| identity.request_root_id.clone());
+            let root_id = codex_user_mirror_root
+                .or_else(|| metadata_string(&event.metadata, "request_root_id"))
                 .or_else(|| event.turn_id.clone())
                 .or_else(|| (normalized_provider == "codex").then(|| event.id.clone()));
             if let Some(root_id) = root_id.as_deref() {
                 set_metadata_string(&mut event.metadata, "request_root_id", root_id);
-                state.request_root_id = Some(root_id.to_string());
+                if !is_unbound_codex_event_msg_user {
+                    state.request_root_id = Some(root_id.to_string());
+                }
             }
 
-            if normalized_provider == "codex" {
-                let pending_turn_id = state.pending_context_indices.iter().find_map(|index| {
-                    state
-                        .pending_events
-                        .get(*index)
-                        .and_then(|context| metadata_string(&context.metadata, "provider_turn_id"))
-                });
-                if let Some(root_id) = root_id {
+            if normalized_provider == "codex" && !is_unbound_codex_event_msg_user {
+                let pending_turn_id = pending_codex_context_turn_id(state);
+                let active_provider_turn_id = provider_turn_id
+                    .clone()
+                    .or_else(|| state.codex_provider_turn_id.clone())
+                    .or(pending_turn_id);
+                if let Some(root_id) = root_id.as_ref() {
                     for index in state.pending_context_indices.drain(..) {
                         if let Some(context) = state.pending_events.get_mut(index) {
-                            set_metadata_string(&mut context.metadata, "request_root_id", &root_id);
-                            if metadata_string(&context.metadata, "causal_ref").is_none() {
+                            let same_provider_turn =
+                                active_provider_turn_id.as_deref().is_some_and(|turn_id| {
+                                    metadata_string(&context.metadata, "provider_turn_id")
+                                        .as_deref()
+                                        == Some(turn_id)
+                                });
+                            if same_provider_turn {
                                 set_metadata_string(
                                     &mut context.metadata,
-                                    "causal_ref",
-                                    &format!("request:{root_id}"),
+                                    "request_root_id",
+                                    root_id,
                                 );
+                                if metadata_string(&context.metadata, "causal_ref").is_none() {
+                                    set_metadata_string(
+                                        &mut context.metadata,
+                                        "causal_ref",
+                                        &format!("request:{root_id}"),
+                                    );
+                                }
+                            } else {
+                                context.role = Some(AgentChatRole::System);
                             }
                         }
                     }
                 }
-                let active_provider_turn_id = provider_turn_id.or(pending_turn_id);
                 state.codex_provider_turn_id = active_provider_turn_id.clone();
                 state.codex_user_mirror_pending = active_provider_turn_id.is_some()
                     && !inherited_provider_turn_id
                     && event.source.as_deref() != Some("event_msg");
+                if event.source.as_deref() == Some("response_item")
+                    && event.role == Some(AgentChatRole::User)
+                    && event.metadata["input_origin"] == "human_input"
+                {
+                    state.codex_user_mirror_identity = active_provider_turn_id
+                        .zip(root_id.clone())
+                        .zip(event.text.as_deref())
+                        .map(|((provider_turn_id, request_root_id), text)| {
+                            CodexUserMirrorIdentity {
+                                provider_turn_id,
+                                request_root_id,
+                                text_sha256: codex_user_text_sha256(text),
+                            }
+                        });
+                } else {
+                    state.codex_user_mirror_identity = None;
+                }
                 events.append(&mut state.pending_events);
             }
         }
@@ -221,6 +499,7 @@ pub(crate) fn normalize_chat_lines_with_state(
             && event.role == Some(AgentChatRole::Assistant)
         {
             state.codex_user_mirror_pending = false;
+            state.codex_user_mirror_identity = None;
         }
 
         if uses_tool_request_roots && event.kind == AgentChatEventKind::ToolCall {
@@ -319,6 +598,29 @@ pub(crate) fn normalize_chat_lines_with_state(
         events.append(&mut state.pending_events);
         state.pending_context_indices.clear();
     }
+    if enforce_limits && normalized_provider == "codex" {
+        for event in &mut state.pending_events {
+            let has_source_coordinates = metadata_string(&event.metadata, "chat_source_ref")
+                .is_some_and(|source_ref| !source_ref.is_empty())
+                && event.metadata["chat_source_start"]
+                    .as_u64()
+                    .zip(event.metadata["chat_source_end"].as_u64())
+                    .is_some_and(|(start, end)| start < end)
+                && metadata_string(&event.metadata, "chat_source_epoch")
+                    .is_some_and(|epoch| !epoch.is_empty());
+            // New rows can be bound by this acquisition batch. Older rows need
+            // their original native coordinates before discarding raw evidence.
+            if event
+                .sequence
+                .is_some_and(|sequence| sequence >= batch_start_sequence)
+                || has_source_coordinates
+            {
+                if let Some(metadata) = event.metadata.as_object_mut() {
+                    metadata.remove(PROVIDER_RAW_LINE_METADATA_KEY);
+                }
+            }
+        }
+    }
     if enforce_limits
         && serde_json::to_vec(state)
             .map_err(|error| format!("provider transcript state could not be measured: {error}"))?
@@ -347,7 +649,7 @@ pub fn normalize_chat_line(
         Err(_) => return fallback_terminal_event(session_id, &provider, raw_line, sequence),
     };
 
-    match provider.as_str() {
+    let mut event = match provider.as_str() {
         "codex" => normalize_codex(session_id, &provider, &parsed, sequence),
         "claude" => normalize_claude(session_id, &provider, &parsed, sequence),
         "gemini" => normalize_gemini(session_id, &provider, &parsed, sequence),
@@ -356,7 +658,39 @@ pub fn normalize_chat_line(
         "pi" => normalize_pi(session_id, &provider, &parsed, sequence),
         "mock" => normalize_mock(session_id, &provider, &parsed, sequence),
         _ => normalize_fallback_json(session_id, &provider, &parsed, raw_line, sequence),
+    }?;
+    if let Some(provider_event_id) = provider_log_event_id(&provider, &parsed) {
+        event.metadata[PROVIDER_EVENT_ID_METADATA_KEY] = json!(provider_event_id);
     }
+    Some(event)
+}
+
+/// Returns identifiers tied to one provider log record. Turn and request IDs
+/// are intentionally excluded because they can identify several records.
+fn provider_log_event_id(provider: &str, parsed: &Value) -> Option<String> {
+    let value = match provider {
+        "pi" => super::pi::provenance::message_entry_id(parsed),
+        "claude" => parsed.get("uuid").and_then(value_to_string).or_else(|| {
+            (str_field(parsed, "type") == Some("assistant"))
+                .then(|| {
+                    content_array(parsed.get("message").unwrap_or(parsed))?
+                        .iter()
+                        .find(|item| str_field(item, "type") == Some("tool_use"))
+                        .and_then(|item| str_field(item, "id"))
+                        .map(str::to_string)
+                })
+                .flatten()
+        }),
+        _ => None,
+    }?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Exact pre-envelope-ID Pi message identity input. Keep the original nested
+/// field precedence rather than guessing whether a modern envelope ID was new.
+pub(crate) fn pi_original_legacy_turn_id(row: &Value) -> Option<String> {
+    row.get("message").and_then(turn_id_from)
 }
 
 fn normalize_pi(
@@ -685,7 +1019,7 @@ fn normalize_codex(
     sequence: u64,
 ) -> Option<AgentChatEvent> {
     let msg_type = str_field(parsed, "type")?;
-    match msg_type {
+    let mut event = match msg_type {
         "thread.started" => Some(event(
             session_id,
             provider,
@@ -721,7 +1055,40 @@ fn normalize_codex(
         }
         "item.completed" => normalize_codex_payload(session_id, provider, parsed, "item", sequence),
         _ => None,
+    }?;
+    if event.kind == AgentChatEventKind::Message {
+        let payload = parsed.get(if msg_type == "item.completed" {
+            "item"
+        } else {
+            "payload"
+        });
+        let explicit = [
+            parsed.get("turn_id"),
+            payload.and_then(|p| p.get("turn_id")),
+            payload
+                .and_then(|p| p.get("internal_chat_message_metadata_passthrough"))
+                .and_then(|p| p.get("turn_id")),
+        ];
+        let mut binding = None;
+        for value in explicit.into_iter().flatten() {
+            let candidate = value_to_string(value);
+            if candidate.is_none()
+                || binding
+                    .as_ref()
+                    .is_some_and(|known| Some(known) != candidate.as_ref())
+            {
+                event.metadata["codex_display_turn_conflict"] = json!(true);
+                break;
+            }
+            binding = candidate;
+        }
+        if event.metadata["codex_display_turn_conflict"] != true {
+            if let Some(binding) = binding {
+                set_metadata_string(&mut event.metadata, "provider_turn_id", &binding);
+            }
+        }
     }
+    Some(event)
 }
 
 fn normalize_codex_payload(
@@ -752,16 +1119,25 @@ fn normalize_codex_payload(
             turn_id,
             payload_type,
         ),
-        "agent_message" | "assistant_message" => message_event(
-            session_id,
-            provider,
-            sequence,
-            AgentChatRole::Assistant,
-            text_from_value(payload)?,
-            source,
-            turn_id,
-            payload_type,
-        ),
+        "agent_message" | "assistant_message" => {
+            let mut event = message_event(
+                session_id,
+                provider,
+                sequence,
+                AgentChatRole::Assistant,
+                text_from_value(payload)?,
+                source,
+                turn_id,
+                payload_type,
+            )?;
+            if let Some(provider_turn_id) = codex_provider_turn_id(payload) {
+                set_metadata_string(&mut event.metadata, "provider_turn_id", &provider_turn_id);
+            }
+            if let Some(phase) = str_field(payload, "phase") {
+                set_metadata_string(&mut event.metadata, "provider_phase", phase);
+            }
+            Some(event)
+        }
         "message" => {
             let role = role_from_str(str_field(payload, "role")?)?;
             if codex_response_item_user_context(payload, &source, &role) {
@@ -792,10 +1168,12 @@ fn normalize_codex_payload(
                     metadata,
                 );
             }
-            let preserve_provider_turn_id = source == "response_item"
-                && matches!(role, AgentChatRole::User | AgentChatRole::Assistant);
+            let preserve_provider_turn_id =
+                matches!(source.as_str(), "response_item" | "item.completed")
+                    && matches!(role, AgentChatRole::User | AgentChatRole::Assistant);
             let is_assistant_response_item =
-                source == "response_item" && role == AgentChatRole::Assistant;
+                matches!(source.as_str(), "response_item" | "item.completed")
+                    && role == AgentChatRole::Assistant;
             let mut event = message_event(
                 session_id,
                 provider,
@@ -1758,7 +2136,7 @@ fn normalize_mock(
     sequence: u64,
 ) -> Option<AgentChatEvent> {
     let msg_type = str_field(parsed, "type")?;
-    match msg_type {
+    let mut normalized = match msg_type {
         "init" => Some(status_event(
             session_id,
             provider,
@@ -1859,7 +2237,20 @@ fn normalize_mock(
             },
         )),
         _ => None,
+    }?;
+    if matches!(msg_type, "message" | "model" | "info") {
+        if let Some(provenance) = super::transcript::mock_mirror_provenance(parsed) {
+            if let Some(mirror) = provenance.mirror {
+                normalized.metadata["mock_observation_id"] = json!(mirror.observation_id);
+                normalized.metadata["mock_provider_incarnation"] = json!(mirror.incarnation);
+                normalized.metadata["mock_provider_session_id"] =
+                    json!(provenance.provider_session_id);
+                normalized.metadata["mock_mirror_logged"] = json!(mirror.logged);
+                normalized.metadata["mock_observation_digest"] = json!(mirror.payload_sha256);
+            }
+        }
     }
+    Some(normalized)
 }
 
 fn normalize_fallback_json(
@@ -1968,9 +2359,22 @@ fn message_event_with_metadata(
     text: String,
     source: String,
     turn_id: Option<String>,
-    metadata: Value,
+    mut metadata: Value,
 ) -> Option<AgentChatEvent> {
     let text = visible_chat_text_for_provider(provider, &role, &text)?;
+    if provider.eq_ignore_ascii_case("codex")
+        && matches!(role, AgentChatRole::User | AgentChatRole::Assistant)
+    {
+        // Capture the complete normalized narrative before archive retention or
+        // page headers replace it with an excerpt. Transport/citation cleanup is
+        // shared by both native forms; a preview must never be hashed as a body.
+        set_metadata_string(
+            &mut metadata,
+            CODEX_DISPLAY_TEXT_SHA256,
+            &codex_display_sha256(&text),
+        );
+        metadata[CODEX_DISPLAY_TEXT_BYTES] = json!(text.len());
+    }
     Some(event(
         session_id,
         provider,
@@ -2277,6 +2681,339 @@ fn metadata_string(metadata: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// Complementary native forms of a Codex narrative, never physical identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexDisplaySide {
+    UserRequest,
+    UserMirror,
+    AssistantLive,
+    AssistantFinal,
+}
+
+fn codex_display_sha256(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+fn codex_display_string<'a>(event: &'a AgentChatEvent, key: &str) -> Option<&'a str> {
+    event
+        .metadata
+        .get(key)?
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn codex_display_optional_string<'a>(
+    event: &'a AgentChatEvent,
+    key: &str,
+) -> Option<Option<&'a str>> {
+    match event.metadata.get(key) {
+        None | Some(Value::Null) => Some(None),
+        Some(_) => codex_display_string(event, key).map(Some),
+    }
+}
+
+fn codex_display_text_evidence(event: &AgentChatEvent) -> Option<(String, u64)> {
+    match (
+        event.metadata.get(CODEX_DISPLAY_TEXT_SHA256),
+        event.metadata.get(CODEX_DISPLAY_TEXT_BYTES),
+    ) {
+        (None, None) => {
+            // Old unabridged native rows can still qualify by exact text. An
+            // archive excerpt or a caller-clipped header cannot supply that proof.
+            if !event.metadata["text_excerpt"].is_null()
+                || !event.metadata["text_artifact_refs"].is_null()
+            {
+                return None;
+            }
+            let text = event
+                .text
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())?;
+            Some((codex_display_sha256(text), text.len() as u64))
+        }
+        (Some(digest), Some(bytes)) => {
+            let digest = digest.as_str()?;
+            let bytes = bytes.as_u64().filter(|bytes| *bytes > 0)?;
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return None;
+            }
+            if let Some(text) = event.text.as_deref() {
+                // Recheck any complete body that is still available. Shorter
+                // previews rely on the caller-trusted pre-retention digest.
+                if text.len() as u64 > bytes
+                    || (text.len() as u64 == bytes && codex_display_sha256(text) != digest)
+                {
+                    return None;
+                }
+            }
+            Some((digest.to_owned(), bytes))
+        }
+        _ => None,
+    }
+}
+
+/// Returns a deterministic candidate bucket and its native display form.
+///
+/// Callers must admit native coordinates/epoch and partition by owned conversation
+/// before using this evidence. Digests are trusted only from this normalizer's
+/// full native output or its retained archive metadata, never arbitrary input or
+/// clipped headers without that metadata. Optional scope/session/epoch evidence
+/// must agree in presence and value; a common positive log path is always required.
+/// Equal keys do not prove occurrence uniqueness, physical identity or eligibility.
+pub(crate) fn codex_display_evidence(event: &AgentChatEvent) -> Option<(String, CodexDisplaySide)> {
+    if event.provider != "codex"
+        || event.session_id.trim().is_empty()
+        || event.kind != AgentChatEventKind::Message
+        || event.metadata["provider_log"] != true
+        || event.metadata["generated"] == true
+        || event.metadata["codex_display_turn_conflict"] == true
+    {
+        return None;
+    }
+    let mut commentary_domain = false;
+    let side = match (
+        event.role.as_ref(),
+        event.source.as_deref(),
+        codex_display_string(event, "raw_type"),
+    ) {
+        (Some(AgentChatRole::User), Some("response_item"), Some("message")) => {
+            CodexDisplaySide::UserRequest
+        }
+        (Some(AgentChatRole::User), Some("event_msg"), Some("user_message")) => {
+            CodexDisplaySide::UserMirror
+        }
+        (
+            Some(AgentChatRole::Assistant),
+            Some("event_msg"),
+            Some("agent_message" | "assistant_message"),
+        ) if event.turn_id.is_none()
+            && matches!(
+                codex_display_optional_string(event, "provider_phase")?,
+                None | Some("final_answer")
+            ) =>
+        {
+            CodexDisplaySide::AssistantLive
+        }
+        (
+            Some(AgentChatRole::Assistant),
+            Some("event_msg"),
+            Some("agent_message" | "assistant_message"),
+        ) if event.turn_id.is_none()
+            && codex_display_string(event, "provider_phase") == Some("commentary") =>
+        {
+            commentary_domain = true;
+            CodexDisplaySide::AssistantLive
+        }
+        (Some(AgentChatRole::Assistant), Some("response_item"), Some("message"))
+            if event
+                .turn_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && codex_display_string(event, "provider_phase") == Some("commentary") =>
+        {
+            commentary_domain = true;
+            CodexDisplaySide::AssistantFinal
+        }
+        (Some(AgentChatRole::Assistant), Some("response_item"), Some("message"))
+        | (
+            Some(AgentChatRole::Assistant),
+            Some("item.completed"),
+            Some("message" | "agent_message" | "assistant_message"),
+        ) if event
+            .turn_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+            && codex_display_string(event, "provider_phase") == Some("final_answer") =>
+        {
+            CodexDisplaySide::AssistantFinal
+        }
+        _ => return None,
+    };
+    let role = match side {
+        CodexDisplaySide::UserRequest | CodexDisplaySide::UserMirror => {
+            if codex_display_string(event, "input_origin") != Some("human_input")
+                || codex_display_string(event, "input_purpose") != Some("request")
+                || codex_display_string(event, "request_root_id").is_none()
+            {
+                return None;
+            }
+            // Native mirror and response_item roots can differ; neither is
+            // rewritten and they are not part of the common narrative bucket.
+            "user"
+        }
+        CodexDisplaySide::AssistantLive | CodexDisplaySide::AssistantFinal => "assistant",
+    };
+    let log_path = codex_display_string(event, "log_path")?;
+    let turn = codex_display_string(event, "provider_turn_id")?;
+    let conversation = codex_display_optional_string(event, "conversation_archive_id")?;
+    let native_session = codex_display_optional_string(event, "provider_session_id")?;
+    let source_path = codex_display_optional_string(event, "source_path")?;
+    let epoch = codex_display_optional_string(event, "chat_source_epoch")?;
+    let (text_digest, text_bytes) = codex_display_text_evidence(event)?;
+    let domain = if commentary_domain {
+        "codex-display-v1-commentary"
+    } else {
+        "codex-display-v1"
+    };
+    // JSON framing prevents separator-containing identities from sharing a key.
+    let key = serde_json::to_string(&json!([
+        domain,
+        event.session_id,
+        "codex",
+        "message",
+        role,
+        log_path,
+        turn,
+        conversation,
+        native_session,
+        source_path,
+        epoch,
+        text_digest,
+        text_bytes,
+    ]))
+    .ok()?;
+    Some((key, side))
+}
+
+/// Digest the complete evidence before the bounded source reader clips string metadata.
+pub(crate) fn codex_display_identity_sha256(event: &AgentChatEvent) -> Option<String> {
+    let (evidence, _) = codex_display_evidence(event)?;
+    Some(codex_display_sha256(&evidence))
+}
+
+/// Reuse a digest produced by the bounded native reader after its fields have
+/// been clipped. Call only after native source ownership has been validated.
+pub(crate) fn codex_display_evidence_from_bounded_header(
+    event: &AgentChatEvent,
+) -> Option<(String, CodexDisplaySide)> {
+    if event.metadata["chat_provisional"] != true
+        || event.metadata["chat_source_ref"].as_str() != Some(event.id.as_str())
+        || event.metadata["chat_source_start"].as_u64().is_none()
+        || event.metadata["chat_source_end"].as_u64().is_none()
+    {
+        return None;
+    }
+    let (_, side) = codex_display_evidence(event)?;
+    let digest = event.metadata[CODEX_DISPLAY_IDENTITY_SHA256].as_str()?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    Some((digest.to_owned(), side))
+}
+
+/// Qualifies complementary narrative forms only. The caller must additionally
+/// prove a unique admitted occurrence on each side within the owned source/epoch.
+/// Retain both physical rows and IDs; this relation cannot advance capture cursors.
+pub(crate) fn codex_display_pair(first: &AgentChatEvent, second: &AgentChatEvent) -> bool {
+    let Some((first_key, first_side)) = codex_display_evidence(first) else {
+        return false;
+    };
+    let Some((second_key, second_side)) = codex_display_evidence(second) else {
+        return false;
+    };
+    first_key == second_key
+        && matches!(
+            (first_side, second_side),
+            (CodexDisplaySide::UserRequest, CodexDisplaySide::UserMirror)
+                | (CodexDisplaySide::UserMirror, CodexDisplaySide::UserRequest)
+                | (
+                    CodexDisplaySide::AssistantLive,
+                    CodexDisplaySide::AssistantFinal
+                )
+                | (
+                    CodexDisplaySide::AssistantFinal,
+                    CodexDisplaySide::AssistantLive
+                )
+        )
+}
+
+fn codex_content_sha256(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn codex_user_text_sha256(text: &str) -> String {
+    codex_content_sha256(text)
+}
+
+pub(crate) fn codex_user_mirror_pair(first: &AgentChatEvent, second: &AgentChatEvent) -> bool {
+    let (request, mirror) = match (first.source.as_deref(), second.source.as_deref()) {
+        (Some("response_item"), Some("event_msg")) => (first, second),
+        (Some("event_msg"), Some("response_item")) => (second, first),
+        _ => return false,
+    };
+    if !request.provider.eq_ignore_ascii_case("codex")
+        || !mirror.provider.eq_ignore_ascii_case("codex")
+        || request.session_id != mirror.session_id
+        || request.kind != AgentChatEventKind::Message
+        || mirror.kind != AgentChatEventKind::Message
+        || request.role != Some(AgentChatRole::User)
+        || mirror.role != Some(AgentChatRole::User)
+        || request.metadata["provider_log"] != true
+        || mirror.metadata["provider_log"] != true
+        || request.metadata["input_origin"] != "human_input"
+        || mirror.metadata["input_origin"] != "human_input"
+        || request.metadata["input_purpose"] != "request"
+        || mirror.metadata["input_purpose"] != "request"
+        || request.metadata["raw_type"] != "message"
+        || mirror.metadata["raw_type"] != "user_message"
+        || request.text.as_deref().is_some_and(str::is_empty)
+        || mirror.text.as_deref().is_some_and(str::is_empty)
+    {
+        return false;
+    }
+    let same_nonempty_metadata = |key: &str| {
+        metadata_string(&request.metadata, key)
+            .zip(metadata_string(&mirror.metadata, key))
+            .is_some_and(|(left, right)| left == right)
+    };
+    let same_optional_session = match (
+        metadata_string(&request.metadata, "provider_session_id"),
+        metadata_string(&mirror.metadata, "provider_session_id"),
+    ) {
+        (Some(request_session), Some(mirror_session)) => request_session == mirror_session,
+        (None, None) => true,
+        _ => false,
+    };
+    let request_digest = request
+        .text
+        .as_deref()
+        .map(codex_user_text_sha256)
+        .or_else(|| metadata_string(&request.metadata, "codex_user_text_sha256"));
+    let mirror_digest = mirror
+        .text
+        .as_deref()
+        .map(codex_user_text_sha256)
+        .or_else(|| metadata_string(&mirror.metadata, "codex_user_text_sha256"));
+    let exact_text_match = match (request.text.as_deref(), mirror.text.as_deref()) {
+        (Some(request_text), Some(mirror_text)) => request_text == mirror_text,
+        _ => request_digest
+            .as_deref()
+            .zip(mirror_digest.as_deref())
+            .is_some_and(|(left, right)| left == right),
+    };
+    let distinct_roots_are_bound = metadata_string(&request.metadata, "request_root_id").is_some()
+        && metadata_string(&mirror.metadata, "request_root_id").is_some();
+    exact_text_match
+        && request_digest.is_some()
+        && request_digest == mirror_digest
+        && same_nonempty_metadata("log_path")
+        && same_optional_session
+        && same_nonempty_metadata("provider_turn_id")
+        && distinct_roots_are_bound
+}
+
 fn set_metadata_string(metadata: &mut Value, key: &str, value: &str) {
     if !metadata.is_object() {
         *metadata = json!({});
@@ -2405,8 +3142,607 @@ fn parse_json_string(value: &str) -> Option<Value> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn codex_pending_context_raw_line_fits_the_continuation_budget() {
+        let text = "x".repeat(600 * 1024);
+        let context = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "id": "context-a", "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-a", "content_item_kinds": ["agents_md.instructions"]
+                }
+            }
+        })
+        .to_string();
+        let mut state = TranscriptNormalizationState::default();
+        let result = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [context.as_str()],
+            &mut state,
+            false,
+            true,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(result.expect("bounded normalization").is_empty());
+        assert_eq!(state.pending_events.len(), 1);
+        assert!(state.pending_events[0].text.as_deref() == Some(text.as_str()));
+        assert!(state.pending_events[0]
+            .metadata
+            .get(PROVIDER_RAW_LINE_METADATA_KEY)
+            .is_none());
+        assert!(
+            serde_json::to_vec(&state).expect("measure state").len()
+                <= MAX_NORMALIZATION_STATE_BYTES
+        );
+    }
+
+    #[test]
+    fn codex_legacy_pending_context_compacts_raw_evidence_without_inventing_coordinates() {
+        let raw = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "id": "old-context-a", "role": "user",
+                "content": [{"type": "input_text", "text": "Old pending context"}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-a", "content_item_kinds": ["agents_md.instructions"]
+                }
+            }
+        })
+        .to_string();
+        let mut state = TranscriptNormalizationState::default();
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [raw.as_str()],
+            &mut state,
+            false,
+            false,
+        )
+        .expect("construct old pending state");
+        assert_eq!(state.pending_events.len(), 1);
+        state.pending_events[0].metadata[PROVIDER_RAW_LINE_METADATA_KEY] =
+            serde_json::Value::String(raw.clone());
+        let previous_id = state.pending_events[0].id.clone();
+        let previous_sequence = state.pending_events[0].sequence;
+        let restored: TranscriptNormalizationState = serde_json::from_str(
+            &serde_json::to_string(&state).expect("persist old pending state"),
+        )
+        .expect("restore old pending state");
+        let mut state = restored;
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            std::iter::empty::<&str>(),
+            &mut state,
+            false,
+            true,
+        )
+        .expect("compact bounded legacy continuation state");
+        assert_eq!(state.pending_events.len(), 1);
+        let pending = &state.pending_events[0];
+        assert_eq!(pending.id, previous_id);
+        assert_eq!(pending.sequence, previous_sequence);
+        assert!(pending
+            .metadata
+            .get(PROVIDER_RAW_LINE_METADATA_KEY)
+            .is_none());
+        assert_eq!(pending.text.as_deref(), Some("Old pending context"));
+        assert_eq!(pending.metadata["provider_turn_id"], "turn-a");
+        assert_eq!(pending.metadata["input_origin"], "context_injection");
+        assert!(pending.metadata.get("chat_source_ref").is_none());
+        assert!(pending.metadata.get("chat_source_start").is_none());
+        assert!(pending.metadata.get("chat_source_end").is_none());
+        assert!(pending.metadata.get("request_root_id").is_none());
+
+        state.pending_events[0].metadata["chat_source_ref"] = json!("native-source-ref");
+        state.pending_events[0].metadata["chat_source_start"] = json!(55);
+        state.pending_events[0].metadata["chat_source_end"] = json!(55 + raw.len());
+        state.pending_events[0].metadata["chat_source_epoch"] = json!("native-source-epoch");
+        let mut expected = state.clone();
+        expected.pending_events[0]
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove(PROVIDER_RAW_LINE_METADATA_KEY);
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            std::iter::empty::<&str>(),
+            &mut state,
+            false,
+            true,
+        )
+        .expect("preserve independently qualified native coordinates");
+        assert_eq!(state, expected);
+    }
+
     fn one(provider: &str, line: &str) -> AgentChatEvent {
         normalize_chat_line("agent-1", provider, line, 7).expect("event")
+    }
+
+    fn qualify_codex_display(event: &mut AgentChatEvent) {
+        event.metadata["provider_log"] = json!(true);
+        event.metadata["log_path"] = json!("owned-codex.jsonl");
+        event.metadata["provider_session_id"] = json!("native-session-a");
+        event.metadata["conversation_archive_id"] = json!("conversation-a");
+        event.metadata["chat_source_epoch"] = json!("epoch-a");
+    }
+
+    #[test]
+    fn pi_original_legacy_turn_uses_nested_precedence_and_ignores_envelope() {
+        assert_eq!(
+            pi_original_legacy_turn_id(&json!({"id":"envelope", "message":{"role":"user"}})),
+            None
+        );
+        assert_eq!(
+            pi_original_legacy_turn_id(
+                &json!({"id":"envelope", "message":{"turn_id":"original-turn", "id":"nested-id"}})
+            )
+            .as_deref(),
+            Some("original-turn")
+        );
+        assert_eq!(
+            pi_original_legacy_turn_id(
+                &json!({"id":"envelope", "message":{"id":null, "message_id":"old-message"}})
+            )
+            .as_deref(),
+            Some("old-message")
+        );
+    }
+
+    fn codex_display_user_events(text: &str) -> (AgentChatEvent, AgentChatEvent) {
+        let request = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "id": "request-a", "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-a", "content_item_kinds": ["user.text"]
+                }
+            }
+        })
+        .to_string();
+        let mirror = json!({
+            "type": "event_msg", "payload": {"type": "user_message", "message": text}
+        })
+        .to_string();
+        let mut events = normalize_chat_lines("agent-1", "codex", [request, mirror]);
+        assert_eq!(events.len(), 2);
+        for event in &mut events {
+            qualify_codex_display(event);
+        }
+        let mirror = events.pop().unwrap();
+        (events.pop().unwrap(), mirror)
+    }
+
+    #[test]
+    fn codex_display_user_mirror_qualifies_without_rewriting_physical_members() {
+        let mut events = normalize_chat_lines(
+            "agent-1",
+            "codex",
+            include_str!("fixtures/codex-user-input-mirror.jsonl").lines(),
+        );
+        assert_eq!(events.len(), 2);
+        for (index, event) in events.iter_mut().enumerate() {
+            qualify_codex_display(event);
+            event.metadata["chat_source_ref"] = json!(format!("native-member-{index}"));
+            event.metadata["chat_source_start"] = json!(index * 100);
+            event.metadata["chat_source_end"] = json!(index * 100 + 50);
+        }
+        let before = events.clone();
+        assert_eq!(
+            events[0].metadata["request_root_id"],
+            events[1].metadata["request_root_id"]
+        );
+        assert_ne!(
+            events[0].metadata["chat_source_ref"],
+            events[1].metadata["chat_source_ref"]
+        );
+        let (request_key, request_side) = codex_display_evidence(&events[0]).unwrap();
+        let (mirror_key, mirror_side) = codex_display_evidence(&events[1]).unwrap();
+        assert_eq!(request_key, mirror_key);
+        assert_eq!(request_side, CodexDisplaySide::UserRequest);
+        assert_eq!(mirror_side, CodexDisplaySide::UserMirror);
+        assert!(codex_display_pair(&events[0], &events[1]));
+        assert!(codex_display_pair(&events[1], &events[0]));
+        assert_eq!(events, before);
+    }
+
+    #[test]
+    fn codex_display_assistant_requires_an_identified_final_in_either_completion_form() {
+        for (source, raw_type) in [
+            ("response_item", "message"),
+            ("item.completed", "message"),
+            ("item.completed", "agent_message"),
+        ] {
+            let mut completion = json!({"type": source});
+            let payload_key = if source == "item.completed" {
+                "item"
+            } else {
+                "payload"
+            };
+            completion[payload_key] = json!({
+                "type": raw_type, "role": "assistant", "id": "answer-a",
+                "phase": "final_answer", "text": "abc\n<oai-mem-citation>internal</oai-mem-citation>",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-a"}
+            });
+            let completion = completion.to_string();
+            let mut events = normalize_chat_lines(
+                "agent-1",
+                "codex",
+                [
+                    r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                    r#"{"type":"event_msg","payload":{"type":"agent_message","message":"abc"}}"#,
+                    completion.as_str(),
+                ],
+            );
+            assert_eq!(events.len(), 2);
+            for event in &mut events {
+                qualify_codex_display(event);
+            }
+            let live = &events[0];
+            let final_event = &events[1];
+            assert_eq!(final_event.metadata["provider_turn_id"], "turn-a");
+            assert_eq!(final_event.metadata["provider_phase"], "final_answer");
+            assert_eq!(final_event.text.as_deref(), Some("abc"));
+            assert_eq!(
+                final_event.metadata[CODEX_DISPLAY_TEXT_SHA256],
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            );
+            assert_eq!(final_event.metadata[CODEX_DISPLAY_TEXT_BYTES], 3);
+            assert_eq!(
+                codex_display_evidence(live).unwrap().1,
+                CodexDisplaySide::AssistantLive
+            );
+            assert_eq!(
+                codex_display_evidence(final_event).unwrap().1,
+                CodexDisplaySide::AssistantFinal
+            );
+            let final_key = serde_json::to_string(&json!([
+                "codex-display-v1",
+                "agent-1",
+                "codex",
+                "message",
+                "assistant",
+                "owned-codex.jsonl",
+                "turn-a",
+                "conversation-a",
+                "native-session-a",
+                Value::Null,
+                "epoch-a",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                3
+            ]))
+            .unwrap();
+            assert_eq!(codex_display_evidence(live).unwrap().0, final_key);
+            assert_eq!(codex_display_evidence(final_event).unwrap().0, final_key);
+            assert!(codex_display_pair(live, final_event));
+            assert!(codex_display_pair(final_event, live));
+            let mut explicit_final_live = live.clone();
+            explicit_final_live.metadata["provider_phase"] = json!("final_answer");
+            assert!(codex_display_pair(&explicit_final_live, final_event));
+            assert_eq!(
+                codex_display_evidence(&explicit_final_live).unwrap().0,
+                final_key
+            );
+            for phase in [Value::Null, json!("commentary"), json!("")] {
+                let mut incomplete = final_event.clone();
+                incomplete.metadata["provider_phase"] = phase;
+                assert!(!codex_display_pair(live, &incomplete));
+            }
+            let mut unidentified = final_event.clone();
+            unidentified.turn_id = None;
+            assert!(!codex_display_pair(live, &unidentified));
+            let mut identified_live = live.clone();
+            identified_live.turn_id = Some("another-native-item".into());
+            assert!(!codex_display_pair(&identified_live, final_event));
+            let mut commentary_live = live.clone();
+            commentary_live.metadata["provider_phase"] = json!("commentary");
+            assert!(!codex_display_pair(&commentary_live, final_event));
+        }
+    }
+
+    #[test]
+    fn codex_display_commentary_pairs_only_complementary_commentary_observations() {
+        let mut events = normalize_chat_lines(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"event_msg","payload":{"type":"agent_message","message":"shared commentary","phase":"commentary","internal_chat_message_metadata_passthrough":{"turn_id":"turn-a"}}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"native-commentary-a","role":"assistant","phase":"commentary","text":"shared commentary","internal_chat_message_metadata_passthrough":{"turn_id":"turn-a"}}}"#,
+            ],
+        );
+        assert_eq!(events.len(), 2);
+        for event in &mut events {
+            qualify_codex_display(event);
+        }
+        let mirror = &events[0];
+        let item = &events[1];
+        assert_eq!(mirror.source.as_deref(), Some("event_msg"));
+        assert_eq!(mirror.turn_id, None);
+        assert_eq!(item.source.as_deref(), Some("response_item"));
+        assert_eq!(item.turn_id.as_deref(), Some("native-commentary-a"));
+        assert_ne!(mirror.id, item.id);
+
+        let (mirror_key, mirror_side) = codex_display_evidence(mirror).unwrap();
+        let (item_key, item_side) = codex_display_evidence(item).unwrap();
+        assert_eq!(mirror_key, item_key);
+        assert!(mirror_key.starts_with("[\"codex-display-v1-commentary\","));
+        assert_eq!(mirror_side, CodexDisplaySide::AssistantLive);
+        assert_eq!(item_side, CodexDisplaySide::AssistantFinal);
+        let original = events.clone();
+        assert!(codex_display_pair(mirror, item));
+        assert!(codex_display_pair(item, mirror));
+        assert_eq!(events, original);
+
+        let mut final_item = item.clone();
+        final_item.metadata["provider_phase"] = json!("final_answer");
+        assert!(!codex_display_pair(mirror, &final_item));
+        assert!(!codex_display_pair(&final_item, mirror));
+        let mut final_mirror = mirror.clone();
+        final_mirror.metadata["provider_phase"] = json!("final_answer");
+        assert!(!codex_display_pair(&final_mirror, item));
+        assert!(!codex_display_pair(item, &final_mirror));
+
+        let mut unknown_mirror = mirror.clone();
+        unknown_mirror
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_phase");
+        assert!(codex_display_pair(&unknown_mirror, &final_item));
+        assert!(codex_display_pair(&final_item, &unknown_mirror));
+        assert!(codex_display_pair(&final_mirror, &final_item));
+
+        let mut another_mirror = mirror.clone();
+        another_mirror.id = "another-commentary-mirror".into();
+        assert!(!codex_display_pair(mirror, &another_mirror));
+        let mut another_item = item.clone();
+        another_item.id = "another-commentary-item-observation".into();
+        another_item.turn_id = Some("native-commentary-b".into());
+        assert_ne!(item.turn_id, another_item.turn_id);
+        assert!(!codex_display_pair(item, &another_item));
+        assert!(codex_display_pair(mirror, &another_item));
+        assert_eq!(
+            [item, &another_item]
+                .into_iter()
+                .filter(|candidate| codex_display_pair(mirror, candidate))
+                .count(),
+            2,
+            "native item IDs remain separate ambiguous candidates"
+        );
+
+        let mut missing_log = mirror.clone();
+        missing_log
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("log_path");
+        assert!(codex_display_evidence(&missing_log).is_none());
+        assert!(!codex_display_pair(&missing_log, item));
+        let mut missing_turn = item.clone();
+        missing_turn
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_turn_id");
+        assert!(codex_display_evidence(&missing_turn).is_none());
+        assert!(!codex_display_pair(mirror, &missing_turn));
+        let mut unidentified_item = item.clone();
+        unidentified_item.turn_id = None;
+        assert!(codex_display_evidence(&unidentified_item).is_none());
+        assert!(!codex_display_pair(mirror, &unidentified_item));
+        let mut completed_commentary = item.clone();
+        completed_commentary.source = Some("item.completed".into());
+        assert!(codex_display_evidence(&completed_commentary).is_none());
+
+        let mut unbound_mirror = mirror.clone();
+        let mut unbound_item = item.clone();
+        for event in [&mut unbound_mirror, &mut unbound_item] {
+            event
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("provider_session_id");
+        }
+        assert!(codex_display_pair(&unbound_mirror, &unbound_item));
+        unbound_item.metadata["provider_session_id"] = json!("native-session-a");
+        assert!(!codex_display_pair(&unbound_mirror, &unbound_item));
+    }
+
+    #[test]
+    fn codex_display_explicit_live_turn_is_not_overwritten_by_active_turn() {
+        let events = normalize_chat_lines(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                r#"{"type":"event_msg","payload":{"type":"agent_message","message":"answer","internal_chat_message_metadata_passthrough":{"turn_id":"turn-b"}}}"#,
+            ],
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].metadata["provider_turn_id"], "turn-b");
+    }
+
+    #[test]
+    fn codex_display_rejects_missing_or_conflicting_scope_and_source_evidence() {
+        let (request, mirror) = codex_display_user_events("same request");
+        for (key, value) in [
+            ("provider_log", json!(false)),
+            ("generated", json!(true)),
+            ("log_path", Value::Null),
+            ("log_path", json!("foreign.jsonl")),
+            ("log_path", json!(" ")),
+            ("provider_turn_id", Value::Null),
+            ("provider_turn_id", json!("turn-b")),
+            ("provider_turn_id", json!(12)),
+            ("provider_session_id", json!("session-b")),
+            ("provider_session_id", Value::Null),
+            ("conversation_archive_id", json!("conversation-b")),
+            ("conversation_archive_id", Value::Null),
+            ("chat_source_epoch", json!("epoch-b")),
+            ("chat_source_epoch", Value::Null),
+            ("source_path", json!("foreign.jsonl")),
+            ("raw_type", json!("message")),
+            ("input_origin", json!("context_injection")),
+            ("input_purpose", json!("internal")),
+            ("request_root_id", Value::Null),
+        ] {
+            let mut incompatible = mirror.clone();
+            incompatible.metadata[key] = value;
+            assert!(!codex_display_pair(&request, &incompatible), "{key}");
+        }
+        for key in ["log_path", "provider_turn_id", "raw_type"] {
+            let mut unbound_request = request.clone();
+            let mut unbound_mirror = mirror.clone();
+            unbound_request
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            unbound_mirror.metadata.as_object_mut().unwrap().remove(key);
+            assert!(codex_display_evidence(&unbound_request).is_none(), "{key}");
+            assert!(!codex_display_pair(&unbound_request, &unbound_mirror));
+        }
+        let mut wrong_agent = mirror.clone();
+        wrong_agent.session_id = "agent-2".into();
+        assert!(!codex_display_pair(&request, &wrong_agent));
+        let mut wrong_provider = mirror.clone();
+        wrong_provider.provider = "pi".into();
+        assert!(!codex_display_pair(&request, &wrong_provider));
+        let mut wrong_kind = mirror.clone();
+        wrong_kind.kind = AgentChatEventKind::ToolResult;
+        assert!(!codex_display_pair(&request, &wrong_kind));
+        let mut wrong_role = mirror.clone();
+        wrong_role.role = Some(AgentChatRole::System);
+        assert!(!codex_display_pair(&request, &wrong_role));
+        let mut no_source = mirror.clone();
+        no_source.source = None;
+        assert!(!codex_display_pair(&request, &no_source));
+    }
+
+    #[test]
+    fn codex_display_optional_native_session_requires_matching_positive_evidence() {
+        let (mut request, mut mirror) = codex_display_user_events("same request");
+        request
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_session_id");
+        mirror
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_session_id");
+        // A common positive log binding supports native logs without session
+        // metadata. One supplied session must never be treated as two agreeing.
+        assert!(codex_display_pair(&request, &mirror));
+        request.metadata["provider_session_id"] = json!("native-session-a");
+        assert!(!codex_display_pair(&request, &mirror));
+        mirror.metadata["provider_session_id"] = json!("native-session-a");
+        assert!(codex_display_pair(&request, &mirror));
+    }
+
+    #[test]
+    fn codex_display_repeated_occurrences_are_candidates_not_identity_or_uniqueness() {
+        let (request, mirror) = codex_display_user_events("repeated request");
+        let mut repeated_request = request.clone();
+        repeated_request.id = "another-physical-request".into();
+        repeated_request.turn_id = Some("another-native-request".into());
+        repeated_request.metadata["request_root_id"] = json!("another-native-request");
+        repeated_request.sequence = Some(400);
+        assert!(!codex_display_pair(&request, &repeated_request));
+        assert!(!codex_display_pair(&mirror, &mirror));
+        // The caller's indexed source/occurrence counts must refuse this
+        // ambiguous bucket; a pure pair predicate cannot certify those counts.
+        assert_eq!(
+            [&request, &repeated_request]
+                .into_iter()
+                .filter(|candidate| codex_display_pair(candidate, &mirror))
+                .count(),
+            2
+        );
+        let mut another_turn = mirror.clone();
+        another_turn.metadata["provider_turn_id"] = json!("turn-b");
+        assert!(!codex_display_pair(&request, &another_turn));
+    }
+
+    #[test]
+    fn codex_display_long_text_digest_survives_retention_and_rejects_equal_excerpts() {
+        let prefix = "same long narrative ".repeat(20_000);
+        let original = format!("{prefix}original suffix");
+        let different = format!("{prefix}changed! suffix");
+        let (request, mut mirror) = codex_display_user_events(&original);
+        let (_, mut conflicting) = codex_display_user_events(&different);
+        assert_eq!(request.metadata[CODEX_DISPLAY_TEXT_BYTES], original.len());
+        assert_eq!(
+            request.metadata[CODEX_DISPLAY_TEXT_BYTES],
+            conflicting.metadata[CODEX_DISPLAY_TEXT_BYTES]
+        );
+        assert_ne!(
+            request.metadata[CODEX_DISPLAY_TEXT_SHA256],
+            conflicting.metadata[CODEX_DISPLAY_TEXT_SHA256]
+        );
+        let excerpt = &prefix[..256];
+        for event in [&mut mirror, &mut conflicting] {
+            event.text = None;
+            event.metadata["text_excerpt"] = json!(excerpt);
+            event.metadata["text_artifact_refs"] = json!(["artifacts/body.txt"]);
+        }
+        let restored: AgentChatEvent =
+            serde_json::from_slice(&serde_json::to_vec(&mirror).unwrap()).unwrap();
+        assert!(codex_display_pair(&request, &restored));
+        assert!(!codex_display_pair(&request, &conflicting));
+        // Reusing the same preview as text also relies on the complete digest.
+        mirror.text = Some(excerpt.into());
+        conflicting.text = Some(excerpt.into());
+        assert!(codex_display_pair(&request, &mirror));
+        assert!(!codex_display_pair(&request, &conflicting));
+        mirror
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove(CODEX_DISPLAY_TEXT_SHA256);
+        mirror
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove(CODEX_DISPLAY_TEXT_BYTES);
+        assert!(!codex_display_pair(&request, &mirror));
+    }
+
+    #[test]
+    fn codex_display_digest_rejects_incomplete_invalid_or_conflicting_full_body_evidence() {
+        let (request, mirror) = codex_display_user_events("abc");
+        for (key, value) in [
+            (CODEX_DISPLAY_TEXT_SHA256, json!("not-a-digest")),
+            (CODEX_DISPLAY_TEXT_SHA256, Value::Null),
+            (CODEX_DISPLAY_TEXT_BYTES, json!(0)),
+            (CODEX_DISPLAY_TEXT_BYTES, json!("3")),
+            (CODEX_DISPLAY_TEXT_BYTES, Value::Null),
+        ] {
+            let mut corrupt = mirror.clone();
+            corrupt.metadata[key] = value;
+            assert!(codex_display_evidence(&corrupt).is_none(), "{key}");
+        }
+        let mut changed_body = mirror.clone();
+        changed_body.text = Some("abd".into());
+        assert!(!codex_display_pair(&request, &changed_body));
+        let mut old = mirror.clone();
+        old.metadata
+            .as_object_mut()
+            .unwrap()
+            .remove(CODEX_DISPLAY_TEXT_SHA256);
+        old.metadata
+            .as_object_mut()
+            .unwrap()
+            .remove(CODEX_DISPLAY_TEXT_BYTES);
+        assert!(codex_display_pair(&request, &old));
+        old.text = Some("different".into());
+        assert!(!codex_display_pair(&request, &old));
     }
 
     #[test]
@@ -2469,6 +3805,402 @@ mod tests {
     }
 
     #[test]
+    fn codex_context_for_next_turn_survives_boundary_after_restart() {
+        let mut state = TranscriptNormalizationState::default();
+        let first_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"assistant-a","role":"assistant","content":[{"type":"output_text","text":"Turn A answer"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a"}}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"context-b","role":"user","content":[{"type":"input_text","text":"Turn B context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-b","content_item_kinds":["agents_md.instructions"]}}}"#,
+            ],
+            &mut state,
+            false,
+            true,
+        )
+        .expect("hold turn A rows and early turn B context");
+        assert!(first_events.is_empty());
+
+        let persisted = serde_json::to_string(&state).expect("persist before turn boundary");
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_str(&persisted).expect("restore before turn boundary");
+        let boundary_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [r#"{"type":"turn_context","payload":{"turn_id":"turn-b"}}"#],
+            &mut restored,
+            false,
+            true,
+        )
+        .expect("release turn A rows and retain turn B context");
+
+        assert_eq!(boundary_events.len(), 2);
+        assert_eq!(boundary_events[0].text.as_deref(), Some("Turn A context"));
+        assert_eq!(boundary_events[0].role, Some(AgentChatRole::System));
+        assert!(boundary_events[0].metadata.get("request_root_id").is_none());
+        assert_eq!(boundary_events[1].text.as_deref(), Some("Turn A answer"));
+        assert_eq!(boundary_events[0].metadata["provider_turn_id"], "turn-a");
+        assert!(restored.has_pending_events());
+        assert_eq!(restored.pending_context_indices.len(), 1);
+        assert_eq!(
+            restored.pending_events[restored.pending_context_indices[0]]
+                .text
+                .as_deref(),
+            Some("Turn B context")
+        );
+
+        let persisted = serde_json::to_string(&restored).expect("persist turn B context");
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_str(&persisted).expect("restore turn B context");
+        let request_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [r#"{"type":"response_item","payload":{"type":"message","id":"request-b","role":"user","content":[{"type":"input_text","text":"Turn B request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-b","content_item_kinds":["user.text"]}}}"#],
+            &mut restored,
+            false,
+            true,
+        )
+        .expect("bind retained context to turn B input");
+
+        assert_eq!(request_events.len(), 2);
+        assert_eq!(request_events[0].text.as_deref(), Some("Turn B context"));
+        assert_eq!(request_events[0].metadata["request_root_id"], "request-b");
+        assert_eq!(request_events[1].metadata["request_root_id"], "request-b");
+        assert!(!restored.has_pending_events());
+    }
+
+    #[test]
+    fn codex_distinct_turn_context_releases_pending_events_across_batches_and_retries() {
+        let first_batch = [
+            r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"assistant-a","role":"assistant","content":[{"type":"output_text","text":"Turn A assistant"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a"}}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-a","name":"shell_command","input":{"command":"true"}}}"#,
+        ];
+        let mut first_state = TranscriptNormalizationState::default();
+        let first_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            first_batch,
+            &mut first_state,
+            false,
+            true,
+        )
+        .expect("normalize first batch");
+        assert!(first_events.is_empty());
+        assert!(first_state.has_pending_events());
+
+        let persisted = serde_json::to_string(&first_state).expect("persist continuation state");
+        let restored: TranscriptNormalizationState =
+            serde_json::from_str(&persisted).expect("restore continuation state");
+        let second_batch = [
+            r#"{"type":"turn_context","payload":{"turn_id":"turn-b"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"request-b","role":"user","content":[{"type":"input_text","text":"Turn B request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-b","content_item_kinds":["user.text"]}}}"#,
+        ];
+        let mut second_state = restored.clone();
+        let second_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            second_batch,
+            &mut second_state,
+            false,
+            true,
+        )
+        .expect("normalize second batch");
+        let mut retry_state = restored;
+        let retry_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            second_batch,
+            &mut retry_state,
+            false,
+            true,
+        )
+        .expect("retry second batch from the same persisted state");
+
+        assert_eq!(retry_events, second_events);
+        assert_eq!(retry_state, second_state);
+        assert_eq!(second_events.len(), 4);
+        assert_eq!(second_events[0].text.as_deref(), Some("Turn A context"));
+        assert_eq!(second_events[0].role, Some(AgentChatRole::System));
+        assert_eq!(
+            second_events[0].metadata["input_origin"],
+            "context_injection"
+        );
+        assert_eq!(second_events[0].metadata["provider_turn_id"], "turn-a");
+        assert!(second_events[0].metadata.get("request_root_id").is_none());
+        assert_eq!(second_events[0].id, "agent-1:2");
+        assert_eq!(second_events[1].text.as_deref(), Some("Turn A assistant"));
+        assert_eq!(second_events[1].id, "agent-1:3");
+        assert_eq!(second_events[2].kind, AgentChatEventKind::ToolCall);
+        assert_eq!(second_events[2].turn_id.as_deref(), Some("call-a"));
+        assert_eq!(second_events[2].id, "agent-1:4");
+        assert_eq!(second_events[3].text.as_deref(), Some("Turn B request"));
+        assert_eq!(second_events[3].metadata["request_root_id"], "request-b");
+        assert_eq!(second_events[3].id, "agent-1:6");
+        assert!(!second_state.has_pending_events());
+    }
+
+    #[test]
+    fn codex_repeated_same_turn_context_keeps_pending_binding_possible() {
+        let mut state = TranscriptNormalizationState::default();
+        let first_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+            ],
+            &mut state,
+            false,
+            true,
+        )
+        .expect("normalize context before the request");
+        assert!(first_events.is_empty());
+
+        let events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"request-a","role":"user","content":[{"type":"input_text","text":"Turn A request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["user.text"]}}}"#,
+            ],
+            &mut state,
+            false,
+            true,
+        )
+        .expect("same-turn context remains eligible for binding");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].text.as_deref(), Some("Turn A context"));
+        assert_eq!(events[0].metadata["request_root_id"], "request-a");
+        assert_eq!(
+            events[0].metadata["causal_ref"],
+            "provider:message:context-a"
+        );
+        assert_eq!(events[1].text.as_deref(), Some("Turn A request"));
+        assert!(!state.has_pending_events());
+    }
+
+    #[test]
+    fn codex_startup_fixture_context_before_turn_context_binds_after_restart() {
+        let lines = include_str!("codex/tests/fixtures/startup-host-context.jsonl")
+            .lines()
+            .collect::<Vec<_>>();
+        let mut state = TranscriptNormalizationState::default();
+        let first_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            lines[..4].iter().copied(),
+            &mut state,
+            false,
+            true,
+        )
+        .expect("normalize startup context before its turn context");
+        assert!(first_events.is_empty());
+        assert!(state.has_pending_events());
+        assert_eq!(state.codex_provider_turn_id, None);
+
+        let persisted = serde_json::to_string(&state).expect("persist pending startup context");
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_str(&persisted).expect("restore pending startup context");
+        let request = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "startup-request",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Inspect the startup state."}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "auto-compact-1",
+                    "content_item_kinds": ["user.text"],
+                },
+            },
+        })
+        .to_string();
+        let second_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [lines[4], request.as_str()],
+            &mut restored,
+            false,
+            true,
+        )
+        .expect("match startup context with the later same-turn input");
+
+        assert_eq!(second_events.len(), 2);
+        assert_eq!(
+            second_events[0].text.as_deref(),
+            Some("# AGENTS.md instructions\nSanitized host instructions.")
+        );
+        assert_eq!(
+            second_events[0].metadata["provider_turn_id"],
+            "auto-compact-1"
+        );
+        assert_eq!(
+            second_events[0].metadata["request_root_id"],
+            "startup-request"
+        );
+        assert_eq!(
+            second_events[1].metadata["request_root_id"],
+            "startup-request"
+        );
+        assert!(!restored.has_pending_events());
+    }
+
+    #[test]
+    fn codex_input_turn_identity_filters_pending_context_with_same_turn_control() {
+        let context = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "context-a",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Turn A context"}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-a",
+                    "content_item_kinds": ["agents_md.instructions"],
+                },
+            },
+        })
+        .to_string();
+        let turn_a_input = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "request-a",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Turn A request"}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-a",
+                    "content_item_kinds": ["user.text"],
+                },
+            },
+        })
+        .to_string();
+        let turn_b_input = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "request-b",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Turn B request"}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-b",
+                    "content_item_kinds": ["user.text"],
+                },
+            },
+        })
+        .to_string();
+
+        let mut distinct_state = TranscriptNormalizationState::default();
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                context.as_str(),
+            ],
+            &mut distinct_state,
+            false,
+            true,
+        )
+        .expect("hold turn A context");
+        let distinct_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [turn_b_input.as_str()],
+            &mut distinct_state,
+            false,
+            true,
+        )
+        .expect("release incompatible context before turn B input");
+
+        assert_eq!(distinct_events.len(), 2);
+        assert_eq!(distinct_events[0].text.as_deref(), Some("Turn A context"));
+        assert_eq!(distinct_events[0].metadata["provider_turn_id"], "turn-a");
+        assert!(distinct_events[0].metadata.get("request_root_id").is_none());
+        assert_eq!(distinct_events[0].role, Some(AgentChatRole::System));
+        assert_eq!(distinct_events[1].metadata["request_root_id"], "request-b");
+        assert!(!distinct_state.has_pending_events());
+
+        let mut same_state = TranscriptNormalizationState::default();
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                context.as_str(),
+            ],
+            &mut same_state,
+            false,
+            true,
+        )
+        .expect("hold same-turn context");
+        let same_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [turn_a_input.as_str()],
+            &mut same_state,
+            false,
+            true,
+        )
+        .expect("bind matching context to turn A input");
+        assert_eq!(same_events.len(), 2);
+        assert_eq!(same_events[0].metadata["request_root_id"], "request-a");
+        assert_eq!(same_events[1].metadata["request_root_id"], "request-a");
+        assert!(!same_state.has_pending_events());
+    }
+
+    #[test]
+    fn codex_missing_or_ambiguous_turn_id_releases_prior_pending_context() {
+        for boundary in [
+            r#"{"type":"turn_context","payload":{"root_turn_id":"turn-b"}}"#,
+            r#"{"type":"turn_context","turn_id":"turn-b","payload":{"turn_id":"turn-c"}}"#,
+        ] {
+            let mut state = TranscriptNormalizationState::default();
+            normalize_chat_lines_with_state(
+                "agent-1",
+                "codex",
+                [
+                    r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                    r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+                ],
+                &mut state,
+                false,
+                true,
+            )
+            .expect("normalize initial pending context");
+
+            let events = normalize_chat_lines_with_state(
+                "agent-1",
+                "codex",
+                [
+                    boundary,
+                    r#"{"type":"event_msg","payload":{"type":"user_message","message":"Unbound next request"}}"#,
+                ],
+                &mut state,
+                false,
+                true,
+            )
+            .expect("ambiguous turn context is a boundary");
+
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].text.as_deref(), Some("Turn A context"));
+            assert_eq!(events[0].metadata["provider_turn_id"], "turn-a");
+            assert!(events[0].metadata.get("request_root_id").is_none());
+            assert_eq!(events[1].text.as_deref(), Some("Unbound next request"));
+            assert_ne!(
+                events[0].metadata.get("request_root_id"),
+                events[1].metadata.get("request_root_id")
+            );
+            assert!(!state.has_pending_events());
+        }
+    }
+
+    #[test]
     fn non_claude_normalization_clears_legacy_tool_roots_without_other_state_loss() {
         let mut state = TranscriptNormalizationState {
             next_sequence: 19,
@@ -2506,6 +4238,102 @@ mod tests {
         .expect("clear legacy Codex tool roots");
 
         assert_eq!(state, expected);
+    }
+
+    #[test]
+    fn codex_drops_raw_line_metadata_while_claude_keeps_it_for_stable_ids() {
+        let mut codex_state = TranscriptNormalizationState::default();
+        let codex_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [r#"{"type":"event_msg","payload":{"type":"user_message","message":"request"}}"#],
+            &mut codex_state,
+            true,
+            true,
+        )
+        .expect("normalize Codex line");
+        assert_eq!(codex_events.len(), 1);
+        assert!(codex_events[0]
+            .metadata
+            .get(PROVIDER_RAW_LINE_METADATA_KEY)
+            .is_none());
+
+        let mut claude_state = TranscriptNormalizationState::default();
+        let claude_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "claude",
+            [r#"{"type":"user","message":{"role":"user","content":"request"}}"#],
+            &mut claude_state,
+            true,
+            true,
+        )
+        .expect("normalize Claude line");
+        assert_eq!(claude_events.len(), 1);
+        assert!(claude_events[0]
+            .metadata
+            .get(PROVIDER_RAW_LINE_METADATA_KEY)
+            .is_some());
+    }
+
+    #[test]
+    fn codex_upgrade_compacts_persisted_raw_lines_before_state_size_check() {
+        let mut pending = one(
+            "codex",
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"pending"}}"#,
+        );
+        set_metadata_string(
+            &mut pending.metadata,
+            PROVIDER_RAW_LINE_METADATA_KEY,
+            &"x".repeat(MAX_NORMALIZATION_STATE_BYTES),
+        );
+        let state = TranscriptNormalizationState {
+            pending_events: vec![pending],
+            ..TranscriptNormalizationState::default()
+        };
+        let persisted = serde_json::to_vec(&state).expect("persist legacy continuation state");
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_slice(&persisted).expect("restore legacy continuation state");
+
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            std::iter::empty::<&str>(),
+            &mut restored,
+            false,
+            true,
+        )
+        .expect("legacy raw-line metadata is removed before enforcing the state cap");
+
+        assert_eq!(restored.pending_events.len(), 1);
+        assert!(restored.pending_events[0]
+            .metadata
+            .get(PROVIDER_RAW_LINE_METADATA_KEY)
+            .is_none());
+    }
+
+    #[test]
+    fn codex_continuation_state_byte_limit_still_rejects_large_live_state() {
+        let mut pending = one(
+            "codex",
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"pending"}}"#,
+        );
+        pending.text = Some("x".repeat(MAX_NORMALIZATION_STATE_BYTES));
+        let mut state = TranscriptNormalizationState {
+            pending_events: vec![pending],
+            ..TranscriptNormalizationState::default()
+        };
+
+        let error = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            std::iter::empty::<&str>(),
+            &mut state,
+            false,
+            true,
+        )
+        .expect_err("large live continuation state remains over the cap");
+
+        assert!(error.contains("continuation-state byte limit exceeded"));
     }
 
     #[test]
@@ -2603,6 +4431,100 @@ mod tests {
         }));
         assert_eq!(users[0].source.as_deref(), Some("response_item"));
         assert_eq!(users[1].source.as_deref(), Some("event_msg"));
+        assert_eq!(users[0].text, users[1].text);
+        assert_eq!(
+            users[0].metadata["request_root_id"],
+            users[1].metadata["request_root_id"]
+        );
+        assert_eq!(
+            users[1].metadata["provider_mirror_request_root_ids"][0],
+            "msg:provider-turn-a"
+        );
+    }
+
+    #[test]
+    fn codex_user_mirror_requires_exact_preceding_request_across_state_restart() {
+        let mut state = TranscriptNormalizationState::default();
+        let first = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-a"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"native-request-a","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-a","content_item_kinds":["user.text"]}}}"#,
+            ],
+            &mut state,
+            false,
+            true,
+        )
+        .expect("normalize response_item request");
+        let expected_root = first
+            .iter()
+            .find(|event| event.role == Some(AgentChatRole::User))
+            .expect("response_item user request")
+            .metadata["request_root_id"]
+            .as_str()
+            .expect("response_item request root")
+            .to_string();
+
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_str(&serde_json::to_string(&state).expect("serialize state"))
+                .expect("restore state");
+        let mirror = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect the archive."}}"#],
+            &mut restored,
+            true,
+            true,
+        )
+        .expect("normalize matching event_msg mirror");
+        assert_eq!(mirror.len(), 1);
+        assert_eq!(mirror[0].metadata["request_root_id"], expected_root);
+        assert_eq!(mirror[0].metadata["provider_turn_id"], "provider-turn-a");
+
+        let mut unbound_state = TranscriptNormalizationState {
+            request_root_id: Some("active-request-root".to_string()),
+            codex_provider_turn_id: Some("provider-turn-a".to_string()),
+            codex_user_mirror_pending: true,
+            ..TranscriptNormalizationState::default()
+        };
+        let unbound = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect the archive."}}"#],
+            &mut unbound_state,
+            true,
+            true,
+        )
+        .expect("normalize unbound event_msg user message");
+        assert_ne!(
+            unbound[0].metadata["request_root_id"],
+            "active-request-root"
+        );
+        assert_eq!(
+            unbound_state.request_root_id.as_deref(),
+            Some("active-request-root")
+        );
+        assert!(unbound_state.codex_user_mirror_identity.is_none());
+    }
+
+    #[test]
+    fn codex_user_event_msg_with_changed_text_cannot_reuse_request_root() {
+        let events = normalize_chat_lines(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-a"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"native-request-a","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-a","content_item_kinds":["user.text"]}}}"#,
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect another archive."}}"#,
+            ],
+        );
+        let users = events
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::User))
+            .collect::<Vec<_>>();
+
+        assert_eq!(users.len(), 2);
         assert_ne!(
             users[0].metadata["request_root_id"],
             users[1].metadata["request_root_id"]
@@ -3292,6 +5214,181 @@ mod tests {
         assert_eq!(event.metadata["input_purpose"], "request");
         assert_eq!(event.metadata["context_observation"], "unreported");
         assert_ne!(event.metadata["input_origin"], "context_injection");
+    }
+
+    fn mock_receipt_line(kind: &str, turn: &str, incarnation: &str, sequence: u64) -> Value {
+        json!({
+            "type": kind, "role": "assistant", "content": "Equal answer", "turn_id": turn,
+            "wardian_mirror": {
+                "observation_id": format!("{incarnation}:{sequence}"),
+                "incarnation": incarnation, "provider_session_id": "actual-mock-session",
+                "logged": true
+            }
+        })
+    }
+
+    #[test]
+    fn mock_normalization_preserves_each_observation_and_locally_derived_digest() {
+        let incarnation = "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc";
+        let restarted = "f21f4e4e-8d11-4a64-9052-4f71052af686";
+        let lines = [
+            mock_receipt_line("message", "same-turn", incarnation, 1),
+            mock_receipt_line("model", "same-turn", incarnation, 2),
+            mock_receipt_line("info", "distinct-turn", incarnation, 3),
+            mock_receipt_line("model", "same-turn", restarted, 1),
+        ];
+        let events = normalize_chat_lines("agent-1", "mock", lines.iter().map(Value::to_string));
+        assert_eq!(events.len(), lines.len());
+        let mut ids = HashSet::new();
+        for (event, raw) in events.iter().zip(&lines) {
+            let watch =
+                super::super::transcript::extract_transcript_message("mock", &raw.to_string())
+                    .unwrap();
+            let claim = watch.provider_provenance.unwrap();
+            let mirror = claim.mirror.unwrap();
+            assert!(ids.insert(event.metadata["mock_observation_id"].as_str().unwrap()));
+            assert_eq!(event.metadata["mock_observation_id"], mirror.observation_id);
+            assert_eq!(
+                event.metadata["mock_provider_incarnation"],
+                mirror.incarnation
+            );
+            assert_eq!(
+                event.metadata["mock_provider_session_id"],
+                claim.provider_session_id
+            );
+            assert_eq!(event.metadata["mock_mirror_logged"], true);
+            assert_eq!(
+                event.metadata["mock_observation_digest"],
+                mirror.payload_sha256
+            );
+            assert_eq!(event.text.as_deref(), Some("Equal answer"));
+            assert_eq!(event.turn_id.as_deref(), raw["turn_id"].as_str());
+            assert_eq!(event.source.as_deref(), raw["type"].as_str());
+            assert!(event.metadata.get("provider_log").is_none());
+        }
+        let mut forged = lines[0].clone();
+        forged["wardian_mirror"]["payload_sha256"] = json!("forged");
+        let event = one("mock", &forged.to_string());
+        assert_eq!(
+            event.metadata["mock_observation_digest"],
+            format!("{:x}", Sha256::digest(serde_json::to_vec(&forged).unwrap()))
+        );
+        let original_digest = event.metadata["mock_observation_digest"].clone();
+        forged["content"] = json!("A conflicting raw body");
+        let conflict = one("mock", &forged.to_string());
+        assert_eq!(
+            conflict.metadata["mock_observation_id"],
+            event.metadata["mock_observation_id"]
+        );
+        assert_ne!(
+            conflict.metadata["mock_observation_digest"],
+            original_digest
+        );
+    }
+
+    #[test]
+    fn mock_normalization_keeps_unlogged_output_and_ignores_unproved_receipts() {
+        let mut raw =
+            mock_receipt_line("model", "turn-1", "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc", 1);
+        raw["wardian_mirror"]["logged"] = json!(false);
+        let unlogged = one("mock", &raw.to_string());
+        assert_eq!(unlogged.metadata["mock_mirror_logged"], false);
+        assert_eq!(unlogged.text.as_deref(), Some("Equal answer"));
+        assert!(unlogged.metadata.get("provider_log").is_none());
+        for receipt in [
+            Value::Null,
+            json!({}),
+            json!({
+                "observation_id": "wrong:1", "incarnation": "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc",
+                "provider_session_id": "actual-mock-session", "logged": true
+            }),
+        ] {
+            raw["wardian_mirror"] = receipt;
+            let event = one("mock", &raw.to_string());
+            assert_eq!(event.text.as_deref(), Some("Equal answer"));
+            for key in [
+                "mock_observation_id",
+                "mock_provider_incarnation",
+                "mock_provider_session_id",
+                "mock_mirror_logged",
+                "mock_observation_digest",
+            ] {
+                assert!(event.metadata.get(key).is_none(), "accepted {key}");
+            }
+        }
+        raw.as_object_mut().unwrap().remove("wardian_mirror");
+        assert!(one("mock", &raw.to_string())
+            .metadata
+            .get("mock_observation_id")
+            .is_none());
+    }
+
+    #[test]
+    fn mock_actual_header_session_survives_split_batches_and_state_restart() {
+        let mut state = TranscriptNormalizationState::default();
+        assert_eq!(state.mock_provider_session(), None);
+        let raw = mock_receipt_line("model", "turn-1", "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc", 1)
+            .to_string();
+        normalize_chat_lines_with_state("agent-1", "mock", [&raw], &mut state, false, true)
+            .unwrap();
+        assert_eq!(state.mock_provider_session(), None);
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "mock",
+            [r#"{"type":"init","session_id":"owned-header-session"}"#],
+            &mut state,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(state.mock_provider_session(), Some("owned-header-session"));
+        let serialized = serde_json::to_vec(&state).unwrap();
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(restored, state);
+        let events =
+            normalize_chat_lines_with_state("agent-1", "mock", [&raw], &mut restored, true, true)
+                .unwrap();
+        assert_eq!(
+            events[0].metadata["mock_provider_session_id"],
+            "actual-mock-session"
+        );
+        assert_eq!(
+            restored.mock_provider_session(),
+            Some("owned-header-session")
+        );
+        for session in [
+            Value::Null,
+            json!(""),
+            json!("x".repeat(129)),
+            json!("invalid session"),
+        ] {
+            restored = state.clone();
+            let invalid = json!({"type": "init", "session_id": session}).to_string();
+            normalize_chat_lines_with_state(
+                "agent-1",
+                "mock",
+                [&invalid],
+                &mut restored,
+                true,
+                true,
+            )
+            .unwrap();
+            assert_eq!(restored.mock_provider_session(), None);
+        }
+        let mut legacy = serde_json::to_value(state).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("mock_provider_session");
+        assert_eq!(
+            serde_json::from_value::<TranscriptNormalizationState>(legacy)
+                .unwrap()
+                .mock_provider_session(),
+            None
+        );
+        restored = TranscriptNormalizationState::default();
+        assert_eq!(restored.mock_provider_session(), None);
     }
 
     #[test]

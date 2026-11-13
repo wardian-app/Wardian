@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type Locator, type WebSocketRoute } from "@playwright/test";
+import type { RemoteAgentChatPage } from "../../src/features/remote/remoteClient";
 
 test.use({
   hasTouch: true,
@@ -285,10 +286,15 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
       }),
     });
   });
-  await page.route("**/remote/api/agents/agent-1/chat", async (route) => {
+  await page.route((url) => url.pathname === "/remote/api/agents/agent-1/chat", async (route) => {
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
+        session_id: "agent-1",
+        conversation_id: "remote-e2e-conversation",
+        generation: "remote-e2e-generation",
+        source_epoch: null,
+        revision: "remote-e2e-chat-1",
         events: [
           {
             id: "remote-user-message",
@@ -462,7 +468,16 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
             metadata: {},
           },
         ],
-      }),
+        next_before: null,
+        unchanged: false,
+        reset: false,
+        progress: "ready",
+        aliases: [],
+        removed_ids: [],
+        detail: null,
+        bytes_read: 0,
+        records_decoded: 9,
+      } satisfies RemoteAgentChatPage),
     });
   });
   await page.route("**/remote/api/ws-ticket", async (route) => {
@@ -795,15 +810,24 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   const transcript = page.locator(".chat-transcript-list");
   const transcriptBox = await transcript.boundingBox();
   const transcriptWidthMetrics = await transcript.evaluate((element) => {
+    return { remWidth: Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
+      maxWidth: Number.parseFloat(getComputedStyle(element).maxWidth) };
+  });
+  expect(transcriptWidthMetrics.maxWidth).toBeCloseTo(transcriptWidthMetrics.remWidth * 72, 0);
+  const proseWidthMetrics = await page.locator(".chat-markdown .chat-prose-block").first().evaluate((element) => {
     const probe = document.createElement("span");
-    probe.style.cssText = "position:absolute; width:1ch; height:0; overflow:hidden;";
+    probe.style.cssText = "position:absolute; width:100ch; height:0; overflow:hidden;";
     element.append(probe);
     const chWidth = probe.getBoundingClientRect().width;
     probe.remove();
     return { chWidth, maxWidth: Number.parseFloat(getComputedStyle(element).maxWidth) };
   });
-  expect(transcriptWidthMetrics.maxWidth).toBeCloseTo(transcriptWidthMetrics.chWidth * 76, 0);
-  const rowBoxes = await transcript.locator(":scope > .chat-row").evaluateAll((elements) =>
+  expect(proseWidthMetrics.maxWidth).toBeCloseTo(proseWidthMetrics.chWidth, 0);
+  const composerBox = await page.locator(".chat-composer").boundingBox();
+  expect(composerBox).not.toBeNull();
+  expect(composerBox!.x).toBeCloseTo(transcriptBox!.x, 0);
+  expect(composerBox!.width).toBeCloseTo(transcriptBox!.width, 0);
+  const rowBoxes = await transcript.locator(":scope > [data-chat-row-key] > .chat-row").evaluateAll((elements) =>
     elements.map((element) => {
       const { width, x } = element.getBoundingClientRect();
       return { width, x };

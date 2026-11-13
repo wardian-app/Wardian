@@ -303,8 +303,13 @@ mod tests {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or(&bin);
-            // Should be either "node" or a Gemini cmd shim, including absolute fallback paths.
-            assert!(bin == "node" || binary_name.eq_ignore_ascii_case("gemini.cmd"));
+            // npm shims can resolve to either bare Node or an adjacent node.exe.
+            assert!(
+                bin == "node"
+                    || binary_name.eq_ignore_ascii_case("node.exe")
+                    || binary_name.eq_ignore_ascii_case("gemini.cmd"),
+                "unexpected Gemini executable: {bin:?}"
+            );
         } else {
             assert_eq!(bin, "gemini");
         }
@@ -341,6 +346,14 @@ SET dp0=%~dp0
         let (executable, args) = GeminiProvider::new().get_executable();
 
         assert_eq!(executable, "node");
+        assert_eq!(args, vec![gemini_js.to_string_lossy().to_string()]);
+
+        let local_node = temp.path().join("node.exe");
+        std::fs::write(&local_node, b"resolver metadata fixture; never executed").unwrap();
+
+        let (executable, args) = GeminiProvider::new().get_executable();
+
+        assert_eq!(executable, local_node.to_string_lossy().to_string());
         assert_eq!(args, vec![gemini_js.to_string_lossy().to_string()]);
 
         match previous_path {

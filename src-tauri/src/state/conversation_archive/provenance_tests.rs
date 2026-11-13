@@ -1,6 +1,73 @@
 use super::*;
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 
+#[test]
+fn native_only_delivery_binding_preserves_repeated_text_and_unknown_references() {
+    let mut events = (0..128)
+        .map(|index| event(&format!("native-{index}"), "codex", None))
+        .collect::<Vec<_>>();
+    let records = events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let mut record = narrative_from_chat_event(event, index as u64 + 1).unwrap();
+            record.event_refs.push("unverified-legacy-reference".into());
+            record
+        })
+        .collect::<Vec<_>>();
+    let before = events.clone();
+    assert!(!provenance::bind_delivered_inputs(&mut events, &records).unwrap());
+    assert_eq!(events, before);
+}
+
+#[test]
+fn generated_reference_filter_keeps_duplicate_ids_eligible_for_binding() {
+    let mut generated = event("shared-id", "codex", None);
+    generated.metadata = serde_json::json!({"generated": true});
+    let native = event("shared-id", "codex", None);
+    let record = narrative_from_chat_event(&generated, 1).unwrap();
+    let mut events = vec![generated, native];
+    assert!(provenance::bind_delivered_inputs(&mut events, &[record]).unwrap());
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, "shared-id");
+    assert_eq!(events[0].metadata["generated"], true);
+    assert_eq!(events[0].metadata["provider_log"], true);
+}
+
+#[test]
+fn generated_reference_filter_preserves_ambiguous_native_ownership() {
+    let mut generated = event("generated", "codex", None);
+    generated.metadata = serde_json::json!({"generated": true});
+    let mut record = narrative_from_chat_event(&generated, 1).unwrap();
+    record
+        .event_refs
+        .extend(["native-a".into(), "native-b".into()]);
+    let mut events = vec![
+        generated,
+        event("native-a", "codex", None),
+        event("native-b", "codex", None),
+    ];
+    let before = events.clone();
+    assert!(!provenance::bind_delivered_inputs(&mut events, &[record]).unwrap());
+    assert_eq!(events, before);
+}
+
+#[test]
+fn generated_reference_filter_does_not_bind_foreign_or_unreferenced_native_rows() {
+    let mut generated = event("generated", "codex", None);
+    generated.metadata = serde_json::json!({"generated": true});
+    let mut record = narrative_from_chat_event(&generated, 1).unwrap();
+    record.event_refs.push("foreign".into());
+    let mut events = vec![
+        generated,
+        event("foreign", "claude", None),
+        event("unreferenced", "codex", None),
+    ];
+    let before = events.clone();
+    assert!(!provenance::bind_delivered_inputs(&mut events, &[record]).unwrap());
+    assert_eq!(events, before);
+}
+
 fn event(id: &str, provider: &str, root: Option<&str>) -> AgentChatEvent {
     AgentChatEvent {
         id: id.into(), session_id: "agent-1".into(), provider: provider.into(),
@@ -11,6 +78,177 @@ fn event(id: &str, provider: &str, root: Option<&str>) -> AgentChatEvent {
         created_at: Some("2026-09-07T09:40:00Z".into()), sequence: Some(1),
         metadata: root.map(|root| serde_json::json!({"provider_log":true,"log_path":"/isolated/session.db","input_origin":"human_input","input_purpose":"request","request_root_id":root,"provider_step_source":4})).unwrap_or_else(|| serde_json::json!({"provider_log":true,"log_path":"/isolated/session.db","archive_extra":"keep"})),
     }
+}
+
+fn canonical_event_refs(event_refs: &[String], events: &[AgentChatEvent]) -> HashSet<String> {
+    event_refs
+        .iter()
+        .map(|event_ref| {
+            let owners = events
+                .iter()
+                .filter(|event| {
+                    event.id == *event_ref
+                        || event.metadata["legacy_event_ids"]
+                            .as_array()
+                            .is_some_and(|aliases| {
+                                aliases
+                                    .iter()
+                                    .any(|alias| alias.as_str() == Some(event_ref))
+                            })
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                owners.len() <= 1,
+                "event reference alias has multiple owners"
+            );
+            owners
+                .first()
+                .map_or_else(|| event_ref.clone(), |event| event.id.clone())
+        })
+        .collect()
+}
+
+#[test]
+fn archived_codex_mirror_narratives_reconcile_without_crossing_turns() {
+    let pair = |turn: &str, seq: u64| {
+        let request = AgentChatEvent {
+            id: format!("response-item-{turn}"),
+            session_id: "agent-1".into(),
+            provider: "codex".into(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::User),
+            text: Some("same retained request".into()),
+            title: None,
+            status: None,
+            turn_id: None,
+            source: Some("response_item".into()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(seq),
+            metadata: serde_json::json!({
+                "provider_log": true,
+                "log_path": "<codex-log>",
+                "raw_type": "message",
+                "input_origin": "human_input",
+                "input_purpose": "request",
+                "provider_turn_id": turn,
+                "request_root_id": format!("wardian:input:{turn}"),
+                "legacy_event_ids": [format!("response-alias-{turn}")],
+            }),
+        };
+        let mut mirror = request.clone();
+        mirror.id = format!("event-message-{turn}");
+        mirror.source = Some("event_msg".into());
+        mirror.sequence = Some(seq + 1);
+        mirror.metadata["raw_type"] = serde_json::json!("user_message");
+        mirror.metadata["request_root_id"] = serde_json::json!(format!("codex-message:{turn}"));
+        mirror.metadata["legacy_event_ids"] = serde_json::json!([format!("event-alias-{turn}")]);
+
+        let mut request_record =
+            narrative_from_chat_event(&request, seq).expect("request narrative");
+        request_record.event_refs = event_identity_ids(&request)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        request_record.source_refs = vec![format!("source-response-{turn}")];
+        let mut mirror_record =
+            narrative_from_chat_event(&mirror, seq + 1).expect("mirror narrative");
+        mirror_record.event_refs = event_identity_ids(&mirror)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        mirror_record.source_refs = vec![format!("source-event-{turn}")];
+        (request, mirror, request_record, mirror_record)
+    };
+
+    let (request_a, mirror_a, request_record_a, mirror_record_a) = pair("turn-a", 1);
+    let (request_b, mirror_b, request_record_b, mirror_record_b) = pair("turn-b", 3);
+    for (request, mirror) in [(&request_a, &mirror_a), (&request_b, &mirror_b)] {
+        let request_ids = event_identity_ids(request);
+        let mirror_ids = event_identity_ids(mirror);
+        assert!(!request_ids.iter().any(|id| mirror_ids.contains(id)));
+        assert!(crate::providers::chat_transcript::codex_user_mirror_pair(
+            request, mirror
+        ));
+    }
+
+    let mut events = [request_a, mirror_a, request_b, mirror_b];
+    let mut records = vec![
+        request_record_a,
+        mirror_record_a,
+        request_record_b,
+        mirror_record_b,
+    ];
+    provenance::refresh_records(&mut records, &events);
+    reconcile_codex_user_mirror_records(&mut records, &mut events)
+        .expect("coalesce verified request mirrors");
+
+    assert_eq!(
+        records.len(),
+        2,
+        "each native turn has one request narrative"
+    );
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        vec![1, 3],
+        "coalescing preserves narrative sequence identity"
+    );
+    assert_eq!(
+        events[1].metadata["wardian_archive_coalesced_narrative_sequences"],
+        serde_json::json!([2])
+    );
+    assert_eq!(
+        events[3].metadata["wardian_archive_coalesced_narrative_sequences"],
+        serde_json::json!([4])
+    );
+    for turn in ["turn-a", "turn-b"] {
+        let request_id = format!("response-item-{turn}");
+        let mirror_id = format!("event-message-{turn}");
+        let request_root = format!("wardian:input:{turn}");
+        let mirror_root = format!("codex-message:{turn}");
+        let record = records
+            .iter()
+            .find(|record| record.request_root_id.as_deref() == Some(request_root.as_str()))
+            .expect("Wardian response-item root remains canonical");
+        assert_eq!(record.event_refs.len(), 4);
+        assert!(record.event_refs.contains(&request_id));
+        assert!(record.event_refs.contains(&mirror_id));
+        assert_eq!(record.source_refs.len(), 2);
+        assert!(record
+            .source_refs
+            .contains(&format!("source-response-{turn}")));
+        assert!(record.source_refs.contains(&format!("source-event-{turn}")));
+        assert_ne!(
+            record.request_root_id.as_deref(),
+            Some(mirror_root.as_str())
+        );
+    }
+
+    let canonical_records = records.clone();
+    reconcile_codex_user_mirror_records(&mut records, &mut events).expect("repeat coalescing");
+    assert_eq!(records, canonical_records, "reconciliation is idempotent");
+}
+
+#[test]
+fn replay_event_refs_compare_observations_through_verified_legacy_aliases() {
+    let mut observation = event("current-event", "codex", Some("request-root"));
+    observation.metadata["legacy_event_ids"] = serde_json::json!(["legacy-event"]);
+    let events = [observation];
+    let original_refs = vec!["current-event".to_string()];
+    let replayed_refs = vec!["current-event".to_string(), "legacy-event".to_string()];
+    assert_eq!(
+        canonical_event_refs(&original_refs, &events),
+        canonical_event_refs(&replayed_refs, &events),
+        "verified aliases preserve the same represented provider observations"
+    );
+    assert_ne!(
+        canonical_event_refs(&original_refs, &events),
+        canonical_event_refs(&["unmapped-reference".to_string()], &events),
+        "unmapped references remain a durable mismatch"
+    );
 }
 
 #[test]
@@ -209,6 +447,110 @@ fn codex_assistant_mirror_projection_requires_one_final_native_turn() {
             .unwrap()
             .len(),
         2
+    );
+
+    let mut watch_mirror = observation("watch-mirror", "event_msg", None, "turn-a", None);
+    watch_mirror.metadata["provider_source"] = serde_json::json!("event");
+    watch_mirror.metadata["provider_session_id"] = serde_json::json!("watch-session");
+    watch_mirror
+        .metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("raw_type");
+    let mut watch_response = observation(
+        "watch-response",
+        "response_item",
+        Some("watch-response-turn"),
+        "turn-a",
+        None,
+    );
+    watch_response.metadata["provider_source"] = serde_json::json!("event");
+    watch_response.metadata["provider_session_id"] = serde_json::json!("watch-session");
+    watch_response
+        .metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("raw_type");
+    let watch_group = provenance::merge_current_capture(
+        Vec::new(),
+        vec![
+            observation("mirror-a", "event_msg", None, "turn-a", None),
+            observation(
+                "msg-a",
+                "response_item",
+                Some("msg-a"),
+                "turn-a",
+                Some("final_answer"),
+            ),
+            watch_mirror.clone(),
+            watch_response.clone(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(watch_group.len(), 1);
+    assert_eq!(watch_group[0].id, "msg-a");
+    assert_eq!(
+        watch_group[0].metadata["provider_observation_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+
+    let mut mismatched_watch_response = watch_response;
+    mismatched_watch_response.metadata["provider_session_id"] =
+        serde_json::json!("different-watch-session");
+    let mismatched_watch_group = provenance::merge_current_capture(
+        Vec::new(),
+        vec![
+            observation("mirror-a", "event_msg", None, "turn-a", None),
+            observation(
+                "msg-a",
+                "response_item",
+                Some("msg-a"),
+                "turn-a",
+                Some("final_answer"),
+            ),
+            watch_mirror,
+            mismatched_watch_response,
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        mismatched_watch_group.len(),
+        4,
+        "watch observations with mismatched sessions fail closed"
+    );
+
+    let mut artifact_mirror = observation("mirror-large", "event_msg", None, "turn-large", None);
+    let mut artifact_completion = observation(
+        "completion-large",
+        "response_item",
+        Some("completion-large"),
+        "turn-large",
+        Some("final_answer"),
+    );
+    artifact_mirror.text = None;
+    artifact_completion.text = None;
+    artifact_mirror.metadata["codex_assistant_text_sha256"] = serde_json::json!("digest-a");
+    artifact_completion.metadata["codex_assistant_text_sha256"] = serde_json::json!("digest-a");
+    assert_eq!(
+        provenance::merge_current_capture(
+            Vec::new(),
+            vec![artifact_mirror.clone(), artifact_completion.clone()]
+        )
+        .unwrap()
+        .len(),
+        1,
+        "matching persisted content digests bind text artifacts"
+    );
+    artifact_completion.metadata["codex_assistant_text_sha256"] = serde_json::json!("digest-b");
+    assert_eq!(
+        provenance::merge_current_capture(Vec::new(), vec![artifact_mirror, artifact_completion])
+            .unwrap()
+            .len(),
+        2,
+        "different artifact digests cannot be paired"
     );
 
     let distinct_turns = provenance::merge_current_capture(
@@ -453,6 +795,419 @@ fn retained_codex_delivery_fixture_collapses_only_the_bound_provider_pair() {
     assert!(assistants.iter().any(|event| event.id == "watch-event-msg"));
 }
 
+#[cfg(feature = "retained-codex-replay")]
+#[test]
+fn retained_codex_logs_replay_to_one_canonical_archive_after_restart() {
+    let (_guard, _temp) = isolate();
+    let paths = std::env::var("WARDIAN_RETAINED_CODEX_EVENT_ARCHIVES")
+        .expect("retained Codex event archive paths")
+        .split(';')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert!(!paths.is_empty());
+
+    let mut replays = Vec::new();
+    for (index, path) in paths.iter().enumerate() {
+        let archive_text = std::fs::read_to_string(path).expect("read retained event archive");
+        let events = archive_text
+            .lines()
+            .map(|line| serde_json::from_str::<AgentChatEvent>(line).expect("decode event row"))
+            .collect::<Vec<_>>();
+        assert!(!events.is_empty());
+        let agent_id = events[0].session_id.clone();
+        assert!(events.iter().all(|event| event.session_id == agent_id));
+
+        let mut raw_logs = std::collections::HashMap::<String, Vec<u8>>::new();
+        let mut checked_offsets = 0;
+        for event in &events {
+            let Some(offset) = event.metadata["provider_log_row_offset"].as_u64() else {
+                continue;
+            };
+            let log_path = event.metadata["log_path"]
+                .as_str()
+                .expect("retained provider observation log binding");
+            let bytes = raw_logs
+                .entry(log_path.to_string())
+                .or_insert_with(|| std::fs::read(log_path).expect("read bound provider log"));
+            let offset = usize::try_from(offset).expect("provider row offset fits memory");
+            assert!(offset == 0 || bytes.get(offset - 1) == Some(&b'\n'));
+            let row_end = bytes[offset..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|relative| offset + relative)
+                .unwrap_or(bytes.len());
+            let raw_row: serde_json::Value =
+                serde_json::from_slice(&bytes[offset..row_end]).expect("decode exact provider row");
+            assert_eq!(raw_row["type"].as_str(), event.source.as_deref());
+            assert_eq!(
+                raw_row["payload"]["type"].as_str(),
+                event.metadata["raw_type"].as_str()
+            );
+            checked_offsets += 1;
+        }
+        assert!(
+            checked_offsets > 0,
+            "retained rows bind to exact provider logs"
+        );
+
+        let context = ConversationArchiveContext {
+            agent_id: agent_id.clone(),
+            agent_name: "CoderOne".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: "<absolute-workspace-path>".to_string(),
+            provider: "codex".to_string(),
+            provider_session_ids: Vec::new(),
+            provider_source_key: Some(format!("codex:retained-archive-{index}")),
+        };
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_chat_events_with_context(context.clone(), &events)
+            .expect("append retained Codex observations");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test(&agent_id)
+            .expect("retained conversation");
+        let directory =
+            conversation_dir(&agent_id, &conversation_id).expect("retained conversation path");
+        let (_, records) = archive
+            .show(&conversation_id)
+            .expect("read narrative records");
+        let context_observation_ids = events
+            .iter()
+            .filter(|event| event.metadata["input_origin"] == "context_injection")
+            .map(|event| event.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(!context_observation_ids.is_empty());
+        let archived_events = archive
+            .chat_events_for_agent(&agent_id)
+            .expect("read retained Codex event archive");
+        let archived_context_ids = archived_events
+            .iter()
+            .filter(|event| event.metadata["input_origin"] == "context_injection")
+            .map(|event| event.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(context_observation_ids.is_subset(&archived_context_ids));
+        assert!(archived_events
+            .iter()
+            .filter(|event| event.metadata["input_origin"] == "context_injection")
+            .all(|event| event.role == Some(AgentChatRole::System)));
+        let provider_turns = events
+            .iter()
+            .filter(|event| {
+                event.role == Some(AgentChatRole::User)
+                    && event.metadata["input_origin"] == "human_input"
+                    && event.metadata["input_purpose"] == "request"
+            })
+            .filter_map(|event| event.metadata["provider_turn_id"].as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let canonical_users = records
+            .iter()
+            .filter(|record| record.role.as_deref() == Some("user"))
+            .collect::<Vec<_>>();
+        assert_eq!(canonical_users.len(), provider_turns.len());
+        let canonical_roots = canonical_users
+            .iter()
+            .filter_map(|record| record.request_root_id.as_deref())
+            .collect::<Vec<_>>();
+        assert!(!canonical_roots.is_empty());
+        assert!(canonical_users.iter().all(|record| record
+            .request_root_id
+            .as_deref()
+            .is_some_and(|root| root.starts_with("wardian:input:"))));
+        for turn_id in &provider_turns {
+            let observations = events
+                .iter()
+                .filter(|event| {
+                    event.metadata["provider_turn_id"].as_str() == Some(*turn_id)
+                        && event.metadata["input_origin"] == "human_input"
+                        && event.metadata["input_purpose"] == "request"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observations.len(), 2);
+            let record = canonical_users
+                .iter()
+                .find(|record| {
+                    observations
+                        .iter()
+                        .all(|event| record.event_refs.contains(&event.id))
+                })
+                .expect("both request observations share one narrative");
+            assert_eq!(record.event_refs.len(), 2);
+            assert_eq!(record.source_refs.len(), 2);
+            let mirror = observations
+                .iter()
+                .find(|event| event.source.as_deref() == Some("event_msg"))
+                .expect("native Codex user mirror");
+            let mirror_root = mirror.metadata["provider_mirror_request_root_ids"]
+                .as_array()
+                .and_then(|roots| roots.first())
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| mirror.metadata["request_root_id"].as_str())
+                .expect("native mirror root provenance");
+            assert_ne!(record.request_root_id.as_deref(), Some(mirror_root));
+        }
+
+        let final_event_ids = events
+            .iter()
+            .filter(|event| event.metadata["provider_phase"] == "final_answer")
+            .map(|event| event.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let final_records = records
+            .iter()
+            .filter(|record| {
+                record.role.as_deref() == Some("assistant")
+                    && record
+                        .event_refs
+                        .iter()
+                        .any(|event_id| final_event_ids.contains(event_id.as_str()))
+            })
+            .collect::<Vec<_>>();
+        let final_turns = events
+            .iter()
+            .filter(|event| event.metadata["provider_phase"] == "final_answer")
+            .filter_map(|event| event.metadata["provider_turn_id"].as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(final_records.len(), final_turns.len());
+        assert!(final_records
+            .iter()
+            .all(|record| record.event_refs.len() >= 2));
+        let assistant_ref_counts = final_records
+            .iter()
+            .map(|record| (record.event_refs.len(), record.source_refs.len()))
+            .collect::<Vec<_>>();
+        let retained_conversation_path =
+            std::path::Path::new(path).with_file_name("conversation.jsonl");
+        let mut seeded_legacy_split = false;
+        if retained_conversation_path.is_file() {
+            let retained_records: Vec<ConversationNarrativeRecord> =
+                read_jsonl_records(&retained_conversation_path)
+                    .expect("read retained narrative archive");
+            let retained_user_requests = retained_records
+                .iter()
+                .filter(|record| {
+                    record.role.as_deref() == Some("user")
+                        && record.input_origin
+                            == Some(
+                                wardian_core::conversations::ConversationInputOrigin::HumanInput,
+                            )
+                        && record.input_purpose.as_deref() == Some("request")
+                })
+                .count();
+            if retained_user_requests > provider_turns.len() {
+                assert_eq!(
+                    retained_user_requests,
+                    provider_turns.len() + 1,
+                    "retained archive contains exactly one split request pair"
+                );
+                let mut reconciled_retained = retained_records.clone();
+                let mut reconciliation_events = events.clone();
+                provenance::refresh_records(&mut reconciled_retained, &events);
+                assert_eq!(
+                    reconcile_codex_user_mirror_records(
+                        &mut reconciled_retained,
+                        &mut reconciliation_events,
+                    )
+                    .expect("reconcile retained split request"),
+                    1,
+                    "the retained native pair uniquely owns two request narratives"
+                );
+                let retained_sequences = retained_records
+                    .iter()
+                    .map(|record| record.seq)
+                    .collect::<std::collections::HashSet<_>>();
+                assert!(reconciled_retained
+                    .iter()
+                    .all(|record| retained_sequences.contains(&record.seq)));
+                assert_eq!(reconciled_retained.len() + 1, retained_records.len());
+                std::fs::copy(
+                    &retained_conversation_path,
+                    directory.join("conversation.jsonl"),
+                )
+                .expect("seed the isolated archive with the retained split narratives");
+                for file_name in ["events.jsonl", "sources.jsonl"] {
+                    let retained_path = retained_conversation_path.with_file_name(file_name);
+                    if retained_path.is_file() {
+                        std::fs::copy(&retained_path, directory.join(file_name))
+                            .expect("seed the isolated archive with retained source records");
+                    }
+                }
+                seeded_legacy_split = true;
+            }
+        }
+        let provider_turn_count = provider_turns.len();
+        drop(provider_turns);
+        replays.push((
+            context,
+            agent_id,
+            events,
+            records,
+            assistant_ref_counts,
+            provider_turn_count,
+            seeded_legacy_split,
+        ));
+    }
+
+    for (
+        context,
+        agent_id,
+        events,
+        before,
+        assistant_ref_counts,
+        provider_turn_count,
+        seeded_legacy_split,
+    ) in replays
+    {
+        let restarted = ConversationArchiveState::default();
+        restarted
+            .append_chat_events_with_context(context, &events)
+            .expect("replay retained Codex observations after restart");
+        let conversation_id = restarted
+            .active_conversation_id_for_test(&agent_id)
+            .expect("replayed conversation");
+        let (_, after) = restarted
+            .show(&conversation_id)
+            .expect("read replayed narrative records");
+        if seeded_legacy_split {
+            let canonical_users = after
+                .iter()
+                .filter(|record| {
+                    record.role.as_deref() == Some("user")
+                        && record.input_origin
+                            == Some(
+                                wardian_core::conversations::ConversationInputOrigin::HumanInput,
+                            )
+                        && record.input_purpose.as_deref() == Some("request")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(canonical_users.len(), provider_turn_count);
+            let replayed_events = restarted
+                .chat_events_for_agent(&agent_id)
+                .expect("read replayed provider events");
+            let mut occupied_sequences = after
+                .iter()
+                .map(|record| record.seq)
+                .collect::<std::collections::HashSet<_>>();
+            for event in &replayed_events {
+                if let Some(markers) =
+                    event.metadata["wardian_archive_coalesced_narrative_sequences"].as_array()
+                {
+                    occupied_sequences.extend(markers.iter().filter_map(serde_json::Value::as_u64));
+                }
+            }
+            let maximum_sequence = occupied_sequences.iter().copied().max().unwrap_or(0);
+            assert_eq!(
+                occupied_sequences,
+                (1..=maximum_sequence).collect(),
+                "verified coalesced sequences reserve only the gaps created by mirror repair"
+            );
+            for turn_id in events
+                .iter()
+                .filter(|event| {
+                    event.metadata["input_origin"] == "human_input"
+                        && event.metadata["input_purpose"] == "request"
+                })
+                .filter_map(|event| event.metadata["provider_turn_id"].as_str())
+                .collect::<std::collections::HashSet<_>>()
+            {
+                let observations = events
+                    .iter()
+                    .filter(|event| {
+                        event.metadata["provider_turn_id"].as_str() == Some(turn_id)
+                            && event.metadata["input_origin"] == "human_input"
+                            && event.metadata["input_purpose"] == "request"
+                    })
+                    .collect::<Vec<_>>();
+                let record = canonical_users
+                    .iter()
+                    .find(|record| {
+                        observations
+                            .iter()
+                            .all(|event| record.event_refs.contains(&event.id))
+                    })
+                    .expect("retained mirror pair has one narrative after restart");
+                assert!(record.source_refs.len() >= 2);
+                for event in &observations {
+                    if let Some(source) = source_record_from_chat_event(event, record.seq) {
+                        assert!(record.source_refs.contains(&source.source_id));
+                    }
+                }
+                assert!(record
+                    .request_root_id
+                    .as_deref()
+                    .is_some_and(|root| root.starts_with("wardian:input:")));
+            }
+            continue;
+        }
+        let mut first_difference = None;
+        let mut ignored_capture_times = 0;
+        for (index, (before_record, after_record)) in before.iter().zip(&after).enumerate() {
+            let before_json = serde_json::to_value(before_record).expect("serialize narrative");
+            let after_json = serde_json::to_value(after_record).expect("serialize narrative");
+            first_difference = [
+                "schema",
+                "seq",
+                "turn_id",
+                "kind",
+                "role",
+                "speaker_type",
+                "input_origin",
+                "input_purpose",
+                "request_root_id",
+                "causal_ref",
+                "text",
+                "tool",
+                "status",
+                "summary",
+                "excerpt",
+                "event_refs",
+                "source_refs",
+                "artifact_refs",
+            ]
+            .into_iter()
+            .find(|field| {
+                if *field == "event_refs" {
+                    canonical_event_refs(&before_record.event_refs, &events)
+                        != canonical_event_refs(&after_record.event_refs, &events)
+                } else {
+                    before_json.get(*field) != after_json.get(*field)
+                }
+            })
+            .map(|field| (index, field));
+            if first_difference.is_some() {
+                break;
+            }
+            if before_record.at != after_record.at {
+                let primary_event = before_record
+                    .event_refs
+                    .first()
+                    .and_then(|id| events.iter().find(|event| &event.id == id));
+                if primary_event.is_some_and(|event| event.created_at.is_none()) {
+                    ignored_capture_times += 1;
+                } else {
+                    first_difference = Some((index, "at"));
+                    break;
+                }
+            }
+        }
+        assert!(
+            before.len() == after.len() && first_difference.is_none(),
+            "fresh-state narrative replay diverged (before={}, after={}, first_difference={:?})",
+            before.len(),
+            after.len(),
+            first_difference
+                .map(|(index, field)| format!("record[{index}].{field}"))
+                .unwrap_or_else(|| "record_count".to_string())
+        );
+        eprintln!("fresh-state replay stable; timestamp deltas from untimed source rows: {ignored_capture_times}");
+        let replayed_counts = after
+            .iter()
+            .filter(|record| record.role.as_deref() == Some("assistant"))
+            .map(|record| (record.event_refs.len(), record.source_refs.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(replayed_counts, assistant_ref_counts);
+    }
+}
+
 #[test]
 fn claude_assistant_mirror_projection_requires_unique_native_message() {
     let observation = |id: &str, native: bool, turn_id: &str| AgentChatEvent {
@@ -551,24 +1306,33 @@ fn pi_capture() -> (Vec<AgentChatEvent>, Vec<AgentChatEvent>) {
     );
     legacy.retain(|event| event.kind == AgentChatEventKind::Message);
     for event in &mut legacy {
-        // The base parser is the actual pre-#1167 parser. Remove the two
-        // repaired fields if this test is later run on the integrated adapter.
+        // Model IDs and metadata persisted before the provider-log identity
+        // migration, even though this helper uses today's normalizer.
         event.turn_id = None;
         event
             .metadata
             .as_object_mut()
             .unwrap()
             .remove("request_root_id");
+        for key in [
+            crate::providers::chat_transcript::PROVIDER_EVENT_ID_METADATA_KEY,
+            crate::providers::chat_transcript::PROVIDER_LOG_ROW_OFFSET_METADATA_KEY,
+        ] {
+            event.metadata.as_object_mut().unwrap().remove(key);
+        }
         event.metadata["provider_log"] = serde_json::json!(true);
         event.metadata["log_path"] = serde_json::json!(path);
-        event.id = native_identity::stable_provider_log_event_id(event, path);
+        event.id = native_identity::legacy_provider_log_event_id(event, path);
     }
     let mut current = legacy.clone();
     for event in &mut current {
         // Boundary stimulus: project #1167's envelope mapping from the real
         // retained record; this is not a claim to retest the Pi adapter.
         let row = &rows[event.sequence.unwrap() as usize - 1];
-        event.turn_id = Some(row["id"].as_str().unwrap().into());
+        let native_id = row["id"].as_str().unwrap();
+        event.turn_id = Some(native_id.into());
+        event.metadata[crate::providers::chat_transcript::PROVIDER_EVENT_ID_METADATA_KEY] =
+            serde_json::json!(native_id);
         if event.role == Some(AgentChatRole::User) {
             event.metadata["request_root_id"] = row["id"].clone();
         }
@@ -1237,4 +2001,391 @@ fn archive_only_roles_and_tail_replay_order_preserve_claude_contract() {
     assert_eq!(view[1].sequence, Some(2));
     assert_eq!(view[0].id, "old");
     assert_eq!(view[1].id, "new");
+}
+
+#[cfg(windows)]
+mod native_refresh {
+    use super::*;
+    use crate::commands::chat::capture_opencode_messages_for_test as capture;
+
+    fn database(path: &std::path::Path, body: &str) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open(path).unwrap();
+        db.execute_batch("CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT); CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,session_id TEXT,time_created INTEGER,data TEXT); INSERT INTO message VALUES('message','native-session',1000,'{\"role\":\"assistant\"}');").unwrap();
+        db.execute(
+            "INSERT INTO part VALUES('part','message','native-session',1000,?1)",
+            [serde_json::json!({"type":"text","text":body}).to_string()],
+        )
+        .unwrap();
+        db
+    }
+
+    fn update(db: &rusqlite::Connection, body: &str) {
+        db.execute(
+            "UPDATE part SET data=?1 WHERE id='part'",
+            [serde_json::json!({"type":"text","text":body}).to_string()],
+        )
+        .unwrap();
+    }
+
+    fn context() -> ConversationArchiveContext {
+        let mut context = ConversationArchiveContext::for_agent_id("native-refresh", "opencode");
+        context.provider_source_key = Some("opencode:session:native-session".into());
+        context.provider_session_ids = vec!["native-session".into()];
+        context
+    }
+
+    fn archive_dir(archive: &ConversationArchiveState) -> std::path::PathBuf {
+        conversation_dir(
+            "native-refresh",
+            &archive
+                .active_conversation_id("native-refresh")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn opencode_native_refresh_rejects_tampering_stale_capture_and_foreign_context() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let path = temp.path().join("native.db");
+        let db = database(&path, "original");
+        let archive = ConversationArchiveState::default();
+        let (old, old_proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &old, &old_proof)
+            .unwrap();
+        let dir = archive_dir(&archive);
+        let before_event = std::fs::read(dir.join("events.jsonl")).unwrap();
+        let before_record = std::fs::read(dir.join("conversation.jsonl")).unwrap();
+        for field in [
+            "chat_recent_native_key",
+            "chat_recent_native_version",
+            "part_id",
+            "opencode_session_id",
+            "source_path",
+        ] {
+            let mut forged = old.clone();
+            forged[0].metadata.as_object_mut().unwrap().remove(field);
+            assert!(
+                archive
+                    .append_chat_events_with_native_messages(context(), &forged, &old_proof)
+                    .is_err(),
+                "missing {field}"
+            );
+        }
+        let mut forged = old.clone();
+        forged[0].text = Some("unobserved body".into());
+        assert!(archive
+            .append_chat_events_with_native_messages(context(), &forged, &old_proof)
+            .is_err());
+        let mut foreign = context();
+        foreign.provider_source_key = Some("opencode:session:other".into());
+        assert!(archive
+            .append_chat_events_with_native_messages(foreign, &old, &old_proof)
+            .is_err());
+        assert_eq!(
+            std::fs::read(dir.join("events.jsonl")).unwrap(),
+            before_event
+        );
+        assert_eq!(
+            std::fs::read(dir.join("conversation.jsonl")).unwrap(),
+            before_record
+        );
+        update(&db, "updated");
+        let (new, new_proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &new, &new_proof)
+            .unwrap();
+        let final_event = std::fs::read(dir.join("events.jsonl")).unwrap();
+        assert_eq!(
+            archive
+                .append_chat_events_with_native_messages(context(), &old, &old_proof)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            std::fs::read(dir.join("events.jsonl")).unwrap(),
+            final_event
+        );
+        let stored = archive.chat_events_for_agent("native-refresh").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, old[0].id);
+        assert_eq!(stored[0].text, new[0].text);
+        let previous: Vec<ConversationNarrativeRecord> = before_record
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&dir.join("conversation.jsonl")).unwrap();
+        assert_eq!(records[0].seq, previous[0].seq);
+        assert_eq!(records[0].at, previous[0].at);
+        assert_eq!(records[0].event_refs, previous[0].event_refs);
+        assert_eq!(records[0].source_refs, previous[0].source_refs);
+        assert_eq!(stored[0].created_at, old[0].created_at);
+        assert_eq!(stored[0].sequence, old[0].sequence);
+    }
+
+    #[test]
+    fn opencode_native_refresh_rejects_replaced_database_and_retains_unknown_legacy_body() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let path = temp.path().join("native.db");
+        let db = database(&path, "original");
+        let (old, proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_chat_events_with_native_messages(context(), &old, &proof)
+            .unwrap();
+        assert!(
+            std::fs::rename(&path, temp.path().join("cannot-replace.db")).is_err(),
+            "live native descriptor forbids replacement"
+        );
+        drop(proof);
+        drop(db);
+        std::fs::rename(&path, temp.path().join("retained-old.db")).unwrap();
+        let replacement = database(&path, "replacement");
+        let (new, replacement_proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        assert_ne!(
+            old[0].metadata["chat_recent_native_key"],
+            new[0].metadata["chat_recent_native_key"]
+        );
+        let dir = archive_dir(&archive);
+        let before = std::fs::read(dir.join("events.jsonl")).unwrap();
+        assert!(archive
+            .append_chat_events_with_native_messages(context(), &new, &replacement_proof)
+            .is_err());
+        assert_eq!(std::fs::read(dir.join("events.jsonl")).unwrap(), before);
+        // Generic callers cannot launder even a copied real receipt into a
+        // durable native binding. Legacy observations remain unrewritable.
+        let legacy = ConversationArchiveState::default();
+        let other_home = temp.path().join("legacy-home");
+        std::env::set_var("WARDIAN_HOME", &other_home);
+        let mut forged = new.clone();
+        forged[0].metadata[crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING] =
+            replacement_proof.binding(&new[0]);
+        legacy
+            .append_chat_events_with_context(context(), &forged)
+            .unwrap();
+        let saved = legacy.chat_events_for_agent("native-refresh").unwrap();
+        assert!(
+            saved[0].metadata[crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING]
+                .is_null()
+        );
+        update(&replacement, "newer body cannot rewrite unknown legacy");
+        let (next, next_proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        legacy
+            .append_chat_events_with_native_messages(context(), &next, &next_proof)
+            .unwrap();
+        let saved = legacy.chat_events_for_agent("native-refresh").unwrap();
+        assert_eq!(saved[0].text, new[0].text);
+        assert_eq!(
+            saved[0].metadata["chat_recent_native_version"],
+            new[0].metadata["chat_recent_native_version"]
+        );
+    }
+
+    #[test]
+    fn opencode_native_refresh_does_not_publish_disabled_interval_mutations() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let path = temp.path().join("native.db");
+        let db = database(&path, "captured before privacy boundary");
+        let archive = ConversationArchiveState::default();
+        let (old, proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &old, &proof)
+            .unwrap();
+        drop(proof);
+        write_capture_state(
+            "native-refresh",
+            &ConversationCaptureState {
+                skip_event_scopes: vec![ConversationCaptureEventScope {
+                    provider_source_key: context().provider_source_key,
+                    disabled_from: Some("1970-01-01T00:00:02Z".into()),
+                    disabled_until: Some("1970-01-01T00:00:03Z".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        update(&db, "aggregate may contain disabled text");
+        db.execute("INSERT INTO part VALUES('later-part','message','native-session',4000,'{\"type\":\"text\",\"text\":\"new part after closed interval\"}')", []).unwrap();
+        let (new, proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &new, &proof)
+            .unwrap();
+        let stored = archive.chat_events_for_agent("native-refresh").unwrap();
+        assert_eq!(stored.len(), 2);
+        let original = stored.iter().find(|event| event.id == old[0].id).unwrap();
+        assert_eq!(original.text, old[0].text);
+        assert_eq!(
+            original.metadata["chat_recent_native_version"],
+            old[0].metadata["chat_recent_native_version"]
+        );
+        assert_eq!(
+            stored
+                .iter()
+                .find(|event| event.metadata["part_id"] == "later-part")
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("new part after closed interval")
+        );
+    }
+
+    #[test]
+    fn opencode_native_refresh_materializes_new_body_and_repairs_event_first_retry() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let path = temp.path().join("native.db");
+        let old_body = format!("{}.", "original full body\n".repeat(2000));
+        let new_body = format!("{}.", "updated full body\n".repeat(2100));
+        assert_eq!(old_body.trim(), old_body);
+        assert_eq!(new_body.trim(), new_body);
+        let db = database(&path, &old_body);
+        let archive = ConversationArchiveState::default();
+        let (old, proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &old, &proof)
+            .unwrap();
+        drop(proof);
+        let dir = archive_dir(&archive);
+        let stale = std::fs::read(dir.join("conversation.jsonl")).unwrap();
+        let old_records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&dir.join("conversation.jsonl")).unwrap();
+        assert_eq!(old_records[0].artifact_refs.len(), 1);
+        let old_artifact = dir.join("artifacts").join(&old_records[0].artifact_refs[0]);
+        update(&db, &new_body);
+        let (new, proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        use std::os::windows::fs::OpenOptionsExt;
+        let held_narrative = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(dir.join("conversation.jsonl"))
+            .unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &new, &proof)
+            .expect_err("narrative publication cannot replace an unshared-delete file");
+        assert_eq!(
+            std::fs::read(dir.join("conversation.jsonl")).unwrap(),
+            stale
+        );
+        let published_events: Vec<AgentChatEvent> =
+            read_jsonl_records(&dir.join("events.jsonl")).unwrap();
+        assert_eq!(
+            published_events[0].metadata["chat_recent_native_version"],
+            new[0].metadata["chat_recent_native_version"]
+        );
+        drop(held_narrative);
+        archive
+            .append_chat_events_with_native_messages(context(), &new, &proof)
+            .unwrap();
+        let final_records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&dir.join("conversation.jsonl")).unwrap();
+        assert_eq!(final_records[0].artifact_refs.len(), 1);
+        assert_ne!(final_records[0].artifact_refs, old_records[0].artifact_refs);
+        let new_artifact = dir
+            .join("artifacts")
+            .join(&final_records[0].artifact_refs[0]);
+        assert_eq!(std::fs::read_to_string(&new_artifact).unwrap(), new_body);
+        assert_eq!(std::fs::read_to_string(old_artifact).unwrap(), old_body);
+        let repaired: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&dir.join("conversation.jsonl")).unwrap();
+        assert_eq!(repaired, final_records);
+        let paths = [
+            dir.join("events.jsonl"),
+            dir.join("conversation.jsonl"),
+            new_artifact,
+        ];
+        let before: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                (
+                    std::fs::read(path).unwrap(),
+                    std::fs::metadata(path).unwrap().modified().unwrap(),
+                )
+            })
+            .collect();
+        let repeated = archive
+            .append_chat_events_with_native_messages(context(), &new, &proof)
+            .unwrap();
+        for (path, (bytes, modified)) in paths.iter().zip(before) {
+            let after = std::fs::read(path).unwrap();
+            let field_changes = || {
+                let first = |raw: &[u8]| {
+                    serde_json::from_slice::<serde_json::Value>(
+                        raw.split(|byte| *byte == b'\n').next().unwrap(),
+                    )
+                    .unwrap()
+                };
+                let prior = first(&bytes);
+                let next = first(&after);
+                prior
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .filter(|key| prior[*key] != next[*key])
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            assert!(
+                after == bytes,
+                "unchanged replay wrote {} fields {:?}",
+                path.file_name().unwrap().to_string_lossy(),
+                field_changes()
+            );
+            assert_eq!(
+                std::fs::metadata(path).unwrap().modified().unwrap(),
+                modified
+            );
+        }
+        assert_eq!(repeated, 0);
+        assert_eq!(std::fs::read_dir(dir.join("artifacts")).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn opencode_native_refresh_disabled_aggregate_requires_birth_after_closed_window() {
+    let source = Some("opencode:session:native-session");
+    let mut state = ConversationCaptureState {
+        skip_event_scopes: vec![ConversationCaptureEventScope {
+            provider_source_key: source.map(str::to_owned),
+            disabled_from: Some("2026-01-02T00:00:00Z".into()),
+            disabled_until: Some("2026-01-03T00:00:00Z".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut row = event("native-row", "opencode", None);
+    for created in [
+        None,
+        Some("invalid"),
+        Some("2026-01-01T00:00:00Z"),
+        Some("2026-01-02T12:00:00Z"),
+        Some("2026-01-03T00:00:00Z"),
+    ] {
+        row.created_at = created.map(str::to_owned);
+        assert!(!state.permits_native_message_refresh(&row, source));
+        assert!(!state.permits_recent_native_time(source, row.created_at.as_deref()));
+    }
+    row.created_at = Some("2026-01-04T00:00:00Z".into());
+    assert!(state.permits_native_message_refresh(&row, source));
+    // Recent partial DB reads deliberately keep their stricter historical fence.
+    assert!(!state.permits_recent_native_time(source, row.created_at.as_deref()));
+    for from in ["invalid", "2026-01-05T00:00:00Z"] {
+        state.skip_event_scopes[0].disabled_from = Some(from.into());
+        assert!(!state.permits_native_message_refresh(&row, source));
+    }
+    state.skip_event_scopes[0].disabled_from = Some("2026-01-02T00:00:00Z".into());
+    state.skip_event_scopes[0].disabled_until = None;
+    assert!(!state.permits_native_message_refresh(&row, source));
 }

@@ -77,7 +77,8 @@ test('normal npm test requires the bounded gate before Vitest and retains existi
   const steps = pkg.scripts.test.split(' && ');
   assert.equal(steps.length, 3);
   assert.ok(steps[0].startsWith('node --test '));
-  for (const file of ['scripts/rust-build-cache.test.mjs', 'scripts/claude-turn-ended-mod.test.mjs', 'scripts/run-compiler-input-guard-tests.test.mjs']) {
+  for (const file of ['scripts/rust-build-cache.test.mjs', 'scripts/claude-turn-ended-mod.test.mjs', 'scripts/run-compiler-input-guard-tests.test.mjs',
+    'e2e-native/tests/chat-saved-fixture.test.mjs', 'e2e-native/tests/harness-invoke.test.mjs']) {
     assert.ok(steps[0].split(' ').includes(file));
   }
   assert.equal(steps[1], 'node scripts/run-compiler-input-guard-tests.mjs');

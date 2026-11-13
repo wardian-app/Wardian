@@ -263,9 +263,34 @@ boundary.
   the phone, confirm the desktop gateway is running, and retry. This state is
   reserved for transport or gateway failures rather than stale pairing state.
 - **An agent's Chat shows an application HTTP error:** the agent detail stays
-  open and earlier chat remains visible. Retry Chat refresh. If the error
+  open and earlier chat remains visible. Select **Retry Chat**. If the error
   repeats, inspect the host's chat and archive diagnostics; re-pairing does not
   resolve an error from the chat endpoint.
+- **Chat is briefly busy while the desktop is healthy:** the selected Chat
+  retries automatically, including for an Off agent. Earlier readable rows
+  stay visible. A recent window can be readable while older history is still
+  catching up. Scroll to request older headers; full details load when opened.
+  Stable, unchanged Chat uses fewer background reads, and fresh visible
+  updates bring the next read forward.
+  The PWA starts with an eight-header recent target; an omitted target retains
+  80. Complete groups can exceed the small target within the 80-header cap.
+  This target changes neither older-history nor detail-read limits.
+  A newly selected Chat can show recent text before saved history finishes
+  loading. Older history and full details become available after their normal
+  publication. Recent text does not enable either action early. Changing or
+  clearing the conversation removes the previous recent window, including
+  when the new conversation has no messages.
+- **A Chat response stops before its history finishes arriving:** earlier rows
+  remain visible with **Retry Chat**. An interrupted successful Chat response
+  does not by itself establish that the desktop is unreachable.
+- **Chat history takes longer to load:** the phone allows up to 60 seconds for
+  each Chat read. A read deadline keeps Chat open with earlier rows and a
+  **Retry Chat** button; it does not mean the desktop is disconnected or that
+  the desktop stopped loading history. Background updates wait for the current
+  read and combine pending refreshes. Switching agents or leaving Chat cancels
+  the phone's pending request. Loading older history preserves its pagination
+  position when newer replies refresh. If an update cannot be confirmed, the
+  current rows and older position remain visible with **Retry Chat**.
 - **The PWA stays on `Restoring` or Inbox does not show a desktop change:** keep
   the gateway reachable while the status stream reconnects, then reload the
   remote URL if the roster and Inbox remain unchanged. If the problem returns,

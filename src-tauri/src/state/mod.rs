@@ -13,6 +13,7 @@ pub mod telemetry_ingest;
 pub mod telemetry_maintenance;
 pub mod terminal_session;
 pub mod terminal_text;
+pub(crate) mod transcript_completion;
 pub mod user_terminal;
 
 pub use active_agent::ActiveAgent;

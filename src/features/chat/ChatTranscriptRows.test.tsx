@@ -1,9 +1,92 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import userEvent from '@testing-library/user-event';
 
-import type { AgentChatEvent } from '../../types';
-import { ChatTranscriptRow } from './ChatTranscriptRows';
+import type { AgentChatDetail, AgentChatEvent, AgentChatPage } from '../../types';
+import producerFixture from './__fixtures__/chat-row-revalidation-producer-consumer-order-r3.json';
+import { ChatTranscriptRow, WorkGroupRow } from './ChatTranscriptRows';
 import { derivePresentedChatRows } from '../grid/workLogPresentation';
+import * as workLogPresentation from '../grid/workLogPresentation';
+import { chatRevalidationIds } from './chatRevalidation';
+import { applyRevalidationReplies } from '../../test/chatRevalidationTestHelpers';
+import { applyChatPage } from './chatReadState';
+
+vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: vi.fn() }));
+beforeEach(() => { vi.mocked(writeText).mockReset().mockResolvedValue(); });
+afterEach(() => { vi.restoreAllMocks(); });
+
+const actualWorkGroupCopy = workLogPresentation.formatPresentedWorkGroupForCopy;
+
+function largeWorkGroup() {
+  const events = Array.from({ length: 128 }, (_, index): AgentChatEvent => ({
+    ...memoryEvent, id: `copy-work-${index}`, kind: 'tool_call', role: 'assistant',
+    title: `Controlled work ${index}`, text: `result ${index}\n${'synthetic work detail\n'.repeat(80)}`,
+    command: `read controlled-${index}.ts`, path: `controlled-${index % 2}.ts`,
+    metadata: {}, sequence: index,
+  }));
+  const row = derivePresentedChatRows(events)[0];
+  if (row?.kind !== 'work_group') throw new Error('Expected the maintained large work group');
+  return row;
+}
+
+describe('gesture-lazy work log copy', () => {
+  it('avoids copy formatting on render, rerender, menu open and expansion and copies current row props', async () => {
+    const row = largeWorkGroup();
+    expect(row.entries).toHaveLength(128);
+    const updated = { ...row, entries: row.entries.map((entry, index) => index === 127
+      ? { ...entry, content: 'current final entry\nwith exact ordering' } : entry) };
+    const expected = actualWorkGroupCopy(updated);
+    const format = vi.spyOn(workLogPresentation, 'formatPresentedWorkGroupForCopy');
+    const view = render(<WorkGroupRow agentIsWorking={false} row={row} />);
+    expect(screen.getByTestId('chat-work-group')).toHaveAttribute('data-expanded', 'false');
+    view.rerender(<WorkGroupRow agentIsWorking={false} row={updated} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Work log actions' }));
+    expect(format).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTitle('Show all work'));
+    expect(screen.getByTestId('chat-work-group')).toHaveAttribute('data-expanded', 'true');
+    expect(format).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTitle('Collapse work log'));
+    expect(format).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Copy work log' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expected));
+    expect(format).toHaveBeenCalledTimes(1);
+    expect(format).toHaveBeenCalledWith(updated);
+    expect(writeText).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['direct', 'menu'])('copies real formatter bytes exactly once through %s browser fallback', async (gesture) => {
+    const user = userEvent.setup();
+    const browserWrite = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+    vi.mocked(writeText).mockRejectedValue(new Error('Native clipboard unavailable'));
+    const row = largeWorkGroup();
+    const expected = actualWorkGroupCopy(row);
+    const format = vi.spyOn(workLogPresentation, 'formatPresentedWorkGroupForCopy');
+    render(<WorkGroupRow agentIsWorking={false} row={row} />);
+    if (gesture === 'menu') await user.click(screen.getByRole('button', { name: 'Work log actions' }));
+    expect(format).not.toHaveBeenCalled();
+    await user.click(screen.getByRole(gesture === 'menu' ? 'menuitem' : 'button', { name: 'Copy work log' }));
+    await waitFor(() => expect(browserWrite).toHaveBeenCalledWith(expected));
+    expect(format).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(expected);
+    expect(browserWrite).toHaveBeenCalledExactlyOnceWith(expected);
+  });
+
+  it('joins already deduplicated changed paths only when their Copy item is selected', async () => {
+    const user = userEvent.setup();
+    const row = largeWorkGroup();
+    expect(row.changedPaths).toEqual(['controlled-0.ts', 'controlled-1.ts']);
+    const join = vi.spyOn(row.changedPaths, 'join');
+    const format = vi.spyOn(workLogPresentation, 'formatPresentedWorkGroupForCopy');
+    render(<WorkGroupRow agentIsWorking={false} row={row} />);
+    await user.click(screen.getByRole('button', { name: 'Work log actions' }));
+    expect(join).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('menuitem', { name: 'Copy changed file paths' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('controlled-0.ts\ncontrolled-1.ts'));
+    expect(join).toHaveBeenCalledExactlyOnceWith('\n');
+    expect(format).not.toHaveBeenCalled();
+  });
+});
 
 const memoryEvent: AgentChatEvent = {
   id: 'memory:event-1',
@@ -25,7 +108,189 @@ const memoryEvent: AgentChatEvent = {
   metadata: { memory_action: 'loaded' },
 };
 
+const actualProducerPage = (label: string): AgentChatPage => {
+  const page = (producerFixture.pages as Array<{ label: string; dto: AgentChatPage }>).find((candidate) => candidate.label === label);
+  if (!page) throw new Error(`Missing producer fixture page: ${label}`);
+  return page.dto;
+};
+
+const actualProducerPages = (prefix: string): AgentChatPage[] => (producerFixture.pages as Array<{ label: string; dto: AgentChatPage }>)
+  .filter((candidate) => candidate.label.startsWith(prefix))
+  .sort((left, right) => Number(left.label.slice(prefix.length)) - Number(right.label.slice(prefix.length)))
+  .map((candidate) => candidate.dto);
+
 describe('memory transcript row', () => {
+  it('shows missing saved details without an indefinite pending state or a load', () => {
+    const load = vi.fn();
+    render(<ChatTranscriptRow agentIsWorking={false} isSubmitting={false} onApprovalSubmit={vi.fn()} onLoadDetail={load}
+      row={{ kind: 'event', event: { ...memoryEvent, kind: 'message', text: 'saved preview',
+        metadata: { chat_body_unavailable: true, chat_body_pending: true } } }} />);
+    expect(screen.getByRole('status')).toHaveTextContent('Saved details are unavailable.');
+    expect(screen.queryByText('Details are updating.')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Show full details' })).toBeNull();
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it('preserves opened chunks when the remaining saved body becomes unavailable', async () => {
+    const event: AgentChatEvent = { ...memoryEvent, kind: 'message', text: 'preview',
+      metadata: { chat_detail_ref: 'prefix:0', chat_body_binding: 'same-body', chat_body_pending: true } };
+    const load = vi.fn().mockResolvedValueOnce({ event_id: event.id, text: 'committed prefix', next: 'prefix:16', complete: false })
+      .mockResolvedValueOnce({ event_id: event.id, text: ' more prefix', next: null, complete: false });
+    const props = { agentIsWorking: false, isSubmitting: false, onApprovalSubmit: vi.fn(), onLoadDetail: load };
+    const view = render(<ChatTranscriptRow {...props} row={{ kind: 'event', event }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Show full details' }));
+    await waitFor(() => expect(view.container.querySelector('pre')).toHaveTextContent('committed prefix'));
+    view.rerender(<ChatTranscriptRow {...props} row={{ kind: 'event', event: { ...event,
+      metadata: { ...event.metadata, chat_body_pending: false, chat_body_unavailable: true } } }} />);
+    expect(view.container.querySelector('pre')).toHaveTextContent('committed prefix');
+    fireEvent.click(screen.getByRole('button', { name: 'Read more' }));
+    await waitFor(() => expect(view.container.querySelector('pre')).toHaveTextContent('committed prefix more prefix'));
+    expect(screen.getByRole('status')).toHaveTextContent('Saved details are unavailable.');
+    expect(screen.queryByText('Details are updating.')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Read more' })).toBeNull();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps missing-body errors sanitized and distinguishes pending details', async () => {
+    const load = vi.fn().mockRejectedValue(new Error('missing private/owned/artifact.txt'));
+    const props = { agentIsWorking: false, isSubmitting: false, onApprovalSubmit: vi.fn(), onLoadDetail: load };
+    const pending: AgentChatEvent = { ...memoryEvent, kind: 'message', text: 'preview', metadata: { chat_body_pending: true } };
+    const view = render(<ChatTranscriptRow {...props} row={{ kind: 'event', event: pending }} />);
+    expect(screen.getByText('Details are updating.')).toBeInTheDocument();
+    view.rerender(<ChatTranscriptRow {...props} row={{ kind: 'event', event: { ...pending,
+      metadata: { chat_body_unavailable: true, chat_detail_ref: 'saved-prefix:0' } } }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Show full details' }));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('status')).toHaveTextContent('Saved details are unavailable.');
+    expect(view.container).not.toHaveTextContent('private/owned/artifact.txt');
+    expect(view.container).not.toHaveTextContent('Details are updating.');
+  });
+
+  it('keeps opened details across a verified replacement and avoids repeating the first chunk', async () => {
+    const observation: AgentChatEvent = { ...memoryEvent, id: 'observation', kind: 'message', role: 'user', text: 'preview',
+      metadata: { chat_display_key: 'slot', chat_detail_ref: 'observation:0', chat_body_binding: 'body' } };
+    const load = vi.fn().mockResolvedValueOnce({ event_id: 'observation', text: 'body', next: null, complete: true })
+      .mockResolvedValueOnce({ event_id: 'canonical', text: 'body-more', next: null, complete: true });
+    const props = { agentIsWorking: false, isSubmitting: false, onApprovalSubmit: vi.fn(), onLoadDetail: load };
+    const view = render(<ChatTranscriptRow {...props} row={{ kind: 'event', event: observation }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Show full details' }));
+    await waitFor(() => expect(view.container.querySelector('pre')).toHaveTextContent('body'));
+    view.rerender(<ChatTranscriptRow {...props} row={{ kind: 'event', event: { ...observation, id: 'canonical',
+      metadata: { ...observation.metadata, chat_detail_ref: 'canonical:0' } } }} />);
+    expect(view.container.querySelector('pre')).toHaveTextContent('body');
+    fireEvent.click(screen.getByRole('button', { name: 'Read more' }));
+    await waitFor(() => expect(view.container.querySelector('pre')).toHaveTextContent('body-more'));
+    expect(view.container.querySelector('pre')).not.toHaveTextContent('bodybody-more');
+  });
+
+  it('keeps the public A slot while replacing B body chunks with the actual renewed A source', async () => {
+    const h0Recent = actualProducerPage('loaded-long-pair-H0-recent-full');
+    const h0Older = actualProducerPage('loaded-long-pair-H0-older-full');
+    const h1Older = actualProducerPage('loaded-pair-H1-first-older-full');
+    const h2Older = actualProducerPage('loaded-pair-H2-first-older-after-late-C-full');
+    const h2Batches = actualProducerPages('loaded-window-H2-recent-after-late-C-batch-');
+    expect(h2Batches).toHaveLength(40);
+
+    const loadedWindow = [h0Recent, h0Older, h1Older, h2Older]
+      .reduce<AgentChatEvent[]>((events, page, index) =>
+        applyChatPage(events, page, index === 0 ? 'recent' : 'older'), []);
+    const requestedIds = chatRevalidationIds(loadedWindow);
+    const acknowledgedIds = h2Batches.flatMap((page) => page.revalidated_ids ?? []);
+    expect(requestedIds).toHaveLength(320);
+    expect(acknowledgedIds).toHaveLength(requestedIds.length);
+    expect(new Set(acknowledgedIds)).toEqual(new Set(requestedIds));
+
+    const publicA = actualProducerPage('loaded-pair-H1-A-only').events.find((event) =>
+      Array.isArray(event.metadata.chat_display_member_ids) && event.metadata.chat_display_member_ids.length === 2);
+    if (!publicA) throw new Error('The captured H1 A-only response omitted the public A pair row.');
+    const memberIds = Array.isArray(publicA.metadata.chat_display_member_ids)
+      ? publicA.metadata.chat_display_member_ids.filter((id): id is string => typeof id === 'string') : [];
+    expect(memberIds).toHaveLength(2);
+    const returnedRows = h2Batches.flatMap((page) => page.events);
+    const rawA = returnedRows.find((event) => event.id === publicA.id);
+    const rawB = returnedRows.find((event) => event.id !== publicA.id
+      && event.metadata.chat_source_ref === memberIds[1]);
+    if (!rawA || !rawB) throw new Error('The actual H2 batch omitted one of the pair members.');
+    expect(publicA.id).toBe(memberIds[0]);
+    expect(publicA.metadata.chat_source_ref).toBe(memberIds[1]);
+    expect(publicA.metadata.chat_display_physical_id).toBe(memberIds[1]);
+    expect(rawA.metadata.chat_source_ref).toBe(publicA.id);
+    expect(publicA.metadata.chat_body_binding).toBeUndefined();
+    expect(rawA.metadata.chat_body_binding).toBeUndefined();
+    expect(typeof publicA.metadata.chat_detail_ref).toBe('string');
+    expect(typeof rawA.metadata.chat_detail_ref).toBe('string');
+
+    const renewed = applyRevalidationReplies(loadedWindow, h2Batches, 'older');
+    const renewedA = renewed.find((event) => event.id === publicA.id);
+    if (!renewedA) throw new Error('The actual revalidation reply omitted raw A.');
+    expect(renewedA.metadata.chat_body_binding).toBeUndefined();
+    expect(publicA.metadata.chat_display_key ?? publicA.id).toBe(publicA.id);
+    expect(renewedA.metadata.chat_display_key).toBe(publicA.id);
+    expect(renewedA.metadata.chat_source_ref).toBe(rawA.metadata.chat_source_ref);
+    expect(renewed).toContainEqual(expect.objectContaining({ id: rawB.id, metadata: expect.objectContaining({
+      chat_source_ref: rawB.metadata.chat_source_ref,
+    }) }));
+
+    let resolveLateChunk!: (detail: AgentChatDetail) => void;
+    const lateChunk = new Promise<AgentChatDetail>((resolve) => { resolveLateChunk = resolve; });
+    const oldReference = String(publicA.metadata.chat_detail_ref);
+    const renewedReference = String(renewedA.metadata.chat_detail_ref);
+    expect(renewedReference).not.toBe(oldReference);
+    const load = vi.fn((reference: string): Promise<AgentChatDetail> => {
+      if (reference === oldReference) return Promise.resolve({
+        event_id: publicA.id, text: 'old B body already opened', next: 'old-B:next', complete: false,
+      });
+      if (reference === 'old-B:next') return lateChunk;
+      if (reference === renewedReference) return Promise.resolve({
+        event_id: renewedA.id, text: 'current A owned body', next: null, complete: true,
+      });
+      return Promise.reject(new Error('unexpected detail reference'));
+    });
+    const rowProps = { agentIsWorking: false, isSubmitting: false, onApprovalSubmit: vi.fn(), onLoadDetail: load };
+    const view = render(<ChatTranscriptRow {...rowProps} row={{ kind: 'event', event: publicA }} />);
+    const stableMessageNode = view.container.querySelector('article[aria-label="assistant message"]');
+    fireEvent.click(screen.getByRole('button', { name: 'Show full details' }));
+    await waitFor(() => expect(view.container.querySelector('pre')).toHaveTextContent('old B body already opened'));
+    fireEvent.click(screen.getByRole('button', { name: 'Read more' }));
+    await waitFor(() => expect(load).toHaveBeenNthCalledWith(2, 'old-B:next'));
+
+    view.rerender(<ChatTranscriptRow {...rowProps} row={{ kind: 'event', event: renewedA }} />);
+    expect(view.container.querySelector('article[aria-label="assistant message"]')).toBe(stableMessageNode);
+    expect(view.container.querySelector('pre')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show full details' }));
+    await waitFor(() => expect(view.container.querySelector('pre')).toHaveTextContent('current A owned body'));
+    expect(load).toHaveBeenNthCalledWith(3, renewedReference);
+
+    await act(async () => {
+      resolveLateChunk({ event_id: publicA.id, text: 'late B body must not append', next: null, complete: true });
+      await lateChunk;
+    });
+    expect(view.container.querySelector('pre')).toHaveTextContent('current A owned body');
+    expect(view.container.querySelector('pre')).not.toHaveTextContent('late B body');
+  });
+  it('opens an actual unbound renewed A header using its own source reference', async () => {
+    const initialPair = actualProducerPage('loaded-pair-H1-A-only').events.find((event) =>
+      Array.isArray(event.metadata.chat_display_member_ids) && event.metadata.chat_display_member_ids.length === 2);
+    if (!initialPair) throw new Error('The captured H1 A-only response omitted the paired public A row.');
+    const rawA = actualProducerPages('loaded-window-H2-recent-after-late-C-batch-')
+      .flatMap((page) => page.events)
+      .find((event) => event.id === initialPair.id && event.metadata.chat_source_ref === initialPair.id);
+    if (!rawA) throw new Error('The captured H2 revalidation pages omitted raw A with its own source reference.');
+
+    expect(rawA.metadata.chat_body_binding).toBeUndefined();
+    expect(rawA.metadata.chat_source_ref).toBe(rawA.id);
+    expect(typeof rawA.metadata.chat_detail_ref).toBe('string');
+
+    const load = vi.fn().mockResolvedValue({
+      event_id: rawA.id, text: 'renewed A owned body', next: null, complete: true,
+    });
+    render(<ChatTranscriptRow agentIsWorking={false} isSubmitting={false} onApprovalSubmit={vi.fn()}
+      onLoadDetail={load} row={{ kind: 'event', event: rawA }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Show full details' }));
+    await waitFor(() => expect(screen.getByText('renewed A owned body')).toBeInTheDocument());
+    expect(load).toHaveBeenCalledWith(rawA.metadata.chat_detail_ref);
+  });
+
   it('is compact by default and reveals the exact injected context', () => {
     render(
       <ChatTranscriptRow

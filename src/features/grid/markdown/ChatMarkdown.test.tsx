@@ -5,6 +5,15 @@ import { describe, expect, it, vi } from "vitest";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { safeMarkdownUrl } from "./markdownSafety";
 
+const markdownWork = vi.hoisted(() => vi.fn());
+vi.mock("react-markdown", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-markdown")>();
+  return { ...actual, default: (props: Parameters<typeof actual.default>[0]) => {
+    markdownWork(props.children);
+    return <actual.default {...props} />;
+  } };
+});
+
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
   writeText: vi.fn(),
 }));
@@ -20,6 +29,42 @@ describe("safeMarkdownUrl", () => {
 });
 
 describe("ChatMarkdown", () => {
+  it("isolates unchanged parser work while preserving code-copy state and source/link-policy updates", async () => {
+    vi.mocked(writeText).mockResolvedValue(undefined);
+    const source = "[local](file:///tmp/a.md)\n\n```ts\nconst stable = true;\n```";
+    const policy = { allowFileLinks: true };
+    const view = render(<ChatMarkdown source={source} linkHandling={policy} />);
+    const code = view.container.querySelector("pre");
+    fireEvent.click(screen.getByRole("button", { name: "Copy code block" }));
+    const copied = await screen.findByRole("button", { name: "Copy code block copied" });
+    const calls = markdownWork.mock.calls.length;
+    view.rerender(<ChatMarkdown source={source} linkHandling={policy} />);
+    expect(markdownWork).toHaveBeenCalledTimes(calls);
+    expect(view.container.querySelector("pre")).toBe(code);
+    expect(screen.getByRole("button", { name: "Copy code block copied" })).toBe(copied);
+    view.rerender(<ChatMarkdown source={source} linkHandling={{ allowFileLinks: false }} />);
+    expect(markdownWork).toHaveBeenCalledTimes(calls + 1);
+    expect(screen.queryByRole("link", { name: "local" })).not.toBeInTheDocument();
+    const openNext = vi.fn().mockResolvedValue(undefined);
+    view.rerender(<ChatMarkdown source={source} linkHandling={{ allowFileLinks: true, openUrl: openNext }} />);
+    fireEvent.click(screen.getByRole("link", { name: "local" }));
+    await waitFor(() => expect(openNext).toHaveBeenCalledWith("file:///tmp/a.md"));
+    view.rerender(<ChatMarkdown source="Updated **source** and [unsafe](javascript:alert)." linkHandling={policy} />);
+    expect(screen.getByText("source").tagName).toBe("STRONG");
+    expect(screen.queryByRole("link", { name: "unsafe" })).not.toBeInTheDocument();
+  });
+
+  it("limits prose blocks without narrowing the technical Markdown lane", () => {
+    const view = render(<ChatMarkdown source={"# Heading\n\nParagraph\n\n- List\n\n> Quote\n\n```js\nconst wide = true;\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |"} />);
+    expect(view.container.querySelector(".chat-markdown")).not.toHaveClass("chat-prose-block");
+    expect(screen.getByText("Paragraph")).toHaveClass("chat-prose-block");
+    expect(screen.getByText("Heading")).toHaveClass("chat-prose-block");
+    expect(view.container.querySelector("ul")).toHaveClass("chat-prose-block");
+    expect(view.container.querySelector("blockquote")).toHaveClass("chat-prose-block");
+    expect(screen.getByRole("table").closest(".chat-prose-block")).toBeNull();
+    expect(view.container.querySelector("pre")?.closest(".chat-prose-block") ?? null).toBeNull();
+  });
+
   it("renders email summaries as semantic GFM tables", () => {
     render(
       <ChatMarkdown

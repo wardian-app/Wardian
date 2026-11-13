@@ -8,7 +8,8 @@ use crate::providers::claude::{
 };
 use crate::providers::codex::CodexProvider;
 use crate::providers::transcript::{
-    bind_pi_watch_message, extract_transcript_message, CodexWatchBindingState,
+    bind_mock_watch_message, bind_pi_watch_message, extract_transcript_message,
+    CodexWatchBindingState,
 };
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
@@ -3257,6 +3258,10 @@ async fn spawn_agent_inner(
         4096,
         262_144,
     )));
+    watch_state
+        .lock()
+        .map_err(|_| "Failed to bind live Chat Watch")?
+        .bind_live_chat(&live_conversation_started_at);
     // Keep the attachment gate on the runtime's existing ActiveAgent-owned
     // watch-state Arc so every status/readiness/admission path sees it.
     let codex_attachment_ready = {
@@ -3305,6 +3310,7 @@ async fn spawn_agent_inner(
         )
     });
     let pty_config = config_lock.clone();
+    let mock_log_path_for_pty = log_path.clone();
     let auto_confirm_antigravity_workspace_trust = config.provider == "antigravity"
         && config
             .antigravity_config()
@@ -4039,10 +4045,26 @@ async fn spawn_agent_inner(
                                 Some(Ok(parsed)) => {
                                     // Use provider to classify the raw JSON into an AgentEvent
                                     let raw_line = parsed.to_string();
-                                    if let Some(message) = extract_transcript_message(
+                                    if let Some(mut message) = extract_transcript_message(
                                         &provider_name_for_pty,
                                         &raw_line,
                                     ) {
+                                        if provider_name_for_pty == "mock" {
+                                            if let (Ok(config), Ok(path)) =
+                                                (pty_config.lock(), mock_log_path_for_pty.lock())
+                                            {
+                                                if let (Some(expected), Some(path)) = (
+                                                    config.fresh_provider_session_id.as_deref(),
+                                                    path.as_ref(),
+                                                ) {
+                                                    bind_mock_watch_message(
+                                                        &mut message,
+                                                        expected,
+                                                        &path.to_string_lossy(),
+                                                    );
+                                                }
+                                            }
+                                        }
                                         if let Ok(mut watch_state) = watch_state_clone.lock() {
                                             watch_state.push_transcript(message);
                                         }
@@ -4299,7 +4321,7 @@ async fn spawn_agent_inner(
                                         codex_watch_binding.extract_message(&raw_line)
                                     {
                                         if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                            watch_state.push_transcript(message);
+                                            watch_state.push_file_transcript(message);
                                         }
                                     }
                                     if let Some(event) = event {
@@ -4430,7 +4452,7 @@ async fn spawn_agent_inner(
                                     );
                                 }
                                 if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                    watch_state.push_transcript(message);
+                                    watch_state.push_file_transcript(message);
                                 }
                             }
                             if let Some(event) = watcher_provider.parse_output(&raw_line) {
@@ -4618,7 +4640,7 @@ async fn spawn_agent_inner(
                                 let message = extract_transcript_message("claude", raw_line);
                                 if let Some(message) = message {
                                     if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                        watch_state.push_transcript(message.clone());
+                                        watch_state.push_file_transcript(message.clone());
                                     }
                                 }
                                 if let Some(event) = watcher_provider.parse_output(raw_line) {
@@ -4973,7 +4995,7 @@ async fn spawn_agent_inner(
                             if !projected.is_empty() {
                                 if let Ok(mut watch_state) = watcher_watch_state.lock() {
                                     for message in projected {
-                                        watch_state.push_transcript(message);
+                                        watch_state.push_file_transcript(message);
                                     }
                                 }
                             }
@@ -5030,7 +5052,7 @@ async fn spawn_agent_inner(
                                         extract_transcript_message("antigravity", &raw_line)
                                     {
                                         if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                            watch_state.push_transcript(message);
+                                            watch_state.push_file_transcript(message);
                                         }
                                     }
                                     if let Some(event) = watcher_provider.parse_output(&raw_line) {

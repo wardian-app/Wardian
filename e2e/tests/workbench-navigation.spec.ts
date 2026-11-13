@@ -1,10 +1,11 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-import type { WorkbenchDocumentV1 } from "../../src/types";
+import type { AgentChatPage, WorkbenchDocumentV1 } from "../../src/types";
 import type { AppSettings, WorkbenchNewTabAction } from "../../src/types/settings";
 import type { WorkbenchLoadResult } from "../../src/features/workbench/workbenchPersistence";
+import { DEFAULT_WATCHLIST_PREFS } from "../../src/layout/watchlist/types";
 import {
   installWorkbenchIpcMock,
   makeWorkbenchDocument,
@@ -1611,6 +1612,254 @@ test("reveals roster agents in Agents and reserves tab creation for explicit Ope
     .click();
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(2);
   await expect(page.getByTestId("workbench-group")).toHaveCount(2);
+});
+
+test("reveals only the focused Off agent Saved Chat in the existing Overview with the native container oracle", async ({ page }, testInfo) => {
+  const owner = "11111111-1111-4111-8111-111111111111";
+  const other = "22222222-2222-4222-8222-222222222222";
+  const body = "Saved synthetic conversation. This agent remains Off while its history is read.";
+  const overview = makeWorkbenchSurface("saved-overview", "agents-overview");
+  const saved: AgentChatPage = {
+    session_id: owner, conversation_id: null, generation: null,
+    source_epoch: null, recent_admission: "public-preview-admission", revision: "saved-revision",
+    next_before: null, unchanged: false, reset: false, older_page: false,
+    progress: "provisional", aliases: [], removed_ids: [], detail: null, bytes_read: 0, records_decoded: 0,
+    events: [{ id: "saved-message", session_id: owner, provider: "claude", kind: "message",
+      role: "assistant", text: body, title: null, status: null, turn_id: "saved-turn", source: "provider_log",
+      command: null, exit_code: null, path: null, language: null, created_at: "2026-01-01T00:00:00Z",
+      sequence: 1, metadata: { chat_provisional: true, chat_source_admission: "public-preview-admission" } }],
+  };
+  const target = saved.events[0];
+  // Public equal-text turns have distinct identities. Earlier rows create
+  // ordinary content overflow; no viewport or scroll position is forced.
+  saved.events = [
+    ...Array.from({ length: 60 }, (_, index) => ({ ...target, id: `earlier-saved-${index}`,
+      text: `Earlier public synthetic saved message ${index + 1}.`, turn_id: `earlier-turn-${index}`, sequence: index + 1 })),
+    { ...target, id: "saved-message-twin", turn_id: "saved-twin-turn", sequence: 61 },
+    { ...target, sequence: 62 },
+  ];
+  await page.addInitScript(() => localStorage.setItem("wardian-settings", JSON.stringify({
+    state: { gridCardDisplayMode: "terminal" }, version: 2,
+  })));
+  const ipc = await installWorkbenchIpcMock(page, {
+    load_result: primaryLoad(makeWorkbenchDocument({ surfaces: [overview] })),
+    agents: [
+      { ...ALPHA_AGENT, session_id: owner, session_name: "Saved Focus", folder: "/workspace/saved-focus", provider: "claude", is_off: true },
+      { ...BETA_AGENT, session_id: other, session_name: "Saved Quiet", folder: "/workspace/saved-quiet", provider: "claude", is_off: true },
+    ],
+    responses: {
+      load_agent_chat_page: saved,
+      list_provider_model_catalog: { provider: "claude", models: [], refresh_error: null },
+      // Show the existing optional status column in the synthetic evidence.
+      load_watchlist_prefs: { ...DEFAULT_WATCHLIST_PREFS,
+        columns: DEFAULT_WATCHLIST_PREFS.columns.map((column) => ({ ...column, visible: column.id === "status_label" })) },
+    },
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("workbench-host")).toBeVisible();
+  await expect(page.locator("[data-agent-grid-card-id]")).toHaveCount(0);
+  // The configuration sidebar performs its own ordinary startup discovery.
+  // Match App's history-entry contract: opening Saved Chat must add none.
+  await expect.poll(() => ipc.calls("list_provider_model_catalog")).toHaveLength(1);
+  const openingCallIndex = (await ipc.calls()).length;
+
+  const descriptor = await page.evaluate((id) => {
+    const native = (window as unknown as { __TAURI_INTERNALS__: {
+      invoke(command: string, args?: Record<string, unknown>): Promise<unknown>;
+    } }).__TAURI_INTERNALS__;
+    const original = native.invoke;
+    let recentReads = 0;
+    // This case's synthetic backend begins with two earlier rows. Record every
+    // ordinary mock IPC call, then expose the full independently planned fixture
+    // only when the real consumer makes its next normal recent request.
+    const invoke = (command: string, args?: Record<string, unknown>) => {
+      const result = original(command, args);
+      if (command !== "load_agent_chat_page" || args?.sessionId !== id || args?.cursor != null) return result;
+      const first = recentReads++ === 0;
+      return result.then((value) => {
+        const dto = value as AgentChatPage;
+        return first ? { ...dto, revision: "opening-preview-revision", recent_admission: "opening-preview-admission",
+          events: dto.events.slice(0, 2).map((event) => ({ ...event,
+            metadata: { ...event.metadata, chat_source_admission: "opening-preview-admission" } })) } : dto;
+      });
+    };
+    Object.defineProperty(native, "invoke", { value: invoke, writable: false, configurable: false });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: native, writable: false, configurable: false });
+    const descriptor = Object.getOwnPropertyDescriptor(native, "invoke");
+    return { writable: descriptor?.writable, configurable: descriptor?.configurable };
+  }, owner);
+  expect(descriptor).toEqual({ writable: false, configurable: false });
+
+  // Execute the maintained native observer verbatim against real React/Dockview
+  // DOM. Importing the native test would allocate its native harness instead.
+  const nativeSource = readFileSync(path.resolve("e2e-native/tests/chat-turn-change-native.test.mjs"), "utf8");
+  const start = nativeSource.indexOf("function installChatObservation(config) {");
+  const end = nativeSource.indexOf("\nasync function readObservation(driver)", start);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  await page.evaluate(`(${nativeSource.slice(start, end)})(${JSON.stringify({ name: "Saved Focus", body, provider: "claude",
+    conversation: null, eventId: "saved-message", probe: "native-input-probe" })});
+    window.__chatAcceptance.bind(${JSON.stringify(owner)}); window.__chatAcceptance.arm("focused-off");`);
+  const readPassive = () => page.evaluate(() => {
+    const api = (window as unknown as { __chatAcceptance: {
+      state: { activation: { active: boolean; version: number; owner: string; token: number; at: number };
+        coverage: string; broaderIpcRuntime: string; errors: string[];
+        calls: Array<{ session: string; at: number }>;
+        receipts: Array<{ session: string; requestSession: string; at: number; rows: Array<{ id: string; target: boolean }> }>;
+        phase: { label: string; ordinal: number; rosterAt: number; domNotificationsAfterRoster: number; paintAt: number | null; usableAt: number | null;
+          completeTrustedProbeAt: number | null; usableFrame1At: number | null; usableFrame2At: number | null;
+          body: { session: string; eventId: string; receiptAt: number; matchingBodySlots: number } | null } };
+      subscriptionStatus(): { active: boolean; fault_count: number; request_count: number };
+      subjectStatus(): { latchedValid: boolean; latchedEventId: string; currentMatchingBodySlots: number };
+      interactionStatus(): unknown;
+    } }).__chatAcceptance;
+    return { ...api.state, subscription: api.subscriptionStatus(), subject: api.subjectStatus(), interaction: api.interactionStatus() };
+  });
+  let expectedToken: number;
+  let postDisposal: { status: string; disposed: boolean; token: number; subscription: { active: boolean } };
+  try {
+    const active = await readPassive();
+    expectedToken = active.activation.token;
+    expect(active.activation).toMatchObject({ active: true, version: 1, owner });
+    expect(active.subscription).toEqual({ active: true, fault_count: 0, request_count: 0 });
+    expect(active.calls).toEqual([]);
+    const callbackStart = nativeSource.indexOf("function waitForChatEndpoint(binding,");
+    const callbackEnd = nativeSource.indexOf("function waitForOwnedChatMode(binding,", callbackStart);
+    const discoveryEnd = nativeSource.indexOf("async function measureChat(driver,", callbackEnd);
+    expect(callbackStart).toBeGreaterThanOrEqual(0);
+    expect(callbackEnd).toBeGreaterThan(callbackStart);
+    expect(discoveryEnd).toBeGreaterThan(callbackEnd);
+    const callbackSource = nativeSource.slice(callbackStart, callbackEnd);
+    const discoverySource = nativeSource.slice(callbackEnd, discoveryEnd);
+    const binding = { owner, version: active.activation.version, token: active.activation.token,
+      ordinal: active.phase.ordinal, label: active.phase.label };
+    const deadline = Date.now() + 5000;
+    const waitEndpoint = (field: "paintAt" | "usableAt") => {
+      const remaining = deadline - Date.now();
+      expect(remaining).toBeGreaterThan(0);
+      return page.evaluate<{ status: string; owner: string; token: number; field: string; endpointAt: number }>(
+        `new Promise(done => (${callbackSource})(${JSON.stringify(binding)}, ${JSON.stringify(field)}, ${remaining}, done))`);
+    };
+    await page.getByLabel("Agent Saved Focus", { exact: true }).click();
+    // Preserve real serialized DOM references. Discovery grants no body or
+    // visibility authority; the browser predicates and actual click follow.
+    type OwnedModeResult = { status: string; owner: string; version: number; token: number; ordinal: number; label: string;
+      field: string; surface: HTMLElement | null; control: HTMLButtonElement | null };
+    const discovered = await page.evaluateHandle<OwnedModeResult>(`new Promise((done) => (${discoverySource})(${JSON.stringify(binding)}, ${deadline - Date.now()}, done))`);
+    const card = page.locator(`[data-agent-grid-card-id="${owner}"]`);
+    try {
+      expect(await discovered.evaluate(({ surface, control, ...ack }) => ({ ...ack, actualSurface: surface?.getAttribute("data-agent-grid-card-id"),
+        actualControl: control?.tagName, contained: Boolean(surface && control && surface.contains(control)) })))
+        .toMatchObject({ status: "ACCEPTED", ...binding, field: "ownedMode", actualSurface: owner, actualControl: "BUTTON", contained: true });
+      const controlHandle = await discovered.getProperty("control");
+      try {
+        const mode = controlHandle.asElement();
+        if (!mode) throw new Error("owned mode discovery did not serialize a real Element");
+        expect(await mode.isVisible()).toBe(true);
+        expect(await mode.getAttribute("title")).toBe("Switch to Chat");
+        await mode.click();
+      } finally { await controlHandle.dispose(); }
+    } finally { await discovered.dispose(); }
+    await expect(card).toBeVisible();
+    await expect(page.locator(`[data-agent-grid-card-id="${other}"]`)).toHaveCount(0);
+    await expect(surfaceTab(page, "agents-overview")).toHaveCount(1);
+    await expect(surfaceTab(page, "agents-overview")).toHaveAttribute("data-surface-id", overview.surface_id);
+    await expect(surfaceTab(page, "agents-overview")).toHaveAttribute("aria-selected", "true");
+    await expect(surfaceTab(page, "agent-session")).toHaveCount(0);
+    const paintAck = await waitEndpoint("paintAt");
+    expect(paintAck).toMatchObject({ status: "ACCEPTED", owner, token: expectedToken, field: "paintAt" });
+    await expect(card.getByText(body, { exact: true })).toHaveCount(2);
+    await expect(card.locator('[data-chat-row-key="saved-message"]').getByText(body, { exact: true })).toBeVisible();
+    const planned = await page.evaluate((id) => {
+      const api = (window as unknown as { __chatAcceptance: { container(owner: string): Element | null;
+        prepareInteraction(owner: string, scroll: Element): { control: string; reason: string; overflow: boolean;
+          input: Element | null; composer: { visible: boolean; enabled: boolean; empty: boolean } } } }).__chatAcceptance;
+      const root = api.container(id);
+      const region = root?.querySelector('[data-testid="agent-chat-scroll-region"]');
+      if (!region) throw new Error("current owned Chat region missing");
+      const plan = api.prepareInteraction(id, region);
+      return { control: plan.control, reason: plan.reason, overflow: plan.overflow, composer: plan.composer,
+        actualOwnedInput: plan.input === root?.querySelector('textarea[aria-label="Message agent"]') };
+    }, owner);
+    expect(planned).toMatchObject({ control: "keyboard", reason: "safe_empty_composer", overflow: true,
+      actualOwnedInput: true, composer: { visible: true, enabled: true, empty: true } });
+    await expect(card.getByRole("textbox", { name: "Message agent", exact: true })).toHaveValue("");
+    const usableWait = waitEndpoint("usableAt");
+    await card.getByRole("textbox", { name: "Message agent", exact: true }).pressSequentially("native-input-probe");
+    const usableAck = await usableWait;
+    expect(usableAck).toMatchObject({ status: "ACCEPTED", owner, token: expectedToken, field: "usableAt" });
+    const observed = await readPassive();
+    expect(observed.phase.domNotificationsAfterRoster).toBeGreaterThan(0);
+    expect(paintAck.endpointAt).toBe(observed.phase.paintAt);
+    expect(usableAck.endpointAt).toBe(observed.phase.usableAt);
+    expect(observed.phase.completeTrustedProbeAt).not.toBeNull();
+    expect(observed.phase.usableFrame1At).toBeGreaterThanOrEqual(observed.phase.completeTrustedProbeAt!);
+    expect(observed.phase.usableFrame2At).toBe(observed.phase.usableAt);
+    const ownedReceipts = observed.receipts.filter((receipt) => receipt.session === owner && receipt.requestSession === owner);
+    expect(ownedReceipts.length).toBeGreaterThanOrEqual(2);
+    expect(ownedReceipts[0].rows).toHaveLength(2);
+    expect(ownedReceipts[0].rows.every((row) => !row.target)).toBe(true);
+    expect(observed.errors).toEqual([]);
+    expect(observed.subscription.active).toBe(true);
+    expect(observed.subscription.fault_count).toBe(0);
+    expect(observed.coverage).toBe("PAGE_LOADER_ONLY");
+    expect(observed.broaderIpcRuntime).toBe("UNOBSERVED");
+    expect(observed.activation.at).toBeLessThanOrEqual(observed.phase.rosterAt);
+    expect(observed.calls.length).toBeGreaterThan(0);
+    expect(observed.calls.every((call) => call.session === owner && call.at >= observed.phase.rosterAt)).toBe(true);
+    expect(observed.phase.body).toMatchObject({ session: owner, eventId: "saved-message", matchingBodySlots: 2,
+      scopeMode: "recent-preview", conversation: null, generation: null, epoch: null, admission: "public-preview-admission" });
+    expect(observed.subject).toMatchObject({ latchedValid: true, latchedEventId: "saved-message", currentMatchingBodySlots: 2 });
+    expect(observed.receipts.some((receipt) => receipt.session === owner && receipt.requestSession === owner
+      && receipt.at === observed.phase.body?.receiptAt && receipt.rows.some((row) => row.id === "saved-message" && row.target))).toBe(true);
+    await testInfo.attach("native-page-loader-receipt", { body: JSON.stringify({
+      coverage: observed.coverage, broader_ipc_runtime: observed.broaderIpcRuntime,
+      activation: observed.activation, subscription: observed.subscription, descriptor,
+      request_count: observed.calls.length, receipt_count: observed.receipts.length,
+      phase: observed.phase, subject: observed.subject, interaction: observed.interaction,
+      natural_overflow: planned.overflow, duplicate_body_ids: ["saved-message-twin", "saved-message"],
+    }), contentType: "application/json" });
+    await expect.poll(() => page.evaluate((id) => {
+      const api = (window as unknown as { __chatAcceptance: { container(owner: string): Element | null } }).__chatAcceptance;
+      return api.container(id)?.getAttribute("data-agent-grid-card-id") ?? null;
+    }, owner)).toBe(owner);
+    expect((await ipc.snapshot()).agents.every((agent) => agent.is_off)).toBe(true);
+    await expect(page.getByLabel("Agent Saved Focus", { exact: true }).getByLabel("Status: Off", { exact: true })).toBeVisible();
+    expect((await ipc.calls()).filter(({ command }) => [
+      "resume_agent", "start_agent", "spawn_agent", "restart_agent",
+    ].includes(command))).toEqual([]);
+    const openingCalls = (await ipc.calls()).slice(openingCallIndex);
+    expect(openingCalls.filter(({ command }) => command === "list_provider_model_catalog")).toEqual([]);
+    await testInfo.attach("history-opening-ipc-scope", { body: JSON.stringify({
+      ordinary_startup_catalog_calls: 1, opening_call_index: openingCallIndex,
+      opening_commands: openingCalls.map(({ command }) => command),
+    }), contentType: "application/json" });
+
+    const screenshotDir = process.env.WARDIAN_FOCUSED_OFF_CHAT_SCREENSHOT_DIR;
+    if (screenshotDir) {
+      const relative = path.relative(path.resolve("e2e/screenshots/chat"), path.resolve(screenshotDir));
+      expect(relative.length > 0 && !path.isAbsolute(relative) && !relative.split(path.sep).includes("..")).toBe(true);
+      mkdirSync(screenshotDir, { recursive: true });
+      const screenshotPath = path.join(screenshotDir, "focused-off-saved-chat.png");
+      await page.screenshot({ path: screenshotPath, animations: "disabled" });
+      await testInfo.attach("focused-off-saved-chat", { path: screenshotPath, contentType: "image/png" });
+    }
+  } finally {
+    const metadata = await page.evaluate(() => {
+      const api = (window as unknown as { __chatAcceptance: { describeContainers(): unknown;
+        dispose(): { status: string; disposed: boolean; token: number; subscription: { active: boolean } } } }).__chatAcceptance;
+      const native = api.describeContainers();
+      const postDispose = api.dispose();
+      return { native, postDispose, containers: Array.from(document.querySelectorAll("[data-agent-grid-card-id]"))
+        .slice(0, 4).map((node) => ({ owner: node.getAttribute("data-agent-grid-card-id"),
+          surface: node.closest('[data-testid="surface-panel"]')?.getAttribute("data-surface-id"),
+          geometry: node.getBoundingClientRect().toJSON() })) };
+    });
+    postDisposal = metadata.postDispose;
+    await testInfo.attach("native-container-real-dom", { body: JSON.stringify(metadata), contentType: "application/json" });
+  }
+  expect(postDisposal).toMatchObject({ status: "OBSERVED_POST_DISPOSE", disposed: true,
+    token: expectedToken, subscription: { active: false } });
 });
 
 test("cancelling one dirty close guard leaves the complete group unchanged", async ({ page }) => {

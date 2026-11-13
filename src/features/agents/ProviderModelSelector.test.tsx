@@ -12,6 +12,28 @@ describe("ProviderModelSelector", () => {
     invokeMock.mockReset();
   });
 
+  it("defers discovery and its timer until explicit activation and blocks read-only activation", async () => {
+    invokeMock.mockResolvedValue({ provider: "codex", models: [], refresh_error: null });
+    const timer = vi.spyOn(window, "setInterval");
+    const props = { idPrefix: "history", provider: "codex", selection: { model: "saved-model" }, onSelectionChange: vi.fn(), deferDiscovery: true };
+    const view = render(<ProviderModelSelector {...props} />);
+    const picker = screen.getByRole("button", { name: "Choose model" });
+    expect(picker).toHaveTextContent("saved-model");
+    picker.focus();
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(timer).not.toHaveBeenCalled();
+    const user = userEvent.setup();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("list_provider_model_catalog", { provider: "codex", forceRefresh: false }));
+    expect(timer.mock.calls.filter(([, delay]) => delay === 5 * 60 * 1000)).toHaveLength(1);
+    timer.mockRestore();
+    view.rerender(<ProviderModelSelector {...props} disabled />);
+    expect(screen.getByRole("button", { name: "Choose model" })).toBeDisabled();
+    const discoveryCalls = invokeMock.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    expect(invokeMock.mock.calls).toHaveLength(discoveryCalls);
+  });
+
   it("uses live provider model capabilities to keep effort compatible with the selected model", async () => {
     invokeMock.mockResolvedValue({
       provider: "codex",

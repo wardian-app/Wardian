@@ -1,0 +1,26 @@
+[
+  {
+    "provider": "codex",
+    "title": "apply_patch",
+    "raw": { "type": "response_item", "payload": { "type": "custom_tool_call", "name": "apply_patch", "input": "*** Begin Patch\n*** Update File: src/example.ts\n@@\n-old\n+new\n*** End Patch" } },
+    "metadata": { "tool_name": "apply_patch", "tool_input_text": "*** Begin Patch\n*** Update File: src/example.ts\n@@\n-old\n+new\n*** End Patch" },
+    "detail_text": "*** Begin Patch\n*** Update File: src/example.ts\n@@\n-old\n+new\n*** End Patch",
+    "change": { "path": "src/example.ts", "kind": "edited", "added": 1, "removed": 1, "counts_unknown": false }
+  },
+  {
+    "provider": "claude",
+    "title": "Edit",
+    "raw": { "type": "assistant", "message": { "content": [ { "type": "tool_use", "id": "edit-1", "name": "Edit", "input": { "file_path": "src/example.ts", "old_string": "old\n", "new_string": "new\n" } } ], "stop_reason": "tool_use" } },
+    "metadata": { "tool_name": "Edit", "file_path": "src/example.ts", "files_written": [ "src/example.ts" ], "tool_input": { "file_path": "src/example.ts", "old_string": "old\n", "new_string": "new\n" }, "chat_edit_summary": { "kind": "edit", "added": 1, "removed": 1 } },
+    "detail_text": "{\"file_path\":\"src/example.ts\",\"old_string\":\"old\\n\",\"new_string\":\"new\\n\"}",
+    "change": { "path": "src/example.ts", "kind": "edited", "added": 1, "removed": 1, "counts_unknown": false }
+  },
+  {
+    "provider": "claude",
+    "title": "Write",
+    "raw": { "type": "assistant", "message": { "content": [ { "type": "tool_use", "id": "write-1", "name": "Write", "input": { "file_path": "src/new.ts", "content": "first\r\nsecond\n" } } ], "stop_reason": "tool_use" } },
+    "metadata": { "tool_name": "Write", "file_path": "src/new.ts", "files_written": [ "src/new.ts" ], "tool_input": { "file_path": "src/new.ts", "content": "first\r\nsecond\n" }, "chat_edit_summary": { "kind": "write", "added": 2, "removed": 0 } },
+    "detail_text": "{\"file_path\":\"src/new.ts\",\"content\":\"first\\r\\nsecond\\n\"}",
+    "change": { "path": "src/new.ts", "kind": "written", "added": 0, "removed": 0, "counts_unknown": true }
+  }
+]

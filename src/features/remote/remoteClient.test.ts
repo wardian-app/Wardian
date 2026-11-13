@@ -1,10 +1,169 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RemoteRequestError, remoteClient } from "./remoteClient";
+import { RemoteChatTimeoutError, RemoteRequestError, remoteClient } from "./remoteClient";
 
 describe("remoteClient error propagation", () => {
+  it("opts into preview only for explicit recent reads", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    await remoteClient.loadAgentChatPage("agent-1");
+    await remoteClient.loadAgentChatPage("agent-1", undefined, undefined, undefined, undefined, undefined, true);
+    await remoteClient.loadAgentChatPage("agent-1", "before", undefined, undefined, undefined, undefined, true);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, undefined, "detail", undefined, undefined, true);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, "revision", undefined, undefined, ["source:one"], true);
+    const queries = fetcher.mock.calls.map(([url]) => new URL(String(url), "https://fixture.test").searchParams);
+    expect(queries[0].has("recent_preview")).toBe(false);
+    expect(queries[1].get("recent_preview")).toBe("true");
+    expect(queries.slice(2).every((query) => !query.has("recent_preview"))).toBe(true);
+    expect(queries[2].get("before")).toBe("before");
+    expect(queries[3].get("detail")).toBe("detail");
+    expect(queries[4].get("revalidate_ids")).toBe('["source:one"]');
+  });
+  it("requests eight recent headers without limiting Older, detail, or renewal reads", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    await remoteClient.loadAgentChatPage("agent-1");
+    await remoteClient.loadAgentChatPage("agent-1", "opaque-before");
+    await remoteClient.loadAgentChatPage("agent-1", undefined, undefined, "opaque-detail");
+    await remoteClient.loadAgentChatPage("agent-1", undefined, "opaque-revision", undefined, undefined, ["actual-source"]);
+    const queries = fetcher.mock.calls.map(([url]) => new URL(String(url), "https://fixture.test").searchParams);
+    expect(queries[0].get("limit")).toBe("8");
+    expect(queries.slice(1).every((query) => !query.has("limit"))).toBe(true);
+    expect(queries[1].get("before")).toBe("opaque-before");
+    expect(queries[2].get("detail")).toBe("opaque-detail");
+    expect(queries[3].get("revision")).toBe("opaque-revision");
+    expect(queries[3].get("revalidate_ids")).toBe('["actual-source"]');
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     remoteClient.setCsrfNonce(null);
+  });
+
+  it("allows a healthy Chat read to finish past the session read deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (response: Response) => void;
+      let signal: AbortSignal | null | undefined;
+      vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          finish = resolve;
+          signal = init?.signal;
+          signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        }),
+      ));
+      const request = remoteClient.loadAgentChatPage("agent-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(signal?.aborted).toBe(false);
+      finish(new Response(JSON.stringify({ events: [], has_older: false, next_before: null })));
+      await expect(request).resolves.toEqual({ events: [], has_older: false, next_before: null });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds Chat reads with a distinguishable local timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        }),
+      ));
+      const request = remoteClient.loadAgentChatPage("agent-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expect(request).resolves.toMatchObject({ name: "RemoteChatTimeoutError" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an interrupted successful Chat body distinguishable from connection loss", async () => {
+    const response = new Response(null, { status: 200 });
+    vi.spyOn(response, "json").mockRejectedValue(new TypeError("Private transport detail"));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(remoteClient.loadAgentChatPage("agent-1")).rejects.toMatchObject({
+      name: "RemoteChatBodyError",
+      message: "Chat could not be loaded. Retry when the desktop is available.",
+    });
+    await expect(remoteClient.loadSession()).rejects.toThrow("Private transport detail");
+  });
+
+  it("preserves caller cancellation after Chat headers have arrived", async () => {
+    const controller = new AbortController();
+    const response = new Response(null, { status: 200 });
+    vi.spyOn(response, "json").mockImplementation(async () => {
+      controller.abort();
+      throw new DOMException("Aborted", "AbortError");
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(remoteClient.loadAgentChatPage("agent-1", undefined, undefined, undefined, controller.signal))
+      .rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("keeps the Chat deadline classification when a successful body stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | null | undefined;
+      const response = new Response(null, { status: 200 });
+      vi.spyOn(response, "json").mockImplementation(() => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      }));
+      vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) => {
+        signal = init?.signal;
+        return Promise.resolve(response);
+      }));
+      const read = remoteClient.loadAgentChatPage("agent-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expect(read).resolves.toMatchObject({ name: "RemoteChatTimeoutError" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels an owned Chat HTTP request independently of the read deadline", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      }),
+    ));
+    const request = remoteClient.loadAgentChatPage("agent-1", "20", undefined, undefined, controller.signal).catch((error: unknown) => error);
+    controller.abort();
+    await expect(request).resolves.toMatchObject({ name: "AbortError" });
+  });
+
+  it("preserves a received Chat 401 when its error body reaches the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | null | undefined;
+      const response = new Response(null, { status: 401 });
+      vi.spyOn(response, "json").mockImplementation(() => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      }));
+      vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) => {
+        signal = init?.signal;
+        return Promise.resolve(response);
+      }));
+      const request = remoteClient.loadAgentChatPage("agent-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expect(request).resolves.toMatchObject({ name: "RemoteRequestError", status: 401 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves the optional exact Chat receipt returned by prompt delivery", async () => {
+    const payload = {
+      ok: true,
+      chat_event_id: "generated:conversation:1",
+      chat_agent_id: "agent-1",
+      chat_conversation_id: "conversation",
+      chat_source_epoch: null,
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(payload))));
+    await expect(remoteClient.sendPrompt("agent-1", "hello")).resolves.toEqual(payload);
   });
 
   it("surfaces the gateway detail message when an action fails", async () => {
@@ -114,10 +273,55 @@ describe("remoteClient error propagation", () => {
       expect(signal?.aborted).toBe(false);
 
       resolveFetch?.(new Response(JSON.stringify({ ok: true }), { status: 200 }));
-      await expect(request).resolves.toBeUndefined();
+      await expect(request).resolves.toEqual({ ok: true });
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps the Chat deadline active after headers while the JSON body stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn((_path: string, init?: RequestInit) => {
+        let streamController!: ReadableStreamDefaultController<Uint8Array>;
+        const body = new ReadableStream<Uint8Array>({ start(controller) { streamController = controller; } });
+        init?.signal?.addEventListener("abort", () => {
+          streamController.error(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+        }, { once: true });
+        return Promise.resolve(new Response(body, { status: 200 }));
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      let settled = false;
+      const request = remoteClient.loadAgentChatPage("agent-1").then(
+        () => { settled = true; return null; },
+        (error: unknown) => { settled = true; return error; },
+      );
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(request).resolves.toBeInstanceOf(RemoteChatTimeoutError);
+      expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("preserves an already received 401 when its optional error body stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) => {
+        let streamController!: ReadableStreamDefaultController<Uint8Array>;
+        const body = new ReadableStream<Uint8Array>({ start(controller) { streamController = controller; } });
+        init?.signal?.addEventListener("abort", () => {
+          streamController.error(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+        }, { once: true });
+        return Promise.resolve(new Response(body, { status: 401 }));
+      }));
+      const request = remoteClient.loadAgentChatPage("agent-1").then(() => null, (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const error = await request;
+      expect(error).toBeInstanceOf(RemoteRequestError);
+      expect(error).toMatchObject({ status: 401 });
+      expect(error).not.toBeInstanceOf(RemoteChatTimeoutError);
+    } finally { vi.useRealTimers(); }
   });
 
   it("requests bounded automation monitor pages through server-owned offsets", async () => {
@@ -144,5 +348,23 @@ describe("remoteClient error propagation", () => {
       "/remote/api/automations/monitor?active_offset=25&recent_offset=50",
       expect.objectContaining({ method: "GET" }),
     );
+  });
+
+  it("encodes selected Chat source IDs as one JSON query value", async () => {
+    const ids = [
+      "source:agent-1:epoch:00000000000000000001:observation-a:0",
+      "source:agent-1:epoch:00000000000000000002:observation-b:0",
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      session_id: "agent-1", conversation_id: "conversation", generation: "generation", source_epoch: "epoch",
+      revision: "revision", events: [], next_before: null, unchanged: false, reset: false, progress: "ready",
+      aliases: [], removed_ids: [], detail: null, revalidated_ids: ids, bytes_read: 0, records_decoded: 0,
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await remoteClient.loadAgentChatPage("agent-1", undefined, "revision", undefined, undefined, ids);
+
+    const url = new URL(String(fetchMock.mock.calls[0]?.[0]), "http://wardian.test");
+    expect(url.searchParams.getAll("revalidate_ids")).toEqual([JSON.stringify(ids)]);
   });
 });

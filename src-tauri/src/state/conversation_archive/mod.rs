@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::providers::chat_transcript::codex_user_mirror_pair;
 use serde::{Deserialize, Serialize};
 use wardian_core::conversations::{
     append_index_upsert, append_jsonl_record, read_jsonl_records, read_jsonl_records_resilient,
@@ -14,8 +15,14 @@ use wardian_core::conversations::{
     ConversationManifest, ConversationNarrativeRecord, ConversationRecordKind,
     ConversationSourceRecord, ConversationSpeakerType, ConversationTurnRecord,
 };
-use wardian_core::models::chat::AgentChatEvent;
+use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 
+mod chat_logical_index;
+pub(crate) mod chat_read;
+mod chat_read_store;
+mod chat_source_index;
+mod compatibility_claims;
+mod mock_mirrors;
 pub(crate) mod provenance;
 mod records;
 mod repair;
@@ -27,13 +34,16 @@ mod turns;
 use records::{
     current_rfc3339_millis, generated_event_from_record, generated_sources_from_record,
     matching_delivered_input_record_index, record_kind_from_chat_event_kind,
-    source_record_from_chat_event,
+    source_record_for_retry, source_record_from_chat_event,
 };
 pub use records::{lifecycle_record, narrative_from_chat_event, narrative_from_delivered_input};
+#[cfg(test)]
+use repair::matching_record_index;
 use repair::{
     append_source_if_needed, coalesce_batch_observations, is_bound_native_delivery,
-    matching_event_index, matching_record_index, publish_recovered_observations,
-    rebuild_derived_projections, recover_unlinked_observations, PendingChatPublication,
+    matching_event_index, matching_record_index_with_candidates, publish_recovered_observations,
+    rebuild_derived_projections, reconcile_codex_user_mirror_records,
+    recover_unlinked_observations, PendingChatPublication,
 };
 #[cfg(test)]
 use storage::new_conversation_id;
@@ -49,14 +59,109 @@ use storage::{
 pub(crate) use turns::derive_turn_records;
 use turns::{apply_archive_summary_to_manifest, archive_summary, derive_turn_records_with_context};
 
+fn codex_archive_mirror_pair<'a>(
+    first: &AgentChatEvent,
+    second: &AgentChatEvent,
+    candidates: impl IntoIterator<Item = &'a AgentChatEvent>,
+) -> bool {
+    codex_user_mirror_pair(first, second)
+        || provenance::codex_unique_stream_completion_pair(first, second, candidates)
+        || provenance::codex_live_watch_observation_pair(first, second)
+}
+
+fn promote_codex_request_root_from_response_item(
+    record: &mut ConversationNarrativeRecord,
+    event: &AgentChatEvent,
+) -> bool {
+    if event.source.as_deref() != Some("response_item")
+        || event.metadata["input_origin"] != "human_input"
+        || event.metadata["input_purpose"] != "request"
+    {
+        return false;
+    }
+    let Some(request_root_id) = event
+        .metadata
+        .get("request_root_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    if record.request_root_id.as_deref() == Some(request_root_id) {
+        return false;
+    }
+    record.request_root_id = Some(request_root_id.to_string());
+    true
+}
+
+fn reconcile_codex_request_root_from_archived_mirror(
+    record: &mut ConversationNarrativeRecord,
+    events: &[AgentChatEvent],
+) -> bool {
+    let mut requests = events.iter().filter(|event| {
+        event.provider.eq_ignore_ascii_case("codex")
+            && event.kind == AgentChatEventKind::Message
+            && event.role == Some(AgentChatRole::User)
+            && event.metadata["provider_log"] == true
+            && event.source.as_deref() == Some("response_item")
+            && event.metadata["raw_type"] == "message"
+            && event.metadata["input_origin"] == "human_input"
+            && event.metadata["input_purpose"] == "request"
+            && record.event_refs.contains(&event.id)
+            && events.iter().any(|mirror| {
+                record.event_refs.contains(&mirror.id)
+                    && codex_archive_mirror_pair(event, mirror, events.iter())
+            })
+    });
+    let Some(request) = requests.next() else {
+        return false;
+    };
+    if requests.next().is_some() {
+        return false;
+    }
+    promote_codex_request_root_from_response_item(record, request)
+}
+
+fn refresh_codex_completion_narrative(
+    record: &mut ConversationNarrativeRecord,
+    event: &AgentChatEvent,
+    conversation_dir: &std::path::Path,
+) -> io::Result<bool> {
+    if event.metadata["provider_phase"] != "final_answer" {
+        return Ok(false);
+    }
+    let Some(mut completion) = narrative_from_chat_event(event, record.seq) else {
+        return Ok(false);
+    };
+    materialize_record_text(conversation_dir, &mut completion)?;
+
+    let mut changed = false;
+    if record.turn_id != completion.turn_id && completion.turn_id.is_some() {
+        record.turn_id = completion.turn_id;
+        changed = true;
+    }
+    for artifact in completion.artifact_refs {
+        if !record.artifact_refs.contains(&artifact) {
+            record.artifact_refs.push(artifact);
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
 #[derive(Debug, Default)]
 pub struct ConversationArchiveState {
     #[allow(dead_code)]
     active: Mutex<HashMap<String, ActiveConversationHandle>>,
     live_started_at: Mutex<HashMap<String, String>>,
     agent_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) chat_projection: chat_read::ProjectionOwner,
+    deferred_receipt_summaries: Mutex<HashMap<String, String>>,
     #[cfg(test)]
     fail_next_rollover_after_close: AtomicBool,
+    #[cfg(test)]
+    fail_next_chat_cursor_commit: AtomicBool,
+    #[cfg(test)]
+    fail_compatibility_stage: std::sync::atomic::AtomicU8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +199,8 @@ impl ConversationArchiveContext {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct ConversationCaptureState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    compatibility_claims: Option<compatibility_claims::Checkpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     skip_events_at_or_before: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     skip_event_ids: Vec<String>,
@@ -101,6 +208,31 @@ struct ConversationCaptureState {
     skip_event_scopes: Vec<ConversationCaptureEventScope>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     provider_log_sources: Vec<crate::commands::provider_log_acquisition::ProviderLogCaptureState>,
+}
+
+pub(crate) fn recent_watch_policy(
+    agent_id: &str,
+) -> io::Result<impl Fn(&AgentChatEvent, Option<&str>) -> bool> {
+    let (state, _) = storage::read_recent_capture_state(agent_id)?;
+    Ok(move |event: &AgentChatEvent, source: Option<&str>| {
+        state.permits_recent_watch(event, source)
+    })
+}
+
+pub(crate) fn recent_native_time_policy(
+    agent_id: &str,
+) -> io::Result<impl Fn(Option<&str>, Option<&str>) -> bool> {
+    let (state, _) = storage::read_recent_capture_state(agent_id)?;
+    Ok(move |source: Option<&str>, created: Option<&str>| {
+        state.permits_recent_native_time(source, created)
+    })
+}
+
+struct CapturePreparation<'a> {
+    state: &'a mut ConversationCaptureState,
+    previous: Option<&'a crate::commands::provider_log_acquisition::ProviderLogCaptureState>,
+    next: &'a crate::commands::provider_log_acquisition::ProviderLogCaptureState,
+    source_proof: Option<&'a crate::commands::provider_log_acquisition::ProviderLogSourceProof>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -117,6 +249,101 @@ struct ConversationCaptureEventScope {
 }
 
 impl ConversationCaptureState {
+    fn permits_recent_native_time(&self, source: Option<&str>, created: Option<&str>) -> bool {
+        // A bounded native tail cannot reconstruct legacy sequence-derived
+        // identities. An unresolved identity exclusion therefore stays a miss.
+        if (source.is_none() && !self.skip_event_ids.is_empty())
+            || self.skip_event_scopes.iter().any(|scope| {
+                scope.provider_source_key.as_deref() == source && !scope.event_ids.is_empty()
+            })
+        {
+            return false;
+        }
+        let created = created
+            .map(chrono::DateTime::parse_from_rfc3339)
+            .transpose();
+        let Ok(created) = created else {
+            return false;
+        };
+        let after = |cutoff: Option<&str>| match cutoff {
+            None => true,
+            Some(cutoff) => created
+                .zip(chrono::DateTime::parse_from_rfc3339(cutoff).ok())
+                .is_some_and(|(created, cutoff)| created > cutoff),
+        };
+        if source.is_none() && !after(self.skip_events_at_or_before.as_deref()) {
+            return false;
+        }
+        if self.skip_event_scopes.iter().any(|scope| {
+            scope.provider_source_key.as_deref() == source
+                && (!after(scope.skip_events_at_or_before.as_deref())
+                    || scope.disabled_from.is_some())
+        }) {
+            return false;
+        }
+        !self.provider_log_sources.iter().any(|policy| {
+            Some(policy.provider_source_key.as_str()) == source
+                && (policy.unknown_before_offset.unwrap_or(0) > 0
+                    || !policy.disabled_spans.is_empty()
+                    || policy.open_disabled_from.is_some())
+        })
+    }
+
+    fn initial_source_is_unrestricted(
+        source: &crate::commands::provider_log_acquisition::ProviderLogCaptureState,
+    ) -> bool {
+        source.policy_generation == 0
+            && source.unknown_before_offset.unwrap_or(0) == 0
+            && source.disabled_spans.is_empty()
+            && source.open_disabled_from.is_none()
+    }
+
+    fn recent_policy_stamp(&self) -> io::Result<String> {
+        let sources = self
+            .provider_log_sources
+            .iter()
+            // The first unrestricted observation adds acquisition bookkeeping,
+            // not an exclusion for already observed Watch messages. The recent
+            // scope pins the actual file identity separately. Keep every real
+            // cutoff, disabled interval, and later policy generation in the fence.
+            .filter(|source| !Self::initial_source_is_unrestricted(source))
+            .map(|source| {
+                serde_json::json!({
+                    "key": source.provider_source_key, "identity": source.native_identity,
+                    "generation": source.policy_generation, "unknown": source.unknown_before_offset,
+                    "disabled": source.disabled_spans, "open": source.open_disabled_from,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(chat_read_store::digest(
+            &serde_json::to_vec(&serde_json::json!({
+                "cutoff": self.skip_events_at_or_before, "ids": self.skip_event_ids,
+                "scopes": self.skip_event_scopes, "sources": sources,
+            }))
+            .map_err(io::Error::other)?,
+        ))
+    }
+
+    fn permits_recent_watch(&self, event: &AgentChatEvent, source_key: Option<&str>) -> bool {
+        let undated_cutoff = event.created_at.is_none()
+            && ((source_key.is_none() && self.skip_events_at_or_before.is_some())
+                || self.skip_event_scopes.iter().any(|scope| {
+                    scope.provider_source_key.as_deref() == source_key
+                        && (scope.skip_events_at_or_before.is_some()
+                            || scope.disabled_from.is_some())
+                }));
+        // Apply the original identity first. Watch supplies no byte coordinates,
+        // so it cannot prove a native row lies beyond an excluded source span.
+        !undated_cutoff
+            && !self.should_skip_event(event, source_key)
+            && !self.provider_log_sources.iter().any(|source| {
+                Some(source.provider_source_key.as_str()) == source_key
+                    && (source.unknown_before_offset.unwrap_or(0) > 0
+                        || !source.disabled_spans.is_empty()
+                        || source.open_disabled_from.is_some())
+            })
+    }
+
     fn should_skip_event(&self, event: &AgentChatEvent, provider_source_key: Option<&str>) -> bool {
         let event_ids = event_identity_ids(event);
         let legacy_unscoped_match = provider_source_key.is_none()
@@ -178,6 +405,37 @@ impl ConversationCaptureState {
             .as_deref()
             .is_some_and(|created_at| created_at <= cutoff)
     }
+    /// A part born before a disabled interval may contain text written inside
+    /// it. Its creation time alone cannot admit a replacement aggregate body.
+    fn permits_native_message_refresh(&self, event: &AgentChatEvent, source: Option<&str>) -> bool {
+        !self.should_skip_event(event, source)
+            && self
+                .skip_event_scopes
+                .iter()
+                .filter(|scope| scope.provider_source_key.as_deref() == source)
+                .all(|scope| {
+                    if let Some(from) = scope.disabled_from.as_deref() {
+                        return scope
+                            .disabled_until
+                            .as_deref()
+                            .zip(event.created_at.as_deref())
+                            .and_then(|(until, created)| {
+                                Some((
+                                    chrono::DateTime::parse_from_rfc3339(from).ok()?,
+                                    chrono::DateTime::parse_from_rfc3339(until).ok()?,
+                                    chrono::DateTime::parse_from_rfc3339(created).ok()?,
+                                ))
+                            })
+                            .is_some_and(|(from, until, created)| {
+                                from <= until && created > until
+                            });
+                    }
+                    scope.skip_events_at_or_before.is_none()
+                        || event.created_at.as_deref().is_some_and(|created| {
+                            chrono::DateTime::parse_from_rfc3339(created).is_ok()
+                        })
+                })
+    }
 }
 
 fn timestamp_is_in_disabled_window(
@@ -213,6 +471,7 @@ impl ConversationArchiveState {
     /// emitted. This remains available when conversation logging is disabled,
     /// because live Chat still projects memory activity.
     pub fn begin_live_conversation(&self, agent_id: &str, started_at: &str) -> io::Result<()> {
+        let _recent_boundary = self.chat_projection.recent_boundary(Some(agent_id))?;
         let agent_id = agent_id.trim();
         let started_at = started_at.trim();
         if agent_id.is_empty() || started_at.is_empty() {
@@ -235,6 +494,15 @@ impl ConversationArchiveState {
             .map_err(|_| io::Error::other("live conversation boundary lock poisoned"))?
             .get(agent_id.trim())
             .cloned())
+    }
+
+    pub(crate) fn retire_live_conversation(&self, agent_id: &str) -> io::Result<()> {
+        let _boundary = self.chat_projection.recent_boundary(Some(agent_id))?;
+        self.live_started_at
+            .lock()
+            .map_err(|_| io::Error::other("live conversation boundary lock poisoned"))?
+            .remove(agent_id);
+        Ok(())
     }
 
     pub fn active_conversation_id(&self, agent_id: &str) -> io::Result<Option<String>> {
@@ -469,6 +737,35 @@ impl ConversationArchiveState {
         context: ConversationArchiveContext,
         events: &[AgentChatEvent],
     ) -> io::Result<usize> {
+        self.append_chat_events_bound(context, events, None, None)
+    }
+
+    /// Admit Mock mirror correspondence only from the actual Watch capture pass.
+    pub(crate) fn append_chat_events_with_mock_watch(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+        watch: Option<&crate::commands::chat::MockWatchAuthority>,
+    ) -> io::Result<usize> {
+        self.append_chat_events_bound(context, events, None, watch)
+    }
+
+    pub(crate) fn append_chat_events_with_native_messages(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+        authority: &crate::commands::chat_recent_database::MessageAuthority,
+    ) -> io::Result<usize> {
+        self.append_chat_events_bound(context, events, Some(authority), None)
+    }
+
+    fn append_chat_events_bound(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+        authority: Option<&crate::commands::chat_recent_database::MessageAuthority>,
+        watch: Option<&crate::commands::chat::MockWatchAuthority>,
+    ) -> io::Result<usize> {
         if !events
             .iter()
             .any(|event| record_kind_from_chat_event_kind(&event.kind).is_some())
@@ -487,19 +784,36 @@ impl ConversationArchiveState {
         }
         let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
-        self.append_chat_events_with_context_locked(context, events)
+        let (count, candidate) =
+            self.append_chat_events_prepared_locked(context, events, None, authority, watch)?;
+        if let Some(authority) = authority {
+            authority.require_current()?;
+        }
+        if let Some(candidate) = candidate {
+            self.publish_chat_candidate(candidate)?;
+        }
+        Ok(count)
     }
 
-    fn append_chat_events_with_context_locked(
+    fn append_chat_events_prepared_locked(
         &self,
         mut context: ConversationArchiveContext,
         events: &[AgentChatEvent],
-    ) -> io::Result<usize> {
+        capture: Option<CapturePreparation<'_>>,
+        native_messages: Option<&crate::commands::chat_recent_database::MessageAuthority>,
+        watch: Option<&crate::commands::chat::MockWatchAuthority>,
+    ) -> io::Result<(usize, Option<chat_read::Candidate>)> {
+        let recovering = if let Some(capture) = capture.as_ref() {
+            compatibility_claims::pending(capture.state, &context.agent_id)?
+        } else {
+            false
+        };
         if !events
             .iter()
             .any(|event| record_kind_from_chat_event_kind(&event.kind).is_some())
+            && !recovering
         {
-            return Ok(0);
+            return Ok((0, None));
         }
         let provider_source_key = context
             .provider_source_key
@@ -512,6 +826,42 @@ impl ConversationArchiveState {
             context.provider_session_ids = provider_session_ids_from_events(events);
         }
         let capture_state = read_capture_state(&context.agent_id)?;
+        if let Some(authority) = native_messages {
+            authority.require_current()?;
+            if events
+                .iter()
+                .any(|event| authority.claims(event) && !authority.proves(&context, event))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "OpenCode message does not match its actual capture",
+                ));
+            }
+        }
+        let sanitized: Vec<_> = events
+            .iter()
+            .cloned()
+            .map(|mut event| {
+                // Generic provider/Watch strings cannot establish this binding.
+                if let Some(metadata) = event.metadata.as_object_mut() {
+                    metadata.remove(crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING);
+                }
+                if let Some(authority) =
+                    native_messages.filter(|authority| authority.proves(&context, &event))
+                {
+                    if capture_state
+                        .permits_native_message_refresh(&event, provider_source_key.as_deref())
+                    {
+                        event.metadata
+                            [crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING] =
+                            authority.binding(&event);
+                    }
+                }
+                mock_mirrors::bind(&context, &mut event, capture.as_ref(), watch)?;
+                Ok(event)
+            })
+            .collect::<io::Result<_>>()?;
+        let events = sanitized.as_slice();
         let active_events = events
             .iter()
             .filter(|event| !capture_state.should_skip_event(event, provider_source_key.as_deref()))
@@ -528,7 +878,104 @@ impl ConversationArchiveState {
         let mut existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
         let mut existing_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
-        let before_refresh_events = existing_events.clone();
+        let mut mirror_sources = capture_state.provider_log_sources.clone();
+        if let Some(capture) = capture.as_ref() {
+            mirror_sources
+                .retain(|source| source.provider_source_key != capture.next.provider_source_key);
+            mirror_sources.push(capture.next.clone());
+        }
+        if let Some(authority) = native_messages {
+            for current in events
+                .iter()
+                .filter(|event| authority.proves(&context, event))
+            {
+                for old in existing_events.iter().filter(|old| old.id == current.id) {
+                    let known_key = old.metadata["chat_recent_native_key"].as_str();
+                    let bound = !old.metadata
+                        [crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING]
+                        .is_null();
+                    if known_key.is_some_and(|key| {
+                        current.metadata["chat_recent_native_key"].as_str() != Some(key)
+                    }) || (bound && !authority.permits_refresh(old, current))
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "OpenCode archive observation changed native identity",
+                        ));
+                    }
+                }
+            }
+        }
+        let before_compatibility_events = existing_events.clone();
+        let (batch_events, compatibility_overlay) = if let Some(capture) = capture {
+            #[cfg(test)]
+            if self
+                .fail_compatibility_stage
+                .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Err(io::Error::other(
+                    "injected compatibility failure before prepare",
+                ));
+            }
+            let manifest = read_manifest(&conversation_dir.join("manifest.json"))?;
+            let prepared = compatibility_claims::prepare(
+                compatibility_claims::Preparation {
+                    context: &effective_context,
+                    conversation_id: &handle.conversation_id,
+                    manifest: manifest.as_ref(),
+                    archived: &existing_events,
+                    records: &existing_records,
+                    events: &batch_events,
+                    previous: capture.previous,
+                    next: capture.next,
+                    source_proof: capture.source_proof,
+                },
+                capture.state,
+            )?;
+            #[cfg(test)]
+            if self
+                .fail_compatibility_stage
+                .compare_exchange(2, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Err(io::Error::other(
+                    "injected compatibility failure after prepare",
+                ));
+            }
+            prepared
+        } else {
+            (batch_events, HashMap::new())
+        };
+        // Only the capture owner's sealed, durable Codex reservation admits
+        // this historical coordinate upgrade. Generic identity matching keeps
+        // rejecting unframed-to-framed aliases.
+        for replacement in compatibility_overlay
+            .values()
+            .filter(|event| event.provider == "codex")
+        {
+            let owner = existing_events
+                .iter_mut()
+                .find(|event| event.id == replacement.id)
+                .ok_or_else(|| io::Error::other("missing prepared Codex archive owner"))?;
+            *owner = replacement.clone();
+        }
+        let claimed_coordinates = compatibility_overlay
+            .values()
+            .filter(|event| event.provider == "claude")
+            .filter_map(|event| event.metadata["chat_source_ref"].as_str())
+            .collect::<HashSet<_>>();
+        let enrichment_events = events
+            .iter()
+            .filter(|event| {
+                !event.metadata["chat_source_ref"]
+                    .as_str()
+                    .is_some_and(|coordinate| claimed_coordinates.contains(coordinate))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let events = enrichment_events.as_slice();
+        let before_refresh_events = before_compatibility_events;
         let before_refresh_records = existing_records.clone();
         let durable_event_ids = existing_events
             .iter()
@@ -540,7 +987,26 @@ impl ConversationArchiveState {
         let events_refreshed = provenance::refresh_events(&mut existing_events, events)?;
         let delivered_refreshed =
             provenance::bind_delivered_inputs(&mut existing_events, &existing_records)?;
-        let events_refreshed = events_refreshed || delivered_refreshed;
+        let mut events_refreshed = events_refreshed || delivered_refreshed;
+        let native_ids = if let Some(authority) = native_messages {
+            provenance::refresh_native_messages(
+                &mut existing_events,
+                &existing_records,
+                events,
+                authority,
+                &effective_context,
+                |event| {
+                    capture_state
+                        .permits_native_message_refresh(event, provider_source_key.as_deref())
+                        && before_refresh_events
+                            .iter()
+                            .filter(|old| old.id == event.id)
+                            .all(|old| authority.permits_refresh(old, event))
+                },
+            )?
+        } else {
+            HashSet::new()
+        };
         let observed = existing_events
             .iter()
             .filter(|event| {
@@ -551,13 +1017,27 @@ impl ConversationArchiveState {
             .cloned()
             .collect::<Vec<_>>();
         provenance::refresh_records(&mut existing_records, &observed);
+        if native_messages.is_some() {
+            provenance::refresh_native_message_records(
+                &mut existing_records,
+                &existing_events,
+                events,
+                &native_ids,
+            );
+        }
+        reconcile_codex_user_mirror_records(&mut existing_records, &mut existing_events)?;
+        events_refreshed = events_refreshed || before_refresh_events != existing_events;
         for record in &mut existing_records {
-            if !before_refresh_records.contains(record) {
+            reconcile_codex_request_root_from_archived_mirror(record, &existing_events);
+        }
+        let before_refresh_by_seq = index_records_by_sequence(&before_refresh_records);
+        for record in &mut existing_records {
+            if !record_was_present(record, &before_refresh_by_seq) {
                 materialize_record_text(&conversation_dir, record)?;
             }
         }
         for event in &mut existing_events {
-            if provenance::completed_native_tool(event) {
+            if provenance::completed_native_tool(event) || native_ids.contains(&event.id) {
                 if let Some(record) = existing_records
                     .iter()
                     .find(|record| record.event_refs.contains(&event.id))
@@ -566,8 +1046,9 @@ impl ConversationArchiveState {
                 }
             }
         }
-        let records_refreshed = before_refresh_records != existing_records;
-        let refreshed = events_refreshed || records_refreshed;
+        events_refreshed |= before_refresh_events != existing_events;
+        let mut records_refreshed = before_refresh_records != existing_records;
+        let mut refreshed = events_refreshed || records_refreshed;
         let mut changed_observation_ids = provenance::changed_observation_ids(
             &before_refresh_events,
             &before_refresh_records,
@@ -589,11 +1070,16 @@ impl ConversationArchiveState {
             &handle.conversation_id,
             &conversation_dir,
             &effective_context,
-            &existing_records,
+            &mut existing_records,
             &existing_events,
             Some(&durable_event_ids),
             &mut next_seq,
         )?;
+        records_refreshed |= before_refresh_records != existing_records;
+        refreshed |= records_refreshed;
+        if let Some(authority) = native_messages {
+            authority.require_current()?;
+        }
         if events_refreshed {
             write_jsonl_atomic(&events_path, &existing_events)?;
         }
@@ -601,23 +1087,121 @@ impl ConversationArchiveState {
             &conversation_path,
             &sources_path,
             &mut existing_records,
+            &existing_events,
             recovered_observations,
         )?;
         if records_refreshed && recovered_count == 0 {
             write_jsonl_atomic(&conversation_path, &existing_records)?;
         }
-        let mut appended = Vec::new();
-        let mut pending_publications = Vec::new();
+        let mut appended: Vec<ConversationNarrativeRecord> = Vec::new();
+        let mut pending_publications: Vec<PendingChatPublication> = Vec::new();
         let mut cached_sources = None;
         let mut merged_existing_count = 0_usize;
+        let mock_mirrors = (effective_context.provider == "mock")
+            .then(|| {
+                mock_mirrors::MatchingSet::new(&existing_events, &batch_events, &mirror_sources)
+            })
+            .transpose()?;
 
-        for event in &batch_events {
+        for (batch_index, event) in batch_events.iter().enumerate() {
+            let same_batch_mirror_matches = pending_publications
+                .iter()
+                .enumerate()
+                .filter_map(|(publication_index, publication)| {
+                    publication
+                        .events
+                        .iter()
+                        .any(|prior| {
+                            codex_archive_mirror_pair(
+                                prior,
+                                event,
+                                existing_events.iter().chain(batch_events.iter()),
+                            )
+                        })
+                        .then_some(publication_index)
+                })
+                .collect::<Vec<_>>();
+            if same_batch_mirror_matches.len() > 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("ambiguous Codex archive mirror for event {}", event.id),
+                ));
+            }
+            if let Some(publication_index) = same_batch_mirror_matches.first().copied() {
+                let record_seq = pending_publications[publication_index].record.seq;
+                let source_record = source_record_from_chat_event(event, record_seq);
+                let publication = &mut pending_publications[publication_index];
+                let completion_refreshed = refresh_codex_completion_narrative(
+                    &mut publication.record,
+                    event,
+                    &conversation_dir,
+                )?;
+                let request_root_promoted =
+                    promote_codex_request_root_from_response_item(&mut publication.record, event);
+                if !publication
+                    .record
+                    .event_refs
+                    .iter()
+                    .any(|event_ref| event_ref == &event.id)
+                {
+                    publication.record.event_refs.push(event.id.clone());
+                }
+                if let Some(source_record) = source_record {
+                    if !publication
+                        .record
+                        .source_refs
+                        .iter()
+                        .any(|source_ref| source_ref == &source_record.source_id)
+                    {
+                        publication
+                            .record
+                            .source_refs
+                            .push(source_record.source_id.clone());
+                    }
+                    publication.sources.push(source_record);
+                }
+                publication
+                    .events
+                    .push(event_record_for_jsonl(event, &publication.record));
+                if completion_refreshed
+                    || request_root_promoted
+                    || !appended[publication_index].event_refs.contains(&event.id)
+                {
+                    appended[publication_index] = publication.record.clone();
+                }
+                changed_observation_ids.insert(event.id.clone());
+                continue;
+            }
+
             let existing_event_index = matching_event_index(&existing_events, event)?;
-            let matching_record =
-                matching_record_index(&existing_records, event, &existing_events)?;
+            let mirror_record = mock_mirrors
+                .as_ref()
+                .and_then(|mirrors| mirrors.matching_record(&existing_records, batch_index));
+            let matching_record = matching_record_index_with_candidates(
+                &existing_records,
+                event,
+                &existing_events,
+                &batch_events,
+            )?
+            .or(mirror_record);
+            let bound_codex_mirror = matching_record.is_some_and(|record_index| {
+                existing_events.iter().any(|archived| {
+                    codex_archive_mirror_pair(
+                        archived,
+                        event,
+                        existing_events.iter().chain(batch_events.iter()),
+                    ) && existing_records[record_index]
+                        .event_refs
+                        .iter()
+                        .any(|event_ref| event_ref == &archived.id)
+                })
+            });
             if existing_event_index.is_none()
-                && matching_record
-                    .is_some_and(|index| !is_bound_native_delivery(&existing_records[index], event))
+                && matching_record.is_some_and(|index| {
+                    !is_bound_native_delivery(&existing_records[index], event)
+                        && !bound_codex_mirror
+                        && mirror_record != Some(index)
+                })
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -629,8 +1213,34 @@ impl ConversationArchiveState {
             }
             if let Some(record_index) = matching_record {
                 let record_seq = existing_records[record_index].seq;
-                let source_record = source_record_from_chat_event(event, record_seq);
+                let source_record = source_record_for_retry(
+                    event,
+                    record_seq,
+                    existing_event_index.and_then(|index| existing_events.get(index)),
+                );
                 let mut record_changed = false;
+                record_changed |= refresh_codex_completion_narrative(
+                    &mut existing_records[record_index],
+                    event,
+                    &conversation_dir,
+                )?;
+                if event.source.as_deref() == Some("response_item")
+                    && existing_events.iter().any(|archived| {
+                        codex_archive_mirror_pair(
+                            event,
+                            archived,
+                            existing_events.iter().chain(batch_events.iter()),
+                        ) && existing_records[record_index]
+                            .event_refs
+                            .iter()
+                            .any(|event_ref| event_ref == &archived.id)
+                    })
+                {
+                    record_changed |= promote_codex_request_root_from_response_item(
+                        &mut existing_records[record_index],
+                        event,
+                    );
+                }
                 if let Some(source_record) = source_record {
                     let source_repaired = append_source_if_needed(
                         &sources_path,
@@ -746,10 +1356,12 @@ impl ConversationArchiveState {
                 record.source_refs = vec![source_record.source_id.clone()];
             }
             pending_publications.push(PendingChatPublication {
-                event: existing_event_index
+                events: existing_event_index
                     .is_none()
-                    .then(|| event_record_for_jsonl(event, &record)),
-                source: source_record,
+                    .then(|| event_record_for_jsonl(event, &record))
+                    .into_iter()
+                    .collect(),
+                sources: source_record.into_iter().collect(),
                 record: record.clone(),
             });
             next_seq = next_seq.saturating_add(1);
@@ -770,8 +1382,44 @@ impl ConversationArchiveState {
                 )?)
         {
             handle.next_seq = next_seq;
+            let committed_output_bytes = match std::fs::metadata(&events_path) {
+                Ok(metadata) => metadata.len(),
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        && handle.next_seq <= 1
+                        && existing_events.is_empty()
+                        && existing_records.is_empty()
+                        && read_manifest(&conversation_dir.join("manifest.json"))?
+                            .is_none_or(|manifest| manifest.record_count == 0)
+                        && chat_read::committed_output_extent(
+                            &context.agent_id,
+                            &handle.conversation_id,
+                        )?
+                        .is_none_or(|extent| extent == 0) =>
+                {
+                    0
+                }
+                Err(error) => return Err(error),
+            };
+            let candidate = chat_read::Candidate {
+                context: effective_context,
+                conversation_id: handle.conversation_id.clone(),
+                events: compatibility_claims::overlay(existing_events, &compatibility_overlay),
+                committed_output_bytes,
+                verified_ids: events.iter().map(|event| event.id.clone()).collect(),
+                generated_input_bindings: chat_read::generated_input_bindings(
+                    &existing_records,
+                    &handle.conversation_id,
+                ),
+                generated_ids: existing_records
+                    .iter()
+                    .flat_map(|record| record.event_refs.iter())
+                    .cloned()
+                    .collect(),
+                source_epoch: None,
+            };
             lock_active(&self.active)?.insert(context.agent_id.clone(), handle);
-            return Ok(0);
+            return Ok((0, Some(candidate)));
         }
 
         if merged_existing_count > 0 {
@@ -779,16 +1427,11 @@ impl ConversationArchiveState {
         }
 
         for publication in &pending_publications {
-            if let Some(event_record) = &publication.event {
+            for event_record in &publication.events {
                 append_jsonl_record(&events_path, event_record)?;
             }
-            if let Some(source_record) = &publication.source {
-                append_source_if_needed(
-                    &sources_path,
-                    &mut cached_sources,
-                    source_record,
-                    publication.event.is_none(),
-                )?;
+            for source_record in &publication.sources {
+                append_source_if_needed(&sources_path, &mut cached_sources, source_record, true)?;
             }
             append_jsonl_record(&conversation_path, &publication.record)?;
         }
@@ -844,11 +1487,189 @@ impl ConversationArchiveState {
         )?;
 
         handle.next_seq = next_seq;
+        let candidate = chat_read::Candidate {
+            context: effective_context,
+            conversation_id: handle.conversation_id.clone(),
+            events: compatibility_claims::overlay(all_events, &compatibility_overlay),
+            committed_output_bytes: std::fs::metadata(&events_path)?.len(),
+            verified_ids: events.iter().map(|event| event.id.clone()).collect(),
+            generated_input_bindings: chat_read::generated_input_bindings(
+                &all_records,
+                &handle.conversation_id,
+            ),
+            generated_ids: all_records
+                .iter()
+                .flat_map(|record| record.event_refs.iter())
+                .cloned()
+                .collect(),
+            source_epoch: None,
+        };
         lock_active(&self.active)?.insert(context.agent_id.clone(), handle);
-        Ok(appended
-            .len()
-            .saturating_add(changed_observation_ids.len())
-            .saturating_add(recovered_count))
+        Ok((
+            appended
+                .len()
+                .saturating_add(changed_observation_ids.len())
+                .saturating_add(recovered_count),
+            Some(candidate),
+        ))
+    }
+
+    /// Derived history admission shares archive serialization, but never binds
+    /// the mutable writer handle or changes canonical archive files.
+    pub(crate) fn bootstrap_saved_chat(
+        &self,
+        context: &ConversationArchiveContext,
+    ) -> io::Result<bool> {
+        let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
+        let _guard = lock_agent_archive(&agent_lock)?;
+        self.chat_projection.bootstrap_saved(context)
+    }
+
+    fn publish_chat_candidate(&self, mut candidate: chat_read::Candidate) -> io::Result<()> {
+        let capture = read_capture_state(&candidate.context.agent_id)?;
+        compatibility_claims::restore_candidate(&mut candidate, &capture)?;
+        if candidate.context.provider == "mock" {
+            let directory =
+                conversation_dir(&candidate.context.agent_id, &candidate.conversation_id)?;
+            let path = directory.join("conversation.jsonl");
+            let mut records = read_jsonl_records(&path)?;
+            if mock_mirrors::reconcile(
+                &mut records,
+                &mut candidate.events,
+                &capture.provider_log_sources,
+            )? {
+                // Evidence precedes its narrative, matching ordinary archive recovery.
+                write_jsonl_atomic(&directory.join("events.jsonl"), &candidate.events)?;
+                #[cfg(test)]
+                if self
+                    .fail_compatibility_stage
+                    .compare_exchange(5, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return Err(io::Error::other(
+                        "injected Mock reconciliation failure after events",
+                    ));
+                }
+                write_jsonl_atomic(&path, &records)?;
+                candidate.committed_output_bytes =
+                    std::fs::metadata(directory.join("events.jsonl"))?.len();
+            }
+            mock_mirrors::project(&mut candidate.events, &capture.provider_log_sources)?;
+        }
+        candidate.source_epoch = capture
+            .provider_log_sources
+            .iter()
+            .find(|source| {
+                candidate.context.provider_source_key.as_deref()
+                    == Some(source.provider_source_key.as_str())
+            })
+            .map(|source| {
+                crate::commands::chat_recent_seed::hash(
+                    &serde_json::to_vec(&source.native_identity).unwrap_or_default(),
+                )
+            });
+        // Legacy rows and partially appended batches are not upgraded by a
+        // subsequent generated write. Native rows need their committed source
+        // coordinate; generated rows need this owned conversation identity.
+        let generated_prefix = format!("generated:{}:", candidate.conversation_id);
+        for event in &mut candidate.events {
+            if event.metadata["generated"] == true {
+                // Legacy text-selected links are evidence in the archive, but
+                // cannot become verified aliases in the display projection.
+                if let Some(metadata) = event.metadata.as_object_mut() {
+                    for key in [
+                        "chat_source_ref",
+                        "chat_source_start",
+                        "chat_source_end",
+                        "chat_source_epoch",
+                        "legacy_event_ids",
+                        "request_root_id",
+                    ] {
+                        metadata.remove(key);
+                    }
+                    metadata.insert(
+                        "chat_identity_resolution".into(),
+                        serde_json::json!("unresolved"),
+                    );
+                }
+            }
+        }
+        let archived_events = std::mem::take(&mut candidate.events);
+        let display_events = archived_events
+            .into_iter()
+            .filter(|event| {
+                event.session_id == candidate.context.agent_id
+                    && (event.provider == candidate.context.provider
+                        || chat_read::is_owned_unknown_input(&candidate, event))
+            })
+            .collect();
+        candidate.events = display_events;
+        candidate.events.retain(|event| {
+            if event.metadata["generated"] == true {
+                return event.id.starts_with(&generated_prefix)
+                    && candidate.generated_ids.contains(&event.id);
+            }
+            if event.metadata["provider_log"] != true {
+                return true;
+            }
+            if matches!(candidate.context.provider.as_str(), "codex" | "pi")
+                && !event.metadata["chat_source_ref"].is_string()
+            {
+                // Keep historical physical envelopes usable. Only the separate
+                // qualified relation index may supply display correspondence.
+                return true;
+            }
+            if matches!(
+                candidate.context.provider.as_str(),
+                "opencode" | "antigravity"
+            ) && candidate.verified_ids.contains(&event.id)
+            {
+                return true;
+            }
+            capture.provider_log_sources.iter().any(|source| {
+                candidate.context.provider_source_key.as_deref()
+                    == Some(source.provider_source_key.as_str())
+                    && event.metadata["chat_source_epoch"].as_str()
+                        == Some(
+                            crate::commands::chat_recent_seed::hash(
+                                &serde_json::to_vec(&source.native_identity).unwrap_or_default(),
+                            )
+                            .as_str(),
+                        )
+                    && event.metadata["chat_source_start"]
+                        .as_u64()
+                        .zip(event.metadata["chat_source_end"].as_u64())
+                        .is_some_and(|(start, end)| {
+                            start < end
+                                && end <= source.committed_offset
+                                && start >= source.unknown_before_offset.unwrap_or(0)
+                                && source
+                                    .open_disabled_from
+                                    .is_none_or(|disabled| end <= disabled)
+                                && !source
+                                    .disabled_spans
+                                    .iter()
+                                    .any(|span| start < span.end && end > span.start)
+                        })
+            })
+        });
+        let stamp = capture
+            .provider_log_sources
+            .iter()
+            .map(|source| {
+                serde_json::json!({
+                    "source": source.provider_source_key, "identity": source.native_identity,
+                    "offset": source.committed_offset, "policy": source.policy_generation,
+                    "disabled": source.disabled_spans, "open_disabled": source.open_disabled_from,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.chat_projection.committed(
+            candidate,
+            crate::commands::chat_recent_seed::hash(
+                &serde_json::to_vec(&stamp).map_err(io::Error::other)?,
+            ),
+        )
     }
 
     pub(crate) fn provider_log_capture_state(
@@ -876,6 +1697,36 @@ impl ConversationArchiveState {
         expected: Option<&crate::commands::provider_log_acquisition::ProviderLogCaptureState>,
         next: &crate::commands::provider_log_acquisition::ProviderLogCaptureState,
     ) -> io::Result<usize> {
+        self.append_verified_provider_log_batch_with_context(context, events, expected, next, None)
+    }
+
+    pub(crate) fn append_verified_provider_log_batch_with_context(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+        expected: Option<&crate::commands::provider_log_acquisition::ProviderLogCaptureState>,
+        next: &crate::commands::provider_log_acquisition::ProviderLogCaptureState,
+        source_proof: Option<&crate::commands::provider_log_acquisition::ProviderLogSourceProof>,
+    ) -> io::Result<usize> {
+        self.append_verified_provider_log_batch_with_native_messages(
+            context,
+            events,
+            expected,
+            next,
+            source_proof,
+            None,
+        )
+    }
+
+    pub(crate) fn append_verified_provider_log_batch_with_native_messages(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+        expected: Option<&crate::commands::provider_log_acquisition::ProviderLogCaptureState>,
+        next: &crate::commands::provider_log_acquisition::ProviderLogCaptureState,
+        source_proof: Option<&crate::commands::provider_log_acquisition::ProviderLogSourceProof>,
+        native_messages: Option<&crate::commands::chat_recent_database::MessageAuthority>,
+    ) -> io::Result<usize> {
         if events
             .iter()
             .any(|event| event.session_id != context.agent_id)
@@ -892,6 +1743,23 @@ impl ConversationArchiveState {
             ));
         }
 
+        let recent_policy_changed = expected.map_or_else(
+            || !ConversationCaptureState::initial_source_is_unrestricted(next),
+            |old| {
+                old.native_identity != next.native_identity
+                    || old.policy_generation != next.policy_generation
+                    || old.unknown_before_offset != next.unknown_before_offset
+                    || old.disabled_spans != next.disabled_spans
+                    || old.open_disabled_from != next.open_disabled_from
+            },
+        );
+        let _recent_boundary = recent_policy_changed
+            .then(|| {
+                self.chat_projection
+                    .recent_boundary(Some(&context.agent_id))
+            })
+            .transpose()?;
+
         let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
         let mut capture_state = read_capture_state(&context.agent_id)?;
@@ -906,13 +1774,53 @@ impl ConversationArchiveState {
                 "provider-log capture state changed before cursor commit",
             ));
         }
-        let appended = self.append_chat_events_with_context_locked(context.clone(), events)?;
+        let (appended, candidate) = self.append_chat_events_prepared_locked(
+            context.clone(),
+            events,
+            Some(CapturePreparation {
+                state: &mut capture_state,
+                previous: expected,
+                next,
+                source_proof,
+            }),
+            native_messages,
+            None,
+        )?;
         if let Some(index) = current_index {
             capture_state.provider_log_sources[index] = next.clone();
         } else {
             capture_state.provider_log_sources.push(next.clone());
         }
+        let policy_changed = recent_policy_changed;
+        if policy_changed {
+            chat_read::policy_barrier(&context.agent_id)?;
+        }
+        #[cfg(test)]
+        if self
+            .fail_next_chat_cursor_commit
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(io::Error::other("injected chat cursor commit failure"));
+        }
         write_capture_state(&context.agent_id, &capture_state)?;
+        chat_read::publish_policy(&context, next)?;
+        #[cfg(test)]
+        if self
+            .fail_compatibility_stage
+            .compare_exchange(4, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return Err(io::Error::other(
+                "injected compatibility failure after cursor",
+            ));
+        }
+        if let Some(authority) = native_messages {
+            authority.require_current()?;
+        }
+        if let Some(candidate) = candidate {
+            self.publish_chat_candidate(candidate)?;
+        }
+        compatibility_claims::finish(&mut capture_state, &context.agent_id)?;
         Ok(appended)
     }
 
@@ -942,6 +1850,125 @@ impl ConversationArchiveState {
         self.append_generated_record(context, |seq| {
             narrative_from_delivered_input(&current_rfc3339_millis(), text, sender_agent_id, seq)
         })
+    }
+
+    /// Best-effort receipt for a bounded generated input. Cold, busy and
+    /// oversized cases return no receipt; accepted provider input is never
+    /// retried because this independent archive operation failed.
+    pub(crate) fn append_delivered_input_receipt(
+        &self,
+        context: ConversationArchiveContext,
+        text: &str,
+        fence: &chat_read::InputFence,
+    ) -> io::Result<Option<wardian_core::models::chat::ChatInputReceipt>> {
+        if text.trim().is_empty() || text.len() > 16 * 1024 {
+            return Ok(None);
+        }
+        let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
+        let _agent_guard = match agent_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(_) => return Err(io::Error::other("chat archive owner poisoned")),
+        };
+        let mut active = match self.active.try_lock() {
+            Ok(active) => active,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(_) => return Err(io::Error::other("chat active owner poisoned")),
+        };
+        let Some(handle) = active.get_mut(&context.agent_id) else {
+            return Ok(None);
+        };
+        if handle.provider_source_key != context.provider_source_key
+            || handle.next_seq == u64::MAX
+            || handle.conversation_id != fence.conversation_id
+        {
+            return Ok(None);
+        }
+        let conversation_id = handle.conversation_id.clone();
+        let seq = handle.next_seq;
+        let dir = conversation_dir(&context.agent_id, &conversation_id)?;
+        let mut record = narrative_from_delivered_input(&current_rfc3339_millis(), text, None, seq);
+        let sources = generated_sources_from_record(&context, &mut record);
+        let event = generated_event_from_record(&context, &conversation_id, &mut record);
+        // Reserve the actual writer identity before any partial write. An
+        // archive failure must not recycle it for a later identical prompt.
+        handle.next_seq += 1;
+        drop(active);
+        self.chat_projection
+            .commit_input(&context, &conversation_id, fence, || {
+                append_jsonl_record(&dir.join("events.jsonl"), &event)?;
+                for source in &sources {
+                    append_jsonl_record(&dir.join("sources.jsonl"), source)?;
+                }
+                append_jsonl_record(&dir.join("conversation.jsonl"), &record)?;
+                for file in ["events.jsonl", "sources.jsonl", "conversation.jsonl"] {
+                    if file == "sources.jsonl" && sources.is_empty() {
+                        continue;
+                    }
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(dir.join(file))?
+                        .sync_data()?;
+                }
+                // Derived turns/index summaries are coalesced background repair;
+                // this owned immutable display publication seals the generated row.
+                let extent = std::fs::metadata(dir.join("events.jsonl"))?.len();
+                self.deferred_receipt_summaries
+                    .lock()
+                    .map_err(|_| io::Error::other("chat maintenance owner poisoned"))?
+                    .insert(context.agent_id.clone(), conversation_id.clone());
+                Ok((event, extent))
+            })
+    }
+
+    pub(crate) fn has_deferred_chat_summaries(&self, agent_id: &str) -> bool {
+        self.deferred_receipt_summaries
+            .lock()
+            .is_ok_and(|pending| pending.contains_key(agent_id))
+    }
+
+    /// The existing background owner maintains full archive summaries. Normal
+    /// reads and submissions never await this legacy derivation work.
+    pub(crate) fn flush_deferred_chat_summaries(
+        &self,
+        context: &ConversationArchiveContext,
+    ) -> io::Result<()> {
+        let pending = self
+            .deferred_receipt_summaries
+            .lock()
+            .map_err(|_| io::Error::other("chat maintenance owner poisoned"))?
+            .get(&context.agent_id)
+            .cloned();
+        let Some(conversation_id) = pending else {
+            return Ok(());
+        };
+        let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
+        let _guard = lock_agent_archive(&agent_lock)?;
+        let active = lock_active(&self.active)?.get(&context.agent_id).cloned();
+        if let Some(handle) = active.filter(|handle| {
+            handle.conversation_id == conversation_id
+                && handle.provider_source_key == context.provider_source_key
+        }) {
+            let directory = conversation_dir(&context.agent_id, &conversation_id)?;
+            let records = read_jsonl_records(&directory.join("conversation.jsonl"))?;
+            let events = read_jsonl_records(&directory.join("events.jsonl"))?;
+            repair::rebuild_receipt_summaries(
+                &context.agent_id,
+                &directory,
+                context,
+                &handle,
+                &records,
+                &events,
+            )?;
+        }
+        let mut pending = self
+            .deferred_receipt_summaries
+            .lock()
+            .map_err(|_| io::Error::other("chat maintenance owner poisoned"))?;
+        if pending.get(&context.agent_id) == Some(&conversation_id) {
+            pending.remove(&context.agent_id);
+        }
+        Ok(())
     }
 
     pub fn append_lifecycle_boundary(
@@ -1021,7 +2048,7 @@ impl ConversationArchiveState {
             &handle.conversation_id,
             &conversation_dir,
             &effective_context,
-            &existing_records,
+            &mut existing_records,
             &existing_events,
             None,
             &mut next_seq,
@@ -1030,6 +2057,7 @@ impl ConversationArchiveState {
             &conversation_path,
             &sources_path,
             &mut existing_records,
+            &existing_events,
             recovered_observations,
         )?;
         if !existing_records.is_empty()
@@ -1110,7 +2138,24 @@ impl ConversationArchiveState {
         } else {
             handle.next_seq.max(next_seq)
         };
+        let conversation_id = handle.conversation_id.clone();
+        let generated_input_bindings =
+            chat_read::generated_input_bindings(&all_records, &conversation_id);
         lock_active(&self.active)?.insert(context.agent_id.clone(), handle);
+        self.publish_chat_candidate(chat_read::Candidate {
+            context: effective_context,
+            conversation_id,
+            events: all_events,
+            committed_output_bytes: std::fs::metadata(&events_path)?.len(),
+            verified_ids: HashSet::new(),
+            generated_input_bindings,
+            generated_ids: all_records
+                .iter()
+                .flat_map(|record| record.event_refs.iter())
+                .cloned()
+                .collect(),
+            source_epoch: None,
+        })?;
         Ok(usize::from(record_is_new))
     }
 
@@ -1119,6 +2164,7 @@ impl ConversationArchiveState {
         agent_id: &str,
         reason: ConversationBoundaryReason,
     ) -> io::Result<Option<String>> {
+        let _recent_boundary = self.chat_projection.recent_boundary(Some(agent_id))?;
         let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
         let Some(handle) = lock_active(&self.active)?.get(agent_id).cloned() else {
@@ -1140,6 +2186,8 @@ impl ConversationArchiveState {
         {
             active.remove(agent_id);
         }
+        drop(active);
+        self.chat_projection.invalidate(agent_id)?;
         Ok(Some(handle.conversation_id))
     }
 
@@ -1173,6 +2221,7 @@ impl ConversationArchiveState {
         provider_source_key: Option<&str>,
         events: &[AgentChatEvent],
     ) -> io::Result<Option<String>> {
+        let _recent_boundary = self.chat_projection.recent_boundary(Some(agent_id))?;
         let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
         let removed = lock_active(&self.active)?
@@ -1236,6 +2285,8 @@ impl ConversationArchiveState {
         {
             active.remove(agent_id);
         }
+        drop(active);
+        self.chat_projection.invalidate(agent_id)?;
         Ok(removed)
     }
 
@@ -1243,6 +2294,9 @@ impl ConversationArchiveState {
         &self,
         context: ConversationArchiveContext,
     ) -> io::Result<()> {
+        let _recent_boundary = self
+            .chat_projection
+            .recent_boundary(Some(&context.agent_id))?;
         let Some(provider_source_key) = context.provider_source_key else {
             return Ok(());
         };
@@ -1299,6 +2353,28 @@ mod completion_tests;
 mod provenance_tests;
 #[cfg(test)]
 mod repair_tests;
+
+/// Sequence numbers narrow the lookup; full equality still decides whether
+/// materialization is needed. Keep duplicate sequences in the same bucket so
+/// an inconsistent archive has the same membership semantics as a slice scan.
+fn index_records_by_sequence(
+    records: &[ConversationNarrativeRecord],
+) -> HashMap<u64, Vec<&ConversationNarrativeRecord>> {
+    let mut indexed = HashMap::<u64, Vec<&ConversationNarrativeRecord>>::new();
+    for record in records {
+        indexed.entry(record.seq).or_default().push(record);
+    }
+    indexed
+}
+
+fn record_was_present(
+    record: &ConversationNarrativeRecord,
+    indexed: &HashMap<u64, Vec<&ConversationNarrativeRecord>>,
+) -> bool {
+    indexed
+        .get(&record.seq)
+        .is_some_and(|previous| previous.contains(&record))
+}
 
 fn read_chat_events(directory: &std::path::Path) -> io::Result<Vec<AgentChatEvent>> {
     let mut events = read_jsonl_records(&directory.join("events.jsonl"))?;

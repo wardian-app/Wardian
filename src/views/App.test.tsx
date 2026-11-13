@@ -25,6 +25,7 @@ import { makeSingleGroupDocument, makeSurface } from "../features/workbench/work
 import type { WorkbenchSaveRequest, WorkbenchSaveResult } from "../features/workbench/workbenchPersistence";
 import { createCoreWorkbenchSurfaceRegistry } from "../features/workbench/coreSurfaceRegistry";
 import type { TelemetryFleet } from "../features/telemetry/telemetryTypes";
+import { chatPageInvokeFixture } from "../test/chatPageTestFixture";
 
 // Mock window.matchMedia globally for tests
 Object.defineProperty(window, 'matchMedia', {
@@ -1638,6 +1639,49 @@ describe("Workbench persistence boot integration", () => {
 
     await waitFor(() => expect(screen.getAllByTestId("workbench-group")).toHaveLength(1));
     expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
+  });
+
+  it("opens an Off agent's history through the normal roster Open action without starting it", async () => {
+    setupDefaultMocks([{ ...sampleAgents[0], is_off: true }], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    chatPageInvokeFixture(mockInvoke).mockImplementation((command, args) => {
+      if (command === "load_agent_chat_page") {
+        return Promise.resolve([{
+          id: "saved-message", session_id: "agent-1", provider: "codex",
+          kind: "message", role: "assistant", text: "Saved Off history",
+          title: null, status: null, turn_id: null, source: null, command: null,
+          exit_code: null, path: null, language: null, created_at: null,
+          sequence: 1, metadata: {},
+        }]);
+      }
+      if (command === "list_provider_model_catalog") {
+        return Promise.resolve({ provider: "codex", models: [], refresh_error: null });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+    const agentEvents = captureQueueAgentListeners();
+
+    render(<App />);
+    const rosterRow = await screen.findByLabelText("Agent Alpha");
+    // Let the existing configuration sidebar finish its own initial discovery;
+    // the history entry must add no discovery or lifecycle request.
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("list_provider_model_catalog", expect.anything()));
+    const openingCallIndex = mockInvoke.mock.calls.length;
+    fireEvent.contextMenu(rosterRow);
+    fireEvent.click(within(screen.getByTestId("agent-context-menu")).getByRole("button", { name: "Open" }));
+
+    const sessionSurface = await screen.findByTestId("agent-session-surface");
+    expect(await within(sessionSurface).findByText("Saved Off history")).toBeInTheDocument();
+    expect(within(sessionSurface).queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
+    expect(mockInvoke.mock.calls.slice(openingCallIndex).filter(([command]) =>
+      /^(spawn_agent|resume_agent|send_input_to_agent|submit_prompt_to_agent|update_agent_model_selection|activate_terminal_presentation|list_provider_model_catalog)$/.test(command),
+    )).toEqual([]);
+    expect(currentAgents[0].is_off).toBe(true);
+    expect(within(sessionSurface).getByText("Off", { exact: true })).toBeInTheDocument();
+    act(() => agentEvents.emitStatus({ session_id: "agent-1", current_status: "Headless" }));
+    expect(await within(sessionSurface).findByText("Headless", { exact: true })).toBeInTheDocument();
+    act(() => agentEvents.emitStatus({ session_id: "agent-1", current_status: "Idle" }));
+    expect(await within(sessionSurface).findByText("Off", { exact: true })).toBeInTheDocument();
   });
 
   it("routes Inbox agent actions to an Agent Session surface", async () => {
@@ -3465,7 +3509,7 @@ describe("Sidebar Navigation", () => {
 // ── Agent Off State Tests ──────────────────────────────────────────────
 
 describe("Agent Off State Operations", () => {
-  it("hides a paused agent from the main grid and requires Start from context menu", async () => {
+  it("keeps a focused paused agent readable, hides it when unfocused, and requires Start to resume", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     await act(async () => {
       render(<App />);
@@ -3479,6 +3523,7 @@ describe("Agent Off State Operations", () => {
     const alphaWatchlistText = screen.getByText("Alpha", { selector: "p" });
     const alphaWatchlistRow = alphaWatchlistText.closest("div.watchlist-row");
     expect(alphaWatchlistRow).not.toBeNull();
+    fireEvent.click(alphaWatchlistRow!);
     
     await act(async () => {
       fireEvent.contextMenu(alphaWatchlistRow!);
@@ -3489,7 +3534,15 @@ describe("Agent Off State Operations", () => {
       pauseButton.click();
     });
 
-    // Paused agents stay available in the watchlist but leave the main grid.
+    // Pausing preserves the focused card without restarting its runtime.
+    await waitFor(() => {
+      expect(currentAgents.find((agent) => agent.session_id === "agent-1")?.is_off).toBe(true);
+      expect(screen.getByTestId("terminal-agent-1")).toBeVisible();
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", expect.anything());
+
+    // An unfocused Off card is still excluded from the overview.
+    fireEvent.click(screen.getByLabelText("Agent Beta"));
     await waitFor(() => {
       expect(screen.queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
       expect(screen.getAllByText("Alpha").length).toBe(1);
@@ -3510,6 +3563,7 @@ describe("Agent Off State Operations", () => {
     });
 
     // Click Start Session
+    expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", expect.anything());
     const startButtons = screen.getAllByText("Start Session");
     await act(async () => {
       startButtons[0].click();
@@ -3518,6 +3572,8 @@ describe("Agent Off State Operations", () => {
     // The agent should reappear in the grid (2 occurrences again)
     await waitFor(() => {
       expect(screen.getAllByText("Alpha").length).toBe(2);
+      expect(currentAgents.find((agent) => agent.session_id === "agent-1")?.is_off).toBe(false);
+      expect(mockInvoke).toHaveBeenCalledWith("resume_agent", expect.objectContaining({ sessionId: "agent-1" }));
     });
   });
 

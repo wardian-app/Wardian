@@ -782,15 +782,34 @@ summary,
 }
 
 /* ── Chat Activity Hints ─────────────────────────────── */
-.agent-chat-view {
+.agent-chat-view,
+.wardian-chat-pane {
+  --chat-content-max: 72rem;
+  --chat-prose-max: 100ch;
+  --chat-pane-gutter: var(--density-panel-padding, 12px);
   container-name: wardian-chat;
   container-type: inline-size;
 }
 
 .chat-transcript-list {
+  min-width: 0;
   width: 100%;
-  max-width: 76ch;
+  max-width: var(--chat-content-max, 72rem);
   margin-inline: auto;
+}
+
+.chat-transcript-scroll {
+  padding: var(--chat-pane-gutter, 12px);
+}
+
+.chat-composer {
+  width: calc(100% - 2 * var(--chat-pane-gutter, 12px));
+  max-width: var(--chat-content-max, 72rem);
+  margin-inline: auto;
+}
+
+.chat-prose-block {
+  max-width: var(--chat-prose-max, 100ch);
 }
 
 .chat-row {
@@ -827,7 +846,7 @@ summary,
    the copy control beside its message while hover, focus, and copy feedback
    change only visibility and never the message geometry. */
 .chat-message-layout {
-  --chat-message-action-gutter: 28px;
+  --chat-message-action-gutter: 32px;
   display: grid;
   align-items: start;
   column-gap: 4px;
@@ -943,7 +962,7 @@ summary,
   /* Touch has no hover: keep the action in the reserved side gutter and expose
      the 44px menu target without covering message text. */
   .chat-message-layout {
-    --chat-message-action-gutter: 44px;
+    --chat-message-action-gutter: 48px;
   }
 
   .chat-row-actions--inline {
@@ -987,12 +1006,16 @@ summary,
 }
 
 @container wardian-chat (max-width: 420px) {
+  .chat-transcript-scroll,
+  .chat-composer {
+    --chat-pane-gutter: 8px;
+  }
   .chat-transcript-scroll {
     padding: 8px;
   }
 
   .chat-message-layout {
-    --chat-message-action-gutter: 44px;
+    --chat-message-action-gutter: 48px;
   }
 
   .chat-message-user {

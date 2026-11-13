@@ -783,11 +783,18 @@ pub(crate) fn emit_agent_turn_completed(
             "session_id": session_id,
         }),
     );
-    tauri::async_runtime::spawn(turn_completion::publish_transcript_turn_completion(
-        app.clone(),
-        session_id.to_string(),
-        reporting_status.clone(),
-    ));
+    if let Some(claim) = app
+        .state::<AppState>()
+        .transcript_completion
+        .notify(session_id, reporting_status)
+    {
+        tauri::async_runtime::spawn(turn_completion::publish_transcript_turn_completion(
+            app.clone(),
+            session_id.to_string(),
+            reporting_status.clone(),
+            claim,
+        ));
+    }
 
     // Change snapshots run off the turn boundary; this keeps the provider's
     // completion path short and lets the snapshot coalesce per workspace.

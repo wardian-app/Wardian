@@ -1,5 +1,125 @@
+use super::*;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+pub(crate) async fn deliver_prompt_to_agent(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    target: &str,
+    prompt: &str,
+    input_mode: MessageInputMode,
+) -> Result<DeliveryDetail, ControlError> {
+    let delivery = deliver_message_to_target_with_headless_timeout(
+        app,
+        state,
+        target,
+        prompt,
+        None,
+        input_mode,
+        QueuePolicy::QueueIfBusy,
+        None,
+        None,
+        false,
+        crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
+    )
+    .await?;
+
+    record_conversation_delivery(state, &delivery, prompt, None).await;
+    delivery.into_iter().next().ok_or_else(|| {
+        ControlError::request_failed(format!(
+            "prompt delivery produced no result for target: {target}"
+        ))
+    })
+}
+
+pub(super) async fn record_conversation_delivery(
+    state: &AppState,
+    delivery: &[DeliveryDetail],
+    message: &str,
+    origin: Option<&MessageOrigin>,
+) {
+    if message.trim().is_empty() {
+        return;
+    }
+
+    let global_conversation_logging = crate::utils::shell::load_shell_settings()
+        .unwrap_or_default()
+        .conversation_logging;
+    let sender_agent_id =
+        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.as_str());
+    let target_settings = {
+        let agents = state.agents.lock().await;
+        delivery
+            .iter()
+            .filter(|detail| conversation_delivery_state_is_recordable(&detail.delivery_state))
+            .filter_map(|detail| {
+                let agent = agents.get(&detail.uuid)?;
+                let config = agent.config.lock().ok()?;
+                let setting = config.conversation_logging;
+                let workspace = config
+                    .git_worktree_folder
+                    .clone()
+                    .unwrap_or_else(|| config.folder.clone());
+                let provider_session_ids = [
+                    config.resume_session.as_deref(),
+                    config.fresh_provider_session_id.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+                let log_path =
+                    agent.log_path.lock().ok().and_then(|path| {
+                        path.as_ref().map(|path| path.to_string_lossy().to_string())
+                    });
+                let provider_source_key = provider_session_ids
+                    .first()
+                    .map(|session| format!("{}:session:{session}", config.provider))
+                    .or_else(|| log_path.map(|path| format!("{}:source:{path}", config.provider)));
+                let context = ConversationArchiveContext {
+                    agent_id: detail.uuid.clone(),
+                    agent_name: if config.session_name.trim().is_empty() {
+                        detail.uuid.clone()
+                    } else {
+                        config.session_name.clone()
+                    },
+                    agent_class: config.agent_class.clone(),
+                    workspace,
+                    provider: config.provider.clone(),
+                    provider_session_ids,
+                    provider_source_key,
+                };
+                Some((context, setting))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (context, agent_conversation_logging) in target_settings {
+        if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
+            != ConversationLoggingSetting::Enabled
+        {
+            continue;
+        }
+        let agent_id = context.agent_id.clone();
+        if let Err(error) = state
+            .conversation_archive
+            .append_delivered_input_with_context(context, message, sender_agent_id)
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] conversation archive delivery append failed for {agent_id}: {error}"
+            ));
+        }
+    }
+}
+
+pub(super) fn conversation_delivery_state_is_recordable(delivery_state: &str) -> bool {
+    matches!(
+        delivery_state,
+        "submitted" | "submit_sent_unverified" | "provider_accepted" | "approval_submitted"
+    )
+}
 
 pub(super) struct OpenCodeReceiptFixture {
     pub(super) db_path: PathBuf,
