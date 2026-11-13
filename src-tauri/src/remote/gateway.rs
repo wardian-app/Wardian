@@ -5378,6 +5378,131 @@ mod tests {
         drop(roster);
     }
 
+    /// Observe one fixed queue phase; ingestion may replace its watermark and cursor.
+    #[derive(Default)]
+    struct QueuePhaseProgress {
+        state: Option<(bool, bool, bool)>,
+    }
+
+    impl QueuePhaseProgress {
+        fn transition(
+            &mut self,
+            label: &str,
+            active: bool,
+            before_root: &serde_json::Value,
+            after_root: &serde_json::Value,
+            before_cursor: &serde_json::Value,
+            after_cursor: &serde_json::Value,
+        ) -> (bool, bool) {
+            if !active {
+                return (false, false);
+            }
+            // Retained ingestion state may belong to an earlier watermark.
+            // Seed once at phase entry; never reseed within this fixed cohort.
+            let (initialized, cursor_initialized, cleared) = self
+                .state
+                .get_or_insert_with(|| (before_root.is_string(), before_cursor.is_string(), false));
+            if before_root.is_null() {
+                assert!(before_cursor.is_null(), "{label} empty queue has no cursor");
+                if after_root.is_null() {
+                    assert!(after_cursor.is_null(), "{label} empty queue has no cursor");
+                    return (false, false);
+                }
+                assert!(
+                    !*initialized && !*cleared,
+                    "{label} queue cannot restart after initialization or clear"
+                );
+                assert!(
+                    after_root.is_string(),
+                    "{label} queue root is a stored reference"
+                );
+                *initialized = true;
+                if !after_cursor.is_null() {
+                    assert!(after_cursor.is_string(), "{label} cursor is a stored key");
+                    *cursor_initialized = true;
+                }
+                return (true, false);
+            }
+
+            assert!(!*cleared, "{label} queue cannot reopen after its clear");
+            *initialized = true;
+            if after_root.is_null() {
+                assert!(
+                    after_cursor.is_null(),
+                    "{label} cleared queue has no cursor"
+                );
+                *cleared = true;
+                return (true, true);
+            }
+            assert_eq!(after_root, before_root, "{label} queue root remains fixed");
+            let moved = match (before_cursor.as_str(), after_cursor.as_str()) {
+                (None, None) => false,
+                (None, Some(_)) => {
+                    assert!(!*cursor_initialized, "{label} cursor initializes only once");
+                    *cursor_initialized = true;
+                    true
+                }
+                (Some(before), Some(after)) => {
+                    assert!(after <= before, "{label} cursor cannot move forward");
+                    after < before
+                }
+                (Some(_), None) => panic!("{label} cursor clears only with its queue root"),
+            };
+            (moved, false)
+        }
+    }
+
+    #[test]
+    fn queue_phase_progress_ignores_cursor_history_from_ingestion() {
+        let root = serde_json::json!("fixed-buckets");
+        let old_cursor = serde_json::json!("old-watermark-cursor");
+        let next_cursor = serde_json::json!("b");
+        let final_cursor = serde_json::json!("a");
+        let none = serde_json::Value::Null;
+        let mut progress = QueuePhaseProgress::default();
+        // qualify_narratives(new_watermark) resets this cursor while ingestion
+        // still owns the work. An immutable bucket root can remain unchanged.
+        assert_eq!(
+            progress.transition("narrative", false, &root, &root, &old_cursor, &none),
+            (false, false)
+        );
+        assert_eq!(
+            progress.transition("narrative", true, &root, &root, &none, &next_cursor),
+            (true, false)
+        );
+        assert_eq!(
+            progress.transition("narrative", true, &root, &root, &next_cursor, &final_cursor),
+            (true, false)
+        );
+        assert_eq!(
+            progress.transition("narrative", true, &root, &none, &final_cursor, &none),
+            (true, true)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "cursor initializes only once")]
+    fn queue_phase_progress_rejects_reinitialization_inside_the_fixed_phase() {
+        let root = serde_json::json!("fixed-buckets");
+        let cursor = serde_json::json!("b");
+        let none = serde_json::Value::Null;
+        let mut progress = QueuePhaseProgress::default();
+        progress.transition("narrative", true, &root, &root, &none, &cursor);
+        progress.transition("narrative", true, &root, &root, &none, &cursor);
+    }
+
+    #[test]
+    #[should_panic(expected = "cursor cannot move forward")]
+    fn queue_phase_progress_rejects_forward_movement_inside_the_fixed_phase() {
+        let root = serde_json::json!("fixed-buckets");
+        let cursor = serde_json::json!("b");
+        let forward = serde_json::json!("c");
+        let none = serde_json::Value::Null;
+        let mut progress = QueuePhaseProgress::default();
+        progress.transition("narrative", true, &root, &root, &none, &cursor);
+        progress.transition("narrative", true, &root, &root, &cursor, &forward);
+    }
+
     #[tokio::test]
     async fn remote_chat_gateway_returns_repeated_codex_turns_after_legacy_archive_identity() {
         run_remote_chat_gateway_repeated_codex_turns(false).await;
@@ -6026,64 +6151,6 @@ mod tests {
             .expect("finite projection work bound");
         assert!(archive_rows > 0, "the projection cohort is nonempty");
 
-        let queue_transition = |label: &str,
-                                before_root: &serde_json::Value,
-                                after_root: &serde_json::Value,
-                                before_cursor: &serde_json::Value,
-                                after_cursor: &serde_json::Value,
-                                initialized: &mut bool,
-                                cursor_initialized: &mut bool,
-                                cleared: &mut bool|
-         -> (bool, bool) {
-            if before_root.is_null() {
-                assert!(before_cursor.is_null(), "{label} empty queue has no cursor");
-                if after_root.is_null() {
-                    assert!(after_cursor.is_null(), "{label} empty queue has no cursor");
-                    return (false, false);
-                }
-                assert!(
-                    !*initialized && !*cleared,
-                    "{label} queue cannot restart after initialization or clear"
-                );
-                assert!(
-                    after_root.is_string(),
-                    "{label} queue root is a stored reference"
-                );
-                *initialized = true;
-                if !after_cursor.is_null() {
-                    assert!(after_cursor.is_string(), "{label} cursor is a stored key");
-                    *cursor_initialized = true;
-                }
-                return (true, false);
-            }
-
-            assert!(!*cleared, "{label} queue cannot reopen after its clear");
-            *initialized = true;
-            if after_root.is_null() {
-                assert!(
-                    after_cursor.is_null(),
-                    "{label} cleared queue has no cursor"
-                );
-                *cleared = true;
-                return (true, true);
-            }
-            assert_eq!(after_root, before_root, "{label} queue root remains fixed");
-            let moved = match (before_cursor.as_str(), after_cursor.as_str()) {
-                (None, None) => false,
-                (None, Some(_)) => {
-                    assert!(!*cursor_initialized, "{label} cursor initializes only once");
-                    *cursor_initialized = true;
-                    true
-                }
-                (Some(before), Some(after)) => {
-                    assert!(after <= before, "{label} cursor cannot move forward");
-                    after < before
-                }
-                (Some(_), None) => panic!("{label} cursor clears only with its queue root"),
-            };
-            (moved, false)
-        };
-
         let mut source_calls = 0u64;
         let mut source_done = false;
         let mut previous_source =
@@ -6091,13 +6158,7 @@ mod tests {
                 &chat_snapshot,
             )
             .expect("read initial source-index scalar state");
-        let mut source_narrative_queue_initialized = previous_source
-            .as_ref()
-            .is_some_and(|source| source.scalars["narrative_queue"].is_string());
-        let mut source_narrative_cursor_initialized = previous_source
-            .as_ref()
-            .is_some_and(|source| source.scalars["narrative_before"].is_string());
-        let mut source_narrative_queue_cleared = false;
+        let mut source_narrative_progress = QueuePhaseProgress::default();
         let mut source_queue_clears = 0u64;
         while !source_done {
             assert!(
@@ -6151,6 +6212,14 @@ mod tests {
                 }
                 let replay_was_settled = before.scalars["replay_settled"] == true;
                 let replay_is_settled = current.scalars["replay_settled"] == true;
+                let (queue_moved, cleared) = source_narrative_progress.transition(
+                    "SourceIndex narrative",
+                    replay_was_settled,
+                    &before.scalars["narrative_queue"],
+                    &current.scalars["narrative_queue"],
+                    &before.scalars["narrative_before"],
+                    &current.scalars["narrative_before"],
+                );
                 if replay_was_settled {
                     assert!(
                         replay_is_settled,
@@ -6188,16 +6257,6 @@ mod tests {
                             "settled source logical root/cursor {key} remains fixed"
                         );
                     }
-                    let (queue_moved, cleared) = queue_transition(
-                        "SourceIndex narrative",
-                        &before.scalars["narrative_queue"],
-                        &current.scalars["narrative_queue"],
-                        &before.scalars["narrative_before"],
-                        &current.scalars["narrative_before"],
-                        &mut source_narrative_queue_initialized,
-                        &mut source_narrative_cursor_initialized,
-                        &mut source_narrative_queue_cleared,
-                    );
                     if cleared {
                         source_queue_clears += 1;
                         assert!(
@@ -6288,16 +6347,8 @@ mod tests {
             Some(current_source_epoch.as_str()),
             "projection starts under the completed SourceIndex epoch"
         );
-        let mut projection_pending_initialized =
-            initial_owner.logical_scalars["pending"].is_string();
-        let mut projection_pending_cursor_initialized =
-            initial_owner.logical_scalars["before"].is_string();
-        let mut projection_pending_cleared = false;
-        let mut projection_narrative_initialized =
-            initial_owner.logical_scalars["narrative_queue"].is_string();
-        let mut projection_narrative_cursor_initialized =
-            initial_owner.logical_scalars["narrative_before"].is_string();
-        let mut projection_narrative_cleared = false;
+        let mut projection_pending_progress = QueuePhaseProgress::default();
+        let mut projection_narrative_progress = QueuePhaseProgress::default();
         let mut projection_queue_clears = 0u64;
         while !projection_done {
             assert!(
@@ -6337,6 +6388,22 @@ mod tests {
             );
             let ingestion_pending =
                 before.todo_count > 0 || before.body_jobs > 0 || before.remaining_body_bytes > 0;
+            let (pending_moved, pending_cleared) = projection_pending_progress.transition(
+                "projection pending",
+                !ingestion_pending,
+                &before.logical_scalars["pending"],
+                &after.logical_scalars["pending"],
+                &before.logical_scalars["before"],
+                &after.logical_scalars["before"],
+            );
+            let (narrative_moved, narrative_cleared) = projection_narrative_progress.transition(
+                "projection narrative",
+                !ingestion_pending,
+                &before.logical_scalars["narrative_queue"],
+                &after.logical_scalars["narrative_queue"],
+                &before.logical_scalars["narrative_before"],
+                &after.logical_scalars["narrative_before"],
+            );
             if ingestion_pending {
                 if pending {
                     assert!(
@@ -6374,26 +6441,6 @@ mod tests {
                         "stable logical root {key} cannot change during queue activation"
                     );
                 }
-                let (pending_moved, pending_cleared) = queue_transition(
-                    "projection pending",
-                    &before.logical_scalars["pending"],
-                    &after.logical_scalars["pending"],
-                    &before.logical_scalars["before"],
-                    &after.logical_scalars["before"],
-                    &mut projection_pending_initialized,
-                    &mut projection_pending_cursor_initialized,
-                    &mut projection_pending_cleared,
-                );
-                let (narrative_moved, narrative_cleared) = queue_transition(
-                    "projection narrative",
-                    &before.logical_scalars["narrative_queue"],
-                    &after.logical_scalars["narrative_queue"],
-                    &before.logical_scalars["narrative_before"],
-                    &after.logical_scalars["narrative_before"],
-                    &mut projection_narrative_initialized,
-                    &mut projection_narrative_cursor_initialized,
-                    &mut projection_narrative_cleared,
-                );
                 if pending_cleared {
                     projection_queue_clears += 1;
                 }
