@@ -635,7 +635,7 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
         provider: "mock",
         kind: "message",
         role: "user",
-        text: "User request with enough text to wrap across several lines while the copy control appears and reports success.",
+        text: "User request with enough text to wrap across several lines while the copy control appears and reports success. ".repeat(3).trim(),
         title: null,
         status: null,
         turn_id: null,
@@ -653,7 +653,7 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
         provider: "mock",
         kind: "message",
         role: "assistant",
-        text: "Assistant response with enough text to wrap across several lines while the copy control appears and reports success.",
+        text: "Assistant response with enough text to wrap across several lines while the copy control appears and reports success. ".repeat(3).trim(),
         title: null,
         status: null,
         turn_id: null,
@@ -687,14 +687,15 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
   const card = page.getByTestId("agent-card");
   const transcript = card.getByTestId("agent-chat-transcript");
   const transcriptWidthMetrics = await transcript.evaluate((element) => {
-    const probe = document.createElement("span");
-    probe.style.cssText = "position:absolute; width:1ch; height:0; overflow:hidden;";
-    element.append(probe);
-    const chWidth = probe.getBoundingClientRect().width;
-    probe.remove();
-    return { chWidth, maxWidth: Number.parseFloat(getComputedStyle(element).maxWidth) };
+    return {
+      remWidth: Number.parseFloat(getComputedStyle(element.ownerDocument.documentElement).fontSize),
+      maxWidth: Number.parseFloat(getComputedStyle(element).maxWidth),
+      width: element.getBoundingClientRect().width,
+    };
   });
-  expect(transcriptWidthMetrics.maxWidth).toBeCloseTo(transcriptWidthMetrics.chWidth * 76, 0);
+  // Wide tools use the transcript cap; readable message prose has its own cap.
+  expect(transcriptWidthMetrics.maxWidth).toBeCloseTo(transcriptWidthMetrics.remWidth * 72, 0);
+  expect(transcriptWidthMetrics.width).toBeLessThanOrEqual(transcriptWidthMetrics.maxWidth + 0.5);
   const rows = [
     card.getByLabel("assistant message"),
     card.getByLabel("user message"),
@@ -703,7 +704,22 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
   await expect(rows[1]).toBeVisible();
 
   for (const row of rows) {
+    const proseWidthMetrics = await row.locator(".chat-prose-block").first().evaluate((element) => {
+      const probe = element.ownerDocument.createElement("span");
+      probe.style.cssText = "position:absolute; width:100ch; height:0; overflow:hidden;";
+      element.append(probe);
+      const proseCap = probe.getBoundingClientRect().width;
+      probe.remove();
+      return {
+        proseCap,
+        maxWidth: Number.parseFloat(getComputedStyle(element).maxWidth),
+        width: element.getBoundingClientRect().width,
+      };
+    });
+    expect(proseWidthMetrics.maxWidth).toBeCloseTo(proseWidthMetrics.proseCap, 0);
+    expect(proseWidthMetrics.width).toBeLessThanOrEqual(proseWidthMetrics.maxWidth + 0.5);
     const baseline = await chatGeometry(row);
+    expect(new Set(baseline.textRects.map((rect) => rect.y)).size).toBeGreaterThan(1);
     await expectChatTextUnobscured(row, baseline);
 
     await row.hover();
