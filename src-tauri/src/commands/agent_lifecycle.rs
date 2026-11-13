@@ -1,6 +1,42 @@
 //! Per-agent lifecycle exclusion and awaited native-owner shutdown.
 use crate::state::AppState;
 
+/// Worktree mutation has committed before reset begins. The reset may fail at
+/// any stage, so describe the saved assignment without asserting runtime state.
+pub(super) fn worktree_reset_error(error: String) -> String {
+    format!("Workspace assignment was saved, but the session reset did not complete: {error}")
+}
+
+/// Explain a durable conflict without implying that missing exit evidence can
+/// be reconstructed by retrying an old, unbound hold.
+pub(super) fn lease_conflict_message(
+    name: &str,
+    operation: &str,
+    conflict: &wardian_core::conversation_lease::ConversationLease,
+) -> String {
+    let recovery = if conflict.mode == "uncertain_previous_provider" {
+        "; exact old-provider exit evidence is unavailable for online release; retain this hold until verified recovery"
+    } else {
+        ""
+    };
+    format!(
+        "cannot {operation} agent {name} while its saved conversation is in use by {} {} ({}){recovery}",
+        conflict.owner_kind, conflict.owner_id, conflict.mode
+    )
+}
+
+/// Retry only a stop already bound to retained handles before ordinary lease
+/// acquisition. Persisted legacy holds without that binding remain untouched.
+pub(super) async fn recover_prior_hold_for_config(
+    config: &wardian_core::models::AgentConfig,
+) -> Result<(), String> {
+    if config.provider == "codex" {
+        let home = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
+        crate::manager::codex_stop::recover_prior_hold(&home, &config.session_id).await?;
+    }
+    Ok(())
+}
+
 /// Fence the previous conversation before stop. Only a later verified runtime
 /// receipt or explicit recovery may release this exact hold acquisition.
 pub(super) fn hold_previous_provider_before_rotation(
@@ -259,11 +295,12 @@ pub(super) async fn stop_native_owner(
     session_id: &str,
     remove_terminal: bool,
 ) -> Result<(), String> {
-    stop_native_owner_with_before_capture(state, session_id, remove_terminal, |_| Ok(())).await
+    stop_native_owner_with_before_capture(state, session_id, remove_terminal, |_| Ok(None)).await
 }
 
 /// Run an exact-owner action under the roster lock just before Codex runtime
 /// capture. A failed native preflight never reaches the action or detaches it.
+/// The returned hold travels with those handles through cancellation and retry.
 pub(super) async fn stop_native_owner_with_before_capture<F>(
     state: &AppState,
     session_id: &str,
@@ -271,7 +308,10 @@ pub(super) async fn stop_native_owner_with_before_capture<F>(
     before_capture: F,
 ) -> Result<(), String>
 where
-    F: FnOnce(&crate::state::ActiveAgent) -> Result<(), String>,
+    F: FnOnce(
+        &crate::state::ActiveAgent,
+    )
+        -> Result<Option<wardian_core::conversation_lease::ConversationLeaseOwner>, String>,
 {
     state
         .native_delivery
@@ -291,7 +331,10 @@ async fn stop_codex_runtime<F>(
     before_capture: F,
 ) -> Result<(), String>
 where
-    F: FnOnce(&crate::state::ActiveAgent) -> Result<(), String>,
+    F: FnOnce(
+        &crate::state::ActiveAgent,
+    )
+        -> Result<Option<wardian_core::conversation_lease::ConversationLeaseOwner>, String>,
 {
     let config = {
         let agents = state.agents.lock().await;
@@ -320,9 +363,11 @@ where
         let agent = agents
             .get_mut(session_id)
             .ok_or_else(|| format!("Agent {session_id} not found"))?;
-        before_capture(agent)?;
+        let hold = before_capture(agent)?;
         let generation = agent.runtime_generation;
-        let guard = registration.capture(super::take_agent_runtime_for_termination(agent));
+        let guard = registration
+            .with_prior_hold(hold)
+            .capture(super::take_agent_runtime_for_termination(agent));
         (guard, generation)
     };
     // From capture onward neither cancellation nor a later rollback can restore

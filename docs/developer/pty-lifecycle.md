@@ -76,7 +76,7 @@ To prevent orphaned provider and console-host processes when Wardian crashes or 
 4. Provider shells, CLIs, ConPTY console hosts, and descendants inherit the job from process creation time.
 5. When the Wardian process terminates, the job object is closed by the OS, which automatically kills all processes assigned to it.
 
-New Windows Claude PTY runtimes also have a dedicated non-breakaway job. Their
+New Windows Claude and Codex PTY runtimes also have a dedicated non-breakaway job. Their
 main thread is suspended until assignment succeeds, closing the post-launch
 descendant race. Fresh resume and clear reject new job members, retain and join
 the current members' handles, and verify the direct child and empty job before
@@ -86,11 +86,72 @@ jobs if app-level supervision cannot be installed. Legacy runtimes do not gain
 an exit receipt from post-launch assignment. See
 [Verified Windows Claude Process Stop](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-02-claude-process-containment.md).
 
+Codex binds the newly acquired prior-provider hold to the retained stop entry
+before releasing its runtime handles. For a contained Windows runtime, the
+stop worker releases that exact acquisition only after the existing tree
+verifier succeeds. Cancellation of the requesting command does not cancel the
+worker. A failed lease write retains the verified receipt for an online retry
+through resume or new-session before ordinary lifecycle lease acquisition.
+Archive-stage failure still preserves the previous configured identity and
+history; hold release does not finalize or bypass the pending close.
+
+Uncontained and legacy runtimes cannot acquire this evidence retroactively.
+Successful uncontained stops, including Unix stops, still let a fresh-session
+rotation continue. They release the in-memory stop fence while retaining the
+exact old-session hold; that hold excludes same-session resume, not the fresh
+identity. Failed stops retain their runtime fence and block rotation as before.
+Their holds remain conservative, including after direct-child exit. A legacy
+stranded hold has no persisted PID or launch identity, and an older worker's
+discarded handles cannot be reconstructed from Off status or an empty
+best-effort process scan. Such a hold requires the explicit operator-attested
+recovery command below; it is not eligible for inferred release on restart.
+
+Startup reports every retained legacy hold in the debug log. A hold that blocks
+an agent's saved session also creates an informational Inbox update, including
+for saved Off agents. The update states why exit is unproven and gives the
+exact acquisition-specific recovery command. It is not an approval prompt.
+
+The original Windows application supervisor has `BREAKAWAY_OK` as well as
+`KILL_ON_JOB_CLOSE`. Legacy Codex TUI launches relied on that supervisor, and
+the Codex app-server's private job was assigned after process spawn. These
+paths do not prove complete non-breakaway containment from launch. The desktop
+ownership lock excludes another cooperating desktop, but neither that lock nor
+a hold timestamp supplies the missing launch binding. Legacy lease records
+also do not identify their creating instance. Consequently, startup cannot
+claim that a restart proves these old provider trees exited. Provider names,
+including Claude, do not substitute for a historical launch receipt.
+
 At startup, Wardian restores an agent as headless only while an unexpired background execution lease protects its conversation. Before starting an interactive provider process, it checks persisted leases under the cross-process lease lock and acquires a lifecycle transition lease. In particular, Codex's app-server owner starts before its PTY child, so the candidate scan must finish before that owner starts; a later scan would mistake Wardian's own owner for a duplicate. For a Codex provider process with a valid `WARDIAN_SESSION_ID`, that explicit identity takes precedence over incidental agent IDs in its launch arguments, while an explicit resume of another session still counts as a candidate. Unmarked or malformed processes use the conservative command-line fallback. Unreadable or semantically invalid lease data blocks that spawn until inspected. A persisted headless status or `WARDIAN_SESSION_ID` marker alone does not establish a live provider: descendants such as a marked Python server must not prevent restore.
 
 The transition lease remains active through provider startup and publication. Before stopping an owned runtime for clear or fresh resume, Wardian persists an exact-owner hold on its previous provider session. This hold conflicts by old session only, does not set `Headless`, and survives retarget and restart. An unconfirmed stop cannot free that identity; a restart cannot silently expire the hold. Resume and clear transfer their exact lifecycle lease to the spawn watcher. Under the cross-process file lock, spawn retargets that acquisition to the selected provider session, including `fresh_provider_session_id` when `resume_session` is empty, and rejects another active owner of that session; the candidate scan still runs at the spawn boundary. Reusing a held old session is withheld. The mock provider's identity-confirmed `Init` is its bootstrap evidence because it has no later prompt signal. For every provider, release waits until the exact runtime generation and status incarnation are published. Other providers release on `Idle`, `Error`, or `Off` after that publication. A rejected or uncertain initialization event cannot signal bootstrap. A terminal status before publication retains exclusion because provider liveness is uncertain. New-agent registration also waits for roster commit and any provisional Codex attachment; failure or cancellation stops renewal and retains its startup lease until finite expiry. If resume or clear aborts after spawn but before publication, the attempted process stop does not prove exit. The watcher stops renewal but leaves the exact lease persisted until its finite expiry. An explicit failure publishes `Error`; cancellation can leave the existing placeholder until recovery. Retry must wait for expiry and any provider candidate must be inspected. Release uses the exact acquisition identity so a late event cannot remove a replacement lease.
 
-Repair an uncertain previous-provider hold only after stopping every Wardian instance that shares the home and verifying that the old provider session has no live writer. Back up `runtime/conversation-leases.json`, remove only the hold record whose `owner_kind`, `owner_id`, and `acquisition_id` match the inspected entry, then restart. Keep the hold when provider exit remains uncertain. A direct PTY child exit or a successful process-tree kill request alone cannot establish that every provider descendant stopped on every supported OS.
+For a legacy hold without retained exit evidence, use the supported operator
+command with a running desktop that implements it. This preserves the configured
+provider conversation and its archive; it does not finish a pending close.
+
+1. Independently establish that the exact old provider and every descendant
+   writer have exited. Off status, an absent PID, an empty best-effort scan,
+   and a successful kill request are insufficient. If exit remains uncertain,
+   stop here and retain the hold.
+2. Inspect the startup diagnostic or
+   `<wardian-home>/runtime/conversation-leases.json`. Match the target agent,
+   provider session, owner, and exact `acquisition_id` to the inspected hold.
+3. Run `wardian agent release-hold <agent> --acquisition-id <acquisition-id> --operator-verified-exit`.
+   The flag is an explicit operator attestation, not a request for Wardian to
+   infer exit from a negative scan. The command refuses owned runtimes,
+   retained stop handles, tied live-provider candidates, and conflicting active
+   conversation ownership. A stale or ambiguous acquisition is refused.
+4. Verify the successful command receipt. The operator OS identity, optional
+   managed actor, time, and complete inspected hold are durably recorded in
+   `<wardian-home>/agents/<agent-id>/lifecycle-history.jsonl` before the exact
+   lease removal. An authorization record alone does not assert completed
+   release: it can remain if the lease write fails. An audit-write failure
+   retains the hold. Other acquisitions, history, and worktrees are preserved.
+5. Use `wardian agent resume <agent>` to retain the configured provider session,
+   or `wardian agent new-session <agent>` to retry archive and fresh-session
+   completion. Verify that the operation succeeds and saved history remains
+   available. An older desktop's rejection is an error; do not edit the lease
+   file as a workaround.
 
 For non-Codex clear and fresh resume, the old-session hold is created immediately before detaching the still-owned runtime, after archive and identity preparation. An earlier preflight error leaves no old-session hold. If clear aborts after detach but before stop, Wardian releases the exact hold after restoring the same runtime incarnation and handles. Codex native-owner shutdown creates the hold under the roster lock immediately before runtime capture, after stop preflight; an error after capture retains it because exit may be uncertain. Once provider spawn succeeds, setup failure or cancellation retains the spawn lease through its finite expiry; the readiness watcher releases the exact acquisition explicitly after publication. Resume, clear, and startup restore own a publication disposition through roster commit. Cancellation before commit signals the watcher to stop renewal and retain only the existing finite lease; commit disarms that signal without an await gap.
 

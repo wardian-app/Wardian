@@ -48,6 +48,7 @@ enum ControlOperation {
     AgentRename,
     AgentRestart,
     AgentNewSession,
+    AgentReleaseHold,
     AgentPause,
     AgentResume,
     AgentModels,
@@ -330,6 +331,26 @@ pub fn agent_new_session(target: &str) -> io::Result<()> {
         }),
     )
     .map(|_| ())
+}
+
+/// Submit one explicit attestation; an older app rejection is terminal.
+pub fn agent_release_hold(
+    target: &str,
+    acquisition_id: &str,
+    operator_verified_exit: bool,
+) -> io::Result<wardian_core::control::AgentReleaseHoldResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentReleaseHold,
+        send_request(ControlRequest::AgentReleaseHold {
+            target: target.to_string(),
+            acquisition_id: acquisition_id.to_string(),
+            operator_verified_exit,
+            origin: require_current_message_origin().ok(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
 }
 
 pub fn agent_resume(target: &str) -> io::Result<()> {
@@ -874,6 +895,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentRename
         | ControlOperation::AgentRestart
         | ControlOperation::AgentNewSession
+        | ControlOperation::AgentReleaseHold
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
         | ControlOperation::AgentModels
@@ -1382,6 +1404,36 @@ mod tests {
             CONTROL_MUTATION_TIMEOUT
         );
         assert!(operation_timeout(&ControlOperation::AgentClone) > CONTROL_TIMEOUT);
+    }
+
+    #[test]
+    fn release_hold_unsupported_endpoint_error_is_terminal() {
+        let runtime = build_runtime().unwrap();
+        let error = timeout_block(
+            &runtime,
+            ControlOperation::AgentReleaseHold,
+            std::future::ready(Err(io::Error::other(ControlEndpointError::new(
+                "bad_request",
+                "older desktop does not support agent_release_hold",
+            )))),
+        )
+        .unwrap_err();
+        let endpoint = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<ControlEndpointError>()
+            .unwrap();
+        assert_eq!(endpoint.code(), "bad_request");
+        assert!(
+            serde_json::from_value::<wardian_core::control::AgentReleaseHoldResponse>(
+                serde_json::json!({"schema":1, "ok":true}),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentReleaseHold),
+            CONTROL_MUTATION_TIMEOUT
+        );
     }
 
     #[test]

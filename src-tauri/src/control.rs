@@ -1,5 +1,6 @@
 mod agent_lifecycle;
 mod agent_spawn;
+mod hold_release;
 mod pi_startup;
 use pi_startup::pi_output_has_startup_ready_prompt;
 
@@ -404,26 +405,10 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
         }
 
         ControlRequest::AgentRename { target, name } => {
-            let uuid = resolve_target_uuid(app, &target)
-                .await
-                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
-            crate::commands::agent::rename_agent(
-                uuid.clone(),
-                name,
-                app.state::<AppState>(),
-                app.clone(),
-            )
-            .await
-            .map_err(ControlError::bad_request)?;
-            let identity = live_agent_identity(app, &uuid).await?;
-            ok_json(&AgentUpdateResponse {
-                schema: wardian_core::control::CONTROL_SCHEMA,
-                ok: true,
-                agent: identity,
-                updated_fields: vec!["name".to_string()],
-                restart_required: false,
-                settings: None,
-            })
+            agent_lifecycle::rename(app, &target, name).await
+        }
+        request @ ControlRequest::AgentReleaseHold { .. } => {
+            hold_release::dispatch(request, app).await
         }
 
         ControlRequest::AgentRestart { target } | ControlRequest::AgentResume { target } => {

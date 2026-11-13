@@ -448,10 +448,7 @@ fn acquire_agent_lifecycle_transition_lease_for_identity(
         }
         Ok(wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Conflict(
             conflict,
-        )) => Err(format!(
-            "cannot {operation} agent {} while its saved conversation is in use by {} {} ({})",
-            name, conflict.owner_kind, conflict.owner_id, conflict.mode
-        )),
+        )) => Err(agent_lifecycle::lease_conflict_message(name, operation, &conflict)),
         Err(error) => Err(format!(
             "cannot {operation} agent {} because its conversation lease could not be acquired: {error}",
             name
@@ -467,6 +464,7 @@ async fn acquire_agent_lifecycle_transition_lease_for_session(
     operation: &str,
 ) -> Result<wardian_core::conversation_lease::PersistedConversationLeaseGuard, String> {
     let config = lifecycle_config_for_session(state, session_id).await?;
+    agent_lifecycle::recover_prior_hold_for_config(&config).await?;
     acquire_agent_lifecycle_transition_lease(&config, operation)
 }
 
@@ -2712,7 +2710,7 @@ pub async fn resume_agent(
     let codex_stops_before_preflight = starts_fresh && initial_config.provider == "codex";
     if codex_stops_before_preflight {
         stop_native_owner_with_before_capture(&state, &session_id, false, |agent| {
-            hold_previous_provider_before_rotation(agent, &lifecycle_lease).map(|_| ())
+            hold_previous_provider_before_rotation(agent, &lifecycle_lease)
         })
         .await?;
     } else {
@@ -3609,7 +3607,7 @@ async fn clear_agent_session_inner(
         == "codex";
     if codex_stops_before_preflight {
         stop_native_owner_with_before_capture(&state, &session_id, false, |agent| {
-            hold_previous_provider_before_rotation(agent, &lifecycle_lease).map(|_| ())
+            hold_previous_provider_before_rotation(agent, &lifecycle_lease)
         })
         .await?;
     } else {
@@ -4388,6 +4386,7 @@ async fn clear_agent_after_worktree_mutation(
         },
     )
     .await
+    .map_err(agent_lifecycle::worktree_reset_error)
 }
 
 #[tauri::command]
