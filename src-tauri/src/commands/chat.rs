@@ -94,6 +94,17 @@ pub(crate) fn queue_recent_capture_for_app<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     session_id: &str,
 ) -> Result<(), String> {
+    queue_recent_capture_for_app_using(state, app, session_id, publish_recent_for_state)
+}
+
+fn queue_recent_capture_for_app_using<R: tauri::Runtime>(
+    state: &AppState,
+    app: &tauri::AppHandle<R>,
+    session_id: &str,
+    publish: impl FnOnce(&AppState, &str, Option<&Arc<Mutex<String>>>) -> std::io::Result<()>
+        + Send
+        + 'static,
+) -> Result<(), String> {
     let (snapshot, runtime) = chat_read_snapshot_for_state(state, session_id)?;
     let nonce = state
         .conversation_archive
@@ -107,7 +118,7 @@ pub(crate) fn queue_recent_capture_for_app<R: tauri::Runtime>(
         tauri::async_runtime::spawn(async move {
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 let state = producer_app.state::<AppState>();
-                publish_recent_for_state(&state, &session_id, Some(&runtime))
+                publish(&state, &session_id, Some(&runtime))
             })
             .await;
             owner_app
@@ -296,6 +307,9 @@ pub(crate) fn chat_read_snapshot_for_state(
 mod antigravity_tests;
 #[path = "chat_opencode_tools.rs"]
 mod opencode_tools;
+#[cfg(test)]
+#[path = "chat_recent_selection_tests.rs"]
+mod recent_selection_tests;
 
 #[derive(Clone)]
 pub(crate) struct AgentArchiveCaptureSnapshot {

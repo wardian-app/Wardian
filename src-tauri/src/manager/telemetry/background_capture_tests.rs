@@ -1,5 +1,7 @@
 use super::*;
+use std::future::{poll_fn, Future};
 use std::io::Write;
+use std::task::Poll;
 use std::time::Duration;
 
 fn stopped_sample(
@@ -1993,11 +1995,19 @@ async fn recent_watch_prelude_does_not_wait_for_older_global_capture_work() {
         .await
         .unwrap();
     let global_work = state.conversation_capture_policy_lock.lock().await;
-    let capturing = state.clone();
-    let capture = tokio::spawn(async move {
-        crate::commands::chat::archive_agent_chat_events_for_state(&capturing, session).await
-    });
+    let mut capture = Box::pin(crate::commands::chat::archive_agent_chat_events_for_state(
+        &state, session,
+    ));
+    let started = std::time::Instant::now();
     let read = tokio::time::timeout(Duration::from_secs(1), async {
+        // Drive the real prelude to its first gate wait before a competing
+        // reader can make its one best-effort snapshot miss. This work remains
+        // inside the original deadline, while old global work stays held.
+        poll_fn(|cx| {
+            assert!(capture.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
         loop {
             let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
                 &state,
@@ -2014,33 +2024,21 @@ async fn recent_watch_prelude_does_not_wait_for_older_global_capture_work() {
             .await
             .unwrap();
             if page.recent_admission.is_some() {
-                break page;
+                break (page, started.elapsed());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
-    if read.is_err() {
-        let (snapshot, _) =
-            crate::commands::chat::chat_read_snapshot_for_state(&state, session).unwrap();
-        let (has_file_receipt, watch_cursor) = {
-            let watch = snapshot.watch_state.lock().unwrap();
-            (watch.recent_file_source().is_some(), watch.latest_cursor())
-        };
-        // Post-deadline diagnosis cannot qualify the already-failed read.
-        let publication = crate::commands::chat::publish_recent_for_state(&state, session, None)
-            .map_err(|error| (error.kind(), error.raw_os_error(), error.to_string()));
-        eprintln!("RECENT_PRELUDE_TIMEOUT admission_open={} file_path={} file_receipt={} cursor={watch_cursor:?} pending={} post_deadline_publication={publication:?}",
-            state.conversation_capture_policy_lock.background_admission_open(), snapshot.log_path.is_some(), has_file_receipt,
-            state.conversation_archive.chat_projection.recent_pending_for_test());
-    }
     drop(global_work);
     let capture = tokio::time::timeout(Duration::from_secs(10), capture).await;
     assert!(
-        capture.unwrap().unwrap().is_ok(),
+        capture.unwrap().is_ok(),
         "owned full capture joined after releasing old work"
     );
-    let page = read.expect("bounded header publication cannot wait behind another old capture");
+    let (page, elapsed) =
+        read.expect("bounded header publication cannot wait behind another old capture");
+    assert!(elapsed < Duration::from_secs(1));
     assert_eq!(
         page.events[0].text.as_deref(),
         Some("Current header before global work")
