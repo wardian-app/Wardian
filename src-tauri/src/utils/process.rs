@@ -436,22 +436,13 @@ impl OwnedBootstrapChild {
         command.kill_on_drop(true);
         #[cfg(windows)]
         {
-            let job = create_kill_on_close_job("agent bootstrap")?;
-            command.creation_flags(windows_silent_process_creation_flags() | 0x0000_0004);
-            let mut child = command.spawn().map_err(|error| error.to_string())?;
-            on_started();
-            let pid = child
-                .id()
-                .ok_or_else(|| "bootstrap process has no owned process identity".to_string())?;
-            if let Err(error) = assign_pid_to_job(&job, pid, "agent bootstrap") {
-                let _ = child.start_kill();
-                return Err(error);
-            }
-            if let Err(error) = resume_suspended_process(pid) {
-                let _ = child.start_kill();
-                return Err(error);
-            }
-            Ok(Self {
+            Self::spawn_with_setup(
+                command,
+                on_started,
+                |job, pid| assign_pid_to_job(job, pid, "contained child"),
+                resume_suspended_process,
+            )
+            .map(|(child, job)| Self {
                 child,
                 complete: false,
                 job: Some(job),
@@ -463,6 +454,58 @@ impl OwnedBootstrapChild {
             let _ = on_started;
             Err("owned bootstrap containment is unavailable on this platform".to_string())
         }
+    }
+
+    #[cfg(windows)]
+    fn spawn_with_setup(
+        command: &mut tokio::process::Command,
+        on_started: impl FnOnce(),
+        assign: impl FnOnce(&win32job::Job, u32) -> Result<(), String>,
+        resume: impl FnOnce(u32) -> Result<(), String>,
+    ) -> Result<(tokio::process::Child, win32job::Job), String> {
+        let job = create_kill_on_close_job("contained child")?;
+        command.kill_on_drop(true);
+        command.creation_flags(windows_silent_process_creation_flags() | 0x0000_0004);
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
+        on_started();
+        let setup = child
+            .id()
+            .ok_or_else(|| "contained child has no owned process identity".to_string())
+            .and_then(|pid| {
+                assign(&job, pid)?;
+                resume(pid)
+            });
+        if let Err(error) = setup {
+            // Setup is synchronous, so cancellation cannot split assignment and
+            // resume. Retain even an unassigned suspended child until reaped.
+            let _ = child.start_kill();
+            tokio::spawn(async move {
+                loop {
+                    let _ = child.start_kill();
+                    if child.wait().await.is_ok() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                drop(job);
+            });
+            return Err(error);
+        }
+        Ok((child, job))
+    }
+
+    /// Launch a long-lived child and transfer its kill-on-close job together.
+    /// No caller can observe the child before assignment and resume complete.
+    #[cfg(windows)]
+    pub(crate) fn spawn_contained(
+        command: &mut tokio::process::Command,
+    ) -> Result<(tokio::process::Child, win32job::Job), String> {
+        Self::spawn_with_setup(
+            command,
+            || {},
+            |job, pid| assign_pid_to_job(job, pid, "contained child"),
+            resume_suspended_process,
+        )
     }
 
     pub(crate) fn child_mut(&mut self) -> &mut tokio::process::Child {
@@ -556,6 +599,10 @@ mod bootstrap_containment_tests {
         assert!(!marker.exists());
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "contained_child_tests.rs"]
+mod contained_child_tests;
 
 #[cfg(windows)]
 fn bootstrap_job_active_processes(job: &win32job::Job) -> Result<u32, String> {

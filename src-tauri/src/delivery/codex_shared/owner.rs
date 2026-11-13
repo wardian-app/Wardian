@@ -477,9 +477,6 @@ impl CodexSharedOwner {
         }
         let stderr_redaction =
             StderrRedactionContext::from_command(private_paths, command.as_std());
-        #[cfg(windows)]
-        let job = crate::utils::process::create_kill_on_close_job("Codex shared owner")
-            .map_err(CodexSharedError::unsupported)?;
         // On Windows the effective backend comes from the initialized server's
         // cwd-aware config read, so its TUI overlay is prepared in that same
         // pre-thread initialization window. Other platforms retain early setup.
@@ -496,7 +493,11 @@ impl CodexSharedOwner {
                 .map_err(CodexSharedError::unsupported)?;
         }
         let child_spawn_at = std::time::Instant::now();
-        let mut child = match command.spawn() {
+        #[cfg(windows)]
+        let spawned = crate::utils::process::OwnedBootstrapChild::spawn_contained(&mut command);
+        #[cfg(not(windows))]
+        let spawned = command.spawn().map_err(|error| error.to_string());
+        let spawned = match spawned {
             Ok(child) => child,
             Err(error) => {
                 restore_launch_overlay(&mut launch_config)?;
@@ -505,6 +506,11 @@ impl CodexSharedOwner {
                 )));
             }
         };
+        #[cfg(windows)]
+        let (mut child, job) = spawned;
+        #[cfg(not(windows))]
+        let mut child = spawned;
+        #[cfg(unix)]
         let child_pid = child
             .id()
             .expect("newly spawned Codex owner must have a process identifier");
@@ -513,19 +519,6 @@ impl CodexSharedOwner {
             .take()
             .expect("Codex owner stderr was configured as piped");
         let mut stderr_capture = CodexStderrCapture::start(stderr, stderr_redaction);
-        #[cfg(windows)]
-        if let Err(error) =
-            crate::utils::process::assign_pid_to_job(&job, child_pid, "Codex shared owner")
-        {
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::utils::process::force_kill_process_tree(child_pid)
-            })
-            .await;
-            terminate_starting_child(&mut child).await;
-            timings.record_stderr_diagnostic(stderr_capture.finish_startup().await);
-            restore_launch_overlay(&mut launch_config)?;
-            return Err(CodexSharedError::unsupported(error));
-        }
         timings.child_spawn = child_spawn_at.elapsed();
         let mut connected = None;
         let mut owned_socket = None;
