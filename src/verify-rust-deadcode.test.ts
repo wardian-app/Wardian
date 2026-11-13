@@ -14,6 +14,7 @@ import {
 import {
   compareWithBaseline,
   deadCodeFindings,
+  deadCodeCargoEnv,
   pathInsideCopy,
   prepareCopyRoot,
   readBaseline,
@@ -28,6 +29,41 @@ import {
 const WINDOWS = productionCfgEnv('win32');
 const LINUX = productionCfgEnv('linux');
 const analyze = (source: string, env = WINDOWS) => analyzeSource(source, { testOnly: false, inactive: false }, env);
+
+describe('dead-code copy compiler environment', () => {
+  it.each(['sccache', 'C:\\tools\\sccache.exe'])('bypasses %s on Windows without changing the parent or target settings', (wrapper) => {
+    const env = {
+      RUSTC_WRAPPER: wrapper,
+      CARGO_TARGET_DIR: 'owned-target',
+      CARGO_BUILD_BUILD_DIR: 'owned-target',
+      RUSTC_WORKSPACE_WRAPPER: 'workspace-wrapper',
+      CARGO_INCREMENTAL: '0',
+      RUSTFLAGS: '--cfg retained',
+    };
+    const childEnv = deadCodeCargoEnv(env, 'win32');
+    const child = spawnSync(process.execPath, ['-e', 'console.log(JSON.stringify(process.env))'], {
+      env: { ...process.env, ...childEnv }, encoding: 'utf8', windowsHide: true,
+    });
+    expect(child.status).toBe(0);
+    expect(JSON.parse(child.stdout)).toMatchObject({ ...env, RUSTC_WRAPPER: '' });
+    expect(env.RUSTC_WRAPPER).toBe(wrapper);
+  });
+
+  it('overrides a Cargo environment sccache setting with an explicit empty wrapper', () => {
+    const env = { CARGO_BUILD_RUSTC_WRAPPER: 'sccache.exe' };
+    expect(deadCodeCargoEnv(env, 'win32')).toEqual({ ...env, RUSTC_WRAPPER: '' });
+    expect(env).not.toHaveProperty('RUSTC_WRAPPER');
+  });
+
+  it('preserves custom wrappers, explicitly disabled wrappers, and non-Windows environments', () => {
+    for (const env of [{ RUSTC_WRAPPER: 'custom-wrapper' }, { RUSTC_WRAPPER: '', CARGO_BUILD_RUSTC_WRAPPER: 'sccache' }, {}]) {
+      expect(deadCodeCargoEnv(env, 'win32')).toBe(env);
+    }
+    const env = { RUSTC_WRAPPER: 'sccache' };
+    expect(deadCodeCargoEnv(env, 'linux')).toBe(env);
+    expect(deadCodeCargoEnv(env, 'darwin')).toBe(env);
+  });
+});
 
 /** The flags of the identifier `name` at its `occurrence`-th appearance. */
 function flagsOf(analysis: ReturnType<typeof analyze>, name: string, occurrence = 0) {
