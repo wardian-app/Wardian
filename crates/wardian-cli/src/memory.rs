@@ -2,7 +2,8 @@ use crate::args::{MemoryArgs, MemoryCommand, MemoryKindArg, MemoryScopeArg};
 use crate::errors::{CliError, ExitCode};
 use wardian_core::identity::{self, AgentIdentity, ListFilters, Scope};
 use wardian_core::memory::{
-    MemoryActor, MemoryKind, MemorySource, MemoryStore, SaveMemoryRequest, UpdateMemoryRequest,
+    normalize_workspace, MemoryActor, MemoryKind, MemorySource, MemoryStore, SaveMemoryRequest,
+    UpdateMemoryRequest, ACTIVE_MEMORY_CAP,
 };
 
 pub fn handle_memory(args: MemoryArgs) -> Result<String, CliError> {
@@ -19,6 +20,7 @@ pub fn handle_memory(args: MemoryArgs) -> Result<String, CliError> {
             source,
             idempotency_key,
         } => {
+            validate_memory_text(&text)?;
             let context = resolve_context(&actor, agent, workspace)?;
             let workspace = match scope {
                 MemoryScopeArg::Agent => None,
@@ -52,7 +54,20 @@ pub fn handle_memory(args: MemoryArgs) -> Result<String, CliError> {
             let records = store
                 .list_active(&actor, &context.agent_id, context.workspace.as_deref())
                 .map_err(memory_error)?;
-            serde_json::json!({ "schema": 1, "memories": records })
+            let workspace = normalize_workspace(context.workspace.as_deref());
+            let mut scope_counts = vec![serde_json::json!({
+                "workspace": null,
+                "active_count": records.iter().filter(|record| record.workspace.is_none()).count(),
+                "cap": ACTIVE_MEMORY_CAP,
+            })];
+            if let Some(workspace) = workspace {
+                scope_counts.push(serde_json::json!({
+                    "active_count": records.iter().filter(|record| record.workspace.as_deref() == Some(workspace.as_str())).count(),
+                    "workspace": workspace,
+                    "cap": ACTIVE_MEMORY_CAP,
+                }));
+            }
+            serde_json::json!({ "schema": 1, "memories": records, "scope_counts": scope_counts })
         }
         MemoryCommand::Show { memory_id } => {
             let record = store
@@ -67,6 +82,7 @@ pub fn handle_memory(args: MemoryArgs) -> Result<String, CliError> {
             source,
             idempotency_key,
         } => {
+            validate_memory_text(&text)?;
             let record = store
                 .update(
                     &actor,
@@ -110,6 +126,48 @@ pub fn handle_memory(args: MemoryArgs) -> Result<String, CliError> {
 struct MemoryContext {
     agent_id: String,
     workspace: Option<String>,
+}
+
+/// Keep interactive memory prose readable without constraining evidence or batch maintenance.
+fn validate_memory_text(text: &str) -> Result<(), CliError> {
+    let tokens: Vec<_> = text.split_whitespace().collect();
+    let mut hex_run = 0;
+    let has_hex_run = text.chars().any(|character| {
+        hex_run = if character.is_ascii_hexdigit() {
+            hex_run + 1
+        } else {
+            0
+        };
+        hex_run >= 16
+    });
+    let identifiers: Vec<_> = tokens
+        .iter()
+        .map(|token| {
+            let token = token.trim_matches(|character: char| !character.is_alphanumeric());
+            token.chars().any(|character| character.is_ascii_digit())
+                || token.contains(['_', '/', '\\'])
+                || token.contains("::")
+                || token.contains('.')
+                || token.contains('-')
+                || token
+                    .chars()
+                    .zip(token.chars().skip(1))
+                    .any(|(left, right)| left.is_lowercase() && right.is_uppercase())
+        })
+        .collect();
+    let dense_identifiers = (0..identifiers.len()).any(|start| {
+        identifiers[start..(start + 8).min(identifiers.len())]
+            .iter()
+            .filter(|value| **value)
+            .count()
+            >= 4
+    });
+    if tokens.iter().any(|token| token.chars().count() > 48) || has_hex_run || dense_identifiers {
+        return Err(CliError::generic(
+            "memory text contains a long token, a hash run, or a dense cluster of identifiers; write one to three plain sentences and keep identifiers in --evidence or --source",
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_context(
@@ -312,6 +370,37 @@ mod tests {
     use super::*;
     use wardian_core::db::AgentUpsert;
 
+    #[test]
+    fn memory_text_rejects_compressed_tokens_hashes_and_identifier_clusters() {
+        for text in [
+            "a".repeat(49),
+            "Keep commit abcdef0123456789 for later.".into(),
+            "Use 0123456789ABCDEF as the authority.".into(),
+            "pid123 task_foo memory.rs issue1727".into(),
+            "alphaBeta then gammaDelta then epsilonZeta then thetaIota".into(),
+        ] {
+            let error = validate_memory_text(&text).unwrap_err();
+            assert!(error.message.contains("write one to three plain sentences"));
+        }
+    }
+
+    #[test]
+    fn memory_text_accepts_ordinary_technical_sentences_and_boundary_cases() {
+        for text in [
+            "Issue #1727 adds memory limits in memory.rs.",
+            "Use tokio::sync::Mutex for shared state.",
+            "Run npm run verify:ci before publishing.",
+            "Prefer cross-platform examples and concise explanations.",
+            "Use src/memory.rs with task_foo and issue1727.",
+            "Keep revision abcdef012345678 for comparison.",
+            "Use memory.rs for storage. The user prefers short explanations with clear examples. Check model.rs for the data shape. Use parser.rs when reading files. Update tests.rs when behavior changes.",
+            "使用普通句子记录用户偏好。",
+        ] {
+            validate_memory_text(text).unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        }
+        validate_memory_text(&"g".repeat(48)).unwrap();
+    }
+
     struct TestHome {
         _guard: std::sync::MutexGuard<'static, ()>,
         _home: tempfile::TempDir,
@@ -426,6 +515,17 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["memories"][0]["agent_id"], "agent-a");
         assert_eq!(value["memories"][0]["text"], "Alpha preference");
+        assert_eq!(
+            value["scope_counts"][0]["workspace"],
+            serde_json::Value::Null
+        );
+        assert_eq!(value["scope_counts"][0]["active_count"], 0);
+        assert_eq!(value["scope_counts"][1]["active_count"], 1);
+        assert_eq!(value["scope_counts"][1]["cap"], ACTIVE_MEMORY_CAP);
+        assert_eq!(
+            value["scope_counts"][1]["workspace"],
+            normalize_workspace(Some("C:/work/alpha")).unwrap()
+        );
     }
 
     #[test]
@@ -441,6 +541,37 @@ mod tests {
             std::env::set_var("WARDIAN_SESSION_ID", "agent-a");
             std::env::set_var(wardian_core::memory::MEMORY_CAPABILITY_ENV, capability);
         }
+
+        for command in [
+            MemoryCommand::Save {
+                text: "abcdef0123456789".into(),
+                evidence: "Evidence.".into(),
+                kind: MemoryKindArg::Stable,
+                scope: MemoryScopeArg::Workspace,
+                agent: None,
+                workspace: None,
+                source: vec![],
+                idempotency_key: None,
+            },
+            MemoryCommand::Update {
+                memory_id: short_id.clone(),
+                text: "abcdef0123456789".into(),
+                evidence: "Evidence.".into(),
+                source: vec![],
+                idempotency_key: None,
+            },
+        ] {
+            let error = handle_memory(MemoryArgs { command }).unwrap_err();
+            assert!(error.message.contains("write one to three plain sentences"));
+        }
+        assert_eq!(
+            MemoryStore::from_default_home()
+                .unwrap()
+                .history(&MemoryActor::Operator, &record.memory_id)
+                .unwrap()
+                .len(),
+            1
+        );
 
         let shown = handle_memory(MemoryArgs {
             command: MemoryCommand::Show {
