@@ -6,11 +6,28 @@ One-time setup steps beyond `npm install` and Rust toolchain installation.
 
 ### Rust Toolchain
 
-Install via [rustup](https://rustup.rs/). The stable channel is sufficient:
+Install [rustup](https://rustup.rs/), then run these commands inside the repository
+in Bash or PowerShell:
 
 ```bash
-rustup toolchain install stable
+rustup show
+rustc --version
+cargo --version
 ```
+
+Rustup installs and selects the exact compiler in the root `rust-toolchain.toml`,
+including Clippy and rustfmt. CI uses the same version. The
+[Rust cache launcher](./rust-build-cache.md) also respects this pin; no global
+default-toolchain change is needed. Release jobs install their matrix-specific
+cross-compilation targets separately.
+
+To bump Rust, open a dedicated PR updating `channel` in `rust-toolchain.toml`
+and every `dtolnay/rust-toolchain@<version>` reference in `.github/workflows/`.
+Choose an exact stable release, run the commands above to confirm the compiler,
+and run `npm run verify:ci`. Fix any newly enabled lints in that PR without
+suppressing them. Confirm the logged `rustc --version` in every Rust CI job
+matches the pin before merging. The toolchain regression test rejects drift
+between the manifest and workflow installers.
 
 ### cargo-llvm-cov (Rust coverage)
 

@@ -116,6 +116,7 @@ describe('CI verification contract', () => {
       'npm run check:deadcode:production',
       'npm run check:budgets',
       'npm run check:page-fixtures',
+      'node --test scripts/rust-toolchain.test.mjs',
       'cargo clippy --workspace --all-targets -- -D warnings',
       'cargo fmt --all -- --check',
       'cargo test --workspace --all-targets -- --test-threads=1',
@@ -130,6 +131,7 @@ describe('CI verification contract', () => {
 
   it('supports a category subset without changing command literals', () => {
     expect(selectPlan(readVerificationPlan(workflow), 'backend').map(({ command }) => command)).toEqual([
+      'node --test scripts/rust-toolchain.test.mjs',
       'cargo clippy --workspace --all-targets -- -D warnings',
       'cargo fmt --all -- --check',
       'cargo test --workspace --all-targets -- --test-threads=1',
