@@ -93,6 +93,7 @@ describe("CI workflow contract", () => {
       "npm run check:frontend-screenshot -- origin/${{ github.base_ref }} HEAD",
     );
     expect(readVerificationPlan(backend).map(({ command }) => command)).toEqual([
+      "node --test scripts/rust-toolchain.test.mjs",
       "cargo clippy --workspace --all-targets -- -D warnings",
       "cargo fmt --all -- --check",
       "cargo test --workspace --all-targets -- --test-threads=1",

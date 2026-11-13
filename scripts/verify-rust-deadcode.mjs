@@ -28,6 +28,10 @@
  * The workspace copy lives under the cargo target directory and is synced in
  * place, so repeated runs reuse cargo's incremental state. The checkout itself
  * is never written to.
+ * On Windows, only this copy build bypasses sccache: deep target paths can
+ * exceed the rustc command-line limit inside the wrapper. Direct Cargo can
+ * retry that spawn through a response file. The persistent copy and target
+ * still reuse Cargo build state; other builds and custom wrappers are unchanged.
  *
  * Usage:
  *   node scripts/verify-rust-deadcode.mjs [--prune] [--verbose]
@@ -173,13 +177,22 @@ function loadWorkspace(metadata, env) {
 const BUILD_SUPPORT_PATHS = ["scripts"];
 
 function listCopiedFiles(memberDirs) {
-  const roots = ["Cargo.toml", "Cargo.lock", ".cargo", ...BUILD_SUPPORT_PATHS, ...memberDirs];
+  const roots = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo", ...BUILD_SUPPORT_PATHS, ...memberDirs];
   const output = execFileSync(
     "git",
     ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...roots],
     { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
   );
   return [...new Set(output.split("\0").filter(Boolean))].filter((file) => existsSync(path.join(REPO_ROOT, file)));
+}
+
+/** Keep Cargo's Windows response-file fallback available for the copy build. */
+export function deadCodeCargoEnv(env, platform = process.platform) {
+  const wrapper = env.RUSTC_WRAPPER ?? env.CARGO_BUILD_RUSTC_WRAPPER;
+  if (platform !== "win32" || !/^sccache(?:\.exe)?$/i.test(path.win32.basename(wrapper ?? ""))) return env;
+  // Empty overrides any Cargo-configured wrapper too; deleting the key would
+  // allow Cargo to select a wrapper again. Never mutate the launcher's parent.
+  return { ...env, RUSTC_WRAPPER: "" };
 }
 
 /**
@@ -405,7 +418,7 @@ function runRustcPass(metadata, workspace, options) {
   const invocation = cargoInvocation(args, { cwd: copyRoot, output: "deadcode" });
   const result = spawnSync("cargo", invocation.args, {
     cwd: copyRoot,
-    env: invocation.env,
+    env: deadCodeCargoEnv(invocation.env),
     encoding: "utf8",
     maxBuffer: 512 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
