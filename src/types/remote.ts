@@ -17,11 +17,17 @@ import type {
 } from "./index";
 
 export type RemoteAccessStatus = "disabled" | "enabled" | "needs_repair";
+export type RemoteCredentialKind = "pwa" | "client";
+export type RemoteCredentialAudience = "wardian_remote_pwa" | "wardian_remote_client_v1";
+export type RemoteReadGrant = "agents:read" | "chat:read";
+export type RemoteSendGrant = "chat:send";
+export type RemoteClientScope = RemoteReadGrant | RemoteSendGrant;
 
 export interface RemoteGatewayConfig {
   schema_version: 1;
   enabled: boolean;
   canonical_origin: string;
+  client_origin_allowlist: string[];
   loopback_host: string;
   loopback_port: number;
   gateway_identity_public_key: string;
@@ -61,6 +67,12 @@ export interface PairingQrPayload {
   server_identity_fingerprint: string;
 }
 
+export interface RemoteClientPairingQrPayload extends PairingQrPayload {
+  credential_kind: "client";
+  client_origin: string;
+  read_grants: RemoteReadGrant[];
+}
+
 export interface PairingSubmitResponse {
   status: "pending" | "approved" | "rejected";
   pairing_request_id: string;
@@ -70,11 +82,27 @@ export interface PairingSubmitResponse {
   expires_at: string;
 }
 
+/**
+ * @ipcContract Rust struct RemoteClientPairingSubmitResponse; remote-client pairing-submit HTTP response.
+ */
+export interface RemoteClientPairingSubmitResponse {
+  status: "pending" | "approved" | "rejected";
+  pairing_request_id: string;
+  device_id: string;
+  public_key_fingerprint: string;
+  expires_at: string;
+}
+
 export interface RemoteDeviceRecord {
   device_id: string;
   label: string;
   public_key_spki_der_base64: string;
   public_key_fingerprint: string;
+  credential_kind: RemoteCredentialKind;
+  audience: RemoteCredentialAudience;
+  client_origin: string | null;
+  read_grants: RemoteReadGrant[];
+  send_grants: RemoteSendGrant[];
   created_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
@@ -85,6 +113,11 @@ export interface RemotePendingPairingRequest {
   device_label: string;
   public_key_fingerprint: string;
   canonical_origin: string;
+  credential_kind: RemoteCredentialKind;
+  audience: string;
+  client_origin: string | null;
+  read_grants: RemoteReadGrant[];
+  send_grants: RemoteSendGrant[];
   submitted_at: string;
   expires_at: string;
 }
@@ -339,6 +372,69 @@ export interface AuthChallengeResponse {
   nonce: string;
   expires_at: string;
   audience: string;
+}
+
+/**
+ * @ipcContract Rust struct RemoteClientAuthChallengeResponse; remote-client auth-challenge HTTP response.
+ */
+export interface RemoteClientAuthChallengeResponse {
+  challenge_id: string;
+  device_id: string;
+  origin: string;
+  client_origin: string;
+  server_identity_fingerprint: string;
+  nonce: string;
+  expires_at: string;
+  audience: "wardian_remote_client_v1";
+  signing_payload: string;
+}
+
+/**
+ * @ipcContract Rust struct RemoteClientAuthSessionResponse; remote-client auth-session HTTP response.
+ */
+export interface RemoteClientAuthSessionResponse {
+  token_type: "Bearer";
+  access_token: string;
+  expires_at: string;
+  device_id: string;
+  scopes: RemoteClientScope[];
+  idempotency_namespace?: string;
+  idempotency_expires_at?: string;
+}
+
+/**
+ * @ipcContract Rust struct RemoteClientSharingStatus; remote-client sharing-status HTTP response.
+ */
+export interface RemoteClientSharingStatus {
+  status: "active";
+  device_id: string;
+  client_origin: string;
+  audience: "wardian_remote_client_v1";
+  read_grants: RemoteReadGrant[];
+  send_grants: RemoteSendGrant[];
+  expires_at: string;
+}
+
+/**
+ * @ipcContract Rust struct RemoteClientMessageSubmitRequest; remote-client message-submit HTTP request.
+ */
+export interface RemoteClientMessageSubmitRequest {
+  text: string;
+  input_mode: "message";
+}
+
+/**
+ * @ipcContract Rust struct RemoteClientMessageOperation; remote-client message-operation HTTP response.
+ */
+export interface RemoteClientMessageOperation {
+  operation_id: string;
+  request_id: string;
+  session_id: string;
+  delivery_state: string;
+  accepted_at: string;
+  updated_at: string;
+  idempotency_expires_at: string;
+  error_code: string | null;
 }
 
 export interface RemoteWebSocketTicketResponse {

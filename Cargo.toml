@@ -34,6 +34,8 @@ subtle = "2.6"
 tempfile = "3.26.0"
 thiserror = "2.0"
 uuid = { version = "1.21.0", features = ["v4"] }
+url = "2"
+tower = { version = "0.5", features = ["util"] }
 
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }

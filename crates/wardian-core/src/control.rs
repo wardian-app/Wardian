@@ -18,6 +18,10 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Create an operator-requested, origin-bound companion-client pairing offer.
+    RemoteClientPairingOffer {
+        client_origin: String,
+    },
     AgentMessaging {
         request: crate::agent_messaging::AgentMessagingRequest,
         origin: MessageOrigin,

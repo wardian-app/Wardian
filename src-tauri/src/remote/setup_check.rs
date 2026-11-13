@@ -470,6 +470,7 @@ mod tests {
             schema_version: REMOTE_SETTINGS_SCHEMA_VERSION,
             enabled: true,
             canonical_origin: "https://inanna.tailb6e29a.ts.net".to_string(),
+            client_origin_allowlist: Vec::new(),
             loopback_host: "127.0.0.1".to_string(),
             loopback_port: 41241,
             gateway_identity_public_key: "pub".to_string(),

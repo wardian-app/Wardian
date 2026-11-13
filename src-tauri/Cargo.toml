@@ -66,6 +66,8 @@ tauri-plugin-dialog = "2"
 wardian-core = { path = "../crates/wardian-core" }
 sha2 = { workspace = true }
 subtle = { workspace = true }
+tower = { workspace = true }
+url = { workspace = true }
 toml_edit = "0.25.11"
 tempfile = "3.26.0"
 socket2 = "0.6.3"

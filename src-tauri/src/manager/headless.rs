@@ -457,6 +457,13 @@ pub(crate) fn headless_provider_args(
 pub async fn run_headless_with_options(
     options: HeadlessRunOptions<'_>,
 ) -> Result<serde_json::Value, HeadlessRunError> {
+    run_headless_with_client_authority(options, None).await
+}
+
+pub(crate) async fn run_headless_with_client_authority(
+    options: HeadlessRunOptions<'_>,
+    client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
+) -> Result<serde_json::Value, HeadlessRunError> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     super::validate_session_values_for_launch(options.wardian_session_id, options.resume_session)?;
     let cwd = options.cwd;
@@ -715,7 +722,7 @@ pub async fn run_headless_with_options(
     // If the control request is cancelled, dropping the child must terminate
     // the provider rather than leaving it running against a leased session.
     cmd.kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut child = spawn_headless_process(&mut cmd, client_send_authority.as_ref()).await?;
     let mut process_tree_guard = HeadlessProcessTreeGuard::new(child.id());
     // Read stdout and stderr concurrently to avoid deadlock when stderr buffer fills.
     let stdout_handle = {
@@ -931,6 +938,27 @@ pub async fn run_headless_with_options(
     } else {
         Ok(serde_json::json!({ "text": output }))
     }
+}
+
+/// Recheck paired-client authority immediately before the irreversible spawn.
+pub(crate) async fn spawn_headless_process(
+    command: &mut tokio::process::Command,
+    client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
+) -> Result<tokio::process::Child, HeadlessRunError> {
+    let permit = match client_send_authority {
+        Some(authority) => Some(
+            authority
+                .acquire()
+                .await
+                .map_err(HeadlessRunError::definite)?,
+        ),
+        None => None,
+    };
+    let spawn_result = command
+        .spawn()
+        .map_err(|error| HeadlessRunError::definite(error.to_string()));
+    drop(permit);
+    spawn_result
 }
 
 fn normalize_pi_headless_output(

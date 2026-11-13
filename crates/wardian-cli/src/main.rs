@@ -7,6 +7,7 @@ mod automation_invoker;
 mod automation_replay;
 mod browser;
 mod disk;
+mod early_commands;
 mod errors;
 mod graph;
 mod inbox;
@@ -17,6 +18,7 @@ mod live;
 mod memory;
 mod messaging;
 mod output;
+mod remote;
 mod schema;
 mod telemetry;
 #[cfg(test)]
@@ -52,32 +54,8 @@ fn run() -> i32 {
         Ok(cli) => cli,
         Err(error) => return handle_parse_error(error),
     };
-    if let Command::Mcp { command } = &cli.command {
-        return wardian_cli::mcp::run(command);
-    }
-    // Static discovery must work without a home, migrations, or running app.
-    if let Command::Schema { path } = &cli.command {
-        return finish(schema::render(path));
-    }
-    if let Command::Browser(args) = &cli.command {
-        if let Some(help) = browser::target_help(args) {
-            return finish(Ok(help));
-        }
-    }
-    if let Command::Agent(args) = &cli.command {
-        if let Err(error) = validate_agent_output(args) {
-            return finish(Err(error));
-        }
-    }
-    if let Command::Automation(AutomationArgs {
-        command: AutomationCommand::NodeTypes { node, json },
-        ..
-    }) = &cli.command
-    {
-        return finish(render_automation_node_types(node.as_deref(), *json));
-    }
-    if let Command::Message(args) = &cli.command {
-        return finish(messaging::handle(args));
+    if let Some(status) = early_commands::dispatch(&cli.command) {
+        return status;
     }
     if let Err(error) = wardian_core::automation_migration::migrate_current_home() {
         let error = CliError::generic(format!(
@@ -104,6 +82,7 @@ fn run() -> i32 {
         Command::Message(_) => unreachable!("messaging runs without local migrations"),
         Command::Delivery(args) => handle_delivery(args),
         Command::Notify(args) => handle_notify(args),
+        Command::Remote(_) => unreachable!("remote control runs without local migrations"),
     };
 
     finish(result)

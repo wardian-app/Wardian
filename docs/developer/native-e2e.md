@@ -147,6 +147,160 @@ You can also target a specific file:
 npm run test:e2e:native:fast -- e2e-native/tests/opencode-native.test.mjs
 ```
 
+### Remote client TLS fixture
+
+`remote-client-tls-fixture.test.mjs` is in the CI tier. It checks the scoped
+TLS fixture, absolute readiness deadline, owned acceptance lifecycle, raw mock
+transcript oracle, independent Node-client barrier, and socket cleanup without
+starting the app or a provider.
+`remote-client-conformance.test.mjs` is in the nightly tier because it starts
+the native app and mock provider, then launches Chromium profiles for the
+unpinned and SPKI-pinned checks. The nightly workflow installs Playwright
+Chromium after `npm ci`.
+
+Run the scoped TLS fixture checks without starting Wardian or a provider:
+
+POSIX shell:
+
+```bash
+node --test e2e-native/tests/remote-client-tls-fixture.test.mjs
+```
+
+PowerShell:
+
+```powershell
+node --test e2e-native/tests/remote-client-tls-fixture.test.mjs
+```
+
+The fixture rejects WebSocket upgrades by default. Its opt-in forwarding covers
+only the existing PWA status and terminal stream paths, preserves the upstream
+handshake error, and drains pending sockets when closed. A controlled transport
+test server also returns a standards-valid WebSocket 101 so the fixture's tunnel
+can be checked with opaque bytes and both upgrade head buffers. This proves
+fixture transport only; it does not prove gateway authentication or real PWA
+WebSocket acceptance. The fixture uses an in-memory certificate trusted
+explicitly by Node clients; it does not change the system trust store. Its ready
+record freezes the HTTPS origin, leaf certificate SHA-256, and base64 SHA-256 of
+the leaf SPKI for the lifetime of that fixture.
+
+The paired-client browser conformance test uses a fresh, explicitly owned
+Chromium user-data directory. An unpinned browser must reject the fixture
+certificate. The pinned browser receives only
+`--ignore-certificate-errors-spki-list=<base64-sha256-spki>` for that generated
+leaf. Chromium applies this test-only exception before hostname validation, so
+the browser run does not prove hostname verification. Independent Node requests
+trust the exact fixture certificate with `ca: certificatePem` and
+`rejectUnauthorized: true`; negative controls require rejection for a wrong
+TLS hostname and an unrelated bundled root. No global trust or generic
+`ignoreHTTPSErrors` setting is used.
+
+Run the paired-client browser and native-gateway conformance test with a
+prebuilt app and its matching CLI:
+
+Install Playwright Chromium before running the browser conformance test:
+
+POSIX shell:
+
+```bash
+npx playwright install chromium
+```
+
+PowerShell:
+
+```powershell
+npx playwright install chromium
+```
+
+POSIX shell:
+
+```bash
+WARDIAN_NATIVE_SKIP_BUILD=1 \
+WARDIAN_NATIVE_APP='<absolute-app-path>' \
+WARDIAN_NATIVE_CLI='<absolute-paired-cli-path>' \
+npm run test:e2e:native:fast -- e2e-native/tests/remote-client-conformance.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_NATIVE_SKIP_BUILD = '1'
+$env:WARDIAN_NATIVE_APP = '<absolute-app-path>'
+$env:WARDIAN_NATIVE_CLI = '<absolute-paired-cli-path>'
+npm run test:e2e:native:fast -- e2e-native/tests/remote-client-conformance.test.mjs
+```
+
+Set `WARDIAN_NATIVE_WEBDRIVER` to a compatible WebDriver binary when automatic
+driver discovery is unavailable. The conformance test owns its HUD origin and
+passes that exact value to
+`createNativeAcceptanceFixture({ hudOrigin, sourceCommit, sourceDeltaDigest })`.
+The factory writes that origin into the isolated gateway allowlist, starts and
+owns the native session and TLS boundary, and exposes a bounded context with
+the gateway and certificate pins. Its session-bound controls create an offer,
+approve only a matching request freshly read from that native session, revoke
+the fixture's approved device, release the external hold, and close owned
+resources. Approval checks the exact gateway and HUD origins, paired-client
+credential kind and audience, submitted public-key fingerprint, and requested
+grants before invoking native approval.
+The conformance test opts into a separate test-support handle for mock-agent
+setup, same-home restart, and redacted response-header observations; external
+HUD consumers receive only the bounded context and session-bound controls.
+
+The browser generates a non-extractable P-256 private `CryptoKey`, exports only
+its public SPKI, submits the offer, signs the gateway challenge, and exchanges
+the signature for a client token. The factory and sanitized
+`remote_client_acceptance_ready` record do not expose the browser key, bearer,
+or native driver handle. Readiness is emitted only after gateway health, an
+authorized roster, and the 80-event Chat response are verified. The release
+control settles the bounded hold; closing aborts and joins active pairing and
+hold work before closing owned resources. `createRemoteClientAcceptanceFixture`
+remains the lower-level lifecycle primitive; its Node `pairClient` helper is a
+unit-test baseline and is not the browser acceptance path.
+
+POSIX shell:
+
+```bash
+export WARDIAN_NATIVE_WEBDRIVER='<absolute-webdriver-path>'
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_NATIVE_WEBDRIVER = '<absolute-webdriver-path>'
+```
+
+This conformance route remains independent of the app's OS trust store and is
+test-only evidence. Do not use its Chromium SPKI exception as a production
+certificate policy. The paired-client run uses the mock provider to create a
+multi-page Chat transcript, then checks recent and opaque older pages, lazy
+detail chunks, and source-row renewal through the HTTPS client boundary. It
+also exercises explicit `chat:send` approval, durable namespace reuse after
+reauthentication, same-key operation status and duplicate admission, conflict
+responses for changed target/body/mode, and request-size limits. The app-free
+TLS fixture separately starts two independent Node client processes behind a
+shared barrier. The send conformance check starts two independent browser
+workers behind a shared GO barrier, then crosses the production native gateway
+and isolated `state.db` into an interactive mock
+provider. It verifies exactly one user input and assistant echo in the raw
+`mock-transcript.jsonl`, snapshots the bytes before a same-home backend restart,
+then reauthenticates the same device and verifies the same idempotency key adds
+no provider transcript event. The Chat readiness loop has one 120-second
+monotonic deadline covering requests and sleeps. These checks do not establish
+behavior for a real provider.
+
+The current fixture does not simulate a process crash between provider input
+and durable outcome publication. A future debug-only fault hook should pause
+after the PTY submit-key write, flush, and completion acknowledgement at
+`src-tauri/src/manager/spawn.rs`, and after `delivery_transaction.rs` returns
+`submit_key_sent` / `submitted_unconfirmed`, but before
+`src-tauri/src/delivery/live_surface.rs` durably publishes the accepted
+outcome. The supervisor would terminate only the frozen, birth-identified app
+process for the explicit mock HOME, session, and intent while the original
+30-second intent deadline remains active. Recovery evidence must show the
+dispatching intent becoming `submitted_unconfirmed` and eligible for
+reconciliation only; it must not replay provider input. A normal harness close
+does not exercise this crash boundary. No hook or crash injection is part of
+the current fixture.
+
 ### Replacement roster contention
 
 The focused replacement roster admission test holds the real core roster

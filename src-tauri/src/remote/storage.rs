@@ -1,8 +1,9 @@
 use crate::remote::models::{
-    RemoteDeviceStore, RemoteGatewayConfig, REMOTE_DEVICE_STORE_SCHEMA_VERSION,
-    REMOTE_SETTINGS_SCHEMA_VERSION,
+    DeviceCredentialKind, DeviceRecord, RemoteCredentialAudience, RemoteDeviceStore,
+    RemoteGatewayConfig, REMOTE_DEVICE_STORE_SCHEMA_VERSION, REMOTE_SETTINGS_SCHEMA_VERSION,
 };
 use fs2::FileExt;
+use serde::Deserialize;
 use std::{
     collections::HashSet,
     fmt,
@@ -14,6 +15,22 @@ use std::{
 const REMOTE_CONFIG_FILE: &str = "remote-access/config.json";
 const REMOTE_DEVICES_FILE: &str = "remote-access/devices.json";
 const REMOTE_DEVICES_LOCK_FILE: &str = "remote-access/devices.lock";
+
+#[derive(Deserialize)]
+struct LegacyRemoteDeviceStore {
+    devices: Vec<LegacyDeviceRecord>,
+}
+
+#[derive(Deserialize)]
+struct LegacyDeviceRecord {
+    device_id: String,
+    label: String,
+    public_key_spki_der_base64: String,
+    public_key_fingerprint: String,
+    created_at: String,
+    last_used_at: Option<String>,
+    revoked_at: Option<String>,
+}
 
 // Keep local mutation threads ordered; the adjacent OS lock covers other processes.
 static REMOTE_DEVICE_STORE_PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -124,15 +141,92 @@ pub fn load_device_store_at(home: &Path) -> Result<RemoteDeviceStore, String> {
         });
     }
     let content = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let store =
-        serde_json::from_str::<RemoteDeviceStore>(&content).map_err(|error| error.to_string())?;
+    let document =
+        serde_json::from_str::<serde_json::Value>(&content).map_err(|error| error.to_string())?;
+    let schema_version = document
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u8::try_from(version).ok())
+        .ok_or_else(|| "remote device store schema version is invalid".to_string())?;
+    let store = match schema_version {
+        1 => migrate_v1_device_store(
+            serde_json::from_value::<LegacyRemoteDeviceStore>(document)
+                .map_err(|error| error.to_string())?,
+        ),
+        REMOTE_DEVICE_STORE_SCHEMA_VERSION => serde_json::from_value::<RemoteDeviceStore>(document)
+            .map_err(|error| error.to_string())?,
+        version => return Err(format!("unsupported remote device store schema {version}")),
+    };
+    validate_device_store(&store)?;
+    Ok(store)
+}
+
+fn migrate_v1_device_store(legacy: LegacyRemoteDeviceStore) -> RemoteDeviceStore {
+    RemoteDeviceStore {
+        schema_version: REMOTE_DEVICE_STORE_SCHEMA_VERSION,
+        devices: legacy
+            .devices
+            .into_iter()
+            .map(|device| DeviceRecord {
+                device_id: device.device_id,
+                label: device.label,
+                public_key_spki_der_base64: device.public_key_spki_der_base64,
+                public_key_fingerprint: device.public_key_fingerprint,
+                credential_kind: DeviceCredentialKind::Pwa,
+                audience: RemoteCredentialAudience::Pwa,
+                client_origin: None,
+                read_grants: Vec::new(),
+                send_grants: Vec::new(),
+                created_at: device.created_at,
+                last_used_at: device.last_used_at,
+                revoked_at: device.revoked_at,
+            })
+            .collect(),
+    }
+}
+
+fn validate_device_store(store: &RemoteDeviceStore) -> Result<(), String> {
     if store.schema_version != REMOTE_DEVICE_STORE_SCHEMA_VERSION {
         return Err(format!(
             "unsupported remote device store schema {}",
             store.schema_version
         ));
     }
-    Ok(store)
+    let mut ids = HashSet::with_capacity(store.devices.len());
+    for device in &store.devices {
+        if !ids.insert(device.device_id.as_str()) {
+            return Err("duplicate_remote_device_id".to_string());
+        }
+        let valid_authority = match device.credential_kind {
+            DeviceCredentialKind::Pwa => {
+                device.audience == RemoteCredentialAudience::Pwa
+                    && device.client_origin.is_none()
+                    && device.read_grants.is_empty()
+                    && device.send_grants.is_empty()
+            }
+            DeviceCredentialKind::PairedClient => {
+                device.audience == RemoteCredentialAudience::PairedClientV1
+                    && device.client_origin.as_deref().is_some_and(|origin| {
+                        crate::remote::policy::parse_client_origin(origin)
+                            .is_ok_and(|parsed| parsed.raw() == origin)
+                    })
+                    && !device
+                        .read_grants
+                        .iter()
+                        .enumerate()
+                        .any(|(index, grant)| device.read_grants[..index].contains(grant))
+                    && !device
+                        .send_grants
+                        .iter()
+                        .enumerate()
+                        .any(|(index, grant)| device.send_grants[..index].contains(grant))
+            }
+        };
+        if !valid_authority {
+            return Err("remote_device_authority_invalid".to_string());
+        }
+    }
+    Ok(())
 }
 
 /// Serializes read-modify-write across local threads and separate processes.
@@ -223,6 +317,7 @@ fn validate_device_store_transition(
             return Err("duplicate_remote_device_id".to_string());
         }
     }
+    validate_device_store(updated)?;
 
     for previous in &original.devices {
         let current = updated
@@ -233,6 +328,10 @@ fn validate_device_store_transition(
         if current.label != previous.label
             || current.public_key_spki_der_base64 != previous.public_key_spki_der_base64
             || current.public_key_fingerprint != previous.public_key_fingerprint
+            || current.credential_kind != previous.credential_kind
+            || current.audience != previous.audience
+            || current.client_origin != previous.client_origin
+            || current.read_grants != previous.read_grants
             || current.created_at != previous.created_at
         {
             return Err("remote_device_identity_cannot_be_changed".to_string());
@@ -242,6 +341,20 @@ fn validate_device_store_transition(
         }
         if previous.last_used_at.is_some() && current.last_used_at.is_none() {
             return Err("remote_device_last_used_cannot_be_cleared".to_string());
+        }
+        if let (Some(previous), Some(current)) = (
+            previous.last_used_at.as_deref(),
+            current.last_used_at.as_deref(),
+        ) {
+            let previous_ms = chrono::DateTime::parse_from_rfc3339(previous)
+                .map_err(|_| "remote_device_last_used_invalid".to_string())?
+                .timestamp_millis();
+            let current_ms = chrono::DateTime::parse_from_rfc3339(current)
+                .map_err(|_| "remote_device_last_used_invalid".to_string())?
+                .timestamp_millis();
+            if current_ms < previous_ms {
+                return Err("remote_device_last_used_cannot_move_backwards".to_string());
+            }
         }
     }
     Ok(())
@@ -260,7 +373,27 @@ fn record_device_last_used(
     if device.revoked_at.is_some() {
         return Err("remote_device_revoked".to_string());
     }
-    device.last_used_at = Some(last_used_at.to_string());
+    advance_device_last_used(device, last_used_at)?;
+    Ok(())
+}
+
+pub(crate) fn advance_device_last_used(
+    device: &mut DeviceRecord,
+    last_used_at: &str,
+) -> Result<(), String> {
+    let submitted_ms = chrono::DateTime::parse_from_rfc3339(last_used_at)
+        .map_err(|_| "remote_device_last_used_invalid".to_string())?
+        .timestamp_millis();
+    let current_ms = device
+        .last_used_at
+        .as_deref()
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .map_err(|_| "remote_device_last_used_invalid".to_string())?
+        .map(|value| value.timestamp_millis());
+    if current_ms.is_none_or(|current_ms| submitted_ms > current_ms) {
+        device.last_used_at = Some(last_used_at.to_string());
+    }
     Ok(())
 }
 
@@ -278,7 +411,8 @@ pub(crate) async fn update_device_last_used(
 mod tests {
     use super::*;
     use crate::remote::models::{
-        DeviceRecord, RemoteGatewayConfig, REMOTE_SETTINGS_SCHEMA_VERSION,
+        DeviceCredentialKind, DeviceRecord, RemoteCredentialAudience, RemoteGatewayConfig,
+        RemoteReadGrant, REMOTE_SETTINGS_SCHEMA_VERSION,
     };
 
     #[test]
@@ -297,6 +431,7 @@ mod tests {
             schema_version: REMOTE_SETTINGS_SCHEMA_VERSION,
             enabled: false,
             canonical_origin: String::new(),
+            client_origin_allowlist: Vec::new(),
             loopback_host: "127.0.0.1".to_string(),
             loopback_port: 0,
             gateway_identity_public_key: "pub".to_string(),
@@ -307,6 +442,22 @@ mod tests {
         let loaded = load_remote_config_at(temp.path()).expect("load config");
 
         assert_eq!(loaded, Some(config));
+    }
+
+    #[test]
+    fn legacy_remote_config_without_client_allowlist_disables_client_origins() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = remote_config_path(temp.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"enabled":false,"canonical_origin":"","loopback_host":"127.0.0.1","loopback_port":0,"gateway_identity_public_key":"pub","gateway_identity_fingerprint":"fp"}"#,
+        )
+        .expect("write legacy config");
+        let loaded = load_remote_config_at(temp.path())
+            .expect("load legacy config")
+            .expect("config exists");
+        assert!(loaded.client_origin_allowlist.is_empty());
     }
 
     #[test]
@@ -330,10 +481,108 @@ mod tests {
             label: label.to_string(),
             public_key_spki_der_base64: format!("key-{device_id}"),
             public_key_fingerprint: fingerprint.to_string(),
+            credential_kind: DeviceCredentialKind::Pwa,
+            audience: RemoteCredentialAudience::Pwa,
+            client_origin: None,
+            read_grants: Vec::new(),
+            send_grants: Vec::new(),
             created_at: "2026-05-21T00:00:00Z".to_string(),
             last_used_at: None,
             revoked_at: None,
         }
+    }
+
+    #[test]
+    fn schema_one_device_store_migrates_to_pwa_and_publishes_schema_two_on_mutation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = remote_devices_path(temp.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"devices":[{"device_id":"dev-1","label":"Phone","public_key_spki_der_base64":"cHVi","public_key_fingerprint":"fp","created_at":"2026-05-21T00:00:00Z","last_used_at":null,"revoked_at":null}]}"#,
+        )
+        .expect("write schema one store");
+
+        let migrated = load_device_store_at(temp.path()).expect("migrate legacy store in memory");
+        assert_eq!(migrated.schema_version, REMOTE_DEVICE_STORE_SCHEMA_VERSION);
+        assert_eq!(
+            migrated.devices[0].credential_kind,
+            DeviceCredentialKind::Pwa
+        );
+        assert_eq!(migrated.devices[0].audience, RemoteCredentialAudience::Pwa);
+        assert_eq!(migrated.devices[0].client_origin, None);
+        assert!(migrated.devices[0].read_grants.is_empty());
+        let before_publication = serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(&path).expect("read original legacy bytes"),
+        )
+        .expect("parse original");
+        assert_eq!(before_publication["schema_version"], 1);
+
+        update_device_store_at(temp.path(), |store| {
+            advance_device_last_used(
+                store.devices.first_mut().expect("migrated device"),
+                "2026-05-21T00:01:00Z",
+            )?;
+            Ok(())
+        })
+        .expect("publish migration through latest-store transaction");
+        let published = serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(&path).expect("read migrated bytes"),
+        )
+        .expect("parse migrated store");
+        assert_eq!(
+            published["schema_version"],
+            REMOTE_DEVICE_STORE_SCHEMA_VERSION
+        );
+        assert_eq!(published["devices"][0]["credential_kind"], "pwa");
+        assert_eq!(published["devices"][0]["audience"], "wardian_remote_pwa");
+        assert!(published["devices"][0]["client_origin"].is_null());
+        assert_eq!(
+            published["devices"][0]["read_grants"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn schema_two_rejects_missing_or_inconsistent_authority_fields() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = remote_devices_path(temp.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":2,"devices":[{"device_id":"dev-1","label":"Phone","public_key_spki_der_base64":"cHVi","public_key_fingerprint":"fp","credential_kind":"pwa","audience":"wardian_remote_pwa","read_grants":[],"created_at":"2026-05-21T00:00:00Z","last_used_at":null,"revoked_at":null}]}"#,
+        )
+        .expect("write malformed schema two store");
+        assert!(load_device_store_at(temp.path()).is_err());
+
+        std::fs::write(
+            &path,
+            r#"{"schema_version":2,"devices":[{"device_id":"dev-1","label":"Phone","public_key_spki_der_base64":"cHVi","public_key_fingerprint":"fp","credential_kind":"pwa","audience":"wardian_remote_client_v1","client_origin":null,"read_grants":[],"created_at":"2026-05-21T00:00:00Z","last_used_at":null,"revoked_at":null}]}"#,
+        )
+        .expect("write inconsistent schema two store");
+        assert_eq!(
+            load_device_store_at(temp.path()).expect_err("inconsistent authority rejected"),
+            "remote_device_authority_invalid"
+        );
+    }
+
+    #[test]
+    fn credential_authority_is_immutable_across_device_store_transitions() {
+        let original = RemoteDeviceStore {
+            schema_version: REMOTE_DEVICE_STORE_SCHEMA_VERSION,
+            devices: vec![device("dev-1", "Phone", "fp")],
+        };
+        let mut updated = original.clone();
+        let record = &mut updated.devices[0];
+        record.credential_kind = DeviceCredentialKind::PairedClient;
+        record.audience = RemoteCredentialAudience::PairedClientV1;
+        record.client_origin = Some("https://client.example".to_string());
+        record.read_grants = vec![RemoteReadGrant::AgentsRead, RemoteReadGrant::ChatRead];
+        assert_eq!(
+            validate_device_store_transition(&original, &updated)
+                .expect_err("authority changes require a new identity"),
+            "remote_device_identity_cannot_be_changed"
+        );
     }
 
     #[test]

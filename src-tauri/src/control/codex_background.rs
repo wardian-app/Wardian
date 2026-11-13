@@ -98,6 +98,7 @@ pub(super) async fn deliver(
             request.origin,
             request.orchestration,
             request.parent_interaction_id,
+            request.client_send_authority.clone(),
         )
         .await?;
         let deadline = tokio::time::Instant::now() + request.timeout;
