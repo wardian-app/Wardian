@@ -401,6 +401,37 @@ where
     G: FnOnce() -> Gfut,
     Gfut: Future<Output = Result<(), TerminalDeliveryError>>,
 {
+    submit_terminal_transaction_with_submit_guard(
+        tx,
+        profile,
+        prompt,
+        on_payload_sent,
+        on_before_submit,
+        || async { Ok(()) },
+    )
+    .await
+}
+
+/// Submit a terminal prompt, acquiring a short-lived guard only for the final
+/// provider action. Payload preparation, composer verification, and the
+/// provider-specific submit delay all finish before `acquire_submit_guard` runs.
+pub async fn submit_terminal_transaction_with_submit_guard<S, F, Fut, G, Gfut, A, Afut, P>(
+    tx: &S,
+    profile: &DeliveryProfile,
+    prompt: &str,
+    on_payload_sent: F,
+    on_before_submit: G,
+    acquire_submit_guard: A,
+) -> Result<TerminalDeliveryOutcome, TerminalDeliveryError>
+where
+    S: TerminalInputSink + ?Sized,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), TerminalDeliveryError>>,
+    G: FnOnce() -> Gfut,
+    Gfut: Future<Output = Result<(), TerminalDeliveryError>>,
+    A: FnOnce() -> Afut,
+    Afut: Future<Output = Result<P, TerminalDeliveryError>>,
+{
     let plan = plan_terminal_payload(profile, prompt);
     if plan.payload_bytes.is_empty() {
         return Ok(TerminalDeliveryOutcome {
@@ -441,7 +472,11 @@ where
     tokio::time::sleep(std::time::Duration::from_millis(plan.submit_delay_ms)).await;
     on_before_submit().await?;
 
-    tx.send_bytes(plan.submit_key).await.map_err(|error| {
+    let submit_result = {
+        let _submit_guard = acquire_submit_guard().await?;
+        tx.send_bytes(plan.submit_key).await
+    };
+    submit_result.map_err(|error| {
         TerminalDeliveryError::terminal_state_unknown(
             "payload_sent_submit_failed",
             format!(

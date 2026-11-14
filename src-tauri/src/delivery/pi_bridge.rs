@@ -67,6 +67,7 @@ pub(crate) enum PiBridgeStartup {
 enum BridgeCommand {
     Deliver {
         envelope: NativeMessageEnvelope,
+        client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
         reply: oneshot::Sender<Result<PiBridgeReceipt, PiBridgeError>>,
     },
     Shutdown,
@@ -391,6 +392,14 @@ impl PiBridgeOwner {
         &self,
         envelope: NativeMessageEnvelope,
     ) -> Result<PiBridgeReceipt, PiBridgeError> {
+        self.deliver_with_authority(envelope, None).await
+    }
+
+    pub(crate) async fn deliver_with_authority(
+        &self,
+        envelope: NativeMessageEnvelope,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
+    ) -> Result<PiBridgeReceipt, PiBridgeError> {
         if !self.is_ready() {
             return Err(PiBridgeError::unavailable(
                 "Pi TUI bridge has not completed its authenticated ready handshake",
@@ -419,6 +428,7 @@ impl PiBridgeOwner {
         self.command_tx
             .send(BridgeCommand::Deliver {
                 envelope,
+                client_send_authority: client_send_authority.cloned(),
                 reply: reply_tx,
             })
             .await
@@ -558,8 +568,19 @@ async fn run_listener(
         let Some(command) = command else { break };
         match command {
             BridgeCommand::Shutdown => break,
-            BridgeCommand::Deliver { envelope, reply } => {
-                let result = deliver_one(&owner, &mut stream, &mut session, &envelope).await;
+            BridgeCommand::Deliver {
+                envelope,
+                client_send_authority,
+                reply,
+            } => {
+                let result = deliver_one(
+                    &owner,
+                    &mut stream,
+                    &mut session,
+                    &envelope,
+                    client_send_authority.as_ref(),
+                )
+                .await;
                 let should_close = matches!(
                     result.as_ref(),
                     Err(error) if error.code != "provider_rejected"
@@ -720,6 +741,7 @@ async fn deliver_one(
     stream: &mut TcpStream,
     session: &mut BridgeSession,
     envelope: &NativeMessageEnvelope,
+    client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
 ) -> Result<PiBridgeReceipt, PiBridgeError> {
     let sender = envelope.sender_agent_id.as_deref().ok_or_else(|| {
         PiBridgeError::rejected("Pi TUI bridge requires a canonical sender attribution")
@@ -749,7 +771,19 @@ async fn deliver_one(
         "deliver",
     );
     frame.insert("delivery".to_string(), delivery);
-    write_frame(stream, &frame).await.map_err(|error| {
+    let encoded_frame = encode_frame(&frame).map_err(PiBridgeError::rejected)?;
+    let permit = match client_send_authority {
+        Some(authority) => Some(
+            authority
+                .acquire()
+                .await
+                .map_err(PiBridgeError::unavailable)?,
+        ),
+        None => None,
+    };
+    let write_result = write_encoded_frame(stream, &encoded_frame).await;
+    drop(permit);
+    write_result.map_err(|error| {
         PiBridgeError::uncertain(format!("Pi TUI bridge deliver write failed: {error}"))
     })?;
     session.tx_sequence += 1;
@@ -982,17 +1016,30 @@ async fn read_frame(stream: &mut TcpStream) -> Result<Value, String> {
 }
 
 async fn write_frame(stream: &mut TcpStream, frame: &Map<String, Value>) -> Result<(), String> {
+    let encoded = encode_frame(frame)?;
+    write_encoded_frame(stream, &encoded).await
+}
+
+fn encode_frame(frame: &Map<String, Value>) -> Result<Vec<u8>, String> {
     let body = serde_json::to_vec(frame).map_err(|error| error.to_string())?;
     if body.is_empty() || body.len() > MAX_FRAME_BYTES {
         return Err("frame size is outside the bounded contract".to_string());
     }
     let size = u32::try_from(body.len()).map_err(|_| "frame size overflow".to_string())?;
+    let mut encoded = Vec::with_capacity(4 + body.len());
+    encoded.extend_from_slice(&size.to_be_bytes());
+    encoded.extend_from_slice(&body);
+    Ok(encoded)
+}
+
+async fn write_encoded_frame(stream: &mut TcpStream, encoded: &[u8]) -> Result<(), String> {
+    let (prefix, body) = encoded.split_at(4);
     stream
-        .write_all(&size.to_be_bytes())
+        .write_all(prefix)
         .await
         .map_err(|error| error.to_string())?;
     stream
-        .write_all(&body)
+        .write_all(body)
         .await
         .map_err(|error| error.to_string())?;
     stream.flush().await.map_err(|error| error.to_string())

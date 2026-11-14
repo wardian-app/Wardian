@@ -97,3 +97,39 @@ pub(crate) async fn deliver_prompt_to_agent_with_chat_receipt(
         chat_receipt,
     })
 }
+
+/// Deliver a remote-client message through the queued control path.
+///
+/// Its interaction ID, deadline, and send authority use the shared delivery path.
+pub(crate) async fn deliver_remote_client_message(
+    state: &AppState,
+    target: &str,
+    message: &str,
+    interaction_id: &str,
+    deadline_at: &str,
+    authority: crate::remote::client_messages::ClientSendAuthority,
+) -> Result<Vec<DeliveryDetail>, ControlError> {
+    let orchestration = wardian_core::control::OrchestrationDeliveryOptions {
+        idempotency_key: Some(interaction_id.to_string()),
+        deadline_at: Some(deadline_at.to_string()),
+        ..Default::default()
+    };
+    deliver_message_to_target_with_delivery_options(
+        None,
+        state,
+        target,
+        message,
+        None,
+        MessageInputMode::Message,
+        QueuePolicy::QueueIfBusy,
+        None,
+        None,
+        false,
+        crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
+        Some(&orchestration),
+        None,
+        Some(interaction_id),
+        Some(authority),
+    )
+    .await
+}

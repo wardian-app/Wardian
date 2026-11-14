@@ -2139,6 +2139,7 @@ pub(super) struct HeadlessMessageDeliveryRequest<'a> {
     pub(super) lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     pub(super) orchestration: Option<&'a wardian_core::control::OrchestrationDeliveryOptions>,
     pub(super) parent_interaction_id: Option<&'a str>,
+    pub(super) client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
 }
 
 #[cfg(test)]

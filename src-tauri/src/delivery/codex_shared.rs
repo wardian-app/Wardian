@@ -843,6 +843,26 @@ impl CodexSharedClient {
         expected_activity: Option<&CodexTurnActivity>,
         initial_activity: Option<u64>,
     ) -> Result<Value, CodexSharedError> {
+        self.request_with_fences_and_authority(
+            method,
+            params,
+            timeout,
+            expected_activity,
+            initial_activity,
+            None,
+        )
+        .await
+    }
+
+    async fn request_with_fences_and_authority(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+        expected_activity: Option<&CodexTurnActivity>,
+        initial_activity: Option<u64>,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
+    ) -> Result<Value, CodexSharedError> {
         if self.observation.borrow().closed {
             return Err(CodexSharedError::unsupported(
                 "provider connection is closed",
@@ -873,6 +893,16 @@ impl CodexSharedClient {
                     provider_boundary_crossed: false,
                 });
             }
+            let _authority_permit = match client_send_authority {
+                Some(authority) => {
+                    Some(authority.acquire().await.map_err(|code| CodexSharedError {
+                        code: code.to_string(),
+                        message: code.to_string(),
+                        provider_boundary_crossed: false,
+                    })?)
+                }
+                None => None,
+            };
             writer
                 .send(Message::Text(payload.to_string().into()))
                 .await
@@ -957,21 +987,23 @@ impl CodexSharedClient {
         Ok(receipt)
     }
 
-    /// Submit ordinary native input without presenting it as a canonical peer task.
-    /// Broker records retain the full envelope; the provider gets the literal body
-    /// and its diagnostic client message identity, not an MCP reply request ID.
-    pub(super) async fn native_message(
+    pub(super) async fn native_message_with_authority(
         &self,
         message_id: &str,
         body: &str,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<CodexSharedReceipt, CodexSharedError> {
         let mut receipt = self.receipt("provider_accepted")?;
         let result = self
-            .request(
+            .request_with_fences_and_authority(
                 "turn/start",
                 json!({"threadId":receipt.provider_session_id,
                     "clientUserMessageId":message_id,
                     "input":[{"type":"text","text":body}]}),
+                Some(Duration::from_secs(30)),
+                None,
+                None,
+                client_send_authority,
             )
             .await?;
         receipt.provider_turn_id = result["turn"]["id"].as_str().map(str::to_owned);
@@ -1120,6 +1152,30 @@ fn validate_endpoint(endpoint: &str) -> Result<(), CodexSharedError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl CodexSharedClient {
+        /// Submit ordinary native input without presenting it as a canonical peer task.
+        /// Broker records retain the full envelope; the provider gets the literal body
+        /// and its diagnostic client message identity, not an MCP reply request ID.
+        async fn native_message(
+            &self,
+            message_id: &str,
+            body: &str,
+        ) -> Result<CodexSharedReceipt, CodexSharedError> {
+            let mut receipt = self.receipt("provider_accepted")?;
+            let result = self
+                .request(
+                    "turn/start",
+                    json!({"threadId":receipt.provider_session_id,
+                        "clientUserMessageId":message_id,
+                        "input":[{"type":"text","text":body}]}),
+                )
+                .await?;
+            receipt.provider_turn_id = result["turn"]["id"].as_str().map(str::to_owned);
+            receipt.message_id = Some(message_id.to_owned());
+            Ok(receipt)
+        }
+    }
 
     #[test]
     fn intentional_owner_shutdown_does_not_mask_an_unexpected_disconnect() {

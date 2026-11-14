@@ -28,6 +28,7 @@
  *   multi_turn    — init → [user → generating → model_response → turn_completed] × 3
  *   interactive_multi_turn — init → action_required → stdin-driven responses × 2
  *   interactive_echo_then_response — init → action_required → accepted input → prompt echo → response
+ *   interactive_idle_echo — init → idle → stdin-driven message echo and response
  *   ansi_output   — init → ANSI terminal output → model_response → turn_completed
  */
 
@@ -430,6 +431,17 @@ async function runMultiTurn() {
   }
 }
 
+async function runPagedChat() {
+  emit(events.init());
+  const longDetail = "Paged client chat detail body. ".repeat(1_400);
+  for (let turn = 1; turn <= 90; turn++) {
+    emit(events.user(`Client page prompt ${turn}.`));
+    await sleep(delay);
+    emit(events.modelResponse(turn === 90 ? longDetail : `Client page response ${turn}.`));
+    emit(events.turnCompleted());
+  }
+}
+
 async function runInteractiveMultiTurn() {
   emit(events.init());
   await sleep(delay);
@@ -475,6 +487,38 @@ async function runInteractiveEchoThenResponse() {
   emit(events.turnCompleted());
 }
 
+async function runInteractiveIdleEcho() {
+  emit(events.init());
+  await sleep(delay);
+  emit(events.user("Mock provider ready."));
+  await sleep(delay);
+  emit(events.generating());
+  await sleep(delay);
+  emit(events.modelResponse("Ready for a message."));
+  await sleep(delay);
+  emit(events.turnCompleted());
+
+  const lines = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
+  try {
+    for await (const line of lines) {
+      const input = String(line).trim();
+      if (!input) continue;
+      emit(events.user(input));
+      await sleep(delay);
+      emit(events.generating());
+      await sleep(delay);
+      emit(events.modelResponse(`Echo: ${input}`));
+      await sleep(delay);
+      emit(events.turnCompleted());
+    }
+  } finally {
+    lines.close();
+  }
+}
+
 async function runAnsiOutput() {
   emit(events.init());
   await sleep(delay);
@@ -518,8 +562,10 @@ async function main() {
     headless_delayed: runHeadlessDelayed,
     headless_structured_reply: runHeadlessStructuredReply,
     multi_turn: runMultiTurn,
+    paged_chat: runPagedChat,
     interactive_multi_turn: runInteractiveMultiTurn,
     interactive_echo_then_response: runInteractiveEchoThenResponse,
+    interactive_idle_echo: runInteractiveIdleEcho,
     ansi_output: runAnsiOutput,
   };
 

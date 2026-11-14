@@ -49,6 +49,24 @@ pub enum Command {
     Delivery(DeliveryArgs),
     /// Send a user-facing update or approval request to Inbox.
     Notify(NotifyArgs),
+    /// Create origin-bound offers for independently hosted paired clients.
+    Remote(RemoteArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RemoteArgs {
+    #[command(subcommand)]
+    pub command: RemoteCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RemoteCommand {
+    /// Create an offer in the running app and emit its opaque HUD payload as JSON.
+    ClientPairingOffer {
+        /// Exact HTTPS client origin, including a non-default port; must be allowlisted.
+        #[arg(long, value_name = "ORIGIN")]
+        client_origin: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -44,6 +44,7 @@ describe("native E2E tiers", () => {
       "http-fixture-cleanup.test.mjs",
       "mock-startup.test.mjs",
       "native-cli-consumer.test.mjs",
+      "remote-client-tls-fixture.test.mjs",
       "remote-gateway-native.test.mjs",
       "replacement-roster-admission-native.test.mjs",
       "terminal-presentation-broker-native.test.mjs",

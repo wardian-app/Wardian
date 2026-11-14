@@ -26,6 +26,7 @@ pub(crate) mod turn_completion;
 
 pub use classes::{get_all_agent_classes, init_agent_classes, save_classes};
 pub(crate) use codex_onboarding::{should_publish_provisionally, CodexAttachmentCompletion};
+pub(crate) use headless::run_headless_with_client_authority;
 pub use headless::{
     obtain_session_id, run_headless_with_options, HeadlessRunError, HeadlessRunErrorKind,
     HeadlessRunOptions, DEFAULT_HEADLESS_RUN_TIMEOUT,

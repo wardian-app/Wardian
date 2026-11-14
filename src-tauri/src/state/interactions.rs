@@ -44,6 +44,25 @@ impl InteractionState {
         target_session_ids: Vec<String>,
         body_ref: InteractionBodyRef,
     ) -> Result<InteractionRecord, String> {
+        self.create_message_durable_with_id(
+            new_interaction_id(),
+            sender_session_id,
+            target_session_ids,
+            body_ref,
+        )
+        .await
+    }
+
+    /// Persists an outbound message using a caller-owned stable identifier.
+    /// Remote idempotent operations use their durable operation UUID here so
+    /// recovery can retain the same Wardian/native delivery linkage.
+    pub async fn create_message_durable_with_id(
+        &self,
+        interaction_id: String,
+        sender_session_id: Option<String>,
+        target_session_ids: Vec<String>,
+        body_ref: InteractionBodyRef,
+    ) -> Result<InteractionRecord, String> {
         let _mutation = self.mutation_lock.lock().await;
         let deleted_sessions = self.deleted_sessions.lock().await;
         if let Some(target_session_id) = target_session_ids
@@ -54,7 +73,7 @@ impl InteractionState {
         }
         drop(deleted_sessions);
         let record = message_record(
-            new_interaction_id(),
+            interaction_id,
             sender_session_id,
             target_session_ids,
             body_ref,

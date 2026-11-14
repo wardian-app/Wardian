@@ -147,6 +147,47 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         )",
         [],
     )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS remote_client_idempotency_namespaces (
+            namespace_id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            client_origin TEXT NOT NULL,
+            audience TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_remote_client_namespaces_binding
+            ON remote_client_idempotency_namespaces(device_id, client_origin, audience, expires_at_ms);
+        CREATE TABLE IF NOT EXISTS remote_client_message_operations (
+            operation_id TEXT PRIMARY KEY,
+            namespace_id TEXT NOT NULL,
+            request_uuid TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            client_origin TEXT NOT NULL,
+            audience TEXT NOT NULL,
+            gateway_origin TEXT NOT NULL,
+            target_session_id TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            text TEXT NOT NULL,
+            input_mode TEXT NOT NULL,
+            delivery_state TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            idempotency_expires_at_ms INTEGER NOT NULL,
+            error_code TEXT,
+            native_intent_id TEXT NOT NULL,
+            UNIQUE(namespace_id, request_uuid)
+        );
+        CREATE INDEX IF NOT EXISTS idx_remote_client_message_operations_expiry
+            ON remote_client_message_operations(idempotency_expires_at_ms, delivery_state);
+        CREATE TABLE IF NOT EXISTS remote_client_message_outbox (
+            operation_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            delivery_deadline_at TEXT NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            FOREIGN KEY(operation_id) REFERENCES remote_client_message_operations(operation_id)
+        );",
+    )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_interactions_user_message_created_at
          ON interactions(created_at, id, target_session_ids)

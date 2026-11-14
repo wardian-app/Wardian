@@ -329,6 +329,7 @@ struct OpenCodeHttpLaunchState {
 enum SessionCommand {
     Submit {
         record: Box<NativeDeliveryRecord>,
+        client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
         reply: oneshot::Sender<Result<NativeDispatchReceipt, NativeBrokerError>>,
     },
     Cancel {
@@ -563,10 +564,11 @@ impl NativeDeliveryBroker {
         Ok(record)
     }
 
-    pub async fn dispatch(
+    pub(crate) async fn dispatch_with_client_authority(
         self: &Arc<Self>,
         spec: NativeSessionSpec,
         record: NativeDeliveryRecord,
+        client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
         if record.envelope.generation != spec.generation {
             let stale = self
@@ -597,15 +599,24 @@ impl NativeDeliveryBroker {
                 record.transport = "opencode_http".to_string();
                 wardian_core::db::upsert_native_delivery(&record).map_err(db_error)?;
             }
-            return self.dispatch_opencode_http(spec, record).await;
+            return self
+                .dispatch_opencode_http(spec, record, client_send_authority.as_ref())
+                .await;
         }
         if spec.provider == "pi" {
-            return self.dispatch_pi_tui(record, spec.generation).await;
+            return self
+                .dispatch_pi_tui(record, spec.generation, client_send_authority.as_ref())
+                .await;
         }
         let handle = self.ensure_session(spec).await?;
         if let Some(owner) = handle.shared_codex {
             return self
-                .dispatch_shared_codex(owner, record, handle.capabilities)
+                .dispatch_shared_codex(
+                    owner,
+                    record,
+                    handle.capabilities,
+                    client_send_authority.as_ref(),
+                )
                 .await;
         }
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -613,6 +624,7 @@ impl NativeDeliveryBroker {
             .tx
             .send(SessionCommand::Submit {
                 record: Box::new(record),
+                client_send_authority,
                 reply: reply_tx,
             })
             .await
@@ -636,6 +648,7 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         spec: NativeSessionSpec,
         record: NativeDeliveryRecord,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
         if record.envelope.operation != NativeMessageOperation::StartTurn {
             return Err(error(
@@ -711,10 +724,11 @@ impl NativeDeliveryBroker {
         );
         match registration
             .owner
-            .submit_once(
+            .submit_once_with_authority(
                 dispatching.envelope.generation,
                 registration.runtime_generation,
                 &prompt,
+                client_send_authority,
             )
             .await
         {
@@ -1757,6 +1771,7 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         record: NativeDeliveryRecord,
         generation: u64,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
         let registration = self
             .pi_bridges
@@ -1791,7 +1806,7 @@ impl NativeDeliveryBroker {
             .await?;
         match registration
             .owner
-            .deliver(dispatching.envelope.clone())
+            .deliver_with_authority(dispatching.envelope.clone(), client_send_authority)
             .await
         {
             Ok(receipt) => {
@@ -2053,7 +2068,11 @@ async fn run_session_actor(
                 None => rx.recv().await,
             };
             match command {
-                Some(SessionCommand::Submit { record, reply }) => {
+                Some(SessionCommand::Submit {
+                    record,
+                    client_send_authority,
+                    reply,
+                }) => {
                     let current = match broker.get(&record.envelope.interaction_id) {
                         Ok(current) => current,
                         Err(failure) => {
@@ -2158,7 +2177,35 @@ async fn run_session_actor(
                         }
                     };
                     let request_id = protocol_request_id(&request);
-                    if let Err(failure) = write_json(&mut opened.stdin, &request).await {
+                    let permit = match client_send_authority {
+                        Some(authority) => match authority.acquire().await {
+                            Ok(permit) => Some(permit),
+                            Err(code) => {
+                                let failure = error(
+                                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                                    code,
+                                    false,
+                                );
+                                let _ = broker
+                                    .advance(
+                                        &dispatching.envelope.interaction_id,
+                                        NativeDeliveryPhase::FailedBeforeSubmit,
+                                        NativeEvidenceSource::WardianQueue,
+                                        None,
+                                        None,
+                                        Some(failure.message.clone()),
+                                        "client_authority_rejected",
+                                    )
+                                    .await;
+                                let _ = reply.send(Err(failure));
+                                continue;
+                            }
+                        },
+                        None => None,
+                    };
+                    let write_result = write_json(&mut opened.stdin, &request).await;
+                    drop(permit);
+                    if let Err(failure) = write_result {
                         let _ = broker
                             .advance(
                                 &dispatching.envelope.interaction_id,
@@ -2214,9 +2261,25 @@ async fn run_session_actor(
         tokio::select! {
             command = rx.recv() => {
                 match command {
-                    Some(SessionCommand::Submit { record, reply }) => {
+                    Some(SessionCommand::Submit {
+                        record,
+                        client_send_authority,
+                        reply,
+                    }) => {
                         if record.envelope.operation == NativeMessageOperation::StartTurn {
-                            pending.push_back(SessionCommand::Submit { record, reply });
+                            pending.push_back(SessionCommand::Submit {
+                                record,
+                                client_send_authority,
+                                reply,
+                            });
+                            continue;
+                        }
+                        if client_send_authority.is_some() {
+                            let _ = reply.send(Err(error(
+                                NativeDeliveryErrorCode::UnsupportedOperation,
+                                "paired-client authority cannot submit a native correction",
+                                false,
+                            )));
                             continue;
                         }
                         if !capabilities.invalidate_premise {
@@ -3649,6 +3712,17 @@ fn error(
 mod tests {
     use super::*;
 
+    impl NativeDeliveryBroker {
+        pub async fn dispatch(
+            self: &Arc<Self>,
+            spec: NativeSessionSpec,
+            record: NativeDeliveryRecord,
+        ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
+            self.dispatch_with_client_authority(spec, record, None)
+                .await
+        }
+    }
+
     struct NativeTestScriptGuard;
 
     impl Drop for NativeTestScriptGuard {
@@ -4427,6 +4501,7 @@ input.on('line', (line) => {
         command_tx
             .send(SessionCommand::Submit {
                 record: Box::new(first),
+                client_send_authority: None,
                 reply: reply_tx,
             })
             .await
@@ -4448,6 +4523,7 @@ input.on('line', (line) => {
         command_tx
             .send(SessionCommand::Submit {
                 record: Box::new(correction),
+                client_send_authority: None,
                 reply: reply_tx,
             })
             .await

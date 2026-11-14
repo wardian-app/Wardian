@@ -700,6 +700,7 @@ impl NativeDeliveryBroker {
         &self,
         client: &crate::delivery::codex_shared::CodexSharedClient,
         record: &NativeDeliveryRecord,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<CodexSharedReceipt, NativeBrokerError> {
         let id = &record.envelope.interaction_id;
         self.advance(
@@ -716,7 +717,11 @@ impl NativeDeliveryBroker {
         // messages. Canonical v2 tasks use codex_followup/run_codex_background.
         // Keep envelope identity in broker evidence, not a peer tool-output frame.
         match client
-            .native_message(&record.envelope.message_id, &record.envelope.body)
+            .native_message_with_authority(
+                &record.envelope.message_id,
+                &record.envelope.body,
+                client_send_authority,
+            )
             .await
         {
             Ok(receipt) => Ok(receipt),
@@ -754,6 +759,7 @@ impl NativeDeliveryBroker {
         owner: Arc<CodexSharedOwner>,
         record: NativeDeliveryRecord,
         capabilities: NativeTransportCapabilities,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
         if record.envelope.operation == NativeMessageOperation::InvalidatePremise {
             return Err(error(
@@ -764,7 +770,7 @@ impl NativeDeliveryBroker {
         }
         let id = record.envelope.interaction_id.clone();
         let accepted = self
-            .submit_shared_codex_input(&owner.client, &record)
+            .submit_shared_codex_input(&owner.client, &record, client_send_authority)
             .await?;
         let updated = self
             .advance(

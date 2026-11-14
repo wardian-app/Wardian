@@ -1219,6 +1219,25 @@ fn trim_recent_slots(recent: &mut RecentSlots) {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectionWorkTestSnapshot {
+    pub(crate) agent_id: String,
+    pub(crate) conversation_id: String,
+    pub(crate) source_key: Option<String>,
+    pub(crate) source_epoch: Option<String>,
+    pub(crate) head_generation: String,
+    pub(crate) head_source_epoch: Option<String>,
+    pub(crate) head_progress: String,
+    pub(crate) committed_output_bytes: u64,
+    pub(crate) row_count: usize,
+    pub(crate) todo_count: usize,
+    pub(crate) body_jobs: usize,
+    pub(crate) remaining_body_bytes: u64,
+    pub(crate) candidate_events: usize,
+    pub(crate) logical_scalars: serde_json::Value,
+}
+
 impl std::fmt::Debug for ProjectionOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProjectionOwner").finish_non_exhaustive()
@@ -1227,6 +1246,76 @@ impl std::fmt::Debug for ProjectionOwner {
 
 #[cfg(test)]
 impl ProjectionOwner {
+    pub(crate) fn test_work_snapshot(
+        &self,
+        agent_id: &str,
+    ) -> io::Result<Option<ProjectionWorkTestSnapshot>> {
+        let works = self
+            .work
+            .lock()
+            .map_err(|_| io::Error::other("chat projection owner poisoned"))?;
+        let Some(work) = works.get(agent_id) else {
+            return Ok(None);
+        };
+        let logical = serde_json::to_value(&work.head.logical).map_err(io::Error::other)?;
+        let remaining_body_bytes = work.bodies.iter().try_fold(0u64, |total, job| {
+            let remaining = job
+                .source
+                .length()?
+                .checked_sub(job.offset)
+                .ok_or_else(|| io::Error::other("chat body offset exceeds source length"))?;
+            total
+                .checked_add(remaining)
+                .ok_or_else(|| io::Error::other("chat body work length overflow"))
+        })?;
+        let logical_scalars = serde_json::json!({
+            "buckets": logical
+                .get("buckets")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "pending": logical
+                .get("pending")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "claims": logical
+                .get("claims")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "before": logical
+                .get("before")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "narrative_queue": logical
+                .get("narrative_queue")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "narrative_before": logical
+                .get("narrative_before")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "narrative_watermark": logical
+                .get("narrative_watermark")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        });
+        Ok(Some(ProjectionWorkTestSnapshot {
+            agent_id: work.candidate.context.agent_id.clone(),
+            conversation_id: work.candidate.conversation_id.clone(),
+            source_key: work.candidate.context.provider_source_key.clone(),
+            source_epoch: work.candidate.source_epoch.clone(),
+            head_generation: work.head.generation.clone(),
+            head_source_epoch: work.head.source_epoch.clone(),
+            head_progress: work.head.progress.clone(),
+            committed_output_bytes: work.head.committed_output_bytes,
+            row_count: work.head.row_count,
+            todo_count: work.todo.len(),
+            body_jobs: work.bodies.len(),
+            remaining_body_bytes,
+            candidate_events: work.candidate.events.len(),
+            logical_scalars,
+        }))
+    }
+
     pub(crate) fn recent_pending_for_test(&self) -> usize {
         self.recent.lock().unwrap().pending.len()
     }
@@ -1396,6 +1485,107 @@ pub(crate) fn advance_source_index(
 ) -> io::Result<bool> {
     super::chat_source_index::advance(snapshot)
 }
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceIndexTestSnapshot {
+    pub(crate) generation: String,
+    pub(crate) epoch: String,
+    pub(crate) progress: String,
+    pub(crate) complete: bool,
+    pub(crate) scalars: serde_json::Value,
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    pub(crate) fn source_index_test_snapshot(
+        snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+    ) -> io::Result<Option<SourceIndexTestSnapshot>> {
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(snapshot);
+        let Some(reference) = super::super::chat_source_index::pointer(&context.agent_id)? else {
+            return Ok(None);
+        };
+        let mut source_store = store(&context.agent_id)?;
+        let (generation, epoch, progress) =
+            super::super::chat_source_index::scope(snapshot, &mut source_store, &reference)?;
+        let complete = super::super::chat_source_index::current_complete_scope(
+            snapshot,
+            &reference,
+            &generation,
+            &epoch,
+        );
+        let head: serde_json::Value = source_store.read(&reference)?;
+        let logical = &head["logical"];
+        let scalars = serde_json::json!({
+            "invalidations": head
+                .get("invalidations")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "target_extent": head
+                .get("target_extent")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "before": head.get("before").cloned().unwrap_or(serde_json::Value::Null),
+            "framed": head.get("framed").cloned().unwrap_or(serde_json::Value::Null),
+            "replay_settled": head
+                .get("replay_settled")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "replay_records_decoded": head
+                .get("replay_records_decoded")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "replay_rows_admitted": head
+                .get("replay_rows_admitted")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "replay_bytes_read": head
+                .get("replay_bytes_read")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "logical_pending": logical
+                .get("pending")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "logical_claims": logical
+                .get("claims")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "logical_before": logical
+                .get("before")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "logical_buckets": logical
+                .get("buckets")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "narrative_queue": logical
+                .get("narrative_queue")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "narrative_before": logical
+                .get("narrative_before")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "narrative_watermark": logical
+                .get("narrative_watermark")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        });
+        Ok(Some(SourceIndexTestSnapshot {
+            generation,
+            epoch,
+            progress,
+            complete,
+            scalars,
+        }))
+    }
+}
+
+#[cfg(test)]
+pub(crate) use test_support::source_index_test_snapshot;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct InputFence {

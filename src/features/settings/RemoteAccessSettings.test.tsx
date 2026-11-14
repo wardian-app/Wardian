@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +21,7 @@ const enabledConfig = {
   schema_version: 1,
   enabled: true,
   canonical_origin: "https://wardian.tailnet.ts.net",
+  client_origin_allowlist: [],
   loopback_host: "127.0.0.1",
   loopback_port: 41241,
   gateway_identity_public_key: "pub",
@@ -133,6 +134,59 @@ describe("RemoteAccessSettings", () => {
     );
     expect(mockToDataURL).toHaveBeenCalledWith(
       "https://wardian.tailnet.ts.net/remote?pairing_offer_id=offer-1&nonce=nonce&server_fingerprint=fp",
+      expect.any(Object),
+    );
+  });
+
+  it("creates a read-only client offer bound to a saved allowlisted origin", async () => {
+    mockInvoke.mockImplementation(async (command, args) => {
+      switch (command) {
+        case "load_remote_access_status":
+          return "enabled";
+        case "load_remote_gateway_config":
+          return { ...enabledConfig, client_origin_allowlist: ["https://client.example"] };
+        case "list_remote_devices":
+        case "list_pending_remote_pairing_requests":
+          return [];
+        case "load_remote_setup_check":
+          return readySetupCheck;
+        case "create_remote_client_pairing_offer":
+          expect(args).toEqual({ clientOrigin: "https://client.example" });
+          return {
+            gateway_origin: "https://wardian.tailnet.ts.net",
+            credential_kind: "client",
+            client_origin: "https://client.example",
+            read_grants: ["agents:read", "chat:read"],
+            pairing_offer_id: "client-offer-1",
+            expires_at: "2026-05-21T00:02:00.000Z",
+            nonce: "client-nonce",
+            server_identity_fingerprint: "server-fp",
+          };
+        default:
+          return null;
+      }
+    });
+
+    render(<RemoteAccessSettings />);
+
+    await screen.findByText("Remote Access");
+    await userEvent.click(screen.getByRole("button", { name: /create client pairing code/i }));
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("create_remote_client_pairing_offer", {
+        clientOrigin: "https://client.example",
+      });
+    });
+    expect(screen.getByText(/agents:read, chat:read/)).toBeVisible();
+    const offer = JSON.parse((screen.getByRole("textbox", { name: "Client pairing JSON" }) as HTMLTextAreaElement).value);
+    expect(offer).toMatchObject({
+      gateway_origin: "https://wardian.tailnet.ts.net",
+      client_origin: "https://client.example",
+      pairing_offer_id: "client-offer-1",
+      nonce: "client-nonce",
+      server_identity_fingerprint: "server-fp",
+    });
+    expect(mockToDataURL).toHaveBeenCalledWith(
+      JSON.stringify(offer),
       expect.any(Object),
     );
   });
@@ -257,6 +311,7 @@ describe("RemoteAccessSettings", () => {
               schema_version: 1,
               enabled: true,
               canonical_origin: "https://wardian.tailnet.ts.net",
+              client_origin_allowlist: [],
               loopback_host: "127.0.0.1",
               loopback_port: 41241,
               gateway_identity_public_key: expect.stringMatching(/^wardian-local-gateway-v1:/),
@@ -316,6 +371,11 @@ describe("RemoteAccessSettings", () => {
               label: "Phone",
               public_key_spki_der_base64: "key",
               public_key_fingerprint: "fp",
+              credential_kind: "pwa",
+              audience: "wardian_remote_pwa",
+              client_origin: null,
+              read_grants: [],
+              send_grants: [],
               created_at: "2026-05-21T00:00:00.000Z",
               last_used_at: null,
               revoked_at: null,
@@ -332,6 +392,11 @@ describe("RemoteAccessSettings", () => {
               label: "Phone",
               public_key_spki_der_base64: "key",
               public_key_fingerprint: "fp",
+              credential_kind: "pwa",
+              audience: "wardian_remote_pwa",
+              client_origin: null,
+              read_grants: [],
+              send_grants: [],
               created_at: "2026-05-21T00:00:00.000Z",
               last_used_at: null,
               revoked_at: "2026-05-21T00:05:00.000Z",
@@ -375,8 +440,26 @@ describe("RemoteAccessSettings", () => {
               device_label: "Pixel phone",
               public_key_fingerprint: "fp:phone",
               canonical_origin: "https://wardian.tailnet.ts.net",
+              credential_kind: "pwa",
+              audience: "wardian_remote_pwa",
+              client_origin: null,
+              read_grants: [],
+              send_grants: [],
               submitted_at: "2026-05-21T00:01:00.000Z",
               expires_at: "2026-05-21T00:02:00.000Z",
+            },
+            {
+              request_id: "client-pairing-request-1",
+              device_label: "Browser client",
+              public_key_fingerprint: "fp:client",
+              canonical_origin: "https://wardian.tailnet.ts.net",
+              credential_kind: "client",
+              audience: "wardian_remote_client_v1",
+              client_origin: "https://client.example",
+              read_grants: ["agents:read"],
+              send_grants: ["chat:send"],
+              submitted_at: "2026-05-21T00:01:05.000Z",
+              expires_at: "2026-05-21T00:16:05.000Z",
             },
           ];
         case "approve_remote_pairing_request":
@@ -387,6 +470,11 @@ describe("RemoteAccessSettings", () => {
               label: "Pixel phone",
               public_key_spki_der_base64: "key",
               public_key_fingerprint: "fp:phone",
+              credential_kind: "pwa",
+              audience: "wardian_remote_pwa",
+              client_origin: null,
+              read_grants: [],
+              send_grants: [],
               created_at: "2026-05-21T00:01:05.000Z",
               last_used_at: null,
               revoked_at: null,
@@ -403,6 +491,19 @@ describe("RemoteAccessSettings", () => {
     expect(screen.getByText("fp:phone")).toBeVisible();
     expect(screen.getAllByText("https://wardian.tailnet.ts.net").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText(/full remote control/i).length).toBeGreaterThanOrEqual(1);
+    const clientRow = screen.getByText("Browser client").parentElement?.parentElement;
+    expect(clientRow).not.toBeNull();
+    const clientRowQueries = within(clientRow as HTMLElement);
+    expect(clientRowQueries.getByText("Browser client")).toBeVisible();
+    expect(clientRowQueries.getByText("fp:client")).toBeVisible();
+    expect(
+      clientRowQueries.getByText(
+        /^Paired client · https:\/\/client\.example · agents:read · chat:send$/,
+      ),
+    ).toBeVisible();
+    expect(clientRowQueries.getByText(/agents:read/)).toBeVisible();
+    expect(clientRowQueries.getByText(/chat:send/)).toBeVisible();
+    expect(clientRowQueries.getByText(/Read and chat send access pending/)).toBeVisible();
 
     await userEvent.click(screen.getByRole("button", { name: /approve pixel phone/i }));
 
@@ -435,6 +536,11 @@ describe("RemoteAccessSettings", () => {
                   device_label: "Pixel phone",
                   public_key_fingerprint: "fp:phone",
                   canonical_origin: "https://wardian.tailnet.ts.net",
+                  credential_kind: "pwa",
+                  audience: "wardian_remote_pwa",
+                  client_origin: null,
+                  read_grants: [],
+                  send_grants: [],
                   submitted_at: "2026-05-21T00:01:00.000Z",
                   expires_at: "2026-05-21T00:02:00.000Z",
                 },

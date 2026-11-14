@@ -127,7 +127,7 @@ pub struct AppState {
     pub remote_listener: crate::remote::listener::RemoteListener,
     /// Orders persisted settings and startup so an older startup snapshot
     /// cannot reopen a listener after remote access was disabled.
-    pub remote_gateway_config_lock: Mutex<()>,
+    pub remote_gateway_config_lock: Arc<Mutex<()>>,
     // Last complete remote roster. The gateway uses this while a provider or
     // telemetry task temporarily owns a live agent snapshot lock.
     pub remote_agent_roster_cache: RwLock<Option<Vec<RemoteAgentSummary>>>,
@@ -550,7 +550,7 @@ impl Default for AppState {
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
             remote_device_store_lock: Arc::new(Mutex::new(())),
             remote_listener: crate::remote::listener::RemoteListener::default(),
-            remote_gateway_config_lock: Mutex::new(()),
+            remote_gateway_config_lock: Arc::new(Mutex::new(())),
             remote_agent_roster_cache: RwLock::new(None),
             remote_agent_status_cache: RwLock::new(HashMap::new()),
             remote_inbox_runtime_cache: RwLock::new(None),

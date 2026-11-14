@@ -1403,6 +1403,7 @@ pub fn run() {
             commands::patch::run_gemini_patch,
             commands::remote::approve_remote_pairing_request,
             commands::remote::create_remote_pairing_offer,
+            commands::remote::create_remote_client_pairing_offer,
             commands::remote::list_pending_remote_pairing_requests,
             commands::remote::list_remote_devices,
             commands::remote::load_remote_access_status,
