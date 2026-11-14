@@ -484,6 +484,39 @@ pub(super) fn archive_display_ready(context: &ConversationArchiveContext) -> io:
         .is_some_and(archive_counts_complete))
 }
 
+/// A complete saved cohort grants archive paging only. A warm candidate or a
+/// partial recount cannot bypass native cursor/renewal qualification.
+pub(super) fn archive_only_head(head: &Head, context: &ConversationArchiveContext) -> bool {
+    context.provider == "codex"
+        && head.agent_id == context.agent_id
+        && head.source_key == context.provider_source_key
+        && scope_matches(head, context)
+        && head.progress == "ready"
+        && head.source_epoch.is_none()
+        && !head.logical.has_evidence()
+        && head.bootstrap.as_ref().is_some_and(|progress| {
+            // Completion belongs to the exact physical cohort. A close, clear
+            // or append may precede publication of the replacement Head.
+            let current = || -> io::Result<()> {
+                let directory = super::super::storage::conversation_dir(
+                    &context.agent_id,
+                    &head.conversation_id,
+                )?;
+                progress
+                    .index
+                    .validate(&super::super::storage::index_path(&context.agent_id)?)?;
+                progress
+                    .manifest
+                    .validate(&directory.join("manifest.json"))?;
+                progress
+                    .narrative
+                    .validate(&directory.join("conversation.jsonl"))?;
+                progress.events.validate(&directory.join("events.jsonl"))
+            };
+            archive_counts_complete(progress) && current().is_ok()
+        })
+}
+
 pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> {
     let (head_path, objects) = locations(&context.agent_id)?;
     let mut store = Store::checkpoint_writer(&objects);

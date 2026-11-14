@@ -70,6 +70,21 @@ function chatMessage(id: string, text: string, sequence: number): AgentChatEvent
   };
 }
 
+function stoppedArchivePage(overrides: Partial<RemoteAgentChatPage> = {}): RemoteAgentChatPage {
+  return {
+    ...chatPageFields, archive_read_ready: true, progress: "capture_source_replaced",
+    revision: "owned-archive-head", events: [], next_before: null, ...overrides,
+  };
+}
+
+function emptyCaptureStop(): RemoteAgentChatPage {
+  return {
+    ...chatPageFields, conversation_id: null, generation: null, source_epoch: null,
+    revision: "none.capture-source-replaced", progress: "capture_source_replaced",
+    events: [], next_before: null,
+  };
+}
+
 describe("useRemoteStore watchlists", () => {
   it("refreshes an admitted nonempty remote preview within the original opening burst", async () => {
     vi.useFakeTimers();
@@ -715,6 +730,195 @@ describe("useRemoteStore watchlists", () => {
   afterEach(() => {
     useRemoteStore.getState().disconnectStatusStream();
     vi.useRealTimers();
+  });
+
+  it("bootstraps stopped owned archive rows, Older and lazy bodies without native renewal", async () => {
+    vi.useFakeTimers();
+    const memberA = "source:agent-1:retired-epoch:00000000000000000001:assistant-a:0";
+    const memberB = "source:agent-1:retired-epoch:00000000000000000002:assistant-b:0";
+    const grouped = { ...chatMessage("archive-assistant-group", "Owned assistant prefix", 3), metadata: {
+      chat_display_member_ids: [memberA, memberB], chat_body_binding: "owned-group-body",
+      chat_detail_ref: "owned-detail-reference", chat_body_pending: true,
+    } };
+    const aliases = [memberA, memberB].map((observation_id) => ({ observation_id, canonical_id: grouped.id }));
+    const initial = stoppedArchivePage({ events: [grouped], aliases, next_before: "archive-before-80" });
+    const older = stoppedArchivePage({ revision: "owned-archive-older", older_page: true,
+      events: [chatMessage("archive-older", "Owned older row", 1)], next_before: "archive-before-160" });
+    const enriched = { ...grouped, text: "Owned assistant prefix with more archive context" };
+    const appended = stoppedArchivePage({ revision: "owned-archive-appended", reset: true,
+      events: [enriched, chatMessage("archive-unseen-latest", "Newly appended owned row", 4)],
+      aliases, next_before: "new-head-frontier" });
+    const unchanged = stoppedArchivePage({ revision: appended.revision, unchanged: true,
+      bytes_read: 12, records_decoded: 0, next_before: "new-head-frontier" });
+    const detail = { event_id: grouped.id, text: "Complete owned assistant body", next: null, complete: true };
+    vi.mocked(remoteClient.loadAgentChatPage)
+      .mockResolvedValueOnce(emptyCaptureStop())
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(older)
+      .mockResolvedValueOnce(stoppedArchivePage({ detail }))
+      .mockResolvedValueOnce(appended)
+      .mockResolvedValueOnce(unchanged);
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat" });
+
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState()).toMatchObject({ chatEvents: [], chatHasOlder: false,
+      chatPage: { conversation_id: null, generation: null, source_epoch: null, progress: "capture_source_replaced" } });
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState()).toMatchObject({ chatError: "", chatHasOlder: true,
+      chatNextBefore: initial.next_before, chatPage: { archive_read_ready: true } });
+    expect(useRemoteStore.getState().chatEvents.map((row) => row.id)).toEqual([grouped.id]);
+    expect(useRemoteStore.getState().chatEvents[0].metadata.chat_display_member_ids).toEqual([memberA, memberB]);
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[1][2]).toBeUndefined();
+
+    await useRemoteStore.getState().loadOlderActiveAgentChat();
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[2][1]).toBe(initial.next_before);
+    expect(useRemoteStore.getState().chatEvents.map((row) => row.id)).toEqual(["archive-older", grouped.id]);
+    expect(useRemoteStore.getState()).toMatchObject({ chatBrowsingOlder: true, chatHasOlder: true,
+      chatNextBefore: older.next_before, chatPage: { archive_read_ready: true } });
+    await expect(useRemoteStore.getState().loadActiveAgentChatDetail("owned-detail-reference")).resolves.toEqual(detail);
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[3][3]).toBe("owned-detail-reference");
+
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState()).toMatchObject({ chatBrowsingOlder: true, chatHasOlder: true,
+      chatNextBefore: older.next_before, chatError: "", chatPage: { archive_read_ready: true, revision: appended.revision } });
+    expect(useRemoteStore.getState().chatEvents.map((row) => row.id)).toEqual(["archive-older", grouped.id]);
+    expect(useRemoteStore.getState().chatEvents[1].text).toBe(enriched.text);
+    expect(useRemoteStore.getState().chatEvents[1].metadata.chat_detail_ref).toBe("owned-detail-reference");
+    const loaded = useRemoteStore.getState().chatEvents;
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState()).toMatchObject({ chatEvents: loaded, chatBrowsingOlder: true,
+      chatHasOlder: true, chatNextBefore: older.next_before, chatError: "",
+      chatPage: { archive_read_ready: true, revision: appended.revision } });
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(6);
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls.every((call) => call[5] === undefined)).toBe(true);
+  });
+
+  it("preserves archive qualification on a recent unchanged response without copying stale rows", async () => {
+    vi.useFakeTimers();
+    const initial = stoppedArchivePage({ events: [chatMessage("archive-owned", "Owned row", 1)], next_before: "archive-before" });
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatPage: initial, chatEvents: initial.events, chatHasOlder: true, chatNextBefore: initial.next_before });
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(stoppedArchivePage({ unchanged: true,
+      revision: initial.revision, next_before: initial.next_before, bytes_read: 17 }));
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState()).toMatchObject({ chatEvents: initial.events, chatNextBefore: initial.next_before,
+      chatPage: { archive_read_ready: true, bytes_read: 17 } });
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[0][5]).toBeUndefined();
+  });
+
+  it.each((["recent", "older"] as const).flatMap((read) =>
+    (["generation", "native", "preview", "omitted marker", "false marker"] as const).map((boundary) => ({ read, boundary })),
+  ))("retires the archive cohort and frontier on $read $boundary", async ({ read, boundary }) => {
+    vi.useFakeTimers();
+    const initial = stoppedArchivePage({ events: [chatMessage("old-owned", "Old owned row", 1)], next_before: "old-frontier" });
+    let next = stoppedArchivePage({ reset: true, revision: "boundary-revision", next_before: "new-frontier",
+      events: [chatMessage("fresh-owned", "Fresh owned row", 2)] });
+    if (boundary === "generation") next = { ...next, generation: "new-generation" };
+    if (boundary === "native") next = { ...next, archive_read_ready: undefined, progress: "ready", source_epoch: "native-epoch",
+      events: [{ ...chatMessage("source:agent-1:native-epoch:record:0", "New native row", 2), metadata: {
+        chat_source_epoch: "native-epoch", chat_source_admission: "native-admission",
+      } }] };
+    if (boundary === "preview") next = { ...next, archive_read_ready: undefined, progress: "provisional",
+      conversation_id: null, generation: null, recent_admission: "new-preview", next_before: null,
+      events: [chatMessage("preview", "Current preview", 2)] };
+    if (boundary === "omitted marker" || boundary === "false marker") {
+      next = { ...next, archive_read_ready: boundary === "false marker" ? false : undefined,
+        reset: false, unchanged: true, events: [], next_before: null };
+    }
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: initial.events, chatPage: initial, chatBrowsingOlder: true,
+      chatHasOlder: true, chatNextBefore: initial.next_before });
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(next).mockResolvedValueOnce(emptyCaptureStop());
+    if (read === "recent") await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    else await useRemoteStore.getState().loadOlderActiveAgentChat();
+    await vi.waitFor(() => expect(useRemoteStore.getState().chatLoading).toBe(false));
+    expect(useRemoteStore.getState().chatEvents.some((row) => row.id === "old-owned")).toBe(false);
+    expect(useRemoteStore.getState().chatNextBefore).not.toBe("old-frontier");
+    expect(useRemoteStore.getState().chatBrowsingOlder).toBe(false);
+    expect(useRemoteStore.getState().chatPage?.archive_read_ready === true).toBe(boundary === "generation");
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(
+      boundary === "omitted marker" || boundary === "false marker" ? 2 : 1,
+    );
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls.every((call) => call[5] === undefined)).toBe(true);
+  });
+
+  it.each(["native", "preview"] as const)("replaces the %s cohort with a tagged owned archive", async (mode) => {
+    vi.useFakeTimers();
+    const oldRow = { ...chatMessage("source:agent-1:old-native:record:0", "Retired native row", 1), metadata: {
+      chat_source_epoch: "old-native", chat_source_admission: "old-native-admission",
+    } };
+    const previous: RemoteAgentChatPage = mode === "native"
+      ? { ...chatPageFields, source_epoch: "old-native", events: [oldRow], next_before: "native-frontier" }
+      : { ...chatPageFields, conversation_id: null, generation: null, recent_admission: "old-preview",
+        progress: "provisional", events: [chatMessage("preview", "Retired preview", 1)], next_before: null };
+    const owned = stoppedArchivePage({ reset: true, events: [chatMessage("archive-owned", "Owned archive row", 2)],
+      next_before: "archive-frontier" });
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatPage: previous, chatEvents: previous.events, chatBrowsingOlder: mode === "native",
+      chatHasOlder: previous.next_before !== null, chatNextBefore: previous.next_before });
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(owned);
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState().chatEvents.map((row) => row.id)).toEqual(["archive-owned"]);
+    expect(useRemoteStore.getState()).toMatchObject({ chatPage: owned, chatBrowsingOlder: false,
+      chatHasOlder: true, chatNextBefore: "archive-frontier", chatError: "" });
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[0][5]).toBeUndefined();
+  });
+
+  it("rejects malformed tagged responses without inheriting archive qualification", async () => {
+    vi.useFakeTimers();
+    const initial = stoppedArchivePage({ events: [chatMessage("owned", "Owned row", 1)], next_before: "old-frontier" });
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: initial.events, chatPage: initial, chatBrowsingOlder: true,
+      chatHasOlder: true, chatNextBefore: initial.next_before });
+    vi.mocked(remoteClient.loadAgentChatPage)
+      .mockResolvedValueOnce(stoppedArchivePage({ unchanged: true, source_epoch: "conflicting-native-epoch" }))
+      .mockResolvedValueOnce(emptyCaptureStop());
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    await vi.waitFor(() => expect(useRemoteStore.getState().chatLoading).toBe(false));
+    expect(useRemoteStore.getState()).toMatchObject({ chatEvents: [], chatBrowsingOlder: false,
+      chatHasOlder: false, chatNextBefore: null });
+    expect(useRemoteStore.getState().chatPage?.archive_read_ready).not.toBe(true);
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls.every((call) => call[5] === undefined)).toBe(true);
+  });
+
+  it.each((["recent", "older"] as const).flatMap((read) =>
+    (["native", "unproven"] as const).map((mode) => ({ read, mode })),
+  ))("keeps an unknown $mode window on a malformed $read archive claim", async ({ read, mode }) => {
+    vi.useFakeTimers();
+    const row = chatMessage("loaded-row", "Existing unqualified row", 1);
+    const previous: RemoteAgentChatPage = { ...chatPageFields,
+      source_epoch: mode === "native" ? "native-epoch" : null,
+      events: [row], next_before: "retained-frontier" };
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatPage: previous, chatEvents: previous.events, chatBrowsingOlder: true,
+      chatHasOlder: true, chatNextBefore: previous.next_before });
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(stoppedArchivePage({ generation: null,
+      reset: true, events: [chatMessage("unproven-reply", "Unqualified archive claim", 2)] }));
+    if (read === "recent") await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    else await useRemoteStore.getState().loadOlderActiveAgentChat();
+    expect(useRemoteStore.getState()).toMatchObject({ chatPage: previous, chatEvents: previous.events,
+      chatHasOlder: true, chatNextBefore: "retained-frontier", chatBrowsingOlder: true,
+      chatError: "Chat history could not be updated. Retry." });
+    expect(useRemoteStore.getState().chatPage?.archive_read_ready).not.toBe(true);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[0][5]).toBeUndefined();
+  });
+
+  it("rejects a lazy archive body after the window loses archive qualification", async () => {
+    vi.useFakeTimers();
+    const initial = stoppedArchivePage({ events: [chatMessage("owned", "Owned row", 1)] });
+    const body = deferred<RemoteAgentChatPage>();
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: initial.events, chatPage: initial });
+    vi.mocked(remoteClient.loadAgentChatPage).mockReturnValueOnce(body.promise)
+      .mockResolvedValueOnce({ ...initial, archive_read_ready: undefined, reset: true, events: [] });
+    const pending = useRemoteStore.getState().loadActiveAgentChatDetail("owned-body");
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    body.resolve(stoppedArchivePage({ detail: { event_id: "owned", text: "Retired body", next: null, complete: true } }));
+    await expect(pending).rejects.toThrow("Conversation changed during detail read");
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls.every((call) => call[5] === undefined)).toBe(true);
   });
 
   it("loads and normalizes remote watchlists and team state", async () => {

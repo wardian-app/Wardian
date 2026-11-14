@@ -1077,6 +1077,7 @@ impl ProjectionOwner {
                 generation: None,
                 source_epoch: None,
                 recent_admission: admission,
+                archive_read_ready: false,
                 revision: token,
                 events: if unchanged { Vec::new() } else { headers },
                 next_before: None,
@@ -2969,6 +2970,35 @@ pub(super) fn detail(
     })
 }
 
+/// Recheck the owned generation after the blocking read, independently of any
+/// native renewal receipt. A lifecycle/privacy retirement cannot retain the
+/// archive marker on a response whose saved scope no longer exists.
+pub(crate) fn archive_page_is_current(
+    snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+    page: &AgentChatPage,
+) -> bool {
+    let check = || -> io::Result<bool> {
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(snapshot);
+        let Some(reference) = head(&snapshot.session_id)? else {
+            return Ok(false);
+        };
+        let mut store = store(&snapshot.session_id)?;
+        let published: Head = store.read(&reference)?;
+        Ok(cold_bootstrap::archive_only_head(&published, &context)
+            && page.session_id == published.agent_id
+            && page.conversation_id.as_deref() == Some(published.conversation_id.as_str())
+            && page.generation.as_deref() == Some(published.generation.as_str())
+            && page.source_epoch.is_none()
+            && page.recent_admission.is_none()
+            && page.revalidated_ids.is_none()
+            && crate::commands::chat_recent_seed::source_scope(snapshot)
+                .err()
+                .and_then(|error| crate::commands::chat_recent_seed::capture_stop_progress(&error))
+                .is_some())
+    };
+    check().unwrap_or(false)
+}
+
 pub(crate) fn finish(mut page: AgentChatPage) -> io::Result<AgentChatPage> {
     for event in &mut page.events {
         if let Some(metadata) = event.metadata.as_object_mut() {
@@ -2976,6 +3006,7 @@ pub(crate) fn finish(mut page: AgentChatPage) -> io::Result<AgentChatPage> {
         }
     }
     if serde_json::to_vec(&page).map_err(io::Error::other)?.len() > IPC_BYTES {
+        page.archive_read_ready = false;
         if page.revalidated_ids.is_some() {
             page.events.clear();
             page.aliases.clear();
@@ -3846,7 +3877,23 @@ fn read_with_recent_limit(
     if cold_rejected {
         current = None;
     }
-    let source_pointer = super::chat_source_index::pointer(&context.agent_id).unwrap_or(None);
+    let mut source_pointer = super::chat_source_index::pointer(&context.agent_id).unwrap_or(None);
+    let archive_scope_checked = decoded_head
+        .as_ref()
+        .is_some_and(|published| cold_bootstrap::archive_only_head(published, context));
+    let archive_capture_stop = archive_scope_checked
+        .then(|| {
+            crate::commands::chat_recent_seed::source_scope(snapshot)
+                .err()
+                .and_then(|error| crate::commands::chat_recent_seed::capture_stop_progress(&error))
+        })
+        .flatten();
+    if archive_capture_stop.is_some() {
+        // The independently counted archive owns these rows and body cursors.
+        // A stopped native index supplies neither their Older frontier nor an
+        // epoch/renewal ACK. Keep its pointer intact for its separate owner.
+        source_pointer = None;
+    }
     let previous_window_matches = revision
         .and_then(|value| value.split_once('.'))
         .map(|(_, seed)| seed.split_once('~').map_or(seed, |(seed, _)| seed))
@@ -3892,13 +3939,35 @@ fn read_with_recent_limit(
     let blocked_progress = seed
         .progress
         .starts_with("capture_source_")
-        .then(|| seed.progress.clone());
+        .then(|| seed.progress.clone())
+        .or_else(|| archive_capture_stop.map(str::to_owned));
+    let archive_identity = decoded_head.as_ref().map(|published| {
+        (
+            published.agent_id.clone(),
+            published.conversation_id.clone(),
+            published.generation.clone(),
+        )
+    });
     let finish_recent = |mut result: AgentChatPage| {
-        if cursor.is_none() && detail_ref.is_none() {
+        if (cursor.is_none() && detail_ref.is_none()) || archive_capture_stop.is_some() {
             if let Some(progress) = &blocked_progress {
                 result.progress.clone_from(progress);
             }
         }
+        result.archive_read_ready = archive_capture_stop.is_some()
+            && !cursor.is_some_and(|cursor| cursor.starts_with("source:"))
+            && !detail_ref.is_some_and(|reference| reference.starts_with("seed:"))
+            && result.source_epoch.is_none()
+            && result.recent_admission.is_none()
+            && result.revalidated_ids.is_none()
+            && archive_identity
+                .as_ref()
+                .is_some_and(|(agent, conversation, generation)| {
+                    result.session_id == *agent
+                        && result.conversation_id.as_deref() == Some(conversation.as_str())
+                        && result.generation.as_deref() == Some(generation.as_str())
+                })
+            && (detail_ref.is_none() || result.detail.is_some());
         finish(result)
     };
     let seed_token = |seed: &str| {
@@ -3920,6 +3989,7 @@ fn read_with_recent_limit(
         generation: None,
         source_epoch: None,
         recent_admission: None,
+        archive_read_ready: false,
         revision: token.clone(),
         events: Vec::new(),
         next_before: None,
@@ -3931,8 +4001,10 @@ fn read_with_recent_limit(
         removed_ids: Vec::new(),
         detail: None,
         revalidated_ids: None,
-        bytes_read: seed.bytes_read + 2 * HEAD_BYTES as usize,
-        records_decoded: seed.records_decoded,
+        bytes_read: seed.bytes_read
+            + 2 * HEAD_BYTES as usize
+            + usize::from(archive_scope_checked) * (2 * HEAD_BYTES + POLICY_BYTES) as usize,
+        records_decoded: seed.records_decoded + usize::from(archive_scope_checked) * 2,
     };
     if let Some(checkpoint) = &seed.checkpoint {
         result.source_epoch = Some(checkpoint.epoch.clone());
@@ -5334,6 +5406,7 @@ fn read_revalidated(
         generation,
         source_epoch: epoch,
         recent_admission: None,
+        archive_read_ready: false,
         revision: revision.to_owned(),
         events,
         next_before: None,
@@ -5400,6 +5473,7 @@ fn finish_revalidated(
         generation,
         source_epoch: epoch,
         recent_admission: None,
+        archive_read_ready: false,
         revision: revision.to_owned(),
         events,
         next_before: None,

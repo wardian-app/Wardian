@@ -13,6 +13,7 @@ import {
   chatPageScopeAllowsOrdinaryRead,
   chatPageScopeRelation,
   chatRevalidationIds,
+  isArchiveReadPage,
   revalidateChatWindow,
 } from "./chatRevalidation";
 
@@ -365,6 +366,88 @@ describe("bounded Chat source revalidation", () => {
     expect(chatPageScopeRelation(pending, { ...canonical, source_epoch: scope.source_epoch }, [], false)).toBe("unknown");
     expect(chatPageScopeRelation(pending, { ...canonical, events: [sourceEvent(93)] }, [], false)).toBe("unknown");
     expect(chatPageScopeRelation(pending, canonical, [], true)).toBe("unknown");
+  });
+
+  it("bootstraps a qualified owned archive while native capture remains stopped", () => {
+    const pending: AgentChatPage = {
+      ...scope, conversation_id: null, generation: null, source_epoch: null,
+      revision: "empty-capture-stop", events: [], next_before: null, progress: "capture_source_replaced",
+    };
+    const owned: AgentChatPage & { archive_read_ready: boolean } = {
+      ...scope, source_epoch: null, recent_admission: null,
+      revision: "owned-cold-cohort", progress: "capture_source_replaced", archive_read_ready: true,
+      events: [{ ...sourceEvent(92), id: "archive-adoption:owned", metadata: {} }],
+    };
+    expect(chatPageScopeRelation(pending, owned, [], false)).toBe("bootstrap");
+    expect(chatNeedsRevalidation(owned, { ...owned, revision: "owned-older" }, true)).toBe(false);
+  });
+
+  it("admits marked archive aliases without converting historical member IDs into native authority", async () => {
+    const group: AgentChatEvent = { ...sourceEvent(92), id: "archive-display:group", metadata: {
+      chat_display_member_ids: ["source:historical-a", "source:historical-b"],
+    } };
+    const archive: AgentChatPage = { ...scope, source_epoch: null, recent_admission: null,
+      archive_read_ready: true, progress: "capture_source_replaced", events: [group], next_before: "owned-older",
+      aliases: [{ observation_id: "source:historical-a", canonical_id: group.id }],
+      removed_ids: ["source:historical-b"],
+    };
+    const pending: AgentChatPage = { ...scope, conversation_id: null, generation: null, source_epoch: null,
+      events: [], aliases: [], removed_ids: [], next_before: null, progress: "capture_source_replaced",
+    };
+    expect(isArchiveReadPage(archive)).toBe(true);
+    expect(chatPageScopeRelation(pending, archive, [], false)).toBe("bootstrap");
+    const older = { ...archive, revision: "owned-next", unchanged: true, events: [], aliases: [], removed_ids: [] };
+    expect(chatPageScopeRelation(archive, older, archive.events, true)).toBe("canonical");
+    expect(chatNeedsRevalidation(archive, older, true)).toBe(false);
+    expect(chatPageScopeRelation(archive, older, archive.events, true, true)).toBe("unknown");
+    const loader = vi.fn();
+    await expect(revalidateChatWindow(archive.events, archive.events, archive, loader, () => true)).rejects.toMatchObject({ name: "ChatRevalidationError", scopeChanged: false });
+    await expect(revalidateChatWindow([], [], archive, loader, () => true)).rejects.toMatchObject({ name: "ChatRevalidationError", scopeChanged: false });
+    expect(loader).not.toHaveBeenCalled();
+    const unmarked = { ...archive, archive_read_ready: undefined };
+    expect(chatPageScopeRelation(pending, unmarked, [], false)).toBe("unknown");
+    for (const prior of [
+      { ...pending, events: [{ ...group, id: "unproven", metadata: {} }] },
+      { ...pending, next_before: "unproven-frontier" },
+      { ...pending, generation: "other-positive-hint" },
+    ]) expect(chatPageScopeRelation(prior, archive, [], false)).not.toBe("bootstrap");
+    expect(chatPageScopeRelation(pending, { ...archive, detail: { event_id: group.id, text: "body", next: null, complete: true } }, [], false)).not.toBe("bootstrap");
+  });
+
+  it("rejects malformed archive claims and retires qualification or generation transitions", () => {
+    const archive: AgentChatPage = { ...scope, source_epoch: null, recent_admission: null,
+      archive_read_ready: true, progress: "capture_source_replaced",
+      events: [{ ...sourceEvent(92), id: "archive-adoption:row", metadata: {} }],
+    };
+    for (const malformed of [
+      { archive_read_ready: undefined }, { archive_read_ready: false },
+      { archive_read_ready: "true" as unknown as boolean },
+      { conversation_id: null }, { generation: null }, { revision: "" },
+      { source_epoch: "native" }, { recent_admission: "preview" }, { revalidated_ids: [] },
+      { progress: "ownership_pending" },
+      { events: [{ ...archive.events[0]!, metadata: { chat_source_epoch: "native" } }] },
+      { events: [{ ...archive.events[0]!, metadata: { chat_source_admission: "native" } }] },
+    ]) {
+      const unqualified = { ...archive, ...malformed };
+      expect(isArchiveReadPage(unqualified)).toBe(false);
+      expect(chatPageScopeRelation(archive, unqualified)).toBe("changed");
+    }
+    expect(chatPageScopeRelation(archive, { ...archive, generation: "next" })).toBe("changed");
+    expect(chatPageScopeRelation(archive, { ...archive, archive_read_ready: undefined })).toBe("changed");
+    const native = { ...scope, events: [sourceEvent(93)], archive_read_ready: false };
+    expect(chatPageScopeRelation(archive, native)).toBe("changed");
+    expect(chatPageScopeRelation(native, archive)).toBe("changed");
+    const preview = { ...archive, archive_read_ready: false, recent_admission: "preview", progress: "provisional" };
+    expect(chatPageScopeRelation(archive, preview)).toBe("changed");
+  });
+
+  it("rejects an archive-marked reply to a native renewal RPC", async () => {
+    const event = sourceEvent(93);
+    const native: AgentChatPage = { ...scope, events: [event] };
+    const reply: AgentChatPage = { ...native, archive_read_ready: true, revalidated_ids: [event.id] };
+    const loader = vi.fn(async () => reply);
+    await expect(revalidateChatWindow(native.events, native.events, native, loader, () => true)).rejects.toMatchObject({ name: "ChatRevalidationError", scopeChanged: false });
+    expect(loader).toHaveBeenCalledTimes(1);
   });
 
   it("publishes only a first complete owned page from an empty pending bootstrap", () => {

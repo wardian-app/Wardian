@@ -613,6 +613,27 @@ lease and audit before deciding whether to retry. See
 [PTY lifecycle recovery](../developer/pty-lifecycle.md) for the conservative
 verification boundary.
 
+For an explicitly approved interval of a replaced Codex log, `agent adopt-archive`
+records an operator authorization and schedules a fixed archive import. It
+requires the target agent, authorization UUID, saved conversation, provider
+session, source locator, numeric start/end, native identity, and user approval
+reference and wording. `wardian agent adopt-archive --help` lists the required
+flags. Reuse the same authorization UUID when retrying the same request.
+
+The start must match the old committed boundary and continuity anchor. Logging
+and the destination must be enabled and open. Ambiguous time/identity exclusions
+and restrictions after the start refuse adoption. The importer excludes a partial
+final record, ignores later appends, and retires pending work if source or policy
+changes. Re-enabling logging does not revive a retired grant. The command requires
+a supporting desktop app and has no offline fallback.
+
+The synced authorization lives in the agent's `archive-adoption-history.jsonl`;
+the independent job and completion/retirement result live under
+`archive-adoptions/`. Authorization is distinct from completion. Imported bodies
+belong to the saved archive and support ordinary history/detail reads. Native
+capture retains its replacement reason, original cursor and privacy boundaries.
+Other sources and future native history require their own authority.
+
 `agent restart` restarts the provider while preserving the Wardian agent, its
 habitat, and saved session history. Use it after `agent update` when the update
 reports `restart_required`, including class changes. `agent delete` is

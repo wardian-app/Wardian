@@ -531,6 +531,505 @@ async fn quiet_replaced_source_finishes_owned_projection_work_without_another_ap
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_replacement() {
+    use wardian_core::control::{ArchiveAdoptionNativeIdentity, ArchiveAdoptionRequest};
+
+    const COHORT_ROWS: usize = 128;
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let (state, session, path) = registered_off_source(&home).await;
+    let header_end = std::fs::metadata(&path).unwrap().len();
+    let record = |text: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "event_msg", "timestamp": "2026-10-04T12:00:00Z",
+                "payload": { "type": "user_message", "message": text }
+            })
+        )
+    };
+    {
+        let mut source = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(
+            source,
+            "{}",
+            record("Excluded before the original policy floor")
+        )
+        .unwrap();
+    }
+    dispatch_ordinary_capture(&state).await;
+    let snapshot = crate::commands::chat::agent_archive_capture_snapshot(&state, &session)
+        .await
+        .unwrap();
+    let policy_floor = std::fs::metadata(&path).unwrap().len();
+    assert!(policy_floor > header_end && header_end > 0);
+    assert_eq!(
+        capture_state(&state, &snapshot).unknown_before_offset,
+        Some(policy_floor)
+    );
+    {
+        let mut source = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(source, "{}", record("Previously captured owned anchor")).unwrap();
+    }
+    dispatch_ordinary_capture(&state).await;
+    let original_receipt = capture_state(&state, &snapshot);
+    let start = original_receipt.committed_offset;
+    assert!(start > policy_floor);
+    assert_eq!(original_receipt.unknown_before_offset, Some(policy_floor));
+    assert_eq!(original_receipt.status, "complete");
+    assert_eq!(
+        original_receipt.continuity_anchor.start + original_receipt.continuity_anchor.len,
+        start
+    );
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    state
+        .conversation_archive
+        .append_delivered_input_with_context(
+            context.clone(),
+            "Existing delivered prompt before adoption",
+            None,
+        )
+        .unwrap();
+    let conversation_id = state
+        .conversation_archive
+        .active_conversation_id(&session)
+        .unwrap()
+        .unwrap();
+    dispatch_ordinary_capture(&state).await;
+
+    // Retain the original inode/file ID; equal bytes and a matching anchor must
+    // not make the replacement a natively admitted continuation.
+    let original_bytes = std::fs::read(&path).unwrap();
+    assert_eq!(original_bytes.len() as u64, start);
+    assert_eq!(original_bytes.last(), Some(&b'\n'));
+    let retired = path.with_extension("retired-jsonl");
+    std::fs::rename(&path, &retired).unwrap();
+    std::fs::copy(&retired, &path).unwrap();
+    {
+        let mut source = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        for index in 0..COHORT_ROWS {
+            write!(
+                source,
+                "{}",
+                record(&format!(
+                    "Audited adopted cohort {index:03}: {}",
+                    "x".repeat(4096)
+                ))
+            )
+            .unwrap();
+        }
+    }
+    let replacement_bytes = std::fs::read(&path).unwrap();
+    assert_eq!(
+        &replacement_bytes[..start as usize],
+        original_bytes.as_slice()
+    );
+    let end = replacement_bytes.len() as u64;
+    assert!(end - start > crate::commands::provider_log_acquisition::PROVIDER_LOG_BATCH_BYTES);
+    let mut replacement = std::fs::File::open(&path).unwrap();
+    let identity =
+        crate::commands::provider_log_acquisition::native_file_identity(&replacement).unwrap();
+    assert_ne!(identity, original_receipt.native_identity);
+    assert!(
+        crate::commands::provider_log_acquisition::published_anchor_matches(
+            &mut replacement,
+            &original_receipt.continuity_anchor,
+        )
+        .unwrap()
+    );
+    drop(replacement);
+    dispatch_ordinary_capture(&state).await;
+    let replaced_receipt = capture_state(&state, &snapshot);
+    assert_eq!(
+        replaced_receipt.reason.as_deref(),
+        Some("provider_log_source_replaced")
+    );
+    assert_eq!(replaced_receipt.committed_offset, start);
+    assert_eq!(replaced_receipt.unknown_before_offset, Some(policy_floor));
+    assert_eq!(
+        replaced_receipt.native_identity,
+        original_receipt.native_identity
+    );
+    assert!(!state
+        .conversation_archive
+        .chat_projection
+        .has_pending_capture_work(&session));
+    assert!(!state
+        .conversation_archive
+        .has_deferred_chat_summaries(&session));
+    let (_, quiet) = collect_agent_metrics_with_sampler(&state, stopped_sample).await;
+    assert!(quiet.wake_sessions.is_empty());
+    assert_eq!(quiet.background_captures.len(), 1);
+    let unchanged_source = quiet.background_captures[0].source.clone();
+    let mut claims = Vec::new();
+    status::dispatch_capture_follow_up(&state, quiet.background_captures, |claim| {
+        claims.push(claim)
+    })
+    .await;
+    assert!(
+        claims.is_empty(),
+        "quiet replacement must coalesce before the grant"
+    );
+
+    let archive_root = wardian_core::paths::agent_conversations_dir(&session).unwrap();
+    let manifest: wardian_core::conversations::ConversationManifest = serde_json::from_slice(
+        &std::fs::read(archive_root.join(&conversation_id).join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.status,
+        wardian_core::conversations::ConversationStatus::Open
+    );
+    assert_eq!(
+        manifest.effective_logging,
+        wardian_core::conversations::ConversationLoggingSetting::Enabled
+    );
+    let archive_root = archive_root.parent().unwrap();
+    let receipt_path = archive_root.join("conversation-capture.json");
+    let policy_path = archive_root.join("chat-source-policy.json");
+    let receipt_before = std::fs::read(&receipt_path).unwrap();
+    let policy_before = std::fs::read(&policy_path).unwrap();
+    let policy: serde_json::Value = serde_json::from_slice(&policy_before).unwrap();
+    assert_eq!(policy["valid"], false);
+    assert_eq!(policy["unknown_before"], policy_floor);
+    assert_eq!(policy["blocked_reason"], "provider_log_source_replaced");
+
+    let authorization_id = uuid::Uuid::new_v4().to_string();
+    let request = ArchiveAdoptionRequest {
+        authorization_id: authorization_id.clone(),
+        conversation_id: conversation_id.clone(),
+        provider_session: snapshot.resume_session.clone().unwrap(),
+        source_path: std::fs::canonicalize(&path)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .into(),
+        start_offset: start,
+        end_offset: end,
+        native_identity: ArchiveAdoptionNativeIdentity {
+            platform: identity.platform,
+            primary: identity.primary,
+            secondary: identity.secondary,
+        },
+        approval_reference: "recorded-user-approval:ordinary-collector-regression".into(),
+        approval_text:
+            "Adopt exactly the selected replacement interval into this open conversation.".into(),
+    };
+    let response = crate::commands::chat::authorize_archive_adoption(
+        &state,
+        &session,
+        request.clone(),
+        None,
+        "test-operator".into(),
+    )
+    .await
+    .unwrap();
+    assert!(response.ok);
+    assert_eq!(response.status, "pending");
+    assert_eq!(response.agent_id, session);
+    assert_eq!(response.conversation_id, conversation_id);
+    let audit = wardian_core::conversations::read_jsonl_records::<serde_json::Value>(
+        &archive_root.join("archive-adoption-history.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["event"], "archive_adoption_authorized");
+    assert_eq!(audit[0]["outcome"], "authorization_only");
+    assert_eq!(
+        audit[0]["grant"]["request"],
+        serde_json::to_value(request).unwrap()
+    );
+    assert!(state
+        .conversation_archive
+        .has_pending_adoption(&session)
+        .unwrap());
+    assert!(!state
+        .conversation_archive
+        .chat_projection
+        .has_pending_capture_work(&session));
+    assert_eq!(std::fs::read(&receipt_path).unwrap(), receipt_before);
+    assert_eq!(std::fs::read(&policy_path).unwrap(), policy_before);
+
+    let (_, follow_up) = collect_agent_metrics_with_sampler(&state, stopped_sample).await;
+    assert!(follow_up.wake_sessions.is_empty());
+    assert_eq!(follow_up.background_captures.len(), 1);
+    assert_eq!(follow_up.background_captures[0].source, unchanged_source);
+    status::dispatch_capture_follow_up(&state, follow_up.background_captures, |claim| {
+        claims.push(claim)
+    })
+    .await;
+    assert_eq!(
+        claims.len(),
+        1,
+        "adoption demand must admit an unchanged source without force"
+    );
+    let claim = claims.pop().unwrap();
+    let work_path = archive_root
+        .join("archive-adoptions")
+        .join(format!("{authorization_id}.json"));
+    let mut worker = Box::pin(crate::commands::background_capture::run_background_capture(
+        &state, claim,
+    ));
+    // Poll the real worker to its first persisted adoption chunk, then pause
+    // at its cooperative boundary to append ordinary owned input deterministically.
+    poll_fn(|cx| {
+        assert!(
+            worker.as_mut().poll(cx).is_pending(),
+            "the selected interval spans multiple passes"
+        );
+        let work: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&work_path).unwrap()).unwrap();
+        let cursor = work["cursor"].as_u64().unwrap();
+        if cursor > start {
+            assert!(
+                cursor < end,
+                "pause while adoption still has selected bytes to import"
+            );
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    state
+        .conversation_archive
+        .append_delivered_input_with_context(
+            context.clone(),
+            "Normal delivered prompt during archive adoption",
+            None,
+        )
+        .unwrap();
+    worker.await;
+    let work: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&work_path).unwrap()).unwrap();
+    assert_eq!(work["status"], "complete");
+    assert_eq!(work["cursor"], end);
+    assert!(!state
+        .conversation_archive
+        .has_pending_adoption(&session)
+        .unwrap());
+    assert!(!state
+        .conversation_archive
+        .chat_projection
+        .has_pending_capture_work(&session));
+
+    let mut cursor = None;
+    let mut rows = Vec::new();
+    for page_index in 0..8 {
+        let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            &state,
+            session.clone(),
+            cursor.take(),
+            None,
+            None,
+            None,
+            crate::commands::chat::RecentChatRead::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            page.progress, "capture_source_replaced",
+            "complete owned history must retain the invalid native source disposition"
+        );
+        assert!(
+            page.archive_read_ready,
+            "initial and Older use the qualified archive reader"
+        );
+        assert_eq!(
+            page.conversation_id.as_deref(),
+            Some(conversation_id.as_str())
+        );
+        assert!(
+            page.source_epoch.is_none(),
+            "archive adoption grants no native source epoch"
+        );
+        assert!(
+            page.recent_admission.is_none(),
+            "archive adoption grants no native recent admission"
+        );
+        assert!(
+            page.revalidated_ids.is_none(),
+            "archive reads cannot acknowledge native renewal"
+        );
+        assert!(page
+            .events
+            .iter()
+            .all(|event| event.metadata["chat_source_epoch"].is_null()
+                && event.metadata["chat_recent_admission"].is_null()));
+        if page_index == 0 {
+            assert!(
+                page.next_before.is_some(),
+                "the full cohort requires real Older pages"
+            );
+            let unchanged = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+                &state,
+                session.clone(),
+                None,
+                Some(page.revision.clone()),
+                None,
+                None,
+                crate::commands::chat::RecentChatRead::default(),
+            )
+            .await
+            .unwrap();
+            assert!(unchanged.archive_read_ready);
+            assert!(unchanged.unchanged);
+            assert!(unchanged.events.is_empty());
+            assert_eq!(unchanged.progress, "capture_source_replaced");
+            assert_eq!(unchanged.generation, page.generation);
+            assert!(unchanged.source_epoch.is_none());
+            assert!(unchanged.recent_admission.is_none());
+            assert!(unchanged.revalidated_ids.is_none());
+            let stale = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+                &state,
+                session.clone(),
+                Some("source:stale".into()),
+                Some(page.revision.clone()),
+                None,
+                None,
+                crate::commands::chat::RecentChatRead::default(),
+            )
+            .await
+            .unwrap();
+            assert!(stale.reset);
+            assert!(
+                !stale.archive_read_ready,
+                "a native cursor fallback cannot inherit archive authority"
+            );
+            assert!(stale.revalidated_ids.is_none());
+        } else {
+            assert!(page.older_page);
+        }
+        cursor = page.next_before;
+        rows.extend(page.events);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert!(
+        cursor.is_none(),
+        "the declared cohort exhausts its Older pages"
+    );
+    let stored: Vec<wardian_core::models::chat::AgentChatEvent> =
+        wardian_core::conversations::read_jsonl_records(
+            &wardian_core::paths::agent_conversation_dir(&session, &conversation_id)
+                .unwrap()
+                .join("events.jsonl"),
+        )
+        .unwrap();
+    let adopted_ids: std::collections::HashSet<_> = stored
+        .iter()
+        .filter(|event| {
+            event.metadata["archive_adoption"]["authorization_id"].as_str()
+                == Some(authorization_id.as_str())
+        })
+        .map(|event| event.id.clone())
+        .collect();
+    assert_eq!(adopted_ids.len(), COHORT_ROWS);
+    // The normal read DTO deliberately omits private grant/chunk evidence.
+    // Physical observation IDs still bind every public row to its owned cohort.
+    let adopted: Vec<_> = rows
+        .iter()
+        .filter(|event| adopted_ids.contains(&event.id))
+        .collect();
+    assert_eq!(
+        adopted.len(),
+        COHORT_ROWS,
+        "import the entire approved cohort exactly once"
+    );
+    let owned = adopted[0];
+    let detail_ref = owned.metadata["chat_detail_ref"]
+        .as_str()
+        .expect("the owned body exceeds the header preview");
+    let body = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.clone(),
+        None,
+        None,
+        Some(detail_ref.into()),
+        None,
+        crate::commands::chat::RecentChatRead::default(),
+    )
+    .await
+    .unwrap();
+    assert!(body.archive_read_ready);
+    assert_eq!(body.progress, "capture_source_replaced");
+    assert!(body.source_epoch.is_none());
+    assert!(body.recent_admission.is_none());
+    assert!(body.revalidated_ids.is_none());
+    let detail = body.detail.unwrap();
+    assert_eq!(detail.event_id, owned.id);
+    assert!(detail.complete);
+    assert!(detail.next.is_none());
+    assert_eq!(
+        detail.text,
+        stored
+            .iter()
+            .find(|event| event.id == owned.id)
+            .unwrap()
+            .text
+            .as_deref()
+            .unwrap()
+    );
+    for index in 0..COHORT_ROWS {
+        let prefix = format!("Audited adopted cohort {index:03}:");
+        assert_eq!(
+            adopted
+                .iter()
+                .filter(|event| event
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with(&prefix)))
+                .count(),
+            1,
+            "approved record {index} remains visible exactly once"
+        );
+    }
+    for text in [
+        "Previously captured owned anchor",
+        "Existing delivered prompt before adoption",
+        "Normal delivered prompt during archive adoption",
+    ] {
+        assert_eq!(
+            rows.iter()
+                .filter(|event| event.text.as_deref() == Some(text))
+                .count(),
+            1
+        );
+    }
+    assert!(!rows
+        .iter()
+        .any(|event| event.text.as_deref() == Some("Excluded before the original policy floor")));
+    assert_eq!(capture_state(&state, &snapshot), replaced_receipt);
+    assert_eq!(std::fs::read(&receipt_path).unwrap(), receipt_before);
+    assert_eq!(std::fs::read(&policy_path).unwrap(), policy_before);
+    assert!(crate::state::conversation_archive::chat_read::source_policy(&context).is_err());
+    assert!(crate::commands::chat_recent_seed::source_scope_with_policy(&snapshot).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), replacement_bytes);
+    assert_eq!(std::fs::read(&retired).unwrap(), original_bytes);
+    let (_, quiet) = collect_agent_metrics_with_sampler(&state, stopped_sample).await;
+    assert!(quiet.wake_sessions.is_empty());
+    assert_eq!(quiet.background_captures.len(), 1);
+    assert_eq!(quiet.background_captures[0].source, unchanged_source);
+    status::dispatch_capture_follow_up(&state, quiet.background_captures, |claim| {
+        claims.push(claim)
+    })
+    .await;
+    assert!(
+        claims.is_empty(),
+        "completed adoption and projection must coalesce without another append"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_live_first_source_covers_full_recent_cohort() {
     let home = crate::control::test_support::TestWardianHome::new_async().await;
     let (state, session, path) = registered_live_mock(&home).await;

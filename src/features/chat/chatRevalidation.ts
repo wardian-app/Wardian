@@ -106,6 +106,22 @@ const completeCanonicalIdentity = (page: AgentChatPage) =>
   && nonEmptyScopeValue(page.generation) && page.source_epoch === null
   && nonEmptyScopeValue(page.revision);
 
+const archiveCaptureStops = new Set([
+  "capture_source_replaced", "capture_source_truncated", "capture_source_rewritten",
+]);
+
+/** The backend's complete cold-cohort classification grants owned archive reads.
+ * Source-shaped historical members and display aliases grant no native renewal. */
+export function isArchiveReadPage(page: AgentChatPage): boolean {
+  return page.archive_read_ready === true && completeCanonicalIdentity(page)
+    && page.recent_admission == null && page.revalidated_ids == null
+    && archiveCaptureStops.has(page.progress) && page.events.length <= 80
+    && new Set(page.events.map((event) => event.id)).size === page.events.length
+    && page.events.every((event) => event.session_id === page.session_id && nonEmptyScopeValue(event.id)
+      && event.metadata.chat_source_epoch == null && event.metadata.chat_source_admission == null
+      && event.metadata.chat_provisional !== true);
+}
+
 function eventAdmission(event: AgentChatEvent): string | null {
   const admission = event.metadata.chat_source_admission;
   return typeof admission === "string" && admission.length > 0 ? admission : null;
@@ -144,10 +160,14 @@ function usableBootstrapPage(page: AgentChatPage): boolean {
   // merely because its owned snapshot still reports indexing.
   const canonicalIndexingSnapshot = page.progress === "indexing" && page.reset
     && page.source_epoch === null;
-  if ((page.progress !== "ready" && page.progress !== "provisional" && !canonicalIndexingSnapshot)
+  const archive = isArchiveReadPage(page);
+  if ((!archive && page.progress !== "ready" && page.progress !== "provisional" && !canonicalIndexingSnapshot)
     || page.unchanged || page.events.length === 0
+    || page.detail !== null
     || (page.revalidated_ids !== undefined && page.revalidated_ids !== null)
     || page.events.some((event) => event.session_id !== page.session_id)) return false;
+
+  if (archive) return true;
 
   if (page.source_epoch === null) {
     return completeCanonicalIdentity(page) && !pageHasProducerEvidence(page);
@@ -195,9 +215,24 @@ export function chatPageScopeRelation(
   requireAdmissionProof = false,
 ): ChatScopeRelation {
   if (!previous) return "unknown";
+  const previousArchive = isArchiveReadPage(previous);
+  const nextArchive = isArchiveReadPage(next);
   if (nonEmptyScopeValue(previous.session_id) && nonEmptyScopeValue(next.session_id)
     && previous.session_id !== next.session_id) return "changed";
-  if (!nonEmptyScopeValue(previous.session_id) || !nonEmptyScopeValue(next.session_id)) return "unknown";
+  if (!nonEmptyScopeValue(previous.session_id) || !nonEmptyScopeValue(next.session_id)) {
+    return previousArchive ? "changed" : "unknown";
+  }
+
+  if (next.archive_read_ready === true && !nextArchive) return previousArchive ? "changed" : "unknown";
+  if (previousArchive || nextArchive) {
+    if (requireAdmissionProof) return "unknown";
+    if (previousArchive && nextArchive) {
+      return previous.conversation_id === next.conversation_id && previous.generation === next.generation
+        ? "canonical" : "changed";
+    }
+    if (nextArchive && isEmptyPendingBootstrap(previous, next, previousEvents, hasOlderFrontier)) return "bootstrap";
+    return "changed";
+  }
 
   if (previous.recent_admission != null || next.recent_admission != null) {
     if ((previous.recent_admission != null && !validRecentPreview(previous))
@@ -272,7 +307,8 @@ export function chatNeedsRevalidation(
   next: AgentChatPage,
   browsingOlder: boolean,
 ): boolean {
-  return previous?.recent_admission == null && next.recent_admission == null
+  return !isArchiveReadPage(next) && !(previous && isArchiveReadPage(previous))
+    && previous?.recent_admission == null && next.recent_admission == null
     && browsingOlder && previous !== null && completeScope(previous) && completeScope(next)
     && previous.session_id === next.session_id && previous.source_epoch === next.source_epoch
     && (next.reset || next.revision !== previous.revision);
@@ -352,6 +388,9 @@ export async function revalidateChatWindow(
   direction: ChatWindowDirection = "recent",
   now: () => number = Date.now,
 ): Promise<AgentChatEvent[]> {
+  if (target.archive_read_ready === true) {
+    throw new ChatRevalidationError("Owned archive reads cannot authorize native source renewal.");
+  }
   if (target.recent_admission != null) {
     throw new ChatRevalidationError("Recent previews cannot authorize source renewal. Retry the canonical Chat window.");
   }
@@ -396,6 +435,9 @@ export async function revalidateChatWindow(
     }
 
     const reply = await loader({ sessionId: target.session_id, revision: target.revision, revalidateIds: batch });
+    if (reply.archive_read_ready === true) {
+      throw new ChatRevalidationError("An archive read cannot acknowledge native source renewal.");
+    }
     if (!isCurrent()) throw new ChatRevalidationError("Chat selection changed during source renewal.");
     if (now() - startedAt >= CHAT_REVALIDATION_PHASE_MS) {
       throw new ChatRevalidationError("Chat source renewal reached its time limit. The current window was kept; retry Chat.");

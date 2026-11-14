@@ -49,6 +49,7 @@ enum ControlOperation {
     AgentRestart,
     AgentNewSession,
     AgentReleaseHold,
+    AgentAdoptArchive,
     AgentPause,
     AgentResume,
     AgentModels,
@@ -360,6 +361,24 @@ pub fn agent_release_hold(
             target: target.to_string(),
             acquisition_id: acquisition_id.to_string(),
             operator_verified_exit,
+            origin: require_current_message_origin().ok(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+/// Submit recorded approval once; retries retain the caller's authorization ID.
+pub fn agent_adopt_archive(
+    target: &str,
+    request: wardian_core::control::ArchiveAdoptionRequest,
+) -> io::Result<wardian_core::control::ArchiveAdoptionResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentAdoptArchive,
+        send_request(ControlRequest::AgentAdoptArchive {
+            target: target.to_string(),
+            request,
             origin: require_current_message_origin().ok(),
         }),
     )?;
@@ -909,6 +928,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentRestart
         | ControlOperation::AgentNewSession
         | ControlOperation::AgentReleaseHold
+        | ControlOperation::AgentAdoptArchive
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
         | ControlOperation::AgentModels
@@ -1446,6 +1466,40 @@ mod tests {
         );
         assert_eq!(
             operation_timeout(&ControlOperation::AgentReleaseHold),
+            CONTROL_MUTATION_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn archive_adoption_unsupported_endpoint_error_is_terminal() {
+        let runtime = build_runtime().unwrap();
+        let error = timeout_block(
+            &runtime,
+            ControlOperation::AgentAdoptArchive,
+            std::future::ready(Err(io::Error::other(ControlEndpointError::new(
+                "bad_request",
+                "older desktop does not support agent_adopt_archive",
+            )))),
+        )
+        .unwrap_err();
+        let endpoint = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<ControlEndpointError>()
+            .unwrap();
+        assert_eq!(endpoint.code(), "bad_request");
+        assert_eq!(
+            endpoint.to_string(),
+            "older desktop does not support agent_adopt_archive"
+        );
+        assert!(
+            serde_json::from_value::<wardian_core::control::ArchiveAdoptionResponse>(
+                serde_json::json!({"schema": 1, "ok": true}),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentAdoptArchive),
             CONTROL_MUTATION_TIMEOUT
         );
     }

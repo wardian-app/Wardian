@@ -354,6 +354,14 @@ pub(super) fn matching_record_index_with_candidates(
     archived_events: &[AgentChatEvent],
     batch_candidates: &[AgentChatEvent],
 ) -> io::Result<Option<usize>> {
+    if !current.metadata["archive_adoption"].is_null() {
+        return unique_match(
+            records.iter().enumerate().filter_map(|(index, record)| {
+                record.event_refs.contains(&current.id).then_some(index)
+            }),
+            "archive adoption narrative ownership",
+        );
+    }
     if current.metadata["provider_log"] == true
         && current.provider.eq_ignore_ascii_case("codex")
         && current.kind == AgentChatEventKind::Message

@@ -230,6 +230,27 @@ pub(crate) async fn load_agent_chat_page_with_recent_for_state(
         return Err("chat runtime changed during read".into());
     }
     let mut result = result;
+    if result.archive_read_ready {
+        result.bytes_read +=
+            (2 * crate::state::conversation_archive::chat_read::POLICY_BYTES) as usize;
+        result.records_decoded += 3;
+        if !crate::state::conversation_archive::chat_read::archive_page_is_current(
+            &current.0, &result,
+        ) {
+            result.archive_read_ready = false;
+            result.events.clear();
+            result.aliases.clear();
+            result.removed_ids.clear();
+            result.detail = None;
+            result.next_before = None;
+            result.conversation_id = None;
+            result.generation = None;
+            result.source_epoch = None;
+            result.reset = true;
+            result.unchanged = false;
+            result.progress = "scope_changed".into();
+        }
+    }
     if previous_preview && result.recent_admission.is_none() {
         result.reset = true;
         result.unchanged = false;
@@ -243,6 +264,7 @@ pub(crate) async fn load_agent_chat_page_with_recent_for_state(
         result.aliases.clear();
         result.removed_ids.clear();
         result.revalidated_ids = None;
+        result.archive_read_ready = false;
         result.generation = None;
         result.source_epoch = None;
         result.reset = true;
@@ -326,6 +348,58 @@ pub(crate) struct AgentArchiveCaptureSnapshot {
     pub(crate) workspace: String,
     pub(crate) agent_conversation_logging: AgentConversationLoggingSetting,
     pub(crate) watch_state: Arc<Mutex<AgentWatchState>>,
+}
+
+fn archive_adoption_admission(
+    snapshot: &AgentArchiveCaptureSnapshot,
+) -> crate::state::conversation_archive::adoption::Admission {
+    let global = crate::utils::shell::recent_conversation_logging();
+    let enabled = global.as_ref().is_ok_and(|(global, _)| {
+        effective_conversation_logging(*global, snapshot.agent_conversation_logging)
+            == ConversationLoggingSetting::Enabled
+    }) && snapshot
+        .resume_session
+        .as_ref()
+        .zip(snapshot.fresh_provider_session_id.as_ref())
+        .is_none_or(|(resume, fresh)| resume == fresh);
+    crate::state::conversation_archive::adoption::Admission {
+        context: conversation_archive_context_from_snapshot(snapshot),
+        enabled,
+        provider_session: snapshot
+            .resume_session
+            .clone()
+            .or_else(|| snapshot.fresh_provider_session_id.clone()),
+        cleared_sessions: snapshot.cleared_provider_sessions.clone(),
+        configuration: serde_json::json!({
+            "global": global.ok().map(|(global, _)| global),
+            "agent": snapshot.agent_conversation_logging,
+            "resume": snapshot.resume_session, "fresh": snapshot.fresh_provider_session_id,
+            "cleared": snapshot.cleared_provider_sessions,
+        })
+        .to_string(),
+    }
+}
+
+/// Explicit operator authorization is distinct from native source admission.
+/// The control issuer supplies OS identity and the recorded user approval.
+pub(crate) async fn authorize_archive_adoption(
+    state: &AppState,
+    agent_id: &str,
+    request: wardian_core::control::ArchiveAdoptionRequest,
+    origin: Option<wardian_core::control::MessageOrigin>,
+    issuer: String,
+) -> Result<wardian_core::control::ArchiveAdoptionResponse, String> {
+    let _policy = state.conversation_capture_policy_lock.lock().await;
+    let snapshot = agent_archive_capture_snapshot_bound(state, agent_id, None).await?;
+    state
+        .conversation_archive
+        .authorize_adoption(
+            &archive_adoption_admission(&snapshot),
+            request,
+            origin,
+            issuer,
+        )
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) struct ArchiveCaptureResult {
@@ -932,6 +1006,25 @@ async fn archive_agent_chat_events_bound(
         snapshot.agent_conversation_logging,
     ) == ConversationLoggingSetting::Enabled;
     let context = conversation_archive_context_from_snapshot(&snapshot);
+
+    // Adoption owns a separate fixed interval and must run even while ordinary
+    // native acquisition truthfully stops at the replacement boundary.
+    if state
+        .conversation_archive
+        .advance_adoption(&archive_adoption_admission(&snapshot))
+        .map_err(|error| AgentChatTranscriptFailure {
+            stage: ChatTranscriptFailureStage::ArchiveWrite,
+            message: format!("archive adoption failed: {error}"),
+        })?
+    {
+        return Ok(ArchiveCaptureResult {
+            events: Vec::new(),
+            context,
+            continue_immediately: true,
+            background_stop: CaptureStop::More,
+            watch_mirrors: None,
+        });
+    }
 
     // This bounded, nonauthoritative prelude precedes saved bootstrap, complete
     // DB merge and legacy archive reads. Failure never skips the durable path.
@@ -1819,6 +1912,12 @@ pub(crate) fn record_provider_log_policy_for_snapshot(
     snapshot: &AgentArchiveCaptureSnapshot,
     logging_enabled: bool,
 ) -> Result<(), String> {
+    if !logging_enabled {
+        state
+            .conversation_archive
+            .retire_pending_adoption(&snapshot.session_id, "conversation logging disabled")
+            .map_err(|error| format!("archive adoption retirement failed: {error}"))?;
+    }
     let context = conversation_archive_context_from_snapshot(snapshot);
     let Some(provider_source_key) = context.provider_source_key.as_deref() else {
         return Ok(());

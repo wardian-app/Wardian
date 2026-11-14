@@ -135,6 +135,30 @@ pub(crate) fn codex_observation_identity_matches(
 /// Require Wardian identity, provider and a common native source binding even
 /// for an equal event ID. A conflicting explicit native session fails closed.
 pub(crate) fn same_observation(old: &AgentChatEvent, current: &AgentChatEvent) -> bool {
+    if !old.metadata["archive_adoption"].is_null()
+        || !current.metadata["archive_adoption"].is_null()
+    {
+        // Archive import identities own their exact physical observations. A
+        // grant is provenance, so a duplicate grant may replay the same row.
+        let physical = |event: &AgentChatEvent| {
+            let mut value = event.metadata["archive_adoption"].clone();
+            if let Some(object) = value.as_object_mut() {
+                // Chunk witnesses validate a particular grant/job continuation.
+                // A different authorized end may frame this same physical row
+                // in a different chunk without changing observation identity.
+                for key in ["authorization_id", "chunk_start", "chunk_sha256"] {
+                    object.remove(key);
+                }
+            }
+            value
+        };
+        return old.id == current.id
+            && old.session_id == current.session_id
+            && old.provider == current.provider
+            && old.kind == current.kind
+            && !old.metadata["archive_adoption"].is_null()
+            && physical(old) == physical(current);
+    }
     if old.session_id != current.session_id
         || old.provider != current.provider
         || old.kind != current.kind

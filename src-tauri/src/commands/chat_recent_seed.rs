@@ -142,6 +142,21 @@ fn observe(
     ))
 }
 
+/// Recognized native capture stops may coexist with qualified owned history.
+/// Privacy transition fences and unclassified ownership failures stay distinct.
+pub(crate) fn capture_stop_progress(error: &io::Error) -> Option<&'static str> {
+    match error.to_string().as_str() {
+        "provider_log_source_replaced" | "source policy epoch changed" => {
+            Some("capture_source_replaced")
+        }
+        "provider_log_truncated" => Some("capture_source_truncated"),
+        "provider_log_continuity_mismatch" | "source continuity changed" => {
+            Some("capture_source_rewritten")
+        }
+        _ => None,
+    }
+}
+
 /// Validate the published privacy/ownership boundary without decoding history.
 pub(crate) fn source_scope(
     snapshot: &AgentArchiveCaptureSnapshot,
@@ -291,16 +306,7 @@ fn read_window_limited(
             })
         }
         Err(error) => {
-            let progress = match error.to_string().as_str() {
-                "provider_log_source_replaced" | "source policy epoch changed" => {
-                    "capture_source_replaced"
-                }
-                "provider_log_truncated" => "capture_source_truncated",
-                "provider_log_continuity_mismatch" | "source continuity changed" => {
-                    "capture_source_rewritten"
-                }
-                _ => "ownership_pending",
-            };
+            let progress = capture_stop_progress(&error).unwrap_or("ownership_pending");
             let revision = format!("unowned-{progress}");
             return Ok(Seed {
                 unchanged: previous == Some(revision.as_str()),

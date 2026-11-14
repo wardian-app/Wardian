@@ -81,6 +81,8 @@ export interface AgentChatPage {
     source_epoch: string | null;
     /** Trusted recent-preview owner, never canonical identity or renewal authority. */
     recent_admission?: string | null;
+    /** Complete owned archive read under a native capture stop; no source renewal authority. */
+    archive_read_ready?: boolean;
     revision: string;
     events: AgentChatEvent[];
     next_before: string | null;

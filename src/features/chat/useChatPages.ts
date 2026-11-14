@@ -7,6 +7,7 @@ import {
   chatPageScopeAllowsOrdinaryRead,
   chatPageScopeRelation,
   chatRevalidationKey,
+  isArchiveReadPage,
   revalidateChatWindow,
 } from "./chatRevalidation";
 
@@ -239,14 +240,17 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
               ...(windowDirection.current === "older" ? { recentPreview: false } : {}) });
           if (readingOlder && next.session_id !== sessionId) throw new Error("Conversation changed during older read");
           if (epoch !== scope.current || requestedWindow !== windowVersion.current || next.session_id !== sessionId) return;
-          if (next.recent_admission != null && chatPageScopeRelation(next, next, [], false) !== "preview") {
-            throw new ChatRevalidationError("Invalid recent preview capability.");
-          }
           const previous = latest.current;
           const browsingOlder = readingOlder || windowDirection.current === "older";
           const scopeRelation = chatPageScopeRelation(previous, next, eventWindow.current,
             demand !== null || olderCursor.current !== null || browsingOlder
               || (previous !== null && previous.next_before !== null));
+          if (next.archive_read_ready === true && !isArchiveReadPage(next)) {
+            throw new ChatRevalidationError("Invalid archive read qualification.", scopeRelation === "changed");
+          }
+          if (next.recent_admission != null && chatPageScopeRelation(next, next, [], false) !== "preview") {
+            throw new ChatRevalidationError("Invalid recent preview capability.", scopeRelation === "changed");
+          }
           const compatible = scopeRelation === "same";
           const ordinaryCompatible = chatPageScopeAllowsOrdinaryRead(scopeRelation);
           if (previous && scopeRelation === "unknown") {
@@ -279,7 +283,8 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
             if (!ordinaryCompatible && !next.reset) { settleOlderDemand(); setLoadingOlder(false); return; }
           }
           const pinLoadedWindow = latest.current !== null && (browsingOlder || interleavedRecent);
-          if (!readingOlder && pinLoadedWindow && (compatible || (interleavedRecent && scopeRelation === "canonical"))) {
+          if (!readingOlder && pinLoadedWindow && (compatible
+            || (scopeRelation === "canonical" && (interleavedRecent || isArchiveReadPage(next))))) {
             if (next.reset && next.events.length > 80) throw new Error("Recent snapshot exceeds the metadata page limit");
             let patched = patchLoadedChatMembers(eventWindow.current, next);
             if (chatNeedsRevalidation(previous, next, true)) patched = await renewCandidate(next, patched, "older");
@@ -287,6 +292,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
             forceRecentRead.current = false;
             setEvents(patched);
             const updated = { ...latest.current!, revision: next.revision, progress: next.progress,
+              archive_read_ready: isArchiveReadPage(next) ? true : undefined,
               next_before: olderCursor.current?.before ?? latest.current!.next_before };
             latest.current = updated; setPage(updated); setError(null);
             failedReadDirection.current = "recent";
@@ -299,7 +305,8 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
               // The next existing poll serves one recent read, even without a reload.
               recentBetweenOlder.current = true;
               // Empty index work is an intermediate response to the same user demand.
-              const updated = { ...latest.current!, progress: next.progress };
+              const updated = { ...latest.current!, progress: next.progress,
+                archive_read_ready: isArchiveReadPage(next) ? true : undefined };
               latest.current = updated; setPage(updated);
             } else {
               if (next.reset && next.older_page === true && ordinaryCompatible) {
@@ -320,6 +327,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
                 windowDirection.current = "older"; setBrowsingOlder(true);
                 setEvents(candidate);
                 const updated = { ...latest.current!, revision: next.revision, progress: next.progress,
+                  archive_read_ready: isArchiveReadPage(next) ? true : undefined,
                   next_before: olderCursor.current?.before ?? latest.current!.next_before };
                 latest.current = updated; setPage(updated); setError(null);
               } else {
@@ -350,6 +358,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
               latest.current = updated; setPage(updated);
             } else if (latest.current) {
               const updated = { ...latest.current, progress: next.progress,
+                archive_read_ready: isArchiveReadPage(next) ? true : undefined,
                 bytes_read: next.bytes_read, records_decoded: next.records_decoded };
               latest.current = updated; setPage(updated);
             }
@@ -481,10 +490,12 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
     const generation = latest.current?.generation;
     const conversation = latest.current?.conversation_id;
     const source = latest.current?.source_epoch;
+    const archiveRead = latest.current !== null && isArchiveReadPage(latest.current);
     const requestedWindow = windowVersion.current;
     const currentScope = () => epoch === scope.current && requestedWindow === windowVersion.current
       && latest.current?.generation === generation && latest.current?.conversation_id === conversation
-      && latest.current?.source_epoch === source;
+      && latest.current?.source_epoch === source
+      && (latest.current !== null && isArchiveReadPage(latest.current)) === archiveRead;
     // Every invocation of the shared loader owns the same physical slot.
     while (readPool.reads.has(sessionId)) {
       await readPool.reads.get(sessionId)!.done;
@@ -500,7 +511,8 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
     try {
       const next = await loader({ sessionId, detailRef });
       if (!currentScope() || next.generation !== generation || next.conversation_id !== conversation
-        || next.source_epoch !== source || next.session_id !== sessionId || !next.detail) {
+        || next.source_epoch !== source || next.session_id !== sessionId
+        || isArchiveReadPage(next) !== archiveRead || !next.detail) {
         throw new Error("Conversation changed during detail read");
       }
       return next.detail;
