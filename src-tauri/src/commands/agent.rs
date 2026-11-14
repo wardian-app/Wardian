@@ -42,6 +42,7 @@ mod name_claims;
 pub(crate) mod provider_log_tests;
 mod removal;
 mod spawn;
+mod worktree_enable;
 use agent_lifecycle::{
     acquire_agent_lifecycle_guard, hold_previous_provider_before_rotation, lock_agent_lifecycle,
     lock_agent_roster_for_best_effort_save, lock_agent_roster_for_save, lock_rename_mutation,
@@ -64,6 +65,7 @@ pub(crate) use spawn::{
     launch_prepared_agent_spawn, planned_provider_session_id, prepare_durable_agent_spawn,
 };
 use spawn::{new_agent_identity_plan, prepare_agent_spawn};
+use worktree_enable::resolve_agent_worktree_source;
 
 const MAX_AGENT_DESCRIPTION_CHARS: usize = 280;
 
@@ -4222,16 +4224,8 @@ pub async fn enable_agent_worktree(
             .get(&session_id)
             .ok_or_else(|| format!("Agent {} not found", session_id))?;
         let config = agent.config.lock().unwrap();
-        let workspace_folder = config
-            .git_worktree_source
-            .as_deref()
-            .map(str::trim)
-            .filter(|source| !source.is_empty())
-            .unwrap_or(config.folder.trim())
-            .to_string();
-        if workspace_folder.is_empty() {
-            return Err("Agent workspace is not configured".to_string());
-        }
+        let workspace_folder =
+            normalize_workspace_record_path(&resolve_agent_worktree_source(&config)?);
         let branch_source = worktree_name.as_deref().unwrap_or(&config.session_name);
         let worktree_path = resolve_agent_worktree_path(
             std::path::Path::new(&workspace_folder),
@@ -4270,6 +4264,7 @@ pub async fn enable_agent_worktree(
         lifecycle_heartbeat.ensure_active("clear")?;
         {
             let mut config = agent.config.lock().unwrap();
+            config.git_worktree_source = Some(workspace_folder);
             enable_worktree_config(&mut config, &worktree_path);
         }
         let context = (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat);
