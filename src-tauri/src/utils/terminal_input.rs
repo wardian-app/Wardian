@@ -22,16 +22,16 @@ pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<V
     Ok(vec![plan.payload_bytes, plan.submit_key])
 }
 
-/// Submits `prompt` through the provider's delivery profile.
-///
-/// `on_payload_sent` runs after the payload bytes are written and
-/// `on_before_submit` immediately before the submit key.
-pub async fn submit_prompt_via_sender<S, F, Fut, G, Gfut>(
+/// Submits through the provider profile and holds the returned guard only while
+/// the final submit key is written. All preparation and receipt work stays
+/// outside that guarded boundary.
+pub async fn submit_prompt_via_sender_with_submit_guard<S, F, Fut, G, Gfut, A, Afut, P>(
     tx: &S,
     provider_name: &str,
     prompt: &str,
     on_payload_sent: F,
     on_before_submit: G,
+    acquire_submit_guard: A,
 ) -> Result<
     crate::utils::delivery_transaction::TerminalDeliveryOutcome,
     crate::utils::delivery_transaction::TerminalDeliveryError,
@@ -42,6 +42,8 @@ where
     Fut: Future<Output = Result<(), crate::utils::delivery_transaction::TerminalDeliveryError>>,
     G: FnOnce() -> Gfut,
     Gfut: Future<Output = Result<(), crate::utils::delivery_transaction::TerminalDeliveryError>>,
+    A: FnOnce() -> Afut,
+    Afut: Future<Output = Result<P, crate::utils::delivery_transaction::TerminalDeliveryError>>,
 {
     let normalized = normalize_prompt_for_terminal_submit(prompt);
     let profile = crate::utils::delivery_profile::delivery_profile(provider_name);
@@ -54,15 +56,57 @@ where
         .await;
     }
 
-    crate::utils::delivery_transaction::submit_terminal_transaction_with_hooks(
+    crate::utils::delivery_transaction::submit_terminal_transaction_with_submit_guard(
         tx,
         &profile,
         &normalized,
         on_payload_sent,
         on_before_submit,
+        acquire_submit_guard,
     )
     .await
 }
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    /// Submits `prompt` through the provider's delivery profile.
+    ///
+    /// `on_payload_sent` runs after the payload bytes are written and
+    /// `on_before_submit` immediately before the submit key.
+    pub(crate) async fn submit_prompt_via_sender<S, F, Fut, G, Gfut>(
+        tx: &S,
+        provider_name: &str,
+        prompt: &str,
+        on_payload_sent: F,
+        on_before_submit: G,
+    ) -> Result<
+        crate::utils::delivery_transaction::TerminalDeliveryOutcome,
+        crate::utils::delivery_transaction::TerminalDeliveryError,
+    >
+    where
+        S: TerminalInputSink + ?Sized,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), crate::utils::delivery_transaction::TerminalDeliveryError>>,
+        G: FnOnce() -> Gfut,
+        Gfut:
+            Future<Output = Result<(), crate::utils::delivery_transaction::TerminalDeliveryError>>,
+    {
+        submit_prompt_via_sender_with_submit_guard(
+            tx,
+            provider_name,
+            prompt,
+            on_payload_sent,
+            on_before_submit,
+            || async { Ok(()) },
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+pub(crate) use test_support::submit_prompt_via_sender;
 
 #[cfg(test)]
 mod tests {

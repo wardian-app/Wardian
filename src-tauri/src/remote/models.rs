@@ -1,10 +1,12 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, VecDeque};
 use wardian_core::control::MessageInputMode;
 
 pub const REMOTE_SETTINGS_SCHEMA_VERSION: u8 = 1;
 pub const REMOTE_AUDIT_SCHEMA_VERSION: u8 = 1;
-pub const REMOTE_DEVICE_STORE_SCHEMA_VERSION: u8 = 1;
+pub const REMOTE_DEVICE_STORE_SCHEMA_VERSION: u8 = 2;
+pub const REMOTE_PWA_AUDIENCE: &str = "wardian_remote_pwa";
+pub const REMOTE_CLIENT_AUDIENCE: &str = "wardian_remote_client_v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +21,9 @@ pub struct RemoteGatewayConfig {
     pub schema_version: u8,
     pub enabled: bool,
     pub canonical_origin: String,
+    /// Exact browser origins allowed to use the paired-client API.
+    #[serde(default)]
+    pub client_origin_allowlist: Vec<String>,
     pub loopback_host: String,
     pub loopback_port: u16,
     pub gateway_identity_public_key: String,
@@ -70,7 +75,9 @@ pub struct RemoteRuntimeState {
     pub pairing_offers: HashMap<String, PairingOfferRecord>,
     pub pending_pairing_requests: HashMap<String, PendingPairingRequestRecord>,
     pub auth_challenges: HashMap<String, AuthChallengeRecord>,
+    pub client_auth_challenges: HashMap<String, AuthChallengeRecord>,
     pub sessions: HashMap<String, RemoteSessionRecord>,
+    pub client_sessions: HashMap<String, RemoteClientSessionRecord>,
     pub websocket_tickets: HashMap<String, WebSocketTicketRecord>,
     pub active_status_streams: HashMap<String, usize>,
     pub rate_limits: HashMap<String, RateLimitBucket>,
@@ -81,6 +88,11 @@ pub struct PairingOfferRecord {
     pub offer_id: String,
     pub nonce: String,
     pub canonical_origin: String,
+    pub gateway_identity_fingerprint: String,
+    pub credential_kind: DeviceCredentialKind,
+    pub audience: RemoteCredentialAudience,
+    pub client_origin: Option<String>,
+    pub read_grants: Vec<RemoteReadGrant>,
     pub expires_at_ms: i64,
     pub used: bool,
 }
@@ -103,6 +115,11 @@ pub struct PendingPairingRequestRecord {
     pub public_key_spki_der_base64: String,
     pub public_key_fingerprint: String,
     pub canonical_origin: String,
+    pub credential_kind: DeviceCredentialKind,
+    pub audience: RemoteCredentialAudience,
+    pub client_origin: Option<String>,
+    pub read_grants: Vec<RemoteReadGrant>,
+    pub send_grants: Vec<RemoteSendGrant>,
     pub submitted_at_ms: i64,
     pub expires_at_ms: i64,
     pub decision: PendingPairingDecision,
@@ -115,6 +132,9 @@ pub struct AuthChallengeRecord {
     pub device_id: String,
     pub nonce: String,
     pub canonical_origin: String,
+    pub gateway_identity_fingerprint: String,
+    pub audience: RemoteCredentialAudience,
+    pub client_origin: Option<String>,
     pub expires_at_ms: i64,
     pub used: bool,
 }
@@ -128,6 +148,24 @@ pub struct RemoteSessionRecord {
     pub expires_at_ms: i64,
     pub absolute_expires_at_ms: i64,
     pub csrf_nonce: String,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteClientSessionRecord {
+    /// Random audit identifier; it is distinct from the bearer token and verifier.
+    pub session_id: String,
+    pub device_id: String,
+    pub client_origin: String,
+    pub gateway_origin: String,
+    pub audience: RemoteCredentialAudience,
+    pub gateway_identity_fingerprint: String,
+    pub read_grants: Vec<RemoteReadGrant>,
+    pub send_grants: Vec<RemoteSendGrant>,
+    pub idempotency_namespace: Option<String>,
+    pub idempotency_expires_at_ms: Option<i64>,
+    pub expires_at_ms: i64,
+    /// Keeps a revoked verifier recognizable as device_revoked until expiry.
     pub revoked: bool,
 }
 
@@ -175,14 +213,40 @@ pub struct PairingQrPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteClientPairingQrPayload {
+    pub gateway_origin: String,
+    pub credential_kind: DeviceCredentialKind,
+    pub client_origin: String,
+    pub read_grants: Vec<RemoteReadGrant>,
+    pub pairing_offer_id: String,
+    pub expires_at: String,
+    pub nonce: String,
+    pub server_identity_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceRecord {
     pub device_id: String,
     pub label: String,
     pub public_key_spki_der_base64: String,
     pub public_key_fingerprint: String,
+    pub credential_kind: DeviceCredentialKind,
+    pub audience: RemoteCredentialAudience,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub client_origin: Option<String>,
+    pub read_grants: Vec<RemoteReadGrant>,
+    #[serde(default)]
+    pub send_grants: Vec<RemoteSendGrant>,
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub revoked_at: Option<String>,
+}
+
+fn deserialize_required_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -221,11 +285,35 @@ pub struct PairingSubmitResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteClientPairingSubmitResponse {
+    pub status: String,
+    pub pairing_request_id: String,
+    pub device_id: String,
+    pub public_key_fingerprint: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteClientPairingSubmitRequest {
+    pub pairing_offer_id: String,
+    pub nonce: String,
+    pub device_label: String,
+    pub public_key_spki_der_base64: String,
+    #[serde(default)]
+    pub requested_scopes: Option<Vec<RemoteClientScope>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemotePendingPairingRequest {
     pub request_id: String,
     pub device_label: String,
     pub public_key_fingerprint: String,
     pub canonical_origin: String,
+    pub credential_kind: DeviceCredentialKind,
+    pub audience: RemoteCredentialAudience,
+    pub client_origin: Option<String>,
+    pub read_grants: Vec<RemoteReadGrant>,
+    pub send_grants: Vec<RemoteSendGrant>,
     pub submitted_at: String,
     pub expires_at: String,
 }
@@ -247,6 +335,138 @@ pub struct AuthSessionResponse {
     pub csrf_nonce: String,
     pub expires_at: String,
     pub absolute_expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteClientAuthChallengeResponse {
+    pub challenge_id: String,
+    pub device_id: String,
+    pub origin: String,
+    pub client_origin: String,
+    pub server_identity_fingerprint: String,
+    pub nonce: String,
+    pub expires_at: String,
+    pub audience: String,
+    pub signing_payload: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteClientAuthSessionResponse {
+    pub token_type: String,
+    pub access_token: String,
+    pub expires_at: String,
+    pub device_id: String,
+    pub scopes: Vec<RemoteClientScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteClientSharingStatus {
+    pub status: String,
+    pub device_id: String,
+    pub client_origin: String,
+    pub audience: String,
+    pub read_grants: Vec<RemoteReadGrant>,
+    pub send_grants: Vec<RemoteSendGrant>,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceCredentialKind {
+    #[default]
+    Pwa,
+    #[serde(rename = "client")]
+    PairedClient,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RemoteCredentialAudience {
+    #[default]
+    #[serde(rename = "wardian_remote_pwa")]
+    Pwa,
+    #[serde(rename = "wardian_remote_client_v1")]
+    PairedClientV1,
+}
+
+impl RemoteCredentialAudience {
+    pub fn for_kind(kind: DeviceCredentialKind) -> Self {
+        match kind {
+            DeviceCredentialKind::Pwa => Self::Pwa,
+            DeviceCredentialKind::PairedClient => Self::PairedClientV1,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pwa => REMOTE_PWA_AUDIENCE,
+            Self::PairedClientV1 => REMOTE_CLIENT_AUDIENCE,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteReadGrant {
+    #[serde(rename = "agents:read")]
+    AgentsRead,
+    #[serde(rename = "chat:read")]
+    ChatRead,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RemoteSendGrant {
+    #[serde(rename = "chat:send")]
+    ChatSend,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RemoteClientScope {
+    #[serde(rename = "agents:read")]
+    AgentsRead,
+    #[serde(rename = "chat:read")]
+    ChatRead,
+    #[serde(rename = "chat:send")]
+    ChatSend,
+}
+
+impl From<RemoteReadGrant> for RemoteClientScope {
+    fn from(grant: RemoteReadGrant) -> Self {
+        match grant {
+            RemoteReadGrant::AgentsRead => Self::AgentsRead,
+            RemoteReadGrant::ChatRead => Self::ChatRead,
+        }
+    }
+}
+
+impl From<RemoteSendGrant> for RemoteClientScope {
+    fn from(grant: RemoteSendGrant) -> Self {
+        match grant {
+            RemoteSendGrant::ChatSend => Self::ChatSend,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteClientMessageSubmitRequest {
+    pub text: String,
+    pub input_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteClientMessageOperation {
+    pub operation_id: String,
+    pub request_id: String,
+    pub session_id: String,
+    pub delivery_state: String,
+    pub accepted_at: String,
+    pub updated_at: String,
+    pub idempotency_expires_at: String,
+    pub error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

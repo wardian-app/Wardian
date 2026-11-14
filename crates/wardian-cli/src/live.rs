@@ -71,6 +71,7 @@ enum ControlOperation {
     ArtifactReviewShow,
     WatchlistsChanged,
     TopologyMutate,
+    RemoteClientPairingOffer,
     AutomationRun,
     Delivery {
         requested: Duration,
@@ -193,6 +194,18 @@ pub fn list_agents() -> io::Result<Vec<AgentIdentity>> {
     let response: AgentListResponse =
         serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(response.agents)
+}
+
+/// Ask the app to issue one offer; never retry or persist the returned secret.
+pub fn remote_client_pairing_offer(client_origin: &str) -> io::Result<serde_json::Value> {
+    let runtime = build_runtime()?;
+    timeout_block(
+        &runtime,
+        ControlOperation::RemoteClientPairingOffer,
+        send_request(ControlRequest::RemoteClientPairingOffer {
+            client_origin: client_origin.to_string(),
+        }),
+    )
 }
 
 /// Topology is the control plane's single writer: every mutation is
@@ -908,7 +921,8 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AutomationRun
         | ControlOperation::ArtifactPresent
         | ControlOperation::NotifyCreate
-        | ControlOperation::TopologyMutate => CONTROL_MUTATION_TIMEOUT,
+        | ControlOperation::TopologyMutate
+        | ControlOperation::RemoteClientPairingOffer => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::Delivery { requested } => watch_timeout_for(*requested),
         ControlOperation::AgentSpawnWait { requested } => watch_timeout_for(*requested),
         ControlOperation::AgentWorktreeList => CONTROL_GIT_DISCOVERY_TIMEOUT,

@@ -32,6 +32,8 @@ fn canonicalized_remote_gateway_config(
     config: &RemoteGatewayConfig,
 ) -> Result<RemoteGatewayConfig, String> {
     let mut normalized = config.clone();
+    normalized.client_origin_allowlist =
+        crate::remote::policy::canonicalized_client_origins(&config.client_origin_allowlist)?;
     if !config.enabled {
         return Ok(normalized);
     }
@@ -80,7 +82,16 @@ pub async fn save_remote_gateway_config(
 ) -> Result<RemoteGatewayConfig, String> {
     let state = app.state::<crate::state::AppState>();
     let _config_guard = state.remote_gateway_config_lock.lock().await;
+    let previous_config = crate::remote::storage::load_remote_config().ok().flatten();
     let saved = save_remote_gateway_config_with_starter(config, |_| {})?;
+    {
+        let mut runtime = state.remote_runtime.lock().await;
+        crate::remote::auth::invalidate_client_authority_for_config_change(
+            &mut runtime,
+            previous_config.as_ref(),
+            &saved,
+        );
+    }
     crate::remote::gateway::configure_remote_gateway(app.clone(), saved.clone()).await?;
     Ok(saved)
 }
@@ -106,6 +117,11 @@ fn pending_pairing_to_dto(request: &PendingPairingRequestRecord) -> RemotePendin
         device_label: request.device_label.clone(),
         public_key_fingerprint: request.public_key_fingerprint.clone(),
         canonical_origin: request.canonical_origin.clone(),
+        credential_kind: request.credential_kind,
+        audience: request.audience,
+        client_origin: request.client_origin.clone(),
+        read_grants: request.read_grants.clone(),
+        send_grants: request.send_grants.clone(),
         submitted_at: millis_to_rfc3339(request.submitted_at_ms),
         expires_at: millis_to_rfc3339(request.expires_at_ms),
     }
@@ -146,6 +162,11 @@ fn device_record_from_pending_pairing(
         label: request.device_label.clone(),
         public_key_spki_der_base64: request.public_key_spki_der_base64.clone(),
         public_key_fingerprint: request.public_key_fingerprint.clone(),
+        credential_kind: request.credential_kind,
+        audience: request.audience,
+        client_origin: request.client_origin.clone(),
+        read_grants: request.read_grants.clone(),
+        send_grants: request.send_grants.clone(),
         created_at: paired_at.to_string(),
         last_used_at: None,
         revoked_at: None,
@@ -252,21 +273,43 @@ async fn approve_remote_pairing_request_inner(
     let saved = match mutation {
         Ok((saved, ())) => saved,
         Err(error) => {
-            let mut runtime = state.remote_runtime.lock().await;
-            if error.publish_state == crate::remote::storage::DeviceStorePublishState::NotPublished
+            let reconciled = if error.publish_state
+                != crate::remote::storage::DeviceStorePublishState::NotPublished
             {
-                crate::remote::auth::mark_pending_pairing_approval_failed(
-                    &mut runtime,
-                    &request_id,
-                    chrono::Utc::now().timestamp_millis(),
-                );
+                crate::remote::storage::load_device_store()
+                    .ok()
+                    .filter(|store| {
+                        let expected = device_record_from_pending_pairing(&request, &paired_at);
+                        store.devices.iter().any(|device| device == &expected)
+                    })
             } else {
+                None
+            };
+            let mut runtime = state.remote_runtime.lock().await;
+            if let Some(saved) = reconciled {
                 crate::remote::auth::mark_pending_pairing_approved(
                     &mut runtime,
                     &request_id,
                     &paired_at,
                 )?;
+                drop(runtime);
+                append_desktop_remote_audit(DesktopRemoteAuditEvent {
+                    origin: Some(&request.canonical_origin),
+                    device_id: Some(&request.device_id),
+                    event_type: "pairing",
+                    action: "approve",
+                    target_type: Some("device"),
+                    target_id: Some(&request.device_id),
+                    outcome: "accepted",
+                    error_code: None,
+                });
+                return Ok(saved.devices);
             }
+            crate::remote::auth::mark_pending_pairing_approval_failed(
+                &mut runtime,
+                &request_id,
+                chrono::Utc::now().timestamp_millis(),
+            );
             drop(runtime);
             if error.message == "device_already_paired" {
                 append_desktop_remote_audit(DesktopRemoteAuditEvent {
@@ -420,6 +463,71 @@ pub async fn create_remote_pairing_offer(
     Ok(offer)
 }
 
+/// Creates a single-use companion offer for an already allowlisted origin.
+/// UI and CLI callers share configuration, expiry, rate limits, and audit policy.
+#[tauri::command]
+pub async fn create_remote_client_pairing_offer(
+    app: tauri::AppHandle,
+    client_origin: String,
+) -> Result<crate::remote::models::RemoteClientPairingQrPayload, String> {
+    let state = app.state::<crate::state::AppState>();
+    let _config_guard = state.remote_gateway_config_lock.lock().await;
+    let config =
+        crate::remote::storage::load_remote_config()?.ok_or("Remote access is not configured")?;
+    if !config.enabled {
+        return Err("Remote access is disabled".to_string());
+    }
+    validate_remote_gateway_config(&config)?;
+    if !crate::remote::policy::is_approved_client_origin(
+        &config.client_origin_allowlist,
+        &client_origin,
+    ) {
+        return Err("client_origin_not_allowlisted".to_string());
+    }
+    let gateway_origin = crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut runtime = state.remote_runtime.lock().await;
+    if crate::remote::auth::check_rate_limit(
+        &mut runtime,
+        "client_pairing_offer:desktop",
+        now_ms,
+        3,
+        10 * 60_000,
+    )
+    .is_err()
+    {
+        append_desktop_remote_audit(DesktopRemoteAuditEvent {
+            origin: Some(gateway_origin.raw()),
+            device_id: None,
+            event_type: "pairing",
+            action: "create_client_offer",
+            target_type: None,
+            target_id: None,
+            outcome: "rejected",
+            error_code: Some("rate_limited"),
+        });
+        return Err("rate_limited".to_string());
+    }
+    let offer = crate::remote::auth::create_client_pairing_offer(
+        &mut runtime,
+        gateway_origin.raw(),
+        &client_origin,
+        &config.gateway_identity_fingerprint,
+        now_ms,
+    )?;
+    append_desktop_remote_audit(DesktopRemoteAuditEvent {
+        origin: Some(gateway_origin.raw()),
+        device_id: None,
+        event_type: "pairing",
+        action: "create_client_offer",
+        target_type: Some("pairing_offer"),
+        target_id: Some(&offer.pairing_offer_id),
+        outcome: "accepted",
+        error_code: None,
+    });
+    Ok(offer)
+}
+
 fn millis_to_rfc3339(ms: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
         .unwrap_or_else(chrono::Utc::now)
@@ -430,7 +538,8 @@ fn millis_to_rfc3339(ms: i64) -> String {
 mod tests {
     use super::*;
     use crate::remote::models::{
-        REMOTE_DEVICE_STORE_SCHEMA_VERSION, REMOTE_SETTINGS_SCHEMA_VERSION,
+        DeviceCredentialKind, RemoteCredentialAudience, REMOTE_DEVICE_STORE_SCHEMA_VERSION,
+        REMOTE_SETTINGS_SCHEMA_VERSION,
     };
 
     fn enabled_config(origin: &str, host: &str) -> RemoteGatewayConfig {
@@ -438,6 +547,7 @@ mod tests {
             schema_version: REMOTE_SETTINGS_SCHEMA_VERSION,
             enabled: true,
             canonical_origin: origin.to_string(),
+            client_origin_allowlist: Vec::new(),
             loopback_host: host.to_string(),
             loopback_port: 41241,
             gateway_identity_public_key: "pub".to_string(),
@@ -516,6 +626,28 @@ mod tests {
     }
 
     #[test]
+    fn saving_config_normalizes_client_origins_and_rejects_ambiguous_entries() {
+        let mut config = enabled_config("https://wardian.tailnet.ts.net", "127.0.0.1");
+        config.client_origin_allowlist = vec![
+            "https://Client.Example:443/".to_string(),
+            "http://localhost:80".to_string(),
+        ];
+        let normalized = canonicalized_remote_gateway_config(&config).expect("valid origins");
+        assert_eq!(
+            normalized.client_origin_allowlist,
+            ["https://client.example", "http://localhost"]
+        );
+
+        config.client_origin_allowlist = vec![
+            "https://client.example".to_string(),
+            "https://CLIENT.example:443".to_string(),
+        ];
+        assert!(canonicalized_remote_gateway_config(&config).is_err());
+        config.client_origin_allowlist = vec!["http://client.example".to_string()];
+        assert!(canonicalized_remote_gateway_config(&config).is_err());
+    }
+
+    #[test]
     fn saving_enabled_config_requests_gateway_start_after_persisting_config() {
         with_temp_wardian_home(|| {
             let mut started = Vec::new();
@@ -553,6 +685,11 @@ mod tests {
             label: "Tablet".to_string(),
             public_key_spki_der_base64: "other-key".to_string(),
             public_key_fingerprint: "other-fp".to_string(),
+            credential_kind: DeviceCredentialKind::Pwa,
+            audience: RemoteCredentialAudience::Pwa,
+            client_origin: None,
+            read_grants: Vec::new(),
+            send_grants: Vec::new(),
             created_at: "2026-05-20T00:00:00Z".to_string(),
             last_used_at: Some("2026-05-21T00:04:00Z".to_string()),
             revoked_at: None,
@@ -565,6 +702,11 @@ mod tests {
                     label: "Old phone".to_string(),
                     public_key_spki_der_base64: "old-key".to_string(),
                     public_key_fingerprint: "same-fp".to_string(),
+                    credential_kind: DeviceCredentialKind::Pwa,
+                    audience: RemoteCredentialAudience::Pwa,
+                    client_origin: None,
+                    read_grants: Vec::new(),
+                    send_grants: Vec::new(),
                     created_at: "2026-05-19T00:00:00Z".to_string(),
                     last_used_at: Some("2026-05-21T00:04:00Z".to_string()),
                     revoked_at: Some(old_revocation.clone()),
@@ -580,6 +722,11 @@ mod tests {
             public_key_spki_der_base64: "new-key".to_string(),
             public_key_fingerprint: "same-fp".to_string(),
             canonical_origin: "https://wardian.tailnet.ts.net".to_string(),
+            credential_kind: DeviceCredentialKind::Pwa,
+            audience: RemoteCredentialAudience::Pwa,
+            client_origin: None,
+            read_grants: Vec::new(),
+            send_grants: Vec::new(),
             submitted_at_ms: 1,
             expires_at_ms: 2,
             decision: PendingPairingDecision::Approving,

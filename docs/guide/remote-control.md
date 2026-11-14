@@ -158,6 +158,113 @@ Wardian does not automatically change Tailscale Serve, Funnel, certificate,
 firewall, or admin-console settings. If the checklist reports a missing
 forwarding rule, review the suggested command before running it.
 
+## Pair a Separate Web Client
+
+The Remote Access settings can also configure a paired web client. Add the exact
+browser origin to the client origin allowlist before creating its pairing
+offer. Use an HTTPS origin for deployed clients. HTTP is accepted only for an
+explicitly configured loopback origin during local development. An empty
+allowlist disables client pairing.
+
+For the Even-Wardian HUD, keep the existing Tailscale Serve forwarding rule
+for the Wardian gateway. Enter the gateway origin
+`https://<machine>.<tailnet>.ts.net` in the HUD's **Wardian connection** settings.
+Serve the HUD itself over trusted HTTPS and open that HTTPS address on the
+phone. Its browser origin must exactly match the saved allowlist entry,
+including any non-default port. A non-loopback HTTP tailnet IP address cannot
+pair. Check the packaged WebView's actual origin with the HUD diagnostic;
+do not assume it equals the gateway origin. Browser crypto and secure key
+persistence must also work on the actual phone.
+
+For an HTTP HUD server already running on the same machine, you can add a
+separate HTTPS listener without replacing the existing Wardian gateway rule.
+First run `tailscale serve status` and verify that port 8443 is unused. On the
+machine hosting the HUD, replace `<hud-http-port>` with its local HTTP port:
+
+```bash
+tailscale serve --bg --https=8443 'http://127.0.0.1:<hud-http-port>'
+tailscale serve status
+```
+
+PowerShell:
+
+```powershell
+tailscale serve --bg --https=8443 'http://127.0.0.1:<hud-http-port>'
+tailscale serve status
+```
+
+Verify that the existing HTTPS 443 rule still forwards to Wardian and the new
+HTTPS 8443 rule forwards to the HUD. Open
+`https://<machine>.<tailnet>.ts.net:8443/glasses.html` on the phone. The HUD's
+connection diagnostic must report the expected secure origin and available
+WebCrypto. Allowlist `https://<machine>.<tailnet>.ts.net:8443` as the client
+origin. Keep `https://<machine>.<tailnet>.ts.net` as the gateway origin in the
+HUD. Tailnet access policy must permit the selected HTTPS port.
+
+Before pairing, install the version with paired-client support and restart the
+desktop app yourself. Installing an update does not replace an already running
+process. Keep the existing Tailscale Serve forwarding rule.
+
+1. Open **Settings > Remote Access** in Wardian.
+2. Add the HUD's exact HTTPS origin to **Paired-client origin allowlist**.
+3. Select **Save gateway settings**. Verify that the saved origin is available
+   under **Client origin**.
+4. Select that origin under **Client origin**.
+5. Select **Create client pairing code**. Verify that the offer shows credential
+   kind `client`, the selected origin, and `agents:read` and `chat:read` grants.
+6. Copy **Client pairing JSON** into the HUD's **Wardian connection** settings.
+   Enter `https://<machine>.<tailnet>.ts.net` in its gateway field. The ordinary
+   PWA pairing link cannot be used for the HUD.
+7. Submit the offer from the HUD. Verify that a pending device appears in Wardian.
+8. Check the pending device's client origin, key fingerprint, and read grants.
+   If they match the HUD, select **Approve**. Approval is a separate operator action.
+9. Verify that the HUD displays the agent roster and can open bounded Chat history.
+
+Offers are short-lived and single-use. If an offer expires, create another one.
+Removing its origin or revoking the device blocks later requests. As an
+alternative to step 5, create the same offer from the CLI attached to the running app:
+
+```bash
+wardian remote client-pairing-offer --client-origin 'https://<hud-host>'
+```
+
+PowerShell:
+
+```powershell
+wardian remote client-pairing-offer --client-origin 'https://<hud-host>'
+```
+
+Copy the command's complete JSON output into the HUD. This command does not
+change the allowlist or approve the pending device.
+
+Omitting `requested_scopes` keeps the
+existing read-only grants `agents:read` and `chat:read`. A client may request
+the separate `chat:send` grant; desktop approval shows the client kind, exact
+origin, key fingerprint, and requested read/send grants. A read-only device
+does not gain send access when it reauthenticates. Grant send access through a
+new explicit pairing and desktop approval.
+
+The client signs a fresh challenge to obtain a 15-minute bearer token. The
+token remains in client memory and is sent only in the `Authorization: Bearer`
+header. A send-enabled token also receives a server-issued idempotency
+namespace that remains active for 24 hours. Reauthentication reuses the active
+namespace. Expiry or a Wardian restart requires a fresh signed challenge.
+Client credentials do not authorize PWA endpoints, and cookies do not
+authorize paired-client endpoints. A paired client can read the agent roster
+and bounded Chat history; older history uses opaque cursors, and large message
+bodies load on demand.
+
+To send an ordinary message, use
+`POST /remote/client/v1/agents/{session_id}/messages` with
+`{ "text": "...", "input_mode": "message" }`, the bearer token, and an
+`Idempotency-Key` formed from the issued namespace and one canonical UUIDv4.
+Create a new key for each deliberate message. Keep the same key, target, and
+exact text when recovering a lost response. Query
+`GET /remote/client/v1/message-operations/by-key` with that same key to inspect
+the durable operation. An `submitted_unconfirmed` operation is status-only;
+do not clone it under a new key. A failed-before-submit operation also remains
+the same result until the user deliberately starts another attempt.
+
 ![Remote Access setup diagnostics](../assets/screenshots/remote-control/setup-diagnostics.png)
 
 When the origin field contains a bare hostname, Wardian saves it as HTTPS. For

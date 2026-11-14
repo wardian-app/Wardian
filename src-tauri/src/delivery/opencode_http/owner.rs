@@ -462,6 +462,22 @@ impl OpenCodeHttpOwner {
         expected_runtime_generation: u64,
         prompt: &OpenCodePrompt,
     ) -> Result<OpenCodeHttpReceipt, OpenCodeHttpError> {
+        self.submit_once_with_authority(
+            expected_generation,
+            expected_runtime_generation,
+            prompt,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn submit_once_with_authority(
+        &self,
+        expected_generation: u64,
+        expected_runtime_generation: u64,
+        prompt: &OpenCodePrompt,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
+    ) -> Result<OpenCodeHttpReceipt, OpenCodeHttpError> {
         self.ensure_open()?;
         self.ensure_generation(expected_generation, expected_runtime_generation)?;
         let body = prompt.request_body().map_err(|_| {
@@ -495,20 +511,31 @@ impl OpenCodeHttpOwner {
         self.ensure_open()?;
         self.ensure_generation(expected_generation, expected_runtime_generation)?;
 
-        let response = self
+        let request = self
             .request(Method::POST, self.session_url("prompt_async")?)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| {
+            .body(body);
+        let permit = match client_send_authority {
+            Some(authority) => Some(authority.acquire().await.map_err(|code| {
                 OpenCodeHttpError::new(
-                    OpenCodeHttpErrorCode::SubmittedUnconfirmed,
-                    true,
+                    OpenCodeHttpErrorCode::TransportUnavailable,
+                    false,
                     None,
-                    "OpenCode prompt submission became uncertain after request start",
+                    code,
                 )
-            })?;
+            })?),
+            None => None,
+        };
+        let response_result = request.send().await;
+        drop(permit);
+        let response = response_result.map_err(|_| {
+            OpenCodeHttpError::new(
+                OpenCodeHttpErrorCode::SubmittedUnconfirmed,
+                true,
+                None,
+                "OpenCode prompt submission became uncertain after request start",
+            )
+        })?;
         if response.status() == StatusCode::NO_CONTENT {
             return Ok(OpenCodeHttpReceipt {
                 provider_session_id: self.binding.provider_session_id().to_string(),

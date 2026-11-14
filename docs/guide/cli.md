@@ -32,6 +32,28 @@ contract, Codex configuration, and current limitations.
 4. Run `wardian agent list` to confirm the CLI sees your neighbors, or `wardian agent list --scope all` to see all agents.
 5. Use live-control commands only while the desktop app is running for that same home.
 
+## Paired Client Offers
+
+Create an origin-bound pairing offer for an independently hosted HUD:
+
+```bash
+wardian remote client-pairing-offer --client-origin 'https://hud.example:9443'
+```
+
+The same command works in PowerShell. `--client-origin` is required and is the
+exact client origin (scheme, host, and optional port), not a page URL or wildcard.
+The running app for the same `WARDIAN_HOME` must have remote access enabled and
+the origin in its `client_origin_allowlist`. The app validates the origin and
+allowlist, applies offer expiry and rate limits, and owns the pairing state.
+This command does not modify configuration or approve a device.
+
+Stdout is the app's opaque pairing payload as compact JSON, including the
+offer ID, nonce, expiry, gateway identity, client origin, and read grants.
+Pass the complete payload to the HUD's pairing flow. Treat it as a short-lived
+secret. Backend rejection remains a structured CLI error; an unavailable app
+returns `app_not_running` without an offline fallback. See
+[Remote Control](./remote-control.md) for gateway setup and pairing.
+
 ## Agent Discovery And Efficient Output
 
 Discover one command at a time:

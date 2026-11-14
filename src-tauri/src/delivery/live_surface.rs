@@ -295,6 +295,26 @@ pub async fn submit_live_surface_prompt(
     state: &AppState,
     request: LiveSurfacePromptRequest,
 ) -> Result<LiveSurfacePromptResult, Box<LiveSurfaceDeliveryError>> {
+    submit_live_surface_prompt_inner(app, state, request, None).await
+}
+
+/// Submit through the live surface after rechecking paired-client authority
+/// at each payload and submit-key write, releasing before receipt waits.
+pub(crate) async fn submit_live_surface_prompt_with_authority(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    request: LiveSurfacePromptRequest,
+    authority: crate::remote::client_messages::ClientSendAuthority,
+) -> Result<LiveSurfacePromptResult, Box<LiveSurfaceDeliveryError>> {
+    submit_live_surface_prompt_inner(app, state, request, Some(authority)).await
+}
+
+async fn submit_live_surface_prompt_inner(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    request: LiveSurfacePromptRequest,
+    authority: Option<crate::remote::client_messages::ClientSendAuthority>,
+) -> Result<LiveSurfacePromptResult, Box<LiveSurfaceDeliveryError>> {
     let delivery_lock = state.delivery_lock_for(&request.session_id).await;
     let _delivery_guard = delivery_lock.lock().await;
 
@@ -783,7 +803,14 @@ pub async fn submit_live_surface_prompt(
             .as_ref()
             .map(|guarded| guarded as &dyn crate::utils::delivery_transaction::TerminalInputSink)
             .unwrap_or(sender);
-        match crate::utils::terminal_input::submit_prompt_via_sender(
+        let authority_input = authority.map(|authority| {
+            crate::remote::client_messages::AuthorityInputSink::new(sender, authority)
+        });
+        let sender = authority_input
+            .as_ref()
+            .map(|input| input as &dyn crate::utils::delivery_transaction::TerminalInputSink)
+            .unwrap_or(sender);
+        match crate::utils::terminal_input::submit_prompt_via_sender_with_submit_guard(
             sender,
             &provider,
             &request.prompt,
@@ -839,6 +866,7 @@ pub async fn submit_live_surface_prompt(
                 })? = Some(proof);
                 Ok(())
             },
+            || async { Ok(()) },
         )
         .await
         {
@@ -1109,6 +1137,15 @@ async fn record_terminal_delivery_error(
     provider: &str,
     error: TerminalDeliveryError,
 ) -> Box<LiveSurfaceDeliveryError> {
+    let authority_error_code = matches!(
+        error.phase,
+        "service_unavailable"
+            | "deadline_expired"
+            | "origin_forbidden"
+            | "device_revoked"
+            | "grant_required"
+    )
+    .then_some(error.phase);
     let default_payload_reason = (error.phase == "payload_apply_unconfirmed").then(|| {
         "The PTY accepted the payload bytes, but Codex did not prove that its composer applied them; Return was withheld and automatic retry is unsafe"
             .to_string()
@@ -1123,11 +1160,13 @@ async fn record_terminal_delivery_error(
         }),
         FailedLiveSurfaceAttempt {
             runtime_state: request.runtime_state,
-            error_code: if error.phase == "payload_apply_unconfirmed" {
-                "payload_apply_unconfirmed"
-            } else {
-                "send_failed"
-            },
+            error_code: authority_error_code.unwrap_or(
+                if error.phase == "payload_apply_unconfirmed" {
+                    "payload_apply_unconfirmed"
+                } else {
+                    "send_failed"
+                },
+            ),
             message: error.message,
             delivery_phase: Some(error.phase.to_string()),
             observed_state: error.observed_state,
