@@ -90,6 +90,13 @@ Each card can show either:
 Chat messages and activity rows share a centered, readable transcript column that
 expands fluidly on narrow surfaces.
 
+Chat keeps saved messages readable when provider-log capture pauses. A replaced,
+truncated, or rewritten log shows the specific reason in the transcript. A
+replacement cannot inherit the old log's privacy boundaries automatically, so
+its existing history stays unavailable until source ownership and policy can be
+verified. Collapsed message and output previews end at a word boundary; open
+full details to read the remaining text.
+
 Use the **Terminal** / **Chat** button in the card header for a temporary per-agent override. The default comes from **Settings > Agents > Agent card display**. Unsent Chat text stays with that agent when you switch modes.
 
 A compact **Subagents** badge appears in the card header only when Wardian has verified

@@ -36,6 +36,8 @@ describe("bounded Chat state", () => {
     expect(chatReadProgress("no_recent", false)).toContain("not available yet");
     expect(chatReadProgress("source_gap", false)).toBe("Recent history could not be read yet.");
     expect(chatReadProgress("source_gap", true)).toContain("Verified recent messages");
+    expect(chatReadProgress("capture_source_replaced", true)).toContain("replaced");
+    expect(chatReadProgress("capture_source_replaced", true)).toContain("paused");
   });
 
   it("leaves unchanged polls and unresolved equal-text identities alone", () => {

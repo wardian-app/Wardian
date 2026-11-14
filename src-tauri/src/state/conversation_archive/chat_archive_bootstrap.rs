@@ -48,6 +48,8 @@ pub(super) struct Progress {
     proofs: Option<String>,
     bodies: Option<String>,
     body_before: Option<String>,
+    #[serde(default)]
+    archive_display: Option<super::super::chat_logical_index::Index>,
 }
 
 impl Progress {
@@ -56,6 +58,11 @@ impl Progress {
         [self.proofs.as_deref(), self.bodies.as_deref()]
             .into_iter()
             .flatten()
+            .chain(
+                self.archive_display
+                    .iter()
+                    .flat_map(|index| index.node_roots()),
+            )
     }
 }
 
@@ -284,6 +291,7 @@ fn select(
             proofs: None,
             bodies: None,
             body_before: None,
+            archive_display: (context.provider == "codex").then(Default::default),
         };
         return Ok((
             Some(Head {
@@ -372,6 +380,110 @@ fn unresolved(event: &mut AgentChatEvent) {
     }
 }
 
+/// Archive relations combine saved display rows and allow member-to-group
+/// presentation aliases. Existing native relations take precedence; native
+/// source correspondence and detail authority remain with their existing owners.
+fn apply_archive_display_updates(
+    store: &mut Store,
+    head: &mut Head,
+    updates: Vec<(String, Option<super::super::chat_logical_index::Relation>)>,
+    changes: &mut HashMap<String, String>,
+) -> io::Result<()> {
+    let mut admitted = Vec::new();
+    for (key, mut relation) in updates {
+        let Some(reference) = store.get(&head.root, &key)? else {
+            continue;
+        };
+        let row: Row = store.read(&reference)?;
+        if row
+            .relation
+            .as_ref()
+            .is_some_and(|current| !current.id.starts_with("archive-display:"))
+        {
+            continue;
+        }
+        if let Some(relation) = relation.as_mut() {
+            relation.id = format!("archive-display:{}", relation.id);
+        }
+        admitted.push((key, relation));
+    }
+    apply_logical_updates(store, head, admitted, changes)
+}
+
+/// A warm projection has no bootstrap state. After restart, only a matching
+/// saved archive without current native authority may replace that derived head.
+pub(super) fn can_upgrade_saved_head(
+    context: &ConversationArchiveContext,
+    head: &Head,
+) -> io::Result<bool> {
+    if context.provider != "codex"
+        || super::super::chat_logical_index::source_proof(context)?.is_some()
+    {
+        return Ok(false);
+    }
+    let directory =
+        super::super::storage::conversation_dir(&context.agent_id, &head.conversation_id)?;
+    let manifest: ConversationManifest = match bounded_json(&directory.join("manifest.json")) {
+        Ok(manifest) => manifest,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if manifest.agent_id != context.agent_id
+        || manifest.conversation_id != head.conversation_id
+        || manifest.provider != context.provider
+        || manifest.status != ConversationStatus::Open
+        || manifest.effective_logging != ConversationLoggingSetting::Enabled
+        || manifest.provider_source_key != context.provider_source_key
+        || !context
+            .provider_session_ids
+            .iter()
+            .all(|id| manifest.provider_session_ids.contains(id))
+    {
+        return Ok(false);
+    }
+    // A derived-only head without its saved input must stay readable. The
+    // ordinary selector will validate fresh stamps again during bounded replay.
+    for path in [
+        super::super::storage::index_path(&context.agent_id)?,
+        directory.join("events.jsonl"),
+        directory.join("conversation.jsonl"),
+    ] {
+        match Stamp::read(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
+}
+
+fn archive_counts_complete(progress: &Progress) -> bool {
+    progress.narrative_before == 0
+        && progress.event_before == 0
+        && progress.archive_display.as_ref().is_some_and(|index| {
+            index.narratives_completed(progress.events.length) && !index.narrative_pending()
+        })
+}
+
+pub(super) fn archive_display_ready(context: &ConversationArchiveContext) -> io::Result<bool> {
+    let Some(reference) = head(&context.agent_id)? else {
+        return Ok(false);
+    };
+    let mut store = Store::new(&locations(&context.agent_id)?.1);
+    let published: Head = store.read(&reference)?;
+    if published.agent_id != context.agent_id
+        || published.source_key != context.provider_source_key
+        || !scope_matches(&published, context)
+        || published.progress != "ready"
+    {
+        return Ok(false);
+    }
+    Ok(published
+        .bootstrap
+        .as_ref()
+        .is_some_and(archive_counts_complete))
+}
+
 pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> {
     let (head_path, objects) = locations(&context.agent_id)?;
     let mut store = Store::checkpoint_writer(&objects);
@@ -391,8 +503,18 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
         return Ok(true);
     }
     let Some(mut progress) = published.bootstrap.take() else {
+        if can_upgrade_saved_head(context, &published)? {
+            retire(&context.agent_id)?;
+            return Ok(true);
+        }
         return Ok(false);
     };
+    if context.provider == "codex" && progress.archive_display.is_none() {
+        // Old settled saved checkpoints have never counted archive-only
+        // relations. Reselect into a new derived generation and bounded scan.
+        retire(&context.agent_id)?;
+        return Ok(true);
+    }
     let directory =
         super::super::storage::conversation_dir(&context.agent_id, &published.conversation_id)?;
     let index_path = super::super::storage::index_path(&context.agent_id)?;
@@ -411,6 +533,16 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
     }
     let mut changes = HashMap::new();
     let source_proof = super::super::chat_logical_index::source_proof(context)?;
+    if published.progress == "ready"
+        && published.source_epoch.is_none()
+        && !published.logical.has_evidence()
+        && source_proof.is_none()
+        && archive_counts_complete(&progress)
+    {
+        // The stamped archive cohort is unchanged and already qualified. A
+        // quiet pass must not create a new revision or disturb pinned details.
+        return Ok(false);
+    }
     published.source_epoch = source_proof.as_ref().map(|source| source.epoch.clone());
     published.logical.defer_narratives();
     if progress.narrative_before > 0 {
@@ -481,6 +613,20 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
             }
             if event.provider != context.provider && !is_owned_unknown_input(&candidate, &event) {
                 continue;
+            }
+            if let Some(index) = progress.archive_display.as_mut() {
+                let updates = index.observe_archive(
+                    &mut store,
+                    &super::super::chat_logical_index::ArchiveAdmission {
+                        context,
+                        conversation: &published.conversation_id,
+                        generation: &published.generation,
+                        extent: progress.events.length,
+                    },
+                    &event,
+                    &format!("{offset:020}"),
+                )?;
+                apply_archive_display_updates(&mut store, &mut published, updates, &mut changes)?;
             }
             // Reverse admission selects the latest envelope for an existing ID.
             if store
@@ -641,6 +787,13 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
         .page(&progress.bodies, progress.body_before.as_deref(), 1)?
         .is_empty();
     if progress.narrative_before == 0 && progress.event_before == 0 {
+        if let Some(index) = progress.archive_display.as_mut() {
+            index.qualify_narratives(progress.events.length);
+            if !store.checkpoint_due() {
+                let updates = index.activate_narratives(&mut store, 2)?;
+                apply_archive_display_updates(&mut store, &mut published, updates, &mut changes)?;
+            }
+        }
         published
             .logical
             .qualify_sequences(source_proof.as_ref().is_some_and(|s| s.sequence_trusted));
@@ -665,6 +818,10 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
     let pending = progress.narrative_before > 0
         || progress.event_before > 0
         || body_pending
+        || progress
+            .archive_display
+            .as_ref()
+            .is_some_and(|index| index.narrative_pending())
         || published.logical.pending()
         || published.logical.narrative_pending();
     // Byte-order keys require an actual newest-window boundary, not len - 80.
@@ -705,6 +862,10 @@ pub(super) fn retire(agent_id: &str) -> io::Result<()> {
         &Option::<String>::None,
     )
 }
+
+#[cfg(test)]
+#[path = "chat_archive_display_tests.rs"]
+mod archive_display_tests;
 
 #[cfg(test)]
 mod tests {
