@@ -353,6 +353,128 @@ fn archive_display_coalesces_unique_legacy_pair_without_native_source_proof() {
 }
 
 #[test]
+fn archive_display_source_free_replay_advances_across_restart_and_stays_quiet() {
+    const USERS: usize = 512;
+    let (_guard, temp) = isolated_home();
+    let context = context();
+    let mut events = legacy_pair(temp.path(), "The saved assistant answer is complete.");
+    for index in 0..USERS {
+        let mut event = events[0].clone();
+        event.id = format!("saved-user-{index}");
+        event.role = Some(AgentChatRole::User);
+        event.text = Some(format!("Saved user message {index}"));
+        event.metadata["raw_type"] = json!("user_message");
+        event.metadata["provider_turn_id"] = json!(format!("saved-turn-{index}"));
+        events.push(event);
+    }
+    let mut archive = ConversationArchiveState::default();
+    archive
+        .append_chat_events_with_context(context.clone(), &events)
+        .unwrap();
+    assert!(
+        crate::state::conversation_archive::chat_logical_index::source_proof(&context)
+            .unwrap()
+            .is_none()
+    );
+    let mut warm_settled = false;
+    for _ in 0..256 {
+        if !archive.chat_projection.advance("agent-1").unwrap() {
+            warm_settled = true;
+            break;
+        }
+    }
+    assert!(
+        warm_settled,
+        "ordinary queues must finish in bounded checkpoints"
+    );
+    assert!(archive.chat_projection.has_pending_capture_work("agent-1"));
+
+    let mut previous: Option<(String, (u64, u64))> = None;
+    let mut advanced = false;
+    let mut restarted = false;
+    let mut settled = false;
+    for checkpoint in 0..1024 {
+        let pending = archive.bootstrap_saved_chat(&context).unwrap();
+        if let Some(reference) = head("agent-1").unwrap() {
+            let mut store = Store::new(&locations("agent-1").unwrap().1);
+            let published: Head = store.read(&reference).unwrap();
+            if let Some(progress) = published.bootstrap.as_ref() {
+                let cursors = (progress.narrative_before, progress.event_before);
+                if let Some((generation, before)) = previous.as_ref() {
+                    assert_eq!(
+                        &published.generation, generation,
+                        "unchanged inputs must not reselect"
+                    );
+                    assert!(
+                        cursors.0 <= before.0 && cursors.1 <= before.1,
+                        "physical replay cursors must never move backward"
+                    );
+                    advanced |= cursors != *before;
+                }
+                previous = Some((published.generation, cursors));
+            }
+        }
+        if checkpoint == 6 {
+            assert!(
+                pending,
+                "the large cohort must still have persisted work at restart"
+            );
+            archive = ConversationArchiveState::default();
+            restarted = true;
+        }
+        if !pending && !archive.chat_projection.advance_capture("agent-1").unwrap() {
+            settled = true;
+            break;
+        }
+    }
+    assert!(
+        settled && restarted && advanced,
+        "source-free recount must advance, survive restart and terminate"
+    );
+    assert!(cold_bootstrap::archive_display_ready(&context).unwrap());
+    let mut users = BTreeSet::new();
+    let mut assistants = 0;
+    let mut cursor = None;
+    let mut exhausted = false;
+    for _ in 0..128 {
+        let page = read(&context, &snapshot(&context), cursor.as_deref(), None, None).unwrap();
+        for event in page.events {
+            match event.role {
+                Some(AgentChatRole::User) => assert!(users.insert(event.id)),
+                Some(AgentChatRole::Assistant) => {
+                    assistants += 1;
+                    assert!(event.id.starts_with("archive-display:"));
+                }
+                _ => panic!("unexpected saved message kind"),
+            }
+        }
+        cursor = page.next_before;
+        if cursor.is_none() {
+            exhausted = true;
+            break;
+        }
+    }
+    assert!(exhausted, "the full saved cohort must exhaust Older");
+    assert_eq!(
+        users,
+        (0..USERS)
+            .map(|index| format!("saved-user-{index}"))
+            .collect()
+    );
+    assert_eq!(assistants, 1);
+    let revision = head("agent-1").unwrap();
+    for _ in 0..3 {
+        assert!(!archive.bootstrap_saved_chat(&context).unwrap());
+        assert!(!archive.chat_projection.advance_capture("agent-1").unwrap());
+        assert_eq!(
+            head("agent-1").unwrap(),
+            revision,
+            "quiet input cannot restart the recount"
+        );
+    }
+}
+
+#[test]
 fn archive_display_upgrades_ready_committed_head_without_explicit_retire() {
     let (_guard, temp) = isolated_home();
     let events = legacy_pair(temp.path(), &"A saved answer. ".repeat(90));

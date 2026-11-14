@@ -779,25 +779,197 @@ async fn ordinary_live_history_progresses_beside_saved_off_capture() {
 
     let (_, follow_up) = collect_agent_metrics_with_sampler(&state, live_sample).await;
     assert_eq!(follow_up.background_captures.len(), 2);
-    let mut workers = Vec::new();
+    let mut workers = tokio::task::JoinSet::new();
+    let (live_finished, live_completion) = tokio::sync::oneshot::channel();
+    let mut live_finished = Some(live_finished);
+    let mut saved_task = None;
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(30);
     status::dispatch_capture_follow_up(&state, follow_up.background_captures, |claim| {
+        let is_live = claim.request.session_id == session;
+        let is_saved = claim.request.session_id == saved_config.session_id;
+        let finished = if is_live { live_finished.take() } else { None };
         let state = state.clone();
-        workers.push(tokio::spawn(async move {
+        let worker = workers.spawn(async move {
             crate::commands::background_capture::run_background_capture(&state, claim).await;
-        }));
-    })
-    .await;
-    tokio::time::timeout(Duration::from_secs(30), async {
-        for worker in workers {
-            worker.await.unwrap();
+            if let Some(finished) = finished {
+                let _ = finished.send(());
+            }
+        });
+        if is_saved {
+            saved_task = Some(worker);
         }
     })
-    .await
-    .expect("both saved and live capture must finish");
-    let canonical = queued_live_recent(&state, &session, Some(preview.revision)).await;
+    .await;
+    drop(live_finished);
+    let qualifying = state.clone();
+    let live_session = session.clone();
+    // Retain this task outside the timed observation too: its recent publisher
+    // uses spawn_blocking, so dropping its future is not a complete teardown.
+    let mut qualification = tokio::spawn(async move {
+        live_completion.await.ok()?;
+        // Worker exit can also mean a logged capture error. The normal read
+        // must qualify canonical history before the original LIVE deadline.
+        let canonical =
+            queued_live_recent(&qualifying, &live_session, Some(preview.revision)).await;
+        let qualified_head =
+            crate::state::conversation_archive::chat_read::head(&live_session).unwrap();
+        // An already-ready task can beat an expired timeout when polled late.
+        // Its own completion time must establish the deadline independently.
+        let qualified_at = tokio::time::Instant::now();
+        Some((canonical, qualified_head, qualified_at))
+    });
+    let live = tokio::time::timeout_at(deadline, &mut qualification).await;
+    let observation_elapsed = started.elapsed();
+    let saved_pending_at_live = saved_task.as_ref().is_some_and(|task| !task.is_finished());
+    let mut worker_errors = Vec::new();
+    // This is a teardown guard, not the LIVE latency budget. A source-free
+    // physical recount has separate bounded-checkpoint coverage.
+    let cleanup = tokio::time::timeout(Duration::from_secs(120), async {
+        while let Some(result) = workers.join_next().await {
+            if let Err(error) = result {
+                worker_errors.push(error.to_string());
+            }
+        }
+    })
+    .await;
+    if cleanup.is_err() {
+        workers.abort_all();
+        while workers.join_next().await.is_some() {}
+    }
+    if live.is_err() {
+        // Joining after expiry cannot turn the recorded deadline into a pass.
+        // Aborted LIVE capture closes its sender; an active bounded read drains.
+        let late_progress = qualification
+            .await
+            .ok()
+            .flatten()
+            .map(|(page, _, _)| page.progress);
+        eprintln!("LIVE deadline expired; owned qualifier joined with progress {late_progress:?}");
+    }
+    assert!(
+        cleanup.is_ok(),
+        "owned saved capture must terminate before teardown"
+    );
+    assert!(
+        worker_errors.is_empty(),
+        "capture worker failures: {worker_errors:?}"
+    );
+    assert!(
+        saved_task.is_some(),
+        "the saved competitor must actually be dispatched"
+    );
+    let (canonical, qualified_head, qualified_at) = live
+        .expect("LIVE qualification must finish within its original 30-second deadline")
+        .expect("the LIVE qualification task must finish successfully")
+        .expect("the LIVE worker must finish successfully");
+    assert!(
+        qualified_at <= deadline,
+        "LIVE canonical qualification completed after its original 30-second deadline"
+    );
+    let qualification_elapsed = qualified_at.duration_since(started);
     assert_eq!(canonical.progress, "ready");
     assert!(canonical.recent_admission.is_none());
+    assert!(canonical.conversation_id.is_some());
+    assert!(canonical.generation.is_some());
+    assert!(canonical.source_epoch.is_some());
     assert!(canonical.next_before.is_some());
+    eprintln!("LIVE canonical qualification: {qualification_elapsed:?}; observed at {observation_elapsed:?}; saved capture pending: {saved_pending_at_live}");
+    assert_eq!(
+        crate::state::conversation_archive::chat_read::head(&session).unwrap(),
+        qualified_head,
+        "cohort verification must use the publication qualified before the deadline"
+    );
+    // The real Older cursor pins that immutable publication. Verify all of its
+    // rows without charging later Older requests to first-page qualification.
+    let mut rows = canonical.events;
+    let mut cursor = canonical.next_before;
+    for _ in 0..8 {
+        let Some(before) = cursor.take() else { break };
+        let older = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            &state,
+            session.clone(),
+            Some(before),
+            None,
+            None,
+            None,
+            crate::commands::chat::RecentChatRead::default(),
+        )
+        .await
+        .unwrap();
+        assert!(older.older_page);
+        assert_eq!(older.generation, canonical.generation);
+        assert_eq!(older.source_epoch, canonical.source_epoch);
+        rows.extend(older.events);
+        cursor = older.next_before;
+    }
+    assert!(
+        cursor.is_none(),
+        "the complete LIVE fixture must exhaust Older"
+    );
+    let ids = rows
+        .iter()
+        .map(|row| &row.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        ids.len(),
+        rows.len(),
+        "Older must not repeat LIVE identities"
+    );
+    for role in [
+        wardian_core::models::chat::AgentChatRole::User,
+        wardian_core::models::chat::AgentChatRole::Assistant,
+    ] {
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.role.as_ref() == Some(&role))
+                .count(),
+            100
+        );
+    }
+    for index in 0..96 {
+        for text in [
+            format!("Please retain controlled history turn {index}."),
+            format!("Controlled assistant history {index} is complete."),
+        ] {
+            assert!(
+                rows.iter()
+                    .any(|row| row.text.as_deref() == Some(text.as_str())),
+                "missing qualified LIVE cohort row: {text}"
+            );
+        }
+    }
+    assert!(!state
+        .conversation_archive
+        .chat_projection
+        .has_pending_capture_work(&saved_config.session_id));
+    let saved_snapshot =
+        crate::commands::chat::agent_archive_capture_snapshot(&state, &saved_config.session_id)
+            .await
+            .unwrap();
+    let saved_context =
+        crate::commands::chat::conversation_archive_context_from_snapshot(&saved_snapshot);
+    let saved_capture = state
+        .conversation_archive
+        .provider_log_capture_state(
+            &saved_config.session_id,
+            saved_context.provider_source_key.as_deref().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved_capture.committed_offset,
+        std::fs::metadata(&saved_capture.path).unwrap().len()
+    );
+    eprintln!(
+        "saved capture at EOF: status={}, reason={:?}, unknown_before={:?}, archive_head={}",
+        saved_capture.status,
+        saved_capture.reason,
+        saved_capture.unknown_before_offset,
+        crate::state::conversation_archive::chat_read::head(&saved_config.session_id)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
