@@ -94,13 +94,37 @@ at startup. This containment covers the launched owner only; it does not prove
 exit of a thread hosted by another daemon discovered outside that job.
 
 Codex binds the newly acquired prior-provider hold to the retained stop entry
-before releasing its runtime handles. For a contained Windows runtime, the
-stop worker releases that exact acquisition only after the existing tree
-verifier succeeds. Cancellation of the requesting command does not cancel the
-worker. A failed lease write retains the verified receipt for an online retry
-through resume or new-session before ordinary lifecycle lease acquisition.
+before releasing its runtime handles. The entry also retains the exact native
+owner and its generation gate through terminal-tree shutdown. Terminal job exit
+alone cannot release the hold: ordinary daemon discovery can put a thread's
+writer outside that job.
+
+Automatic release requires a thread previously observed on the captured private
+owner. After verified terminal-tree exit, the worker uses supported
+`thread/loaded/list` evidence, with a single `thread/unsubscribe` request when
+needed, to establish that the thread is unloaded. Missing, ambiguous, foreign,
+or timed-out evidence retains the hold. The worker then joins the owner's
+launch-contained Windows job using retained member handles, direct-child exit,
+and empty-job verification. Only this path can construct a private receipt
+matching the agent, runtime generation, and provider thread. Hold release
+compares that receipt and the complete acquisition under the lease locks.
+
+Cancellation of the requesting command does not cancel the worker. A failed
+lease write retains the verified receipt for an online retry through resume or
+new-session before ordinary lifecycle lease acquisition. An uncertain owner
+exit retains the runtime fence. Successful cleanup without writer evidence
+allows fresh rotation while preserving exclusion of the old session. A global
+daemon, an unknown owner, or a legacy hold cannot acquire a receipt from
+terminal exit. Startup continues to report retained holds through the existing
+log and saved-session Inbox diagnostic, and operator-attested recovery remains
+available.
 Archive-stage failure still preserves the previous configured identity and
 history; hold release does not finalize or bypass the pending close.
+
+Even a verified full reboot proves only exit of pre-boot process incarnations.
+It does not exclude a post-boot writer, and wall-clock hold age without host and
+boot provenance proves neither fact. Wardian does not infer hold release from
+restart or reboot. See [Codex Thread Writer Exit](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-11-13-codex-thread-writer-exit.md).
 
 Uncontained and legacy runtimes cannot acquire this evidence retroactively.
 Successful uncontained stops, including Unix stops, still let a fresh-session

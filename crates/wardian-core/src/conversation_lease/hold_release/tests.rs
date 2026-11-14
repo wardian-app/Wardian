@@ -159,3 +159,140 @@ fn legacy_hold_without_acquisition_cannot_be_operator_released() {
     );
     assert_eq!(load_leases_checked().unwrap(), vec![legacy]);
 }
+
+fn transition() -> ConversationLease {
+    let mut lease = hold();
+    lease.owner_kind = "agent_lifecycle".into();
+    lease.mode = "lifecycle_transition".into();
+    lease.owner_id = "current-transition".into();
+    lease.acquisition_id = "transition-acquisition".into();
+    // Fresh rotation may already have retargeted the reservation.
+    lease.resume_session = "fresh-session".into();
+    lease
+}
+
+#[test]
+fn verified_exit_releases_exact_hold_and_preserves_current_transition() {
+    let _lock = crate::tests::env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = home(temp.path());
+    let expected = hold();
+    for current in [None, Some(transition())] {
+        let mut leases = vec![expected.clone()];
+        leases.extend(current.clone());
+        save_leases(&leases).unwrap();
+        let mut verified = false;
+        release_previous_provider_hold_after_exit(&expected, |exact| {
+            assert_eq!(exact, &expected);
+            verified = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(verified);
+        assert_eq!(
+            load_leases_checked().unwrap(),
+            current.into_iter().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn verified_exit_rejects_foreign_other_mode_and_ambiguous_active_owners() {
+    let _lock = crate::tests::env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = home(temp.path());
+    let expected = hold();
+    let current = transition();
+    let mut foreign = current.clone();
+    foreign.agent_id = "foreign-agent".into();
+    foreign.resume_session = expected.resume_session.clone();
+    let mut resume = current.clone();
+    resume.mode = "background_resume".into();
+    let mut fresh = current.clone();
+    fresh.mode = "background_fresh".into();
+    let mut other_kind = current.clone();
+    other_kind.owner_kind = "automation".into();
+    let mut second = current.clone();
+    second.owner_id = "second-transition".into();
+    second.acquisition_id = "second-acquisition".into();
+    for owners in [
+        vec![foreign],
+        vec![resume],
+        vec![fresh],
+        vec![other_kind],
+        vec![current.clone(), second],
+        vec![current.clone(), current],
+    ] {
+        let mut leases = vec![expected.clone()];
+        leases.extend(owners);
+        save_leases(&leases).unwrap();
+        assert!(release_previous_provider_hold_after_exit(&expected, |_| {
+            panic!("conflicting owner must prevent verification")
+        })
+        .is_err());
+        assert_eq!(load_leases_checked().unwrap(), leases);
+    }
+}
+
+#[test]
+fn verified_exit_retains_changed_missing_and_duplicate_acquisitions() {
+    let _lock = crate::tests::env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = home(temp.path());
+    let expected = hold();
+    // Include fields outside the owner identity to pin full-record comparison.
+    for field in 0..12 {
+        let mut changed = expected.clone();
+        match field {
+            0 => changed.agent_id = "different-agent".into(),
+            1 => changed.provider = "claude".into(),
+            2 => changed.resume_session = "different-session".into(),
+            3 => changed.owner_kind = "agent_lifecycle".into(),
+            4 => changed.owner_id = "different-owner".into(),
+            5 => changed.acquisition_id = "different-acquisition".into(),
+            6 => changed.acquisition_id.clear(),
+            7 => changed.owner_node_id = Some("different-node".into()),
+            8 => changed.mode = "lifecycle_transition".into(),
+            9 => changed.started_at = "2026-02-01T00:00:00Z".into(),
+            10 => changed.heartbeat_at = "2026-02-01T00:00:00Z".into(),
+            _ => changed.expires_at = "9998-12-31T23:59:59Z".into(),
+        }
+        // owner_kind alone would make an uncertain hold invalid on load.
+        if field == 3 {
+            changed.mode = "lifecycle_transition".into();
+        }
+        save_leases(std::slice::from_ref(&changed)).unwrap();
+        assert!(release_previous_provider_hold_after_exit(&expected, |_| {
+            panic!("changed acquisition must prevent verification")
+        })
+        .is_err());
+        assert_eq!(load_leases_checked().unwrap(), vec![changed]);
+    }
+    for leases in [vec![], vec![expected.clone(), expected.clone()]] {
+        save_leases(&leases).unwrap();
+        assert!(release_previous_provider_hold_after_exit(&expected, |_| {
+            panic!("missing or ambiguous acquisition must prevent verification")
+        })
+        .is_err());
+        assert_eq!(load_leases_checked().unwrap(), leases);
+    }
+}
+
+#[test]
+fn verified_exit_callback_error_retains_hold_and_transition() {
+    let _lock = crate::tests::env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = home(temp.path());
+    let expected = hold();
+    let leases = vec![expected.clone(), transition()];
+    save_leases(&leases).unwrap();
+    assert_eq!(
+        release_previous_provider_hold_after_exit(&expected, |exact| {
+            assert_eq!(exact, &expected);
+            Err("writer exit receipt mismatch".into())
+        })
+        .unwrap_err(),
+        "writer exit receipt mismatch"
+    );
+    assert_eq!(load_leases_checked().unwrap(), leases);
+}

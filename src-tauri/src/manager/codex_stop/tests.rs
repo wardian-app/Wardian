@@ -86,18 +86,127 @@ async fn direct_child_exit_does_not_release_a_bound_prior_hold() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn terminal_job_exit_without_writer_evidence_retains_prior_hold() {
+    use wardian_core::conversation_lease::{load_leases_checked, save_leases};
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let home = tempfile::tempdir().unwrap();
+    let _env = LeaseHome::set(home.path());
+    let hold = prior_hold();
+    save_leases(std::slice::from_ref(&hold)).unwrap();
+    let (job, child, _pty, _descendant) =
+        crate::utils::process::test_contained_pty_tree(home.path()).await;
+    let signals = Arc::new(Signals::default());
+    let mut runtime = agent(&hold.agent_id, &signals);
+    runtime.config.lock().unwrap().resume_session = Some(hold.resume_session.clone());
+    runtime.process_id = child.process_id();
+    runtime.child_process = Some(child);
+    runtime.job_object = Some(job);
+    let handle = prepare_stop(home.path(), &hold.agent_id)
+        .unwrap()
+        .with_prior_hold(Some(hold.owner()))
+        .capture(runtime)
+        .begin_stop();
+    handle.wait().await.unwrap();
+    assert!(handle.0.tree_exited.load(Ordering::Acquire));
+    assert_eq!(load_leases_checked().unwrap(), vec![hold]);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn late_tui_exit_cannot_bypass_failed_native_owner_join_without_a_hold() {
+    use crate::delivery::codex_shared::test_support::{stop_fixture, WriterCase};
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let home = tempfile::tempdir().unwrap();
+    let _env = LeaseHome::set(home.path());
+    let mut fixture = stop_fixture(
+        home.path(),
+        "late-owner",
+        7,
+        "thread",
+        WriterCase::UnverifiedExit,
+    )
+    .await;
+    let broker = Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new());
+    broker
+        .install_stop_test_owner("late-owner", 7, fixture.owner.clone())
+        .await;
+    let owner = broker
+        .capture_codex_stop("late-owner", Some(7))
+        .await
+        .unwrap();
+    let signals = Arc::new(Signals::default());
+    signals.exited.store(true, Ordering::SeqCst);
+    let handle = prepare_stop(home.path(), "late-owner")
+        .unwrap()
+        .with_codex_owner(owner)
+        .unwrap()
+        .capture(agent("late-owner", &signals))
+        .begin_stop();
+    assert!(handle.wait().await.is_err());
+    assert!(!handle.observe_exit().unwrap());
+    assert!(await_quiescent(home.path(), "late-owner").await.is_err());
+    fixture.restore_containment().await;
+    retry_stop(home.path(), "late-owner").unwrap();
+    handle.wait().await.unwrap();
+    fixture.cleanup().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn real_codex_tree_exit_after_cancellation_releases_only_bound_acquisition() {
-    real_tree_release(false).await;
+    real_tree_release(
+        false,
+        crate::delivery::codex_shared::test_support::WriterCase::Owned,
+    )
+    .await;
 }
 
 #[cfg(windows)]
 #[tokio::test]
 async fn real_codex_tree_receipt_survives_lease_io_failure_for_online_retry() {
-    real_tree_release(true).await;
+    real_tree_release(
+        true,
+        crate::delivery::codex_shared::test_support::WriterCase::Owned,
+    )
+    .await;
 }
 
 #[cfg(windows)]
-async fn real_tree_release(fail_release: bool) {
+#[tokio::test]
+async fn daemon_hosted_thread_retains_hold_after_contained_tui_and_owner_exit() {
+    real_tree_release(
+        false,
+        crate::delivery::codex_shared::test_support::WriterCase::DaemonHosted,
+    )
+    .await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn missing_supported_unload_evidence_retains_hold_but_allows_fresh_rotation() {
+    real_tree_release(
+        false,
+        crate::delivery::codex_shared::test_support::WriterCase::MissingUnload,
+    )
+    .await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn unverified_owner_exit_retains_hold_and_exact_fence_until_retry() {
+    real_tree_release(
+        false,
+        crate::delivery::codex_shared::test_support::WriterCase::UnverifiedExit,
+    )
+    .await;
+}
+
+#[cfg(windows)]
+async fn real_tree_release(
+    fail_release: bool,
+    case: crate::delivery::codex_shared::test_support::WriterCase,
+) {
+    use crate::delivery::codex_shared::test_support::{stop_fixture, WriterCase};
     use std::os::windows::io::AsRawHandle;
     use wardian_core::conversation_lease::{load_leases_checked, save_leases};
     let _lock = crate::utils::wardian_test_env_lock_async().await;
@@ -109,6 +218,16 @@ async fn real_tree_release(fail_release: bool) {
     save_leases(&[hold.clone(), later.clone()]).unwrap();
     let history = home.path().join("history.jsonl");
     std::fs::write(&history, "retained history\n").unwrap();
+    let mut fixture =
+        stop_fixture(home.path(), &hold.agent_id, 7, &hold.resume_session, case).await;
+    let broker = Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new());
+    broker
+        .install_stop_test_owner(&hold.agent_id, 7, fixture.owner.clone())
+        .await;
+    let owner = broker
+        .capture_codex_stop(&hold.agent_id, Some(7))
+        .await
+        .unwrap();
     let (job, child, pty, descendant) =
         crate::utils::process::test_contained_pty_tree(home.path()).await;
     let signals = Arc::new(Signals::default());
@@ -120,6 +239,8 @@ async fn real_tree_release(fail_release: bool) {
     runtime.child_process = Some(child);
     runtime.job_object = Some(job);
     let guard = prepare_stop(home.path(), &hold.agent_id)
+        .unwrap()
+        .with_codex_owner(owner)
         .unwrap()
         .with_prior_hold(Some(hold.owner()))
         .capture(runtime);
@@ -133,7 +254,7 @@ async fn real_tree_release(fail_release: bool) {
     // Model cancellation during the broker await: Drop must finish the exact
     // retained stop and hold release without an observing request surviving.
     drop(guard);
-    if fail_release {
+    if fail_release || case == WriterCase::UnverifiedExit {
         assert!(await_quiescent(home.path(), &hold.agent_id).await.is_err());
         assert_eq!(entries(&key(home.path(), &hold.agent_id).unwrap()).len(), 1);
         assert_eq!(
@@ -142,7 +263,10 @@ async fn real_tree_release(fail_release: bool) {
             },
             winapi::um::winbase::WAIT_OBJECT_0
         );
-        save_leases(&[hold.clone(), later.clone()]).unwrap();
+        if fail_release {
+            save_leases(&[hold.clone(), later.clone()]).unwrap();
+        }
+        fixture.restore_containment().await;
         recover_prior_hold(home.path(), &hold.agent_id)
             .await
             .unwrap();
@@ -151,7 +275,30 @@ async fn real_tree_release(fail_release: bool) {
     recover_prior_hold(home.path(), &hold.agent_id)
         .await
         .unwrap();
-    assert_eq!(load_leases_checked().unwrap(), vec![later]);
+    assert_eq!(
+        load_leases_checked().unwrap(),
+        if case == WriterCase::Owned {
+            vec![later]
+        } else {
+            vec![hold, later]
+        }
+    );
+    if let Some(writer) = fixture.external_writer.as_mut() {
+        assert!(
+            writer.try_wait().unwrap().is_none(),
+            "an out-of-job writer survives both contained trees"
+        );
+    }
+    assert_eq!(
+        fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request["method"] == "thread/unsubscribe")
+            .count(),
+        usize::from(case != WriterCase::DaemonHosted)
+    );
     assert_eq!(
         unsafe { winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0) },
         winapi::um::winbase::WAIT_OBJECT_0
@@ -165,6 +312,7 @@ async fn real_tree_release(fail_release: bool) {
         serde_json::to_value(&*config.lock().unwrap()).unwrap(),
         serde_json::to_value(config_before).unwrap()
     );
+    fixture.cleanup().await;
 }
 
 #[tokio::test]

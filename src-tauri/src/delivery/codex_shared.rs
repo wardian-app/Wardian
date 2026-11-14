@@ -34,7 +34,7 @@ mod task_delivery;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod version;
-pub use owner::{CodexSharedOwner, CodexTuiAttachment};
+pub use owner::{CodexSharedOwner, CodexThreadExit, CodexTuiAttachment};
 
 // Erase only the split writer, preserving each transport's handshake buffers.
 type SocketWriter = Box<

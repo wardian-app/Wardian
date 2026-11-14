@@ -19,6 +19,9 @@ mod policy;
 mod preparation_tests;
 #[path = "startup_resources.rs"]
 mod startup_resources;
+#[path = "owner_stop.rs"]
+pub(super) mod stop;
+pub use stop::CodexThreadExit;
 
 /// Phase durations for one owner startup.
 ///
@@ -351,8 +354,9 @@ pub struct CodexSharedOwner {
     launch_config: Mutex<Option<super::launch_config::LaunchConfigGuard>>,
     settings_operation: Mutex<()>,
     _memory: Option<wardian_core::memory::MemoryCapabilityLease>,
+    verified_thread: StdMutex<Option<String>>,
     #[cfg(windows)]
-    job: Mutex<Option<win32job::Job>>,
+    job: Mutex<Option<crate::utils::process::RuntimeProcessJob>>,
 }
 
 impl std::fmt::Debug for CodexSharedOwner {
@@ -494,7 +498,8 @@ impl CodexSharedOwner {
         }
         let child_spawn_at = std::time::Instant::now();
         #[cfg(windows)]
-        let spawned = crate::utils::process::OwnedBootstrapChild::spawn_contained(&mut command);
+        let spawned =
+            crate::utils::process::OwnedBootstrapChild::spawn_contained_runtime(&mut command);
         #[cfg(not(windows))]
         let spawned = command.spawn().map_err(|error| error.to_string());
         let spawned = match spawned {
@@ -522,6 +527,7 @@ impl CodexSharedOwner {
         timings.child_spawn = child_spawn_at.elapsed();
         let mut connected = None;
         let mut owned_socket = None;
+        let mut verified_thread = None;
         let timings = &mut timings;
         let start = async {
             // A private socket must appear while our daemon is alive. No controller
@@ -624,12 +630,14 @@ impl CodexSharedOwner {
                     ).await?;
                     policy.validate(&response)?;
                     let thread_id = client.bind(&response)?;
+                    attachment::require_observed_thread(&client, &thread_id).await?;
                     if spec.config.resume_session.as_deref().is_some_and(|id| id != thread_id) {
                         return Err(CodexSharedError::unsupported("background resume returned a different thread"));
                     }
                     client.install_initial_context(&initialization_context(
                         &spec.target_agent_id, &spec.config.session_name,
                     )).await?;
+                    verified_thread = Some(thread_id);
                 }
                 attachment::child_alive(&mut child)?;
                 Ok::<_, CodexSharedError>((client.clone(), observed_version))
@@ -672,6 +680,7 @@ impl CodexSharedOwner {
                 launch_config: Mutex::new(launch_config),
                 settings_operation: Mutex::new(()),
                 _memory: memory,
+                verified_thread: StdMutex::new(verified_thread),
                 #[cfg(windows)]
                 job: Mutex::new(Some(job)),
             })),
@@ -766,6 +775,10 @@ impl CodexSharedOwner {
             restore_launch_overlay(&mut overlay)?;
             attachment::child_alive(child)?;
             tui_alive().await?;
+            *self
+                .verified_thread
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(id);
             Ok(response)
         })
         .await
@@ -782,7 +795,12 @@ impl CodexSharedOwner {
         if let Some(child) = owned.as_mut() {
             #[cfg(windows)]
             {
-                self.job.lock().await.take();
+                let job = self.job.lock().await;
+                job.as_ref()
+                    .ok_or_else(|| CodexSharedError::uncertain("owner containment is unavailable"))?
+                    .stop_and_join_tokio(child)
+                    .await
+                    .map_err(CodexSharedError::uncertain)?;
             }
             #[cfg(unix)]
             {
@@ -804,6 +822,8 @@ impl CodexSharedOwner {
                 .wait()
                 .await
                 .map_err(|_| CodexSharedError::uncertain("owner exit was not observed"))?;
+            #[cfg(windows)]
+            self.job.lock().await.take();
             owned.take();
         }
         drop(owned);

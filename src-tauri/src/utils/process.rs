@@ -202,6 +202,35 @@ impl RuntimeProcessJob {
         &self,
         child: &mut (dyn portable_pty::Child + Send),
     ) -> Result<(), String> {
+        self.stop_and_join_with(|| {
+            child
+                .try_wait()
+                .map(|status| status.is_some())
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Join a Tokio runtime tree using the same creation fence, retained member
+    /// handles, and empty-job verification as the PTY runtime path.
+    /// The caller must retain this job and its original child together.
+    pub(crate) async fn stop_and_join_tokio(
+        &self,
+        child: &mut tokio::process::Child,
+    ) -> Result<(), String> {
+        self.stop_and_join_with(|| {
+            child
+                .try_wait()
+                .map(|status| status.is_some())
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    async fn stop_and_join_with(
+        &self,
+        mut child_exited: impl FnMut() -> Result<bool, String>,
+    ) -> Result<(), String> {
         if !self.contained_from_launch {
             return Err("Provider tree was not contained before launch".into());
         }
@@ -210,10 +239,7 @@ impl RuntimeProcessJob {
         self.terminate()?;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let child_exited = child
-                .try_wait()
-                .map_err(|error| error.to_string())?
-                .is_some();
+            let child_exited = child_exited()?;
             use std::os::windows::io::AsRawHandle;
             let mut members_exited = true;
             for member in &members {
@@ -506,6 +532,24 @@ impl OwnedBootstrapChild {
             |job, pid| assign_pid_to_job(job, pid, "contained child"),
             resume_suspended_process,
         )
+    }
+
+    /// Transfer a runtime child and evidence of containment established before
+    /// its first instruction. Only the successful suspended launch can create
+    /// this runtime job; arbitrary raw jobs cannot acquire that evidence.
+    #[cfg(windows)]
+    pub(crate) fn spawn_contained_runtime(
+        command: &mut tokio::process::Command,
+    ) -> Result<(tokio::process::Child, RuntimeProcessJob), String> {
+        Self::spawn_contained(command).map(|(child, job)| {
+            (
+                child,
+                RuntimeProcessJob {
+                    job,
+                    contained_from_launch: true,
+                },
+            )
+        })
     }
 
     pub(crate) fn child_mut(&mut self) -> &mut tokio::process::Child {

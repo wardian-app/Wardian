@@ -150,3 +150,69 @@ async fn cancellation_closes_job_and_leaves_no_live_descendant() {
     exited(&child).await;
     exited(&descendant).await;
 }
+
+#[tokio::test]
+async fn tokio_runtime_stop_joins_owner_and_immediate_descendant() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut child, job) =
+        OwnedBootstrapChild::spawn_contained_runtime(&mut command(directory.path())).unwrap();
+    assert!(job.contained_from_launch());
+    let owner = process_handle(child.id().unwrap());
+    let descendant = descendant(directory.path()).await;
+    assert!(job.active_processes().unwrap() >= 2);
+
+    job.stop_and_join_tokio(&mut child).await.unwrap();
+
+    // Assert kernel termination immediately after join, without a grace period.
+    for member in [&owner, &descendant] {
+        assert_eq!(
+            unsafe { winapi::um::synchapi::WaitForSingleObject(member.as_raw_handle() as _, 0) },
+            winapi::um::winbase::WAIT_OBJECT_0
+        );
+    }
+    assert!(child.try_wait().unwrap().is_some());
+    assert_eq!(job.active_processes().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn tokio_runtime_rejects_uncontained_boundary_before_stopping_child() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut child, raw_job) =
+        OwnedBootstrapChild::spawn_contained(&mut command(directory.path())).unwrap();
+    // Even an actually contained child cannot upgrade fallback evidence.
+    let job = RuntimeProcessJob::fallback(raw_job);
+    let descendant = descendant(directory.path()).await;
+    assert_eq!(
+        job.stop_and_join_tokio(&mut child).await.unwrap_err(),
+        "Provider tree was not contained before launch"
+    );
+    assert!(child.try_wait().unwrap().is_none());
+    assert_eq!(
+        unsafe { winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0) },
+        winapi::shared::winerror::WAIT_TIMEOUT
+    );
+    job.terminate().unwrap();
+    child.wait().await.unwrap();
+    exited(&descendant).await;
+}
+
+#[tokio::test]
+async fn runtime_join_does_not_succeed_when_child_exit_verification_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut child, job) =
+        OwnedBootstrapChild::spawn_contained_runtime(&mut command(directory.path())).unwrap();
+    let descendant = descendant(directory.path()).await;
+    // Exercise the shared verifier with a failed child wait after a real tree
+    // has been sealed and terminated. Termination alone must not return success.
+    assert_eq!(
+        job.stop_and_join_with(|| Err("controlled child wait failure".into()))
+            .await
+            .unwrap_err(),
+        "controlled child wait failure"
+    );
+    // Failed verification retains ownership and permits a verified retry.
+    job.stop_and_join_tokio(&mut child).await.unwrap();
+    assert!(child.try_wait().unwrap().is_some());
+    assert_eq!(job.active_processes().unwrap(), 0);
+    exited(&descendant).await;
+}

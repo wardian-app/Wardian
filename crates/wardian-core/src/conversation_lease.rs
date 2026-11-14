@@ -1,6 +1,8 @@
 use fs2::FileExt;
 mod hold_release;
-pub use hold_release::release_previous_provider_hold_exact;
+pub use hold_release::{
+    release_previous_provider_hold_after_exit, release_previous_provider_hold_exact,
+};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
