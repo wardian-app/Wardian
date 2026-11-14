@@ -42,6 +42,8 @@ pub(crate) struct SourcePolicy {
     pub(crate) disabled: Vec<crate::commands::provider_log_acquisition::ProviderLogDisabledSpan>,
     pub(crate) open_disabled: Option<u64>,
     pub(crate) valid: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) blocked_reason: Option<String>,
     pub(crate) framed_starts: Vec<u64>,
 }
 
@@ -59,6 +61,18 @@ pub(super) fn publish_policy(
     context: &ConversationArchiveContext,
     state: &crate::commands::provider_log_acquisition::ProviderLogCaptureState,
 ) -> io::Result<()> {
+    let blocked_reason = state
+        .reason
+        .as_deref()
+        .filter(|reason| {
+            matches!(
+                *reason,
+                "provider_log_source_replaced"
+                    | "provider_log_truncated"
+                    | "provider_log_continuity_mismatch"
+            )
+        })
+        .map(str::to_owned);
     let mut policy = SourcePolicy {
         agent_id: context.agent_id.clone(),
         source_key: state.provider_source_key.clone(),
@@ -68,14 +82,8 @@ pub(super) fn publish_policy(
         unknown_before: state.unknown_before_offset.unwrap_or(0),
         disabled: state.disabled_spans.clone(),
         open_disabled: state.open_disabled_from,
-        valid: !matches!(
-            state.reason.as_deref(),
-            Some(
-                "provider_log_source_replaced"
-                    | "provider_log_truncated"
-                    | "provider_log_continuity_mismatch"
-            )
-        ),
+        valid: blocked_reason.is_none(),
+        blocked_reason,
         framed_starts: vec![0],
     };
     let mut file = File::open(&state.path)?;
@@ -83,6 +91,7 @@ pub(super) fn publish_policy(
         != state.native_identity
     {
         policy.valid = false;
+        policy.blocked_reason = Some("provider_log_source_replaced".into());
     }
     for offset in std::iter::once(policy.unknown_before)
         .chain(policy.disabled.iter().map(|span| span.end))
@@ -111,7 +120,6 @@ pub(crate) fn source_policy(context: &ConversationArchiveContext) -> io::Result<
     let policy: Option<SourcePolicy> = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     let policy = policy.ok_or_else(|| io::Error::other("source policy transition pending"))?;
     if bytes.len() as u64 != extent
-        || !policy.valid
         || policy.agent_id != context.agent_id
         || Some(policy.source_key.as_str()) != context.provider_source_key.as_deref()
         || policy.disabled.len() > 256
@@ -119,6 +127,13 @@ pub(crate) fn source_policy(context: &ConversationArchiveContext) -> io::Result<
         || policy.anchor.len > 4096
     {
         return Err(io::Error::other("source policy unavailable"));
+    }
+    if !policy.valid {
+        return Err(io::Error::other(
+            policy
+                .blocked_reason
+                .unwrap_or_else(|| "source policy unavailable".into()),
+        ));
     }
     Ok(policy)
 }
@@ -301,6 +316,24 @@ struct Work {
     published: Option<String>,
     bodies: VecDeque<BodyWork>,
     source_proof: Option<super::chat_logical_index::SourceProof>,
+    archive_display_handoff: bool,
+}
+
+impl Work {
+    fn request_archive_display(&mut self) -> io::Result<()> {
+        if self.head.progress == "ready"
+            && self.todo.is_empty()
+            && self.bodies.is_empty()
+            && !self.head.logical.pending()
+            && !self.head.logical.narrative_pending()
+            && cold_bootstrap::can_upgrade_saved_head(&self.candidate.context, &self.head)?
+        {
+            // This is scheduling intent. Only the gated bootstrap path may
+            // count physical archive inputs or publish a cold checkpoint.
+            self.archive_display_handoff = true;
+        }
+        Ok(())
+    }
 }
 
 struct BodyWork {
@@ -1641,6 +1674,21 @@ pub(crate) fn clip(value: &str, limit: usize) -> String {
     value[..end].to_string()
 }
 
+/// Narrative headers end before a partial word. Body chunk offsets and identity
+/// metadata retain their byte-exact clipping rules.
+fn narrative_preview(value: &str, limit: usize) -> String {
+    let bounded = clip(value, limit);
+    if bounded.len() == value.len() {
+        return bounded;
+    }
+    let end = if value[bounded.len()..].starts_with(char::is_whitespace) {
+        bounded.len()
+    } else {
+        bounded.rfind(char::is_whitespace).unwrap_or(0)
+    };
+    bounded[..end].trim_end().to_owned()
+}
+
 fn complete_path(value: &serde_json::Value) -> Option<&str> {
     value.as_str().filter(|path| path.len() <= 256)
 }
@@ -1881,7 +1929,7 @@ pub(crate) fn header(event: &AgentChatEvent) -> AgentChatEvent {
             .as_deref()
             .or_else(|| event.metadata["text_excerpt"].as_str())
             .or_else(|| event.metadata["archive_record"]["excerpt"].as_str())
-            .map(|text| clip(text, PREVIEW_BYTES)),
+            .map(|text| narrative_preview(text, PREVIEW_BYTES)),
         title: event.title.as_deref().map(|v| clip(v, 256)),
         status: event.status.clone(),
         turn_id: event.turn_id.as_deref().map(|v| clip(v, 256)),
@@ -1977,14 +2025,34 @@ impl ProjectionOwner {
     /// Restore saved history in fixed checkpoints without hydrating the archive
     /// writer. The caller holds the policy and per-agent archive gates.
     pub(super) fn bootstrap_saved(&self, context: &ConversationArchiveContext) -> io::Result<bool> {
-        let works = self
+        let mut works = self
             .work
             .lock()
             .map_err(|_| io::Error::other("chat projection owner poisoned"))?;
-        if works.contains_key(&context.agent_id) {
-            return Ok(false);
+        let handoff = if let Some(work) = works.get(&context.agent_id) {
+            if !work.archive_display_handoff {
+                return Ok(false);
+            }
+            if work.candidate.context != *context
+                || !cold_bootstrap::can_upgrade_saved_head(context, &work.head)?
+            {
+                works.remove(&context.agent_id);
+                return Ok(false);
+            }
+            true
+        } else {
+            false
+        };
+        let pending = cold_bootstrap::advance(context)?;
+        if handoff && !pending {
+            if !cold_bootstrap::archive_display_ready(context)? {
+                return Err(io::Error::other(
+                    "archive display handoff has no qualified saved head",
+                ));
+            }
+            works.remove(&context.agent_id);
         }
-        cold_bootstrap::advance(context)
+        Ok(pending)
     }
 
     pub(super) fn committed(&self, candidate: Candidate, capture_stamp: String) -> io::Result<()> {
@@ -2044,12 +2112,24 @@ impl ProjectionOwner {
             .work
             .lock()
             .map_err(|_| io::Error::other("chat projection owner poisoned"))?;
+        if source_proof.is_none()
+            && works.get(&agent_id).is_some_and(|old| {
+                old.archive_display_handoff
+                    && old.candidate.context == candidate.context
+                    && old.candidate.conversation_id == candidate.conversation_id
+            })
+        {
+            // The durable append changes physical stamps. Keep the gated
+            // recount owner; a materialized Candidate cannot replace its cohort.
+            return Ok(());
+        }
         // Replaying an unchanged settled capture must preserve the opaque
         // revision already held by a concurrent bounded source-renewal phase.
         // Source-proof publishers retain their existing qualification path.
         if source_proof.is_none()
             && works.get(&agent_id).is_some_and(|old| {
-                old.source_proof.is_none()
+                !old.archive_display_handoff
+                    && old.source_proof.is_none()
                     && old.head.progress == "ready"
                     && old.todo.is_empty()
                     && old.bodies.is_empty()
@@ -2069,7 +2149,8 @@ impl ProjectionOwner {
             return Ok(());
         }
         if let Some(old) = works.remove(&agent_id) {
-            let compatible = old.head.conversation_id == head.conversation_id
+            let compatible = !old.archive_display_handoff
+                && old.head.conversation_id == head.conversation_id
                 && old.head.source_key == head.source_key
                 && old.head.source_epoch == head.source_epoch
                 && old.source_proof.as_ref().map(|s| &s.admission)
@@ -2128,6 +2209,7 @@ impl ProjectionOwner {
                 published,
                 bodies,
                 source_proof,
+                archive_display_handoff: false,
             },
         );
         drop(works);
@@ -2145,6 +2227,12 @@ impl ProjectionOwner {
         let Some(work) = work_map.get_mut(agent_id) else {
             return Ok(false);
         };
+        if !work.archive_display_handoff {
+            work.request_archive_display()?;
+        }
+        if work.archive_display_handoff {
+            return Ok(false);
+        }
         // Only small immutable roots and this checkpoint's row/body updates are
         // staged. Candidate payloads and the remaining queues stay in place.
         let mut head = work.head.clone();
@@ -2352,8 +2440,30 @@ impl ProjectionOwner {
             work.candidate.events.clear();
             work.candidate.verified_ids.clear();
             work.candidate.generated_ids.clear();
+            work.request_archive_display()?;
         }
         Ok(pending)
+    }
+
+    /// Keep already owned projection work moving even when the provider source
+    /// is quiet. Archive handoffs are executed only by gated bootstrap_saved.
+    pub(crate) fn has_pending_capture_work(&self, agent_id: &str) -> bool {
+        self.work.lock().is_ok_and(|works| {
+            works.get(agent_id).is_some_and(|work| {
+                work.archive_display_handoff
+                    || work.head.progress != "ready"
+                    || !work.todo.is_empty()
+                    || !work.bodies.is_empty()
+                    || work.head.logical.pending()
+                    || work.head.logical.narrative_pending()
+            })
+        })
+    }
+
+    /// Return scheduling demand for ordinary indexing and gated archive replay.
+    /// Plain advance never performs cold archive I/O outside the archive gate.
+    pub(crate) fn advance_capture(&self, agent_id: &str) -> io::Result<bool> {
+        Ok(self.advance(agent_id)? || self.has_pending_capture_work(agent_id))
     }
 
     pub(crate) fn invalidate(&self, agent_id: &str) -> io::Result<()> {
@@ -2382,7 +2492,8 @@ impl ProjectionOwner {
         let Some(work) = works.get_mut(&context.agent_id) else {
             return Ok(None);
         };
-        if work.head.conversation_id != conversation_id
+        if work.archive_display_handoff
+            || work.head.conversation_id != conversation_id
             || work.head.source_key != context.provider_source_key
             || fence.conversation_id != conversation_id
             || fence.source_epoch != work.head.source_epoch
@@ -3778,6 +3889,18 @@ fn read_with_recent_limit(
             ..Default::default()
         }
     };
+    let blocked_progress = seed
+        .progress
+        .starts_with("capture_source_")
+        .then(|| seed.progress.clone());
+    let finish_recent = |mut result: AgentChatPage| {
+        if cursor.is_none() && detail_ref.is_none() {
+            if let Some(progress) = &blocked_progress {
+                result.progress.clone_from(progress);
+            }
+        }
+        finish(result)
+    };
     let seed_token = |seed: &str| {
         if limit == PAGE_ROWS {
             seed.to_owned()
@@ -3825,7 +3948,7 @@ fn read_with_recent_limit(
     if cold_rejected {
         result.bytes_read += store.bytes;
         result.records_decoded += store.objects;
-        return finish(result);
+        return finish_recent(result);
     }
     let mut current_head = None;
     if current.is_some() {
@@ -3960,7 +4083,7 @@ fn read_with_recent_limit(
                 result.unchanged = true;
                 result.bytes_read += store.bytes;
                 result.records_decoded += store.objects;
-                return finish(result);
+                return finish_recent(result);
             }
             seed = revalidated_seed;
             revalidated_seed_commentary = Some(current_commentary);
@@ -4004,7 +4127,7 @@ fn read_with_recent_limit(
                     result.progress.clone_from(progress);
                 }
             }
-            return finish(result);
+            return finish_recent(result);
         }
     }
     if let Some(detail_ref) = detail_ref.filter(|reference| reference.starts_with("seed:")) {
@@ -4027,7 +4150,7 @@ fn read_with_recent_limit(
         )?);
         result.bytes_read += store.bytes + 2 * (2 * HEAD_BYTES + POLICY_BYTES) as usize + 16 * 1024;
         result.records_decoded += store.objects + 5;
-        return finish(result);
+        return finish_recent(result);
     }
     let source_cursor = cursor.is_some_and(|cursor| cursor.starts_with("source:"));
     let mut seed_source_page = None;
@@ -5044,7 +5167,7 @@ fn read_with_recent_limit(
     }
     result.bytes_read += store.bytes;
     result.records_decoded += store.objects;
-    finish(result)
+    finish_recent(result)
 }
 
 fn revision_matches_heads(revision: &str, canonical: Option<&str>, source: Option<&str>) -> bool {

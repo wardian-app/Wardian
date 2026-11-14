@@ -1796,7 +1796,7 @@ pub(crate) async fn archive_background_capture_pass(
             let pending = state
                 .conversation_archive
                 .chat_projection
-                .advance(&request.session_id)
+                .advance_capture(&request.session_id)
                 .map_err(|_| "chat projection checkpoint failed".to_string())?;
             if pending
                 && result.background_stop != CaptureStop::Disabled

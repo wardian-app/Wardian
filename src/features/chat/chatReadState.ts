@@ -138,6 +138,9 @@ export function chatReadProgress(progress: string, hasRows = true): string | nul
     : "No public message in the recent window yet. History is updating.";
   if (progress === "oversized_record") return "Recent source contains a large record. History is updating.";
   if (progress === "ownership_pending") return "Waiting for a verified conversation source.";
+  if (progress === "capture_source_replaced") return "History capture is paused because the provider log was replaced. Saved messages remain available. Recent messages from the replacement could not be verified.";
+  if (progress === "capture_source_truncated") return "History capture is paused because the provider log was truncated.";
+  if (progress === "capture_source_rewritten") return "History capture is paused because the provider log changed before the capture position.";
   if (progress === "source_unavailable") return "Conversation source is not available yet.";
   if (progress === "privacy_disabled") return "Conversation logging is disabled.";
   if (progress === "no_admitted_rows") return "No captured message in the recent window yet.";

@@ -4,6 +4,81 @@ use wardian_core::conversations::AgentConversationLoggingSetting;
 use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
 
 #[test]
+fn narrative_header_preview_ends_at_a_complete_word() {
+    let prefix = format!("{}Actions → ", "A complete sentence. ".repeat(48));
+    assert!(prefix.len() < PREVIEW_BYTES);
+    let text = format!("{prefix}AgentSettings another paragraph");
+    let shown = header(&event("word-boundary", &text)).text.unwrap();
+    assert!(text.starts_with(&shown));
+    assert!(shown.len() <= PREVIEW_BYTES);
+    assert!(shown.ends_with('→'), "preview splits a word: {shown:?}");
+    assert_eq!(
+        header(&event("short", "Complete text")).text.as_deref(),
+        Some("Complete text")
+    );
+    assert_eq!(narrative_preview("one two next", 7), "one two");
+    assert_eq!(narrative_preview("one\n\ntwoword", 8), "one");
+    assert_eq!(narrative_preview("éé word", 4), "éé");
+    assert_eq!(narrative_preview("unbroken", 4), "");
+}
+
+#[test]
+fn replaced_capture_source_reports_its_reason_in_recent_chat() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("source.jsonl");
+    let contents = format!(
+        "{}\n{}",
+        json!({"type":"session_meta","payload":{"id":"one"}}),
+        native_message("latest answer")
+    );
+    let (snapshot, _) = owned_native_source(&path, &contents);
+    let ctx = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let source_key = ctx.provider_source_key.as_deref().unwrap();
+    let mut previous = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1", "codex", &path, source_key, None, true,
+    )
+    .unwrap()
+    .next;
+    previous.unknown_before_offset = Some(contents.find('\n').unwrap() as u64 + 1);
+    previous.native_identity.secondary ^= 1;
+    let batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        source_key,
+        Some(previous.clone()),
+        true,
+    )
+    .unwrap();
+    assert_eq!(batch.consumed_bytes, 0);
+    assert_eq!(batch.next.committed_offset, previous.committed_offset);
+    assert_eq!(
+        batch.next.reason.as_deref(),
+        Some("provider_log_source_replaced")
+    );
+    publish_policy(&ctx, &batch.next).unwrap();
+    let seed = crate::commands::chat_recent_seed::read(&snapshot, None).unwrap();
+    assert!(
+        seed.events.is_empty(),
+        "replacement never inherits an old byte policy"
+    );
+    assert_eq!(seed.progress, "capture_source_replaced");
+    let page = read(&ctx, &snapshot, None, None, None).unwrap();
+    assert_eq!(page.progress, "capture_source_replaced");
+    let owner = ProjectionOwner::default();
+    let mut saved_event = event("saved", "Saved reply");
+    saved_event.provider = "codex".into();
+    let mut saved = candidate(vec![saved_event]);
+    saved.context = ctx.clone();
+    owner.committed(saved, "saved-capture".into()).unwrap();
+    while owner.advance("agent-1").unwrap() {}
+    let saved_page = read(&ctx, &snapshot, None, None, None).unwrap();
+    assert_eq!(saved_page.progress, "capture_source_replaced");
+    assert_eq!(saved_page.events.len(), 1);
+    assert_eq!(saved_page.events[0].text.as_deref(), Some("Saved reply"));
+}
+
+#[test]
 fn recent_watch_cutoff_without_timestamp_or_recorded_identity_is_withheld() {
     let policy = super::super::ConversationCaptureState {
         skip_events_at_or_before: Some("2026-11-07T00:00:00Z".into()),
@@ -1890,6 +1965,9 @@ fn cursor_failure_preserves_previous_head_and_retry_publishes_the_committed_batc
     let archive = ConversationArchiveState::default();
     let mut ctx = ConversationArchiveContext::for_agent_id("agent-1", "codex");
     ctx.provider_source_key = Some("codex:session:one".into());
+    // This case requires native publication after cursor commit. An unowned
+    // saved source instead finishes through the bounded archive handoff.
+    ctx.provider_session_ids = vec!["one".into()];
     archive
         .append_delivered_input_with_context(ctx.clone(), "previous", None)
         .unwrap();
@@ -1917,8 +1995,11 @@ fn cursor_failure_preserves_previous_head_and_retry_publishes_the_committed_batc
         .unwrap()
         .is_none());
     archive
-        .append_provider_log_batch_with_context(ctx, &batch.events, None, &batch.next)
+        .append_provider_log_batch_with_context(ctx.clone(), &batch.events, None, &batch.next)
         .unwrap();
+    assert!(super::super::chat_logical_index::source_proof(&ctx)
+        .unwrap()
+        .is_some());
     assert_ne!(head("agent-1").unwrap(), previous);
 }
 
@@ -2152,6 +2233,7 @@ fn skipped_native_spans_and_first_disabled_eof_are_never_admitted() {
         disabled: Vec::new(),
         open_disabled: Some(100),
         valid: true,
+        blocked_reason: None,
         framed_starts: vec![100],
     };
     assert_eq!(policy.recent_interval(100), None);
@@ -10458,6 +10540,7 @@ fn owned_native_source_for_provider_session(
         disabled: Vec::new(),
         open_disabled: None,
         valid: true,
+        blocked_reason: None,
         framed_starts: vec![0],
     };
     write_json_atomic(&policy_path(&context.agent_id).unwrap(), &Some(&policy)).unwrap();

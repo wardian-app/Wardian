@@ -290,18 +290,29 @@ fn read_window_limited(
                 checkpoint: None,
             })
         }
-        Err(_) => {
+        Err(error) => {
+            let progress = match error.to_string().as_str() {
+                "provider_log_source_replaced" | "source policy epoch changed" => {
+                    "capture_source_replaced"
+                }
+                "provider_log_truncated" => "capture_source_truncated",
+                "provider_log_continuity_mismatch" | "source continuity changed" => {
+                    "capture_source_rewritten"
+                }
+                _ => "ownership_pending",
+            };
+            let revision = format!("unowned-{progress}");
             return Ok(Seed {
-                revision: "unowned".into(),
+                unchanged: previous == Some(revision.as_str()),
+                revision,
                 events: Vec::new(),
-                progress: "ownership_pending".into(),
+                progress: progress.into(),
                 bytes_read: (2 * HEADER_BYTES
                     + crate::state::conversation_archive::chat_read::POLICY_BYTES)
                     as usize,
                 records_decoded: 2,
-                unchanged: previous == Some("unowned"),
                 checkpoint: None,
-            })
+            });
         }
     };
     let mut checkpoint = SeedCheckpoint {

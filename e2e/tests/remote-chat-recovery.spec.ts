@@ -93,7 +93,7 @@ function declaredHeader(index: number): AgentChatEvent {
 }
 
 /** Exercise the normal HTTP client with one fixed cohort; this is not provider proof. */
-async function installBoundedChat(page: Page, retryableFirst = false, status: "Off" | "Processing" = "Off") {
+async function installBoundedChat(page: Page, retryableFirst = false, status: "Off" | "Processing" = "Off", progress = "ready") {
   const agent = { ...boundedAgent, status };
   const traffic: { url: string; request_bytes: number; response_bytes: number; unchanged: boolean }[] = [];
   const statusTraffic = { connections: 0, client_frames: 0, client_bytes: 0, server_frames: 0, server_bytes: 0 };
@@ -111,7 +111,7 @@ async function installBoundedChat(page: Page, retryableFirst = false, status: "O
       expect(Number.isInteger(limit) && limit >= 1 && limit <= 80).toBe(true);
       const dto: AgentChatPage = {
         session_id: boundedAgent.session_id, conversation_id: "bounded-conversation", generation: "bounded-generation",
-        source_epoch: null, revision: "bounded-revision", unchanged, reset: false, progress: "ready",
+        source_epoch: null, revision: "bounded-revision", unchanged, reset: false, progress,
         aliases: [], removed_ids: [],
         detail: detail ? { event_id: "bounded-79", text: "x".repeat(60_000), next: null, complete: true } : null,
         bytes_read: 0, records_decoded: 0,
@@ -152,6 +152,17 @@ async function installBoundedChat(page: Page, retryableFirst = false, status: "O
   await page.getByRole("button", { name: "Open Bounded Chat details" }).click();
   return { chat: traffic, status_stream: statusTraffic };
 }
+
+test("Chat explains a replaced provider source while keeping saved messages readable", async ({ page }) => {
+  await installBoundedChat(page, false, "Off", "capture_source_replaced");
+  await expect(page.getByText("Declared header 78", { exact: true })).toBeVisible();
+  await expect(page.getByText(/History capture is paused because the provider log was replaced/)).toBeVisible();
+  const screenshotDir = process.env.WARDIAN_CHAT_CAPTURE_SCREENSHOT_DIR;
+  if (screenshotDir) {
+    fs.mkdirSync(screenshotDir, { recursive: true });
+    await page.screenshot({ path: path.join(screenshotDir, "replaced-source.png"), animations: "disabled" });
+  }
+});
 
 test("healthy Off Chat automatically recovers a retryable read without a roster change", async ({ page }) => {
   const { chat: traffic } = await installBoundedChat(page, true);

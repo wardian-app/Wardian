@@ -93,6 +93,124 @@ pub(super) struct Admission<'a> {
     pub(super) sequence_trusted: bool,
 }
 
+/// Ownership of complete saved archive envelopes, independent of native-source
+/// admission. Member-to-group presentation aliases reconcile archived display
+/// rows only; this scope grants no native source-coordinate correspondence.
+pub(super) struct ArchiveAdmission<'a> {
+    pub(super) context: &'a ConversationArchiveContext,
+    pub(super) conversation: &'a str,
+    pub(super) generation: &'a str,
+    pub(super) extent: u64,
+}
+
+impl ArchiveAdmission<'_> {
+    fn scope(&self) -> String {
+        digest(
+            &serde_json::to_vec(&json!([
+                "archive-display-v1",
+                self.context.agent_id,
+                self.context.provider,
+                self.context.provider_source_key,
+                self.context.provider_session_ids,
+                self.conversation,
+                self.generation,
+                self.extent,
+            ]))
+            .unwrap(),
+        )
+    }
+
+    fn owned(&self, event: &AgentChatEvent) -> bool {
+        event.session_id == self.context.agent_id
+            && event.provider == "codex"
+            && event.provider == self.context.provider
+            && event.kind == AgentChatEventKind::Message
+            && event.role == Some(wardian_core::models::chat::AgentChatRole::Assistant)
+            && event.metadata["provider_log"] == true
+            && event.metadata["generated"] != true
+            && event.metadata["chat_provisional"] != true
+            && event.metadata["chat_legacy_identity_ineligible"] != true
+            && !event.id.starts_with("source:")
+            && [
+                "chat_source_ref",
+                "chat_source_start",
+                "chat_source_end",
+                "chat_source_epoch",
+            ]
+            .iter()
+            .all(|key| event.metadata[*key].is_null())
+            && event.metadata["conversation_archive_id"]
+                .as_str()
+                .is_none_or(|id| id == self.conversation)
+            && event.metadata["provider_session_id"]
+                .as_str()
+                .is_none_or(|id| {
+                    self.context
+                        .provider_session_ids
+                        .iter()
+                        .any(|known| known == id)
+                })
+    }
+
+    fn evidence(&self, event: &AgentChatEvent) -> Option<(String, bool)> {
+        let required = |key: &str| {
+            event
+                .metadata
+                .get(key)?
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+        };
+        let optional = |key: &str| match event.metadata.get(key) {
+            None | Some(serde_json::Value::Null) => Some(None),
+            Some(_) => required(key).map(Some),
+        };
+        let phase = optional("provider_phase")?;
+        let completed = match (event.source.as_deref(), required("raw_type")) {
+            (Some("event_msg"), Some("agent_message" | "assistant_message"))
+                if event.turn_id.is_none()
+                    && matches!(phase, None | Some("final_answer" | "commentary")) =>
+            {
+                false
+            }
+            (Some("response_item"), Some("message"))
+                if event
+                    .turn_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    && matches!(phase, Some("final_answer" | "commentary")) =>
+            {
+                true
+            }
+            _ => return None,
+        };
+        // An excerpt cannot establish full-body equality. Older archives without
+        // complete inline text remain separate rather than trusting clipped data.
+        if !event.metadata["text_excerpt"].is_null()
+            || !event.metadata["text_artifact_refs"].is_null()
+            || event.metadata["codex_display_turn_conflict"] == true
+        {
+            return None;
+        }
+        let text = event
+            .text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())?;
+        let evidence = serde_json::to_string(&json!([
+            "archive-assistant-v1",
+            required("log_path")?,
+            required("provider_turn_id")?,
+            optional("provider_session_id")?,
+            optional("source_path")?,
+            optional("conversation_archive_id")?,
+            phase == Some("commentary"),
+            digest(text.as_bytes()),
+            text.len(),
+        ]))
+        .ok()?;
+        Some((evidence, completed))
+    }
+}
+
 impl Admission<'_> {
     fn scope(&self) -> String {
         digest(
@@ -173,6 +291,48 @@ impl Admission<'_> {
 }
 
 impl Index {
+    /// Count an owned legacy assistant envelope before body or metadata clipping.
+    /// Activation must wait for the complete immutable archive extent. Native
+    /// rows and compatibility bridges never enter this separate display index.
+    pub(super) fn observe_archive(
+        &mut self,
+        store: &mut Store,
+        admission: &ArchiveAdmission<'_>,
+        event: &AgentChatEvent,
+        row: &str,
+    ) -> io::Result<Vec<(String, Option<Relation>)>> {
+        if !admission.owned(event) {
+            return Ok(Vec::new());
+        }
+        let Some((evidence, completed)) = admission.evidence(event) else {
+            return Ok(Vec::new());
+        };
+        let scope = admission.scope();
+        if self.scope != scope {
+            *self = Self {
+                admission: scope.clone(),
+                scope,
+                narrative_deferred: true,
+                ..Self::default()
+            };
+        }
+        let key = narrative_bucket_key(&self.scope, &evidence);
+        let member = Member {
+            token: digest(&serde_json::to_vec(&json!([self.scope, event.id, row])).unwrap()),
+            id: event.id.clone(),
+            row: row.into(),
+            buckets: vec![key.clone()],
+            legacy: false,
+            commentary_id: None,
+        };
+        self.register_member(
+            store,
+            member,
+            vec![(key, "narrative", completed)],
+            admission.extent,
+        )
+    }
+
     /// Persistent trees only. `before`/`narrative_before` are seek keys, while
     /// member/bucket fields contain logical IDs and ordinal keys, not roots.
     pub(super) fn node_roots(&self) -> impl Iterator<Item = &str> {
@@ -455,6 +615,17 @@ impl Index {
             legacy,
             commentary_id,
         };
+        self.register_member(store, member, keys, admission.watermark)
+    }
+
+    fn register_member(
+        &mut self,
+        store: &mut Store,
+        member: Member,
+        keys: Vec<(String, &str, bool)>,
+        watermark: u64,
+    ) -> io::Result<Vec<(String, Option<Relation>)>> {
+        let token = member.token.clone();
         if let Some(reference) = store.get(&self.members, &token)? {
             let prior: Member = store.read(&reference)?;
             if prior.buckets != member.buckets {
@@ -479,7 +650,7 @@ impl Index {
                 left: Vec::new(),
                 right: Vec::new(),
                 conflict: false,
-                watermark: admission.watermark,
+                watermark,
             });
             let list = if right {
                 &mut bucket.right
@@ -493,7 +664,7 @@ impl Index {
                     bucket.conflict = true;
                 }
             }
-            bucket.watermark = admission.watermark;
+            bucket.watermark = watermark;
             affected.extend(bucket.left.iter().chain(&bucket.right).cloned());
             let r = store.put(&bucket)?;
             self.buckets = Some(store.insert(&self.buckets, &key, &r)?);

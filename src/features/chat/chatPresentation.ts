@@ -290,8 +290,10 @@ export function compactPath(path: string): string {
 export function previewContent(content: string): string {
   const lines = content.split(/\r\n|\r|\n/);
   const linePreview = lines.slice(0, 6).join("\n");
-  const charPreview = linePreview.slice(0, 900);
-  return `${charPreview}\n\nOutput collapsed; show output to inspect all lines.`;
+  const bounded = linePreview.slice(0, 900);
+  const charPreview = linePreview.length > 900 && !/\s/u.test(linePreview[900])
+    ? bounded.replace(/\S+$/u, "") : bounded;
+  return `${charPreview.trimEnd()}\n\nOutput collapsed; show output to inspect all lines.`;
 }
 
 export function compactTerminalPreview(content: string): string {

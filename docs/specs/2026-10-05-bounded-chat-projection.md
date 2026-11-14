@@ -31,7 +31,8 @@ for eight and omission retains 80. Complete frames and certified display groups
 remain atomic within the hard 80-header cap. This target never changes Older,
 detail or revalidation budgets, and 80 physical headers need not mean 80
 displayed logical rows. Previews
-contain at most 1 KiB of UTF-8 text; each body chunk contains at most 16 KiB.
+contain at most 1 KiB of UTF-8 text and stop at a word boundary; each body chunk
+contains at most 16 KiB and retains byte-exact continuation offsets.
 The immutable object reader allows at most 512 object attempts and 1 MiB of
 object bytes. A recent-source observation adds at most two 128 KiB tail reads
 and two bounded 4 KiB ownership headers, 4 KiB continuity anchors and 32 KiB
@@ -53,6 +54,34 @@ complete transcript. Older indexing updates already loaded headers without
 causing the client to load unseen older history.
 
 ## Publication and privacy
+
+A stopped provider-log source publishes its replacement, truncation, or
+continuity failure in the bounded source policy. Recent Chat preserves that
+specific status even when a saved canonical page is readable. The status grants
+no source admission: a replaced native file cannot inherit an excluded prefix
+or disabled span from the old file. A matching session header and cursor anchor
+alone do not prove that those historical boundaries survived replacement.
+
+Saved Codex assistant mirrors and completed messages may share an archive-only
+display relation after the bounded bootstrap has counted the entire selected
+archive extent. The relation requires unique complementary observations with
+matching complete inline bodies, provider turns, and source scope. Its scope
+includes the conversation and derived archive generation. Ambiguous pairs,
+excerpts, and different turns or sources remain separate. This relation preserves
+both physical records. Display aliases may move already-loaded archive members
+into the shared display slot; they establish no native-source correspondence,
+source epoch, or capture progress. Older saved checkpoints are rebuilt through
+the normal background bootstrap to acquire these relations.
+
+An ordinary projection that settles without native authority requests a one-way
+handoff to that physical archive recount. Capture admission and continuation keep
+owned projection work moving even when the provider source is quiet. Only the
+existing bootstrap path, under the policy and per-agent archive gates, performs
+cold checkpoints. A handed-off warm owner cannot publish cached roots, take its
+settled no-op shortcut for a new append, or execute an input-receipt write.
+Physical input changes restart the stamped cohort; successful qualification
+retires the handoff. Failures retain retry intent, and persisted cold progress
+supports restart. A completed unchanged archive-only head keeps its revision.
 
 The archive owner publishes content-addressed row, body and persistent index
 objects before replacing the bounded `chat-read-head.json` pointer. Native

@@ -5,11 +5,18 @@ import { toActivityBlock } from "../grid/activityBlocks";
 import {
   isProcessingAgentStatus,
   liveApprovalEventId,
+  previewContent,
   resolvedActivityTone,
   shouldShowChatEvent,
   sortTranscriptEvents,
   workGroupDurationLabel,
 } from "./chatPresentation";
+
+it("ends collapsed output at a complete word", () => {
+  const prefix = `${"complete ".repeat(98)}Actions → `;
+  const preview = previewContent(`${prefix}AgentSettings more output`);
+  expect(preview.split("\n\n")[0]).toBe(prefix.trimEnd());
+});
 
 const event = (overrides: Partial<AgentChatEvent>): AgentChatEvent => ({
   id: "event-1",

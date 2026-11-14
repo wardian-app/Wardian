@@ -447,6 +447,90 @@ async fn assert_live_cohort_handoff(state: &Arc<AppState>, session: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quiet_replaced_source_finishes_owned_projection_work_without_another_append() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let (state, session, path) = registered_off_source(&home).await;
+    *state.agents.lock().await[&session].log_path.lock().unwrap() = Some(path.clone());
+    dispatch_ordinary_capture(&state).await;
+    let retired = path.with_extension("retired-jsonl");
+    std::fs::rename(&path, &retired).unwrap();
+    std::fs::copy(&retired, &path).unwrap();
+    dispatch_ordinary_capture(&state).await;
+    let quiet_request = crate::commands::chat::background_capture_request(&state, &session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::commands::background_capture::admit_background_capture(&state, quiet_request, false)
+            .await
+            .is_none()
+    );
+    let snapshot = crate::commands::chat::agent_archive_capture_snapshot(&state, &session)
+        .await
+        .unwrap();
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let source_before = std::fs::read(&path).unwrap();
+    let capture_path = wardian_core::paths::agent_conversations_dir(&session)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("conversation-capture.json");
+    let capture_before = std::fs::read(&capture_path).unwrap();
+    state
+        .conversation_archive
+        .append_delivered_input_with_context(context, "A quiet-source prompt", None)
+        .unwrap();
+    assert!(state
+        .conversation_archive
+        .chat_projection
+        .has_pending_capture_work(&session));
+    let request = crate::commands::chat::background_capture_request(&state, &session)
+        .await
+        .unwrap()
+        .unwrap();
+    let claim =
+        crate::commands::background_capture::admit_background_capture(&state, request, false)
+            .await
+            .expect("owned projection work must bypass source-observation coalescing");
+    crate::commands::background_capture::run_background_capture(&state, claim).await;
+    assert!(!state
+        .conversation_archive
+        .chat_projection
+        .has_pending_capture_work(&session));
+    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.clone(),
+        None,
+        None,
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: None,
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.progress, "capture_source_replaced");
+    assert!(page
+        .events
+        .iter()
+        .any(|event| event.text.as_deref() == Some("A quiet-source prompt")));
+    assert_eq!(std::fs::read(&path).unwrap(), source_before);
+    assert_eq!(std::fs::read(capture_path).unwrap(), capture_before);
+    let quiet_request = crate::commands::chat::background_capture_request(&state, &session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::commands::background_capture::admit_background_capture(&state, quiet_request, false)
+            .await
+            .is_none(),
+        "settled handoff must coalesce again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_live_first_source_covers_full_recent_cohort() {
     let home = crate::control::test_support::TestWardianHome::new_async().await;
     let (state, session, path) = registered_live_mock(&home).await;
