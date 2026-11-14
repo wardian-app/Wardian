@@ -52,7 +52,15 @@ mod tests {
             let next = resolve_agent_worktree_path(&source, Some(name), "agent");
             create_worktree_with_build_caches(&source, &next, &format!("wardian/{name}")).unwrap();
             enable_worktree_config(&mut config, &next);
-            assert_eq!(next, temp.path().join("project.wt").join(name));
+            // Git expands temporary-directory aliases such as Windows 8.3 paths.
+            assert_eq!(
+                next.canonicalize().unwrap(),
+                temp.path()
+                    .join("project.wt")
+                    .join(name)
+                    .canonicalize()
+                    .unwrap()
+            );
             assert_eq!(
                 run_git(next.to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap(),
                 default_head
