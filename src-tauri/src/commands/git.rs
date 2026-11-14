@@ -14,9 +14,11 @@ use wardian_core::models::git::{
 };
 
 mod cargo_worktree_config;
+mod worktree_creation;
 mod worktree_removal;
 pub(crate) use cargo_worktree_config::managed_worktree_cargo_target;
 use cargo_worktree_config::{remove_generated_cargo_config, write_cargo_worktree_config};
+pub(crate) use worktree_creation::{create_worktree_with_build_caches, primary_worktree_path};
 
 /// Run a git command in the given directory and return stdout as a String.
 ///
@@ -1249,30 +1251,6 @@ fn is_untracked_path(cwd: &str, path: &str) -> Result<bool, String> {
     Ok(raw
         .lines()
         .any(|line| line.starts_with("?? ") && parse_porcelain_path(&line[3..]) == path))
-}
-
-pub(crate) fn create_worktree_with_build_caches(
-    workspace_path: &Path,
-    worktree_path: &Path,
-    branch: &str,
-) -> Result<(), String> {
-    let workspace_path = absolute_existing_path(workspace_path)?;
-    let worktree_path = absolute_worktree_target_path(&workspace_path, worktree_path);
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    let workspace = path_to_git_arg(&workspace_path)?;
-    let worktree = path_to_git_arg(&worktree_path)?;
-    let branch_exists = local_branch_exists(&workspace, branch)?;
-    if branch_exists {
-        run_git(&workspace, &["worktree", "add", &worktree, branch])?;
-    } else {
-        run_git(&workspace, &["worktree", "add", &worktree, "-b", branch])?;
-    }
-
-    let worktree_path = absolute_existing_path(&worktree_path)?;
-    setup_worktree_build_caches(&worktree_path, &workspace_path)
 }
 
 fn local_branch_exists(workspace: &str, branch: &str) -> Result<bool, String> {
