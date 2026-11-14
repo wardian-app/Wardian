@@ -53,6 +53,11 @@ Categories:
   devices, and setup diagnostics for Tailscale HTTPS access.
 - **Advanced**: settings file and diagnostics information.
 
+Remote Access keeps its introduction above separate **Phone pairing** and
+**Companion client** groups. The groups share a row when the settings pane has
+room and stack at narrower widths. Choose an allowed client origin within the
+Companion client group before creating its pairing code.
+
 Each row includes a short detail line. For example, the default provider row
 notes that **Auto** prefers Claude when available.
 

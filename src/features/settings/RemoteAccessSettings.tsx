@@ -336,11 +336,20 @@ export const RemoteAccessSettings: React.FC = () => {
 
   return (
     <section aria-label="Remote Access" className="px-4 py-4">
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+      <div className="grid min-w-0 gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <Smartphone className="h-4 w-4 text-muted-neutral" aria-hidden="true" />
             <h4 className="text-sm font-semibold text-primary">Remote Access</h4>
+            <button
+              type="button"
+              aria-label="Refresh remote access settings"
+              onClick={() => void refresh()}
+              disabled={loading}
+              className={`${iconButtonClass} ml-auto shrink-0`}
+            >
+              <RefreshCw className="h-4 w-4" aria-hidden="true" />
+            </button>
           </div>
           <p className="mt-2 max-w-2xl text-xs leading-relaxed text-muted-neutral">
             Pair a phone for full remote control, or allow a companion client to read the agent roster and chat. Companion clients need an exact origin in the allowlist below.
@@ -351,56 +360,55 @@ export const RemoteAccessSettings: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-          <button
-            type="button"
-            aria-label="Refresh remote access settings"
-            onClick={() => void refresh()}
-            disabled={loading}
-            className={iconButtonClass}
-          >
-            <RefreshCw className="h-4 w-4" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            onClick={() => void createPairingOffer()}
-            disabled={!remoteReady || creatingPairing}
-            className={actionButtonClass}
-          >
-            <QrCode className="h-4 w-4" aria-hidden="true" />
-            {creatingPairing ? "Creating..." : "Create pairing code"}
-          </button>
-          <label className="text-xs font-medium text-muted-neutral">
-            Client origin
-            <select
-              aria-label="Paired client origin"
-              value={pairingClientOrigin}
-              onChange={(event) => setPairingClientOrigin(event.target.value)}
-              disabled={!config?.client_origin_allowlist?.length}
-              className={inputClass}
+        <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-3">
+          <fieldset className="min-w-0 rounded-md border border-wardian-border p-3">
+            <legend className="px-1 text-xs font-semibold text-primary">Phone pairing</legend>
+            <p className="mb-3 text-xs leading-relaxed text-muted-neutral">Control Wardian from your paired phone.</p>
+            <button
+              type="button"
+              onClick={() => void createPairingOffer()}
+              disabled={!remoteReady || creatingPairing}
+              className={actionButtonClass}
             >
-              <option value="">Choose an allowed origin</option>
-              {(config?.client_origin_allowlist ?? []).map((origin) => (
-                <option key={origin} value={origin}>{origin}</option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            onClick={() => void createClientPairingOffer()}
-            disabled={!remoteReady || creatingPairing || !pairingClientOrigin}
-            className={actionButtonClass}
-          >
-            <QrCode className="h-4 w-4" aria-hidden="true" />
-            {creatingPairing ? "Creating..." : "Create client pairing code"}
-          </button>
+              <QrCode className="h-4 w-4" aria-hidden="true" />
+              {creatingPairing ? "Creating..." : "Create pairing code"}
+            </button>
+          </fieldset>
+          <fieldset className="min-w-0 rounded-md border border-wardian-border p-3">
+            <legend className="px-1 text-xs font-semibold text-primary">Companion client</legend>
+            <p className="mb-3 text-xs leading-relaxed text-muted-neutral">Read the agent roster and chat from an allowed origin.</p>
+            <label className="block min-w-0 text-xs font-medium text-muted-neutral">
+              Client origin
+              <select
+                aria-label="Paired client origin"
+                value={pairingClientOrigin}
+                onChange={(event) => setPairingClientOrigin(event.target.value)}
+                disabled={!config?.client_origin_allowlist?.length}
+                className={inputClass}
+              >
+                <option value="">Choose an allowed origin</option>
+                {(config?.client_origin_allowlist ?? []).map((origin) => (
+                  <option key={origin} value={origin}>{origin}</option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={() => void createClientPairingOffer()}
+              disabled={!remoteReady || creatingPairing || !pairingClientOrigin}
+              className={`${actionButtonClass} mt-3`}
+            >
+              <QrCode className="h-4 w-4" aria-hidden="true" />
+              {creatingPairing ? "Creating..." : "Create client pairing code"}
+            </button>
+          </fieldset>
         </div>
       </div>
 
       <dl className="mt-4 grid gap-3 text-xs sm:grid-cols-3">
         <div>
           <dt className="text-muted-neutral">Tailscale origin</dt>
-          <dd className="mt-1 font-mono text-primary">{originLabel}</dd>
+          <dd className="mt-1 break-all font-mono text-primary">{originLabel}</dd>
         </div>
         <div>
           <dt className="text-muted-neutral">Local gateway</dt>
@@ -455,7 +463,7 @@ export const RemoteAccessSettings: React.FC = () => {
       ) : null}
 
       <div className="mt-4 border-t border-wardian-border pt-4">
-        <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-xs font-semibold text-primary">Gateway configuration</div>
             <div className="mt-1 text-xs leading-relaxed text-muted-neutral">
