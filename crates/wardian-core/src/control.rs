@@ -52,6 +52,13 @@ pub enum ControlRequest {
         #[serde(default)]
         origin: Option<MessageOrigin>,
     },
+    /// Adopt one archive range using recorded operator approval and a stable authorization ID.
+    AgentAdoptArchive {
+        target: String,
+        request: ArchiveAdoptionRequest,
+        #[serde(default)]
+        origin: Option<MessageOrigin>,
+    },
     AgentPause {
         target: String,
     },
@@ -653,6 +660,42 @@ pub struct AgentReleaseHoldResponse {
     pub resume_session: String,
     pub acquisition_id: String,
     pub authorization_id: String,
+}
+
+/// Native source identity captured when the operator approved the archive range.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveAdoptionNativeIdentity {
+    pub platform: String,
+    pub primary: u64,
+    pub secondary: u64,
+}
+
+/// Recorded user approval for one exact archive range. OS identity alone is not consent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveAdoptionRequest {
+    /// Reuse this ID when retrying the same authorization for idempotent adoption.
+    pub authorization_id: String,
+    pub conversation_id: String,
+    pub provider_session: String,
+    pub source_path: String,
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub native_identity: ArchiveAdoptionNativeIdentity,
+    pub approval_reference: String,
+    pub approval_text: String,
+}
+
+/// Desktop-authoritative outcome for a scoped archive adoption authorization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveAdoptionResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub agent_id: String,
+    pub authorization_id: String,
+    pub conversation_id: String,
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub status: String,
 }
 
 impl OkResponse {
@@ -1294,6 +1337,88 @@ mod tests {
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<ControlRequest>(missing).is_err());
         }
+    }
+
+    #[test]
+    fn archive_adoption_request_round_trips_exact_scope_and_approval() {
+        let value = serde_json::json!({
+            "command": "agent_adopt_archive", "target": "coder-a1",
+            "request": {
+                "authorization_id": "a5f6ad8a-0ac5-4ec2-99e0-b856663594a8",
+                "conversation_id": "conversation-1",
+                "provider_session": "89b85617-bcad-4d38-8329-67d3297d7c94",
+                "source_path": "/archive/session.jsonl", "start_offset": 123, "end_offset": 456,
+                "native_identity": {"platform": "unix", "primary": u64::MAX, "secondary": 17},
+                "approval_reference": "recorded-user-approval-1",
+                "approval_text": "I approve adopting exactly this range."
+            }
+        });
+        let request: ControlRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(matches!(
+            &request,
+            ControlRequest::AgentAdoptArchive { origin: None, .. }
+        ));
+        let mut expected = value.clone();
+        expected["origin"] = serde_json::Value::Null;
+        assert_eq!(serde_json::to_value(&request).unwrap(), expected);
+        for origin in [
+            None,
+            Some(MessageOrigin::WardianAgent {
+                session_id: "managed-actor".into(),
+            }),
+        ] {
+            let mut with_origin = value.clone();
+            with_origin["origin"] = serde_json::to_value(origin).unwrap();
+            let request: ControlRequest = serde_json::from_value(with_origin.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&request).unwrap(), with_origin);
+        }
+        for field in ["target", "request"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ControlRequest>(missing).is_err());
+        }
+        for field in value["request"].as_object().unwrap().keys() {
+            let mut missing = value.clone();
+            missing["request"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<ControlRequest>(missing).is_err(),
+                "{field}"
+            );
+        }
+        for field in ["platform", "primary", "secondary"] {
+            let mut missing = value.clone();
+            missing["request"]["native_identity"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<ControlRequest>(missing).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn archive_adoption_response_round_trips() {
+        let response = ArchiveAdoptionResponse {
+            schema: CONTROL_SCHEMA,
+            ok: true,
+            agent_id: "agent-1".into(),
+            authorization_id: "a5f6ad8a-0ac5-4ec2-99e0-b856663594a8".into(),
+            conversation_id: "conversation-1".into(),
+            start_offset: 123,
+            end_offset: 456,
+            status: "adopted".into(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ArchiveAdoptionResponse>(&json).unwrap(),
+            response
+        );
+        assert!(serde_json::from_value::<ArchiveAdoptionResponse>(
+            serde_json::json!({"schema": 1, "ok": true})
+        )
+        .is_err());
     }
 
     #[test]

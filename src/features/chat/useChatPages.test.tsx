@@ -79,6 +79,8 @@ describe("normal Chat page polling", () => {
   });
 
   it.each(["new-owner", null] as const)("clears a retired preview on an empty %s response", async (admission) => {
+    // Observe retirement before the next automatic empty-window poll can run.
+    vi.useFakeTimers();
     const preview = page("agent", { conversation_id: null, generation: null, source_epoch: null,
       recent_admission: "initial-owner", progress: "provisional", events: [row("preview")] });
     const empty = page("agent", { conversation_id: null, generation: null, source_epoch: null,
@@ -86,12 +88,38 @@ describe("normal Chat page polling", () => {
     const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(preview).mockResolvedValue(empty);
     const hook = renderHook(({ reload }) => useChatPages("agent", loader, 3_000, reload), { initialProps: { reload: 0 } });
     try {
-      await waitFor(() => expect(hook.result.current.events.map((event) => event.id)).toEqual(["preview"]));
+      await act(async () => {});
+      expect(hook.result.current.events.map((event) => event.id)).toEqual(["preview"]);
       hook.rerender({ reload: 1 });
-      await waitFor(() => expect(loader).toHaveBeenCalledTimes(2));
-      await waitFor(() => expect(hook.result.current.events).toEqual([]));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(loader).toHaveBeenCalledTimes(2);
+      expect(hook.result.current.events).toEqual([]);
       expect(hook.result.current.error).toBeNull();
       expect(hook.result.current.page?.recent_admission ?? null).toBe(admission);
+    } finally { hook.unmount(); }
+  });
+
+  it("keeps a repeated unowned empty reply outside source scope after preview retirement", async () => {
+    vi.useFakeTimers();
+    const preview = page("agent", { conversation_id: null, generation: null, source_epoch: null,
+      recent_admission: "initial-owner", progress: "provisional", events: [row("preview")] });
+    const empty = page("agent", { conversation_id: null, generation: null, source_epoch: null,
+      recent_admission: null, progress: "no_recent", reset: true });
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(preview).mockResolvedValue(empty);
+    const hook = renderHook(({ reload }) => useChatPages("agent", loader, 3_000, reload), { initialProps: { reload: 0 } });
+    try {
+      await act(async () => {});
+      hook.rerender({ reload: 1 });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(loader).toHaveBeenCalledTimes(2);
+      expect(hook.result.current.events).toEqual([]);
+      expect(hook.result.current.error).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(loader).toHaveBeenCalledTimes(3);
+      expect(hook.result.current.error).toBe("Chat history could not be updated. Retry.");
+      expect(hook.result.current.events).toEqual([]);
+      expect(hook.result.current.page).toEqual(empty);
+      expect(loader.mock.calls.every(([request]) => request.revalidateIds === undefined)).toBe(true);
     } finally { hook.unmount(); }
   });
 

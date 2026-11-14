@@ -68,6 +68,10 @@ pub struct AgentChatPage {
     /// Trusted ephemeral recent-preview owner; grants no canonical or ACK authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent_admission: Option<String>,
+    /// Complete scope-bound saved archive read while native capture is stopped.
+    /// Grants archive paging/detail only, never native admission or renewal.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub archive_read_ready: bool,
     pub revision: String,
     pub events: Vec<AgentChatEvent>,
     pub next_before: Option<String>,
@@ -127,6 +131,63 @@ pub struct ChatPromptDeliveryDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn archive_page_json() -> serde_json::Value {
+        serde_json::json!({
+            "session_id": "agent", "conversation_id": "conversation", "generation": "generation",
+            "source_epoch": null, "revision": "opaque-revision", "events": [],
+            "next_before": null, "unchanged": false, "reset": false,
+            "progress": "capture_source_replaced", "aliases": [], "removed_ids": [],
+            "detail": null, "bytes_read": 0, "records_decoded": 0
+        })
+    }
+
+    #[test]
+    fn archive_read_ready_defaults_false_and_false_is_omitted() {
+        let mut json = archive_page_json();
+        let legacy: AgentChatPage = serde_json::from_value(json.clone()).unwrap();
+        assert!(!legacy.archive_read_ready);
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("archive_read_ready")
+            .is_none());
+        json["archive_read_ready"] = serde_json::json!(false);
+        let explicit: AgentChatPage = serde_json::from_value(json).unwrap();
+        assert!(!explicit.archive_read_ready);
+        assert!(serde_json::to_value(explicit)
+            .unwrap()
+            .get("archive_read_ready")
+            .is_none());
+    }
+
+    #[test]
+    fn archive_read_ready_true_round_trips_without_native_authority() {
+        let mut json = archive_page_json();
+        json["archive_read_ready"] = serde_json::json!(true);
+        let page: AgentChatPage = serde_json::from_value(json).unwrap();
+        assert!(page.archive_read_ready);
+        let encoded = serde_json::to_value(page).unwrap();
+        assert_eq!(encoded["archive_read_ready"], true);
+        let decoded: AgentChatPage = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.archive_read_ready);
+        assert!(decoded.source_epoch.is_none());
+        assert!(decoded.recent_admission.is_none());
+        assert!(decoded.revalidated_ids.is_none());
+        assert_eq!(decoded.progress, "capture_source_replaced");
+    }
+
+    #[test]
+    fn archive_read_ready_rejects_non_boolean_values() {
+        for invalid in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            let mut json = archive_page_json();
+            json["archive_read_ready"] = invalid;
+            assert!(serde_json::from_value::<AgentChatPage>(json).is_err());
+        }
+    }
 
     #[test]
     fn agent_chat_event_serializes_snake_case() {

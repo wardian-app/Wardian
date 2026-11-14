@@ -1,6 +1,8 @@
 mod agent_lifecycle;
 mod agent_spawn;
+mod archive_adoption;
 mod hold_release;
+mod operator;
 mod pi_startup;
 use pi_startup::pi_output_has_startup_ready_prompt;
 
@@ -422,20 +424,13 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             ok_json(&OkResponse::new())
         }
 
-        ControlRequest::AgentRename { target, name } => {
-            agent_lifecycle::rename(app, &target, name).await
-        }
-        request @ ControlRequest::AgentReleaseHold { .. } => {
-            hold_release::dispatch(request, app).await
-        }
-
-        ControlRequest::AgentRestart { target } | ControlRequest::AgentResume { target } => {
-            agent_lifecycle::resume(app, &target).await
-        }
-        ControlRequest::AgentNewSession { target } => {
-            agent_lifecycle::new_session(app, &target).await
-        }
-        ControlRequest::AgentPause { target } => agent_lifecycle::pause(app, &target).await,
+        request @ (ControlRequest::AgentRename { .. }
+        | ControlRequest::AgentReleaseHold { .. }
+        | ControlRequest::AgentAdoptArchive { .. }
+        | ControlRequest::AgentRestart { .. }
+        | ControlRequest::AgentResume { .. }
+        | ControlRequest::AgentNewSession { .. }
+        | ControlRequest::AgentPause { .. }) => operator::dispatch(request, app).await,
 
         ControlRequest::AgentModels {
             provider,

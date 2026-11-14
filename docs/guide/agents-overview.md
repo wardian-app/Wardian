@@ -94,7 +94,9 @@ Chat keeps saved messages readable when provider-log capture pauses. A replaced,
 truncated, or rewritten log shows the specific reason in the transcript. A
 replacement cannot inherit the old log's privacy boundaries automatically, so
 its existing history stays unavailable until source ownership and policy can be
-verified. Collapsed message and output previews end at a word boundary; open
+verified or an operator explicitly adopts a fixed interval into the saved
+archive. [Scoped archive adoption](./cli.md) preserves the native capture stop
+and earlier privacy boundaries. Collapsed message and output previews end at a word boundary; open
 full details to read the remaining text.
 
 Use the **Terminal** / **Chat** button in the card header for a temporary per-agent override. The default comes from **Settings > Agents > Agent card display**. Unsent Chat text stays with that agent when you switch modes.

@@ -17,6 +17,7 @@ use wardian_core::conversations::{
 };
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 
+pub(crate) mod adoption;
 mod chat_logical_index;
 pub(crate) mod chat_read;
 mod chat_read_store;
@@ -64,6 +65,11 @@ fn codex_archive_mirror_pair<'a>(
     second: &AgentChatEvent,
     candidates: impl IntoIterator<Item = &'a AgentChatEvent>,
 ) -> bool {
+    if !first.metadata["archive_adoption"].is_null()
+        || !second.metadata["archive_adoption"].is_null()
+    {
+        return false;
+    }
     codex_user_mirror_pair(first, second)
         || provenance::codex_unique_stream_completion_pair(first, second, candidates)
         || provenance::codex_live_watch_observation_pair(first, second)
@@ -162,6 +168,8 @@ pub struct ConversationArchiveState {
     fail_next_chat_cursor_commit: AtomicBool,
     #[cfg(test)]
     fail_compatibility_stage: std::sync::atomic::AtomicU8,
+    #[cfg(test)]
+    fail_adoption_stage: std::sync::atomic::AtomicU8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -785,7 +793,7 @@ impl ConversationArchiveState {
         let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
         let (count, candidate) =
-            self.append_chat_events_prepared_locked(context, events, None, authority, watch)?;
+            self.append_chat_events_prepared_locked(context, events, None, authority, watch, None)?;
         if let Some(authority) = authority {
             authority.require_current()?;
         }
@@ -802,6 +810,7 @@ impl ConversationArchiveState {
         capture: Option<CapturePreparation<'_>>,
         native_messages: Option<&crate::commands::chat_recent_database::MessageAuthority>,
         watch: Option<&crate::commands::chat::MockWatchAuthority>,
+        adoption: Option<&adoption::ArchiveAdoptionAuthority>,
     ) -> io::Result<(usize, Option<chat_read::Candidate>)> {
         let recovering = if let Some(capture) = capture.as_ref() {
             compatibility_claims::pending(capture.state, &context.agent_id)?
@@ -842,6 +851,14 @@ impl ConversationArchiveState {
             .iter()
             .cloned()
             .map(|mut event| {
+                if !event.metadata["archive_adoption"].is_null()
+                    && !adoption.is_some_and(|authority| authority.proves(&event))
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "archive adoption requires current operator authority",
+                    ));
+                }
                 // Generic provider/Watch strings cannot establish this binding.
                 if let Some(metadata) = event.metadata.as_object_mut() {
                     metadata.remove(crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING);
@@ -868,8 +885,24 @@ impl ConversationArchiveState {
             .cloned()
             .collect::<Vec<_>>();
         let batch_events = coalesce_batch_observations(&active_events)?;
-        let mut handle =
-            active_handle_for_context(&self.active, &context, provider_source_key.clone())?;
+        let mut handle = if let Some(authority) = adoption {
+            if lock_active(&self.active)?
+                .get(&context.agent_id)
+                .is_some_and(|active| active.conversation_id != authority.conversation_id())
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "archive adoption active destination changed",
+                ));
+            }
+            ActiveConversationHandle {
+                conversation_id: authority.conversation_id().to_owned(),
+                next_seq: 1,
+                provider_source_key: provider_source_key.clone(),
+            }
+        } else {
+            active_handle_for_context(&self.active, &context, provider_source_key.clone())?
+        };
         let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
         let effective_context = effective_context_for_handle(&context, &handle, &conversation_dir)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
@@ -878,6 +911,18 @@ impl ConversationArchiveState {
         let mut existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
         let mut existing_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
+        if adoption.is_some()
+            && events.iter().any(|event| {
+                existing_events
+                    .iter()
+                    .any(|old| old.id == event.id && !provenance::same_observation(old, event))
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive adoption observation conflicts with persisted evidence",
+            ));
+        }
         let mut mirror_sources = capture_state.provider_log_sources.clone();
         if let Some(capture) = capture.as_ref() {
             mirror_sources
@@ -1346,6 +1391,13 @@ impl ConversationArchiveState {
                 continue;
             };
             materialize_record_text(&conversation_dir, &mut record)?;
+            if adoption.is_some() {
+                adoption::sync_record_bodies(&conversation_dir, &record)?;
+            }
+            #[cfg(test)]
+            if adoption.is_some() {
+                self.adoption_fault(2)?;
+            }
             let durable_event_id = existing_event_index
                 .and_then(|index| existing_events.get(index))
                 .map(|event| event.id.clone())
@@ -1429,6 +1481,10 @@ impl ConversationArchiveState {
         for publication in &pending_publications {
             for event_record in &publication.events {
                 append_jsonl_record(&events_path, event_record)?;
+            }
+            #[cfg(test)]
+            if adoption.is_some() {
+                self.adoption_fault(3)?;
             }
             for source_record in &publication.sources {
                 append_source_if_needed(&sources_path, &mut cached_sources, source_record, true)?;
@@ -1784,6 +1840,7 @@ impl ConversationArchiveState {
                 source_proof,
             }),
             native_messages,
+            None,
             None,
         )?;
         if let Some(index) = current_index {
@@ -2167,6 +2224,7 @@ impl ConversationArchiveState {
         let _recent_boundary = self.chat_projection.recent_boundary(Some(agent_id))?;
         let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
+        self.retire_adoption_locked(agent_id, "conversation boundary changed")?;
         let Some(handle) = lock_active(&self.active)?.get(agent_id).cloned() else {
             return Ok(None);
         };
@@ -2224,6 +2282,7 @@ impl ConversationArchiveState {
         let _recent_boundary = self.chat_projection.recent_boundary(Some(agent_id))?;
         let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
+        self.retire_adoption_locked(agent_id, "conversation cleared")?;
         let removed = lock_active(&self.active)?
             .get(agent_id)
             .map(|handle| handle.conversation_id.clone());

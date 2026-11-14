@@ -183,11 +183,21 @@ fn complete_body(
 
 fn saved_page(temp: &Path, events: &[AgentChatEvent], retire_first: bool) -> AgentChatPage {
     let context = context();
+    saved_page_in_scope(temp, events, retire_first, &context, &snapshot(&context))
+}
+
+fn saved_page_in_scope(
+    temp: &Path,
+    events: &[AgentChatEvent],
+    retire_first: bool,
+    context: &ConversationArchiveContext,
+    snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+) -> AgentChatPage {
     let archive = ConversationArchiveState::default();
     let path = temp.join("rollout.jsonl").canonicalize().unwrap();
     let file = File::open(&path).unwrap();
     let capture = ProviderLogCaptureState {
-        provider_source_key: "codex:one".into(),
+        provider_source_key: context.provider_source_key.clone().unwrap(),
         path: path.to_string_lossy().into_owned(),
         native_identity: native_file_identity(&file).unwrap(),
         committed_offset: file.metadata().unwrap().len(),
@@ -202,7 +212,7 @@ fn saved_page(temp: &Path, events: &[AgentChatEvent], retire_first: bool) -> Age
     };
     if !retire_first {
         // Model an ordinary persisted head from before native authority was lost.
-        save_capture(&context, &current_capture(capture.clone()));
+        save_capture(context, &current_capture(capture.clone()));
     }
     archive
         .append_chat_events_with_context(context.clone(), events)
@@ -212,10 +222,10 @@ fn saved_page(temp: &Path, events: &[AgentChatEvent], retire_first: bool) -> Age
     }
     let conversation = archive.active_conversation_id("agent-1").unwrap().unwrap();
     let directory = conversation_dir("agent-1", &conversation).unwrap();
-    let capture_path = save_capture(&context, &capture);
-    assert!(source_policy(&context).is_err());
+    let capture_path = save_capture(context, &capture);
+    assert!(source_policy(context).is_err());
     assert!(
-        crate::state::conversation_archive::chat_logical_index::source_proof(&context)
+        crate::state::conversation_archive::chat_logical_index::source_proof(context)
             .unwrap()
             .is_none()
     );
@@ -251,7 +261,7 @@ fn saved_page(temp: &Path, events: &[AgentChatEvent], retire_first: bool) -> Age
     let mut settled = false;
     for _ in 0..128 {
         if !ConversationArchiveState::default()
-            .bootstrap_saved_chat(&context)
+            .bootstrap_saved_chat(context)
             .unwrap()
         {
             settled = true;
@@ -262,7 +272,7 @@ fn saved_page(temp: &Path, events: &[AgentChatEvent], retire_first: bool) -> Age
         settled,
         "cold archive display admission must settle after restart"
     );
-    let page = read(&context, &snapshot(&context), None, None, None).unwrap();
+    let page = read(context, snapshot, None, None, None).unwrap();
     // A blocked recent source may still serve saved archive rows.
     assert!(page.source_epoch.is_none());
     let archived_ids = fs::read_to_string(directory.join("events.jsonl"))
@@ -326,6 +336,325 @@ fn assistant_rows(page: &AgentChatPage) -> Vec<&AgentChatEvent> {
                 && event.role == Some(AgentChatRole::Assistant)
         })
         .collect()
+}
+
+fn archive_read_fixture(
+    temp: &Path,
+) -> (
+    ConversationArchiveContext,
+    crate::commands::chat::AgentArchiveCaptureSnapshot,
+    AgentChatPage,
+) {
+    // Grouping requires complete inline evidence. A separate owned artifact
+    // exercises multi-chunk detail without making excerpts prove equality.
+    let pair = legacy_pair(temp, &"Grouped inline answer. ".repeat(80));
+    let mut long_body = pair[1].clone();
+    long_body.id = "agent-1:provider_log:long-owned-body".into();
+    long_body.turn_id = Some("native-long-message".into());
+    long_body.metadata["provider_turn_id"] = json!("long-body-turn");
+    long_body.text = Some("Owned archive body. ".repeat(1400));
+    let mut events = Vec::new();
+    for index in 0..90 {
+        let mut event = pair[0].clone();
+        event.id = format!("activity-{index}");
+        event.kind = AgentChatEventKind::Message;
+        event.role = Some(AgentChatRole::User);
+        event.text = Some(format!("Saved activity {index}"));
+        event.source = None;
+        event.metadata = json!({});
+        events.push(event);
+    }
+    events.extend(pair);
+    events.push(long_body);
+    let mut snapshot = snapshot(&context());
+    snapshot.resume_session = Some("one".into());
+    snapshot.log_path = Some(temp.join("rollout.jsonl"));
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let page = saved_page_in_scope(temp, &events, true, &context, &snapshot);
+    (context, snapshot, page)
+}
+
+fn assert_archive_read(page: &AgentChatPage) {
+    assert!(
+        page.archive_read_ready,
+        "owned archive read: {}",
+        page.progress
+    );
+    assert_eq!(page.progress, "capture_source_replaced");
+    assert!(page.conversation_id.is_some());
+    assert!(page.generation.is_some());
+    assert!(page.source_epoch.is_none());
+    assert!(page.recent_admission.is_none());
+    assert!(page.revalidated_ids.is_none());
+}
+
+#[test]
+fn archive_read_ready_covers_initial_older_owned_detail_and_unchanged() {
+    let (_guard, temp) = isolated_home();
+    let (context, snapshot, initial) = archive_read_fixture(temp.path());
+    assert_archive_read(&initial);
+    assert!(!initial.unchanged);
+    assert!(
+        !initial.aliases.is_empty(),
+        "exercise a grouped archive response"
+    );
+    assert!(super::super::archive_page_is_current(&snapshot, &initial));
+    let older = read(
+        &context,
+        &snapshot,
+        initial.next_before.as_deref(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_archive_read(&older);
+    assert!(older.older_page);
+    assert!(!older.events.is_empty());
+    assert!(older
+        .events
+        .iter()
+        .all(|event| !initial.events.iter().any(|newer| newer.id == event.id)));
+    let unchanged = read(&context, &snapshot, None, Some(&initial.revision), None).unwrap();
+    assert_archive_read(&unchanged);
+    assert!(unchanged.unchanged);
+    assert!(unchanged.events.is_empty());
+    let assistant = initial
+        .events
+        .iter()
+        .find(|event| event.id == "agent-1:provider_log:long-owned-body")
+        .expect("the independent owned artifact appears in the recent archive page");
+    let mut reference = assistant.metadata["chat_detail_ref"]
+        .as_str()
+        .map(str::to_owned);
+    assert!(reference.is_some());
+    let mut body = String::new();
+    let mut chunks = 0;
+    while let Some(next) = reference.take() {
+        let page = read(
+            &context,
+            &snapshot,
+            None,
+            Some(&initial.revision),
+            Some(&next),
+        )
+        .unwrap();
+        assert_archive_read(&page);
+        assert!(super::super::archive_page_is_current(&snapshot, &page));
+        let detail = page.detail.unwrap();
+        assert_eq!(detail.event_id, assistant.id);
+        assert_eq!(detail.complete, detail.next.is_none());
+        body.push_str(&detail.text);
+        reference = detail.next;
+        chunks += 1;
+        assert!(chunks < 8, "owned body must finish within its fixed extent");
+    }
+    assert!(chunks > 1, "exercise lazy body continuation");
+    assert_eq!(body, "Owned archive body. ".repeat(1400));
+}
+
+#[test]
+fn archive_read_ready_never_tags_native_cursor_detail_or_renewal_fallbacks() {
+    let (_guard, temp) = isolated_home();
+    let (context, snapshot, initial) = archive_read_fixture(temp.path());
+    let stale = read(
+        &context,
+        &snapshot,
+        Some("source:stale"),
+        Some(&initial.revision),
+        None,
+    )
+    .unwrap();
+    assert!(stale.reset);
+    assert!(!stale.older_page);
+    assert!(
+        !stale.archive_read_ready,
+        "a complete archive cannot qualify a native cursor fallback"
+    );
+    assert!(stale.revalidated_ids.is_none());
+    assert!(read(
+        &context,
+        &snapshot,
+        None,
+        Some(&initial.revision),
+        Some("seed:stale")
+    )
+    .is_err());
+    let renewal = super::super::read_revalidated(
+        &context,
+        &snapshot,
+        &initial.revision,
+        &["source:stale".into()],
+    )
+    .unwrap();
+    assert!(!renewal.archive_read_ready);
+    assert!(
+        renewal.revalidated_ids.is_none(),
+        "archive ownership never acknowledges native renewal"
+    );
+    let detail_ref = assistant_rows(&initial)[0].metadata["chat_detail_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (head_path, objects) = locations(&context.agent_id).unwrap();
+    let mut store = Store::new(&objects);
+    let mut changed: Head = store
+        .read(&head(&context.agent_id).unwrap().unwrap())
+        .unwrap();
+    changed.generation = "retired-generation".into();
+    write_json_atomic(&head_path, &store.put(&changed).unwrap()).unwrap();
+    assert!(read(
+        &context,
+        &snapshot,
+        None,
+        Some(&initial.revision),
+        Some(&detail_ref)
+    )
+    .is_err());
+}
+
+#[test]
+fn archive_read_ready_rejects_unqualified_heads_and_unclassified_stops() {
+    let (_guard, temp) = isolated_home();
+    let (context, snapshot, initial) = archive_read_fixture(temp.path());
+    let (head_path, objects) = locations(&context.agent_id).unwrap();
+    let mut store = Store::new(&objects);
+    let qualified: Head = store
+        .read(&head(&context.agent_id).unwrap().unwrap())
+        .unwrap();
+    let mut warm = qualified.clone();
+    warm.bootstrap = None;
+    let mut partial = qualified.clone();
+    partial.bootstrap.as_mut().unwrap().event_before = 1;
+    let mut body_pending = qualified.clone();
+    body_pending.progress = "indexing".into();
+    body_pending.bootstrap.as_mut().unwrap().body_before = Some("pending-body".into());
+    let mut logical_pending = qualified.clone();
+    logical_pending.progress = "indexing".into();
+    logical_pending.bootstrap.as_mut().unwrap().archive_display = None;
+    let mut native = qualified.clone();
+    native.source_epoch = Some("native-epoch".into());
+    for (label, mut rejected) in [
+        ("warm", warm),
+        ("partial", partial),
+        ("body", body_pending),
+        ("logical", logical_pending),
+        ("native", native),
+    ] {
+        // A synthetic checkpoint cannot retain a pack bound to the original Head.
+        rejected.recent_page = None;
+        write_json_atomic(&head_path, &store.put(&rejected).unwrap()).unwrap();
+        let page = read(&context, &snapshot, None, None, None).unwrap();
+        assert!(
+            !page.archive_read_ready,
+            "{label} head cannot grant archive reads"
+        );
+        assert!(
+            !super::super::archive_page_is_current(&snapshot, &initial),
+            "{label}"
+        );
+    }
+    write_json_atomic(&head_path, &store.put(&qualified).unwrap()).unwrap();
+    let policy_path = policy_path(&context.agent_id).unwrap();
+    let mut policy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&policy_path).unwrap()).unwrap();
+    for reason in [
+        "source policy transition pending",
+        "source_changed",
+        "provider_log_source_replaced: unclassified suffix",
+    ] {
+        policy["blocked_reason"] = json!(reason);
+        write_json_atomic(&policy_path, &policy).unwrap();
+        let page = read(&context, &snapshot, None, None, None).unwrap();
+        assert!(!page.archive_read_ready, "unclassified stop: {reason}");
+        assert!(!super::super::archive_page_is_current(&snapshot, &initial));
+    }
+    policy_barrier(&context.agent_id).unwrap();
+    assert!(
+        !read(&context, &snapshot, None, None, None)
+            .unwrap()
+            .archive_read_ready
+    );
+    assert!(!super::super::archive_page_is_current(&snapshot, &initial));
+}
+
+#[test]
+fn archive_read_ready_revalidates_scope_and_is_cleared_on_response_budget() {
+    let (_guard, temp) = isolated_home();
+    let (_, snapshot, initial) = archive_read_fixture(temp.path());
+    assert!(super::super::archive_page_is_current(&snapshot, &initial));
+    let mut foreign = snapshot.clone();
+    foreign.resume_session = Some("other-session".into());
+    assert!(!super::super::archive_page_is_current(&foreign, &initial));
+    for field in [
+        "session_id",
+        "conversation_id",
+        "generation",
+        "source_epoch",
+        "recent_admission",
+        "revalidated_ids",
+    ] {
+        let mut json = serde_json::to_value(&initial).unwrap();
+        json[field] = if field == "revalidated_ids" {
+            json!(["source:stale"])
+        } else {
+            json!("other")
+        };
+        let changed = serde_json::from_value(json).unwrap();
+        assert!(
+            !super::super::archive_page_is_current(&snapshot, &changed),
+            "{field}"
+        );
+    }
+    let mut over_budget = initial.clone();
+    over_budget.events[0].text = Some("x".repeat(IPC_BYTES));
+    let trimmed = super::super::finish(over_budget).unwrap();
+    assert_eq!(trimmed.progress, "response_budget");
+    assert!(!trimmed.archive_read_ready);
+    retire(&snapshot.session_id).unwrap();
+    assert!(
+        !super::super::archive_page_is_current(&snapshot, &initial),
+        "retirement between read and publication must reject the marker"
+    );
+}
+
+#[test]
+fn archive_read_ready_rejects_changed_physical_inputs_before_head_retirement() {
+    for name in [
+        "index",
+        "manifest.json",
+        "conversation.jsonl",
+        "events.jsonl",
+    ] {
+        let (_guard, temp) = isolated_home();
+        let (context, snapshot, initial) = archive_read_fixture(temp.path());
+        let directory = conversation_dir(
+            &context.agent_id,
+            initial.conversation_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        let path = if name == "index" {
+            super::super::super::storage::index_path(&context.agent_id).unwrap()
+        } else {
+            directory.join(name)
+        };
+        let before = fs::read(&path).unwrap();
+        let mut changed = before.clone();
+        if path.file_name().unwrap() == "manifest.json" {
+            let mut manifest: serde_json::Value = serde_json::from_slice(&before).unwrap();
+            manifest["status"] = json!("closed");
+            changed = serde_json::to_vec(&manifest).unwrap();
+        } else {
+            changed.push(b'\n');
+        }
+        fs::write(&path, changed).unwrap();
+        assert!(head(&context.agent_id).unwrap().is_some());
+        assert!(!super::super::archive_page_is_current(&snapshot, &initial));
+        assert!(
+            !read(&context, &snapshot, None, None, None)
+                .unwrap()
+                .archive_read_ready
+        );
+    }
 }
 
 #[test]
@@ -486,6 +815,39 @@ fn archive_display_upgrades_ready_committed_head_without_explicit_retire() {
         "ordinary background bootstrap must upgrade a ready persisted head"
     );
     assert!(rows[0].id.starts_with("archive-display:"));
+}
+
+#[test]
+fn archive_only_read_requires_a_complete_owned_cold_cohort() {
+    let (_guard, temp) = isolated_home();
+    let events = legacy_pair(temp.path(), "A complete saved cohort");
+    cold_page(temp.path(), &events);
+    let context = context();
+    let reference = head(&context.agent_id).unwrap().unwrap();
+    let mut store = Store::new(&locations(&context.agent_id).unwrap().1);
+    let qualified: Head = store.read(&reference).unwrap();
+    assert!(archive_only_head(&qualified, &context));
+    let mut warm = qualified.clone();
+    warm.bootstrap = None;
+    assert!(!archive_only_head(&warm, &context));
+    let mut partial = qualified.clone();
+    partial.bootstrap.as_mut().unwrap().event_before = 1;
+    assert!(!archive_only_head(&partial, &context));
+    let mut native = qualified.clone();
+    native.source_epoch = Some("native-epoch".into());
+    assert!(!archive_only_head(&native, &context));
+    let mut foreign = context.clone();
+    foreign.provider_session_ids = vec!["other-session".into()];
+    assert!(!archive_only_head(&qualified, &foreign));
+    for fence in [
+        "source policy transition pending",
+        "source policy unavailable",
+    ] {
+        assert!(
+            crate::commands::chat_recent_seed::capture_stop_progress(&io::Error::other(fence))
+                .is_none()
+        );
+    }
 }
 
 #[test]

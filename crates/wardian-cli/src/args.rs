@@ -1346,6 +1346,38 @@ pub struct ReleaseHoldArgs {
     pub operator_verified_exit: bool,
 }
 
+/// Explicit authorization from recorded user approval for an exact archive range.
+#[derive(Debug, Args)]
+pub struct AdoptArchiveArgs {
+    /// Agent name or UUID.
+    pub target: String,
+    /// Stable authorization UUID; reuse it when retrying the same approval.
+    #[arg(long, value_name = "UUID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub authorization_id: String,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub conversation_id: String,
+    #[arg(long, value_name = "UUID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub provider_session: String,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub source_path: String,
+    #[arg(long)]
+    pub start_offset: u64,
+    #[arg(long)]
+    pub end_offset: u64,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub native_platform: String,
+    #[arg(long)]
+    pub native_primary: u64,
+    #[arg(long)]
+    pub native_secondary: u64,
+    /// Reference to the recorded user approval; OS identity alone is not consent.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub approval_reference: String,
+    /// Exact recorded approval text authorizing this scope.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub approval_text: String,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
     /// Show one agent, or the managed session when no target is supplied.
@@ -1395,6 +1427,8 @@ pub enum AgentCommand {
     NewSession { target: String },
     /// Release one legacy hold after explicit operator verification of old-provider exit.
     ReleaseHold(ReleaseHoldArgs),
+    /// Adopt one archive range using explicit recorded user approval.
+    AdoptArchive(AdoptArchiveArgs),
     /// Pause an agent's provider process.
     Pause { target: String },
     /// Resume a paused agent.
@@ -2666,6 +2700,105 @@ mod tests {
             args.command,
             Some(AgentCommand::Doctor { target }) if target == "ee-1"
         ));
+    }
+
+    fn archive_adoption_arguments() -> Vec<&'static str> {
+        vec![
+            "wardian",
+            "agent",
+            "adopt-archive",
+            "coder-a1",
+            "--authorization-id",
+            "a5f6ad8a-0ac5-4ec2-99e0-b856663594a8",
+            "--conversation-id",
+            "conversation-1",
+            "--provider-session",
+            "89b85617-bcad-4d38-8329-67d3297d7c94",
+            "--source-path",
+            "/archive/session.jsonl",
+            "--start-offset",
+            "0",
+            "--end-offset",
+            "456",
+            "--native-platform",
+            "unix",
+            "--native-primary",
+            "18446744073709551615",
+            "--native-secondary",
+            "17",
+            "--approval-reference",
+            "recorded-user-approval-1",
+            "--approval-text",
+            "I approve adopting exactly this range.",
+        ]
+    }
+
+    #[test]
+    fn archive_adoption_requires_target_and_every_scope_and_approval_argument() {
+        let valid = archive_adoption_arguments();
+        let cli = Cli::try_parse_from(&valid).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected agent command")
+        };
+        assert!(
+            matches!(args.command, Some(AgentCommand::AdoptArchive(args))
+            if args.target == "coder-a1" && args.start_offset == 0
+                && args.end_offset == 456 && args.native_primary == u64::MAX)
+        );
+        let mut missing_target = valid.clone();
+        missing_target.remove(3);
+        assert!(Cli::try_parse_from(missing_target).is_err());
+        for flag_index in (4..valid.len()).step_by(2) {
+            let mut missing = valid.clone();
+            missing.drain(flag_index..flag_index + 2);
+            assert!(
+                Cli::try_parse_from(missing).is_err(),
+                "{}",
+                valid[flag_index]
+            );
+            let mut empty = valid.clone();
+            empty[flag_index + 1] = "";
+            assert!(Cli::try_parse_from(empty).is_err(), "{}", valid[flag_index]);
+        }
+        for flag in [
+            "--start-offset",
+            "--end-offset",
+            "--native-primary",
+            "--native-secondary",
+        ] {
+            let index = valid.iter().position(|argument| *argument == flag).unwrap() + 1;
+            for invalid_value in ["-1", "18446744073709551616", "invalid"] {
+                let mut invalid = valid.clone();
+                invalid[index] = invalid_value;
+                assert!(
+                    Cli::try_parse_from(invalid).is_err(),
+                    "{flag}: {invalid_value}"
+                );
+            }
+        }
+        let mut hold_exit = valid;
+        hold_exit.push("--operator-verified-exit");
+        assert!(Cli::try_parse_from(hold_exit).is_err());
+    }
+
+    #[test]
+    fn archive_adoption_schema_reflects_all_required_arguments() {
+        let schema = crate::schema::render(&["agent".into(), "adopt-archive".into()]).unwrap();
+        let schema: serde_json::Value = serde_json::from_str(&schema).unwrap();
+        assert_eq!(schema["command"], "wardian agent adopt-archive");
+        let arguments = schema["args"].as_array().unwrap();
+        let valid = archive_adoption_arguments();
+        for name in std::iter::once("target").chain((4..valid.len()).step_by(2).map(|i| valid[i])) {
+            assert!(
+                arguments
+                    .iter()
+                    .any(|argument| argument["name"] == name && argument["required"] == true),
+                "{name}"
+            );
+        }
+        assert!(!arguments
+            .iter()
+            .any(|argument| argument["name"] == "--operator-verified-exit"));
     }
 
     #[test]

@@ -216,7 +216,7 @@ fn provider_candidates(config: &AgentConfig, hold: &ConversationLease) -> Vec<u3
 
 /// The endpoint belongs to this OS user; query the inherited OS token rather
 /// than accepting a username supplied by the client or USER/USERNAME variables.
-fn operator_os_identity() -> Result<String, String> {
+pub(super) fn operator_os_identity() -> Result<String, String> {
     #[cfg(windows)]
     {
         // EXTENDED_NAME_FORMAT (NameSamCompatible), LPWSTR, PULONG; BOOLEAN
