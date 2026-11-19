@@ -19,6 +19,10 @@ const PROVENANCE_KEYS: &[&str] = &[
     "causal_ref",
     "context_observation",
     "provider_turn_id",
+    "provider_phase",
+    "chat_turn_adapter",
+    "chat_turn_membership_complete",
+    "chat_turn_membership_partial",
     "codex_user_text_sha256",
     "provider_step_source",
 ];

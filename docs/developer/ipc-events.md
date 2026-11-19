@@ -310,6 +310,79 @@ arguments, patches and artifact output are published through scoped lazy detail
 references, with each detail response limited to 16 KiB. Structured edit totals
 describe the original input; clipped patch totals remain explicitly partial.
 
+#### Versioned canonical turn presentation
+
+`AgentChatPage.presentation` is an optional version envelope for producer-owned
+turns. Version 1 defines bounded turn, item, step, admitted preview and output-tail
+records in `wardian-core` and matching snake_case TypeScript DTOs. Scope,
+revision, aliases, removals and cursors remain on the existing page. The payload
+stays opaque until its version is recognized, so a future payload shape cannot
+break legacy event decoding.
+
+The existing archive capture owner derives canonical metadata in its bounded
+checkpoints. Source-scoped accepted request roots establish membership; owned
+call identities pair invocation and result records. Stable keys and incremental
+turn counters live in additive AVL roots in the same immutable Store and Head.
+An empty index is omitted when serialized, preserving legacy packed-head
+bindings. An edited legacy prompt cannot activate incomplete turn metadata.
+Source adapters currently cover Codex's explicit matching turn brackets and
+Claude's UUID ancestry to an actual request. Claude sidechains need an explicit
+parent tool link. Adapter state persists with the existing source cursor; it
+retains bounded identities rather than transcript text. Open or broken proof
+keeps membership and counts partial, even after a projection checkpoint settles.
+Only a complete closing proof can publish full totals. Other providers retain
+the legacy view until they have a proven adapter.
+The accepted native capture owner retains a typed closure receipt on the
+existing canonical request when the closing provider record is status-only.
+The receipt binds the exact source, epoch, request, provider turn and closing
+source coordinates. It does not create a narrative row or change prompt order.
+Only an opaque, continuity-verified native acquisition can issue it; ordinary
+provider or Watch metadata cannot. Status-only capture may enrich an existing
+owned request after restart, but cannot create a conversation. Privacy gaps
+withhold the receipt. Initial history without a verified capture receipt stays
+partial until closing evidence is admitted.
+Claude rows containing several invocations or results remain partial while the
+legacy normalizer emits one event per native row.
+Unqualified or unmigrated turns retain the corrected Work log through
+producer-owned legacy groups in the same canonical view. A turn selects one
+representation; unsupported history does not disable other proven turns.
+
+Settled recent metadata is packed with canonical headers and bound to the same
+Head. Reads select one committed representation; recent previews keep their
+existing fast path. The canonical Row owner certifies every member of an admitted
+archive window; raw-source headers cannot issue that certificate. An unavailable
+live source does not demote committed archive rows. A window containing provisional
+or uncertified source rows retains the whole legacy view until canonical admission.
+Optional metadata seeks share the existing read allowance,
+including failed attempts. They never scan a turn, enter the archive gate or
+open raw logs. Provider state evidence updates turn status through
+`state_event_refs`; it does not become assistant narration. Unknown assistant
+phase stays narration, and agent idle state does not imply completion.
+
+Step-tail references retain the existing generation, current-row and body-binding
+checks, then resolve the latest backing through the committed step owner. Reads
+fetch at most the final two existing body chunks and return a UTF-8-aligned
+16 KiB output tail. Input is separate, bounded to 1 KiB and marked when clipped.
+There is no continuation to concatenate. Earlier output remains in the archive.
+
+The final page publication guard validates a supplied version 1 payload before
+returning it. Duplicate keys, dangling ownership/references, invalid provenance,
+more than 80 items/turns, and malformed output-tail metadata reject the entire
+capability. Detail text is limited to 16 KiB; JSON requires a complete, valid,
+untruncated value. Detail revision must match the enclosing page. Unknown
+versions, malformed capabilities and combined responses exceeding the existing
+256 KiB IPC budget drop the entire capability with a diagnostic, retaining the
+legacy event view and its existing budget enforcement. No representation is
+partially trimmed into another one.
+
+This producer stage does not enable the shared renderer or provisional transcript
+publication. Exact pending-prompt bridges and the preview-identity bridge remain
+follow-up work under the spec's identity amendment. Renderer activation must keep
+other submissions pending in the composer. Source and submission identities are distinct;
+neither text equality nor admission alone establishes canonical correspondence.
+Public Chat behavior and screenshots remain unchanged at this stage. Native and
+PWA open-to-usable timing remains separate acceptance evidence for activation.
+
 Archive replay retains canonical IDs and can enrich provenance from a current,
 source-bound native observation. Capture-enabled repair persists verified
 aliases and metadata in the existing archive format; capture-disabled repair

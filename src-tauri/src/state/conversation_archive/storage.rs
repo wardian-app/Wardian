@@ -276,6 +276,36 @@ pub(super) fn active_handle_for_context(
     })
 }
 
+/// Read-only lookup for lifecycle-only native capture. Unlike normal writer
+/// selection, this never creates a conversation or closes another source.
+pub(super) fn existing_handle_for_source(
+    context: &ConversationArchiveContext,
+) -> io::Result<Option<ActiveConversationHandle>> {
+    let Some(source) = context.provider_source_key.as_deref() else {
+        return Ok(None);
+    };
+    for entry in read_agent_index(&context.agent_id)? {
+        if entry.status != ConversationStatus::Open {
+            continue;
+        }
+        let directory = conversation_dir(&context.agent_id, &entry.conversation_id)?;
+        let Some(manifest) = read_manifest(&directory.join("manifest.json"))? else {
+            continue;
+        };
+        if manifest.status == ConversationStatus::Open
+            && manifest.provider == context.provider
+            && manifest.provider_source_key.as_deref() == Some(source)
+        {
+            return Ok(Some(ActiveConversationHandle {
+                conversation_id: manifest.conversation_id,
+                next_seq: 1,
+                provider_source_key: Some(source.into()),
+            }));
+        }
+    }
+    Ok(None)
+}
+
 fn hydrate_open_handle(
     context: &ConversationArchiveContext,
     provider_source_key: Option<&str>,

@@ -8,6 +8,7 @@ mod automation_approval_lock;
 pub mod automation_execution_lock;
 pub mod automation_migration;
 pub mod browser;
+pub mod chat_presentation;
 pub mod classes;
 pub mod claude_mod;
 pub mod control;

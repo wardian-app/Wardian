@@ -1,6 +1,31 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn optional_metadata_allowance_keeps_failed_reads_charged() {
+    let temp = tempfile::tempdir().unwrap();
+    let writer = Store::writer(temp.path());
+    let reference = writer.put(&"synthetic value").unwrap();
+    let mut reader = Store::new(temp.path());
+    let limits = (reader.object_limit, reader.byte_limit);
+    let result = reader.read_allowance(1, READ_BYTES, |reader| {
+        reader.read::<String>(&reference)?;
+        reader.read::<String>(&reference)
+    });
+    assert!(result.is_err());
+    assert_eq!(reader.objects, 1);
+    assert_eq!((reader.object_limit, reader.byte_limit), limits);
+    reader.read::<String>(&reference).unwrap();
+    assert_eq!(reader.objects, 2);
+    let bytes = reader.bytes;
+    assert!(reader
+        .read_allowance(1, 0, |reader| reader.read::<String>(&reference))
+        .is_err());
+    assert_eq!(reader.objects, 3);
+    assert_eq!(reader.bytes, bytes);
+    assert_eq!((reader.object_limit, reader.byte_limit), limits);
+}
+
 fn insert_rows(store: &mut Store, count: usize) -> String {
     let mut root = None;
     for index in 0..count {
