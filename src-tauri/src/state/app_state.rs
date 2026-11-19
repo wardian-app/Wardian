@@ -80,6 +80,8 @@ pub struct AppState {
     pub spawn_operation_slots: Arc<tokio::sync::Semaphore>,
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One durable attachment index per desktop runtime; opened lazily off-thread.
+    pub remote_attachments: Mutex<Option<Arc<crate::remote::attachments::AttachmentStore>>>,
     pub status_observation_sequences: std::sync::Mutex<HashMap<String, u64>>,
     status_revisions: std::sync::Mutex<HashMap<String, StatusRevisionSession>>,
     pub automation_scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -529,6 +531,7 @@ impl Default for AppState {
             spawn_operation_slots: Arc::new(tokio::sync::Semaphore::new(0)),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
+            remote_attachments: Mutex::new(None),
             status_observation_sequences: std::sync::Mutex::new(HashMap::new()),
             status_revisions: std::sync::Mutex::new(HashMap::new()),
             automation_scheduler_handle: Mutex::new(None),

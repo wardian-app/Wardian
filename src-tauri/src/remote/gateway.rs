@@ -28,6 +28,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tower::ServiceExt;
 
+mod attachments;
+
 const REMOTE_SESSION_COOKIE_NAME: &str = "__Host-wardian_remote_session";
 const REMOTE_CSRF_HEADER_NAME: &str = "x-wardian-csrf";
 const REMOTE_STATUS_STREAM_NAME: &str = "agent_status";
@@ -93,6 +95,12 @@ pub async fn configure_remote_gateway(
 ) -> Result<(), String> {
     if config.enabled {
         validate_gateway_bind_config(&config)?;
+        attachments::store(&RemoteGatewayContext {
+            app: app.clone(),
+            config: config.clone(),
+        })
+        .await
+        .map_err(|_| "attachment_storage_failure".to_string())?;
     }
     let state = app.state::<crate::state::AppState>();
     // Disabled settings still close the running listener, even if their saved
@@ -152,6 +160,17 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
             get(terminal_stream_upgrade),
         )
         .route("/remote/api/agents/action", post(run_agent_action))
+        .route(
+            "/remote/api/agents/{session_id}/attachments/{upload_id}",
+            post(attachments::upload)
+                .get(attachments::status)
+                .delete(attachments::remove)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/remote/api/agents/{session_id}/attachment-submissions/{submission_id}",
+            get(attachments::submission_status),
+        )
         .route("/remote/api/ws-ticket", post(create_ws_ticket))
         .route("/remote/api/status-stream", get(status_stream_upgrade))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -2293,7 +2312,7 @@ async fn run_agent_action(
     State(ctx): State<RemoteGatewayContext>,
     headers: HeaderMap,
     Json(request): Json<RemoteAgentActionRequest>,
-) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
+) -> Result<Response, RemoteGatewayError> {
     let origin = require_audited_request_boundary(&ctx.config, &headers, true, "agent_action")?;
     let session =
         require_audited_remote_session(&ctx, &headers, &origin, "agent_action", &request.action)
@@ -2308,6 +2327,11 @@ async fn run_agent_action(
                 .target("agent", &request.target),
         );
         return Err(error);
+    }
+    if !request.attachment_ids.is_empty() || request.submission_id.is_some() {
+        return attachments::send(&ctx, &headers, &origin, &session, request)
+            .await
+            .map(attachments::no_store);
     }
     let receipt =
         match crate::remote::operations::run_remote_agent_action(&ctx.app, request.clone()).await {
@@ -2335,7 +2359,7 @@ async fn run_agent_action(
         "chat_agent_id": receipt.as_ref().map(|receipt| &receipt.chat_agent_id),
         "chat_conversation_id": receipt.as_ref().map(|receipt| &receipt.chat_conversation_id),
         "chat_source_epoch": receipt.as_ref().and_then(|receipt| receipt.chat_source_epoch.as_ref()),
-    })))
+    })).into_response())
 }
 
 fn execute_remote_inbox_action(
@@ -3193,13 +3217,23 @@ impl IntoResponse for RemoteGatewayError {
             body["detail"] = serde_json::Value::String(detail.to_string());
         }
         let body = axum::Json(body);
-        (self.status, body).into_response()
+        let mut response = (self.status, body).into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+        }
+        response
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod attachments_tests;
     use crate::remote::models::{
         DeviceCredentialKind, DeviceRecord, RemoteCredentialAudience, RemoteGatewayConfig,
         RemoteReadGrant, RemoteSessionRecord, REMOTE_AUDIT_SCHEMA_VERSION,

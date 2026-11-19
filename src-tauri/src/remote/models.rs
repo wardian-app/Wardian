@@ -496,12 +496,16 @@ pub struct RemoteTerminalSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteAgentActionRequest {
     pub action: String,
     pub target: String,
     pub prompt: Option<String>,
     pub input_mode: Option<MessageInputMode>,
     pub inbox_item_id: Option<String>,
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
+    pub submission_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

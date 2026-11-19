@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, RefreshCw, Send } from "lucide-react";
+import { ArrowLeft, RefreshCw } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -24,6 +24,7 @@ import {
 } from "../chat/chatPresentation";
 import { chatTranscriptRowKey, withTurnChangeSummaries } from "../chat/chatTurns";
 import { derivePresentedChatRows } from "../grid/workLogPresentation";
+import { RemoteAttachmentComposer } from "./RemoteAttachmentComposer";
 import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
 import { useRemoteStore } from "./useRemoteStore";
@@ -467,7 +468,6 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const refreshActiveAgentChat = useRemoteStore((state) => state.refreshActiveAgentChat);
   const loadOlderActiveAgentChat = useRemoteStore((state) => state.loadOlderActiveAgentChat);
   const sendPromptToActiveAgent = useRemoteStore((state) => state.sendPromptToActiveAgent);
-  const [prompt, setPrompt] = useState("");
   const contentEndRef = useRef<HTMLDivElement | null>(null);
   const lastVisibleChatEventIdRef = useRef<string | undefined>(undefined);
 
@@ -490,14 +490,6 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
     if (shouldScroll && (activeAgentViewMode === "terminal" || nearBottom)) contentEndRef.current?.scrollIntoView({ block: "end" });
   }, [activeAgentViewMode, visibleEvents]);
 
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    const trimmed = prompt.trim();
-    if (!trimmed || chatInputDisabledReason(agent.status, sending)) return;
-    await sendPromptToActiveAgent(trimmed, trimmed.startsWith("/") ? "command" : "message");
-    setPrompt("");
-  };
-
   const refresh = () => {
     if (activeAgentViewMode === "chat") {
       void refreshActiveAgentChat();
@@ -506,7 +498,6 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
     }
   };
   const disabledReason = chatInputDisabledReason(agent.status, sending);
-  const canSubmit = prompt.trim().length > 0 && !disabledReason;
 
   return (
     <main
@@ -591,29 +582,10 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
         <TerminalPane agent={agent} loading={terminalLoading} error={terminalError} endRef={contentEndRef} />
       )}
 
-      {activeAgentViewMode === "chat" && (
-        <form onSubmit={(event) => void submit(event)} className="chat-composer shrink-0 border-t border-wardian-border bg-wardian-bg/95 p-3 backdrop-blur">
-          <div className="flex items-end gap-2">
-            <textarea
-              aria-label={`Prompt ${agent.session_name}`}
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              disabled={Boolean(disabledReason)}
-              rows={2}
-              className="min-h-14 flex-1 resize-none rounded-md border border-wardian-border bg-wardian-card px-3 py-2 text-sm text-primary outline-none transition-colors placeholder:text-muted-neutral focus:border-[var(--color-wardian-accent)] disabled:cursor-not-allowed disabled:opacity-70"
-              placeholder={disabledReason ?? "Prompt agent"}
-            />
-            <button
-              type="submit"
-              disabled={!canSubmit}
-              className="inline-flex h-14 w-14 shrink-0 items-center justify-center rounded-md border border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <span className="sr-only">Send prompt</span>
-              <Send className="h-4 w-4" aria-hidden="true" />
-            </button>
-          </div>
-        </form>
-      )}
+      <div hidden={activeAgentViewMode !== "chat"} className="shrink-0">
+        <RemoteAttachmentComposer key={agent.session_id} agent={agent} disabledReason={disabledReason}
+          sendText={sendPromptToActiveAgent} onAccepted={() => { void refreshActiveAgentChat(); }} />
+      </div>
     </main>
   );
 };

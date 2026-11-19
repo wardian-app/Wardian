@@ -1399,7 +1399,8 @@ describe("RemoteMobileApp", () => {
     expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("aria-pressed", "false");
     expect(chatCalls).toBe(0);
     expect(scrollIntoViewMock).toHaveBeenCalled();
-    expect(screen.queryByLabelText("Prompt Coder")).not.toBeInTheDocument();
+    // Keep drafts and uncertain attachment submissions alive across mode switches.
+    expect(screen.getByLabelText("Prompt Coder")).not.toBeVisible();
     expect(screen.queryByRole("button", { name: "Send prompt" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Chat" }));
     expect(await screen.findByText("I can see the selected conversation.")).toBeVisible();

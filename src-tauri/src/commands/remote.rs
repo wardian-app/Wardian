@@ -22,6 +22,8 @@ pub async fn submit_inbox_provider_choice(
             prompt: Some(prompt),
             input_mode: Some(wardian_core::control::MessageInputMode::Message),
             inbox_item_id: Some(inbox_item_id),
+            attachment_ids: Vec::new(),
+            submission_id: None,
         },
     )
     .await
@@ -395,6 +397,18 @@ async fn revoke_remote_device_inner(
     )
     .await
     .map_err(|error| error.message)?;
+    let attachment_store = state.remote_attachments.lock().await.clone();
+    if let Some(store) = attachment_store {
+        let revoked_device = device_id.clone();
+        if !matches!(
+            tokio::task::spawn_blocking(move || store.revoke_device(&revoked_device)).await,
+            Ok(Ok(()))
+        ) {
+            crate::utils::logging::log_debug(
+                "[Wardian] revoked attachment cleanup deferred to retention sweep",
+            );
+        }
+    }
     let origin = remote_audit_origin();
     append_desktop_remote_audit(DesktopRemoteAuditEvent {
         origin: origin.as_deref(),

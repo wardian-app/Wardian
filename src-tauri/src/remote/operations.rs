@@ -1636,6 +1636,11 @@ pub async fn remote_agent_terminal_snapshot(
 }
 
 pub fn validate_remote_agent_action(request: &RemoteAgentActionRequest) -> Result<(), String> {
+    // Only the authenticated HTTP attachment boundary may resolve upload IDs.
+    // Ordinary dispatch receives the resulting prompt, never caller paths/IDs.
+    if !request.attachment_ids.is_empty() || request.submission_id.is_some() {
+        return Err("attachment_resolution_required".to_string());
+    }
     if request.action == "send_prompt" {
         if request
             .prompt
@@ -3123,6 +3128,8 @@ mod tests {
             prompt: None,
             input_mode: None,
             inbox_item_id: None,
+            attachment_ids: Vec::new(),
+            submission_id: None,
         };
 
         assert_eq!(
@@ -3139,6 +3146,8 @@ mod tests {
             prompt: Some("/status".to_string()),
             input_mode: Some(wardian_core::control::MessageInputMode::Command),
             inbox_item_id: None,
+            attachment_ids: Vec::new(),
+            submission_id: None,
         };
 
         validate_remote_agent_action(&request).expect("command mode should be accepted");
@@ -3152,6 +3161,8 @@ mod tests {
             prompt: Some("1".to_string()),
             input_mode: Some(wardian_core::control::MessageInputMode::ApprovalAction),
             inbox_item_id: None,
+            attachment_ids: Vec::new(),
+            submission_id: None,
         };
 
         assert_eq!(
@@ -3168,6 +3179,8 @@ mod tests {
             prompt: None,
             input_mode: None,
             inbox_item_id: None,
+            attachment_ids: Vec::new(),
+            submission_id: None,
         };
 
         assert_eq!(
