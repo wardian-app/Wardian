@@ -41,9 +41,12 @@ remain available in step details and Copy command.
 
 ## Turn anatomy
 
-1. **Prompt:** render the committed user message once, including attachments.
-   A local submission indicator belongs to the composer until committed; it
-   must not become an optimistic transcript row.
+1. **Prompt:** render the user's message in place immediately on submission
+   admission, including attachments. The producer publishes a provisional
+   prompt item keyed by its scoped submission or delivery receipt identity,
+   visibly marked `Pending` while queued. Do not wait for delivery or capture.
+   Canonical publication replaces it through a verified alias exactly once,
+   retaining its visible key and position; no receiptless client echo.
 2. **Work:** one summary for a turn containing steps or narration. Initially
    collapsed, including while live. Example: `Working · 4 steps · Reading config`
    or `Worked for 2m · 6 steps · Edited 2 files (reported)`.
@@ -162,10 +165,19 @@ not every output chunk, and honor reduced motion.
 The Rust projection producer is authoritative for membership, pairing,
 deduplication, ordering, labels, aggregates, and phases. Both clients render
 one committed projection; refresh/delta application is revision reconciliation
-within that source, never a union of provider logs, delivery records, local
-submissions, recent previews, and persisted rows. A non-authoritative recent
-preview may report loading progress, but supplies no narrative rows in this
-presentation. This deliberately trades preview immediacy for one authority.
+within that source. The producer admits recent previews and pending submissions
+as provisional items inside that same projection, with the same `turn_key` and
+`item_key` as their canonical replacements and a visible `Provisional` or
+`Pending` marker. Each item has exactly one current representation; clients
+never union provider logs, delivery records, local echoes, preview cohorts,
+and persisted rows.
+
+Here, committed means an atomically published producer view. Provisional
+publication must not wait for durable archive capture or canonical indexing,
+and does not itself make the evidence canonical. Retain the recent-admission
+ownership, privacy, scope, lifetime and byte limits of the recent-publication
+contract. Provisional items confer no canonical Older, detail or ACK authority;
+show bounded inline content and pending detail until qualified references exist.
 
 Add a versioned presentation contract to existing bounded page/detail APIs
 and matching snake_case Rust/TypeScript DTOs. Required logical fields follow;
@@ -175,7 +187,7 @@ these are semantics, not a prescribed storage layout or a new public API.
 | --- | --- |
 | Page | presentation version; existing session/conversation/generation/source epoch, revision, reset, aliases, removals, bounded cursors/progress |
 | Turn | stable `turn_key`, prompt reference(s), status, ordered answer references, duration and reported-change evidence, step count and completeness |
-| Item | stable `item_key`, owning `turn_key`, immutable order key, kind (`step`, `narration`, `answer`), evidence references |
+| Item | stable `item_key`, owning `turn_key`, immutable order key, kind (`prompt`, `step`, `narration`, `answer`), provisional/canonical provenance, admission/submission identity and evidence references |
 | Step | tool identity/category, human description, status, optional summary, invocation/result references, detail availability/reference |
 | Detail | owning step, bound revision/scope, retained text/format, pending/unavailable/complete flags, truncated-before flag, total size when known |
 
@@ -184,7 +196,17 @@ Invariants:
 1. Keys survive refresh, restart, result arrival, and Older paging. Scope keys
    include conversation identity; never derive identity from display text,
    timestamps, array positions, or the currently loaded page boundary. Producer
-   aliases explicitly migrate a provisional display identity when necessary.
+   aliases migrate provisional backing identities to proven canonical records
+   while retaining the visible turn/item keys, position and expansion state.
+   Replacement is atomic, never an extra row or text-based deduplication.
+   Changed or retired admission retracts its provisional items immediately,
+   including after clear/privacy changes; stale publications cannot restore them.
+   Canonical replacement requires matching owned source identity and version.
+   Publish queued prompts at admission using a submission/delivery identity
+   even when the optional canonical `chat_event_id` receipt is absent. This
+   admission identity proves the pending item, not canonical correspondence.
+   Repeated observations of that identity update one item; uncertain delivery
+   must not trigger a prompt resend. Preserve failed/cancelled delivery status.
 2. Resolve request/turn membership and call/result links in the producer using
    proven source identities. Provider `turn_id` alone is insufficient. For
    legacy data, use the archive's accepted request boundary; if attribution is
@@ -200,8 +222,10 @@ Invariants:
    producer may designate the last assistant message as the answer only when
    source ordering establishes it. Unknown phase stays unknown. No client
    heuristic promotes narration into an answer because the agent went idle.
-5. Publish dependent presentation headers and references before the committed
-   head changes. Preserve existing 80-header, 256 KiB IPC and reader budgets;
+5. Publish dependent presentation headers and references atomically with their
+   view revision; canonical heads retain their existing durability rules and
+   provisional views remain independent of slow capture. Preserve existing
+   80-header, 256 KiB IPC and reader budgets;
    a large turn spans pages. Build summaries incrementally, never by scanning
    a whole turn on a normal read. `partial`/pending data remains visibly partial.
 6. Reset, alias and retraction semantics remain those of `useChatPages` and
@@ -216,15 +240,17 @@ contract. Styling the existing adjacency groups alone cannot satisfy it.
 
 ## Transition and acceptance
 
-1. Land #1751's immediate defect fixes independently. Add producer contract and
-   fixtures behind an explicit version capability; preserve legacy reader DTOs.
-   Rebuild derived presentation metadata incrementally through the existing
-   projection owner. Leave source evidence untouched; checkpoints resume after
-   interruption and never block recent reads on complete history.
-2. Switch the shared renderer only for supported versions. Old clients retain
-   the existing reader; new clients use corrected legacy Work log rendering
-   when capability is absent. Each view selects exactly one representation.
-   Unknown versions fail to legacy presentation with a diagnostic, never mix.
+1. Land #1751's immediate defect fixes independently. Ship a first visible slice:
+   the versioned producer contract, provisional preview/prompt identity path,
+   and shared renderer for new turns together. Preserve legacy reader DTOs;
+   earlier history stays on the corrected Work log rendering while derived
+   metadata rebuilds incrementally through the existing projection owner.
+   Leave source evidence untouched; checkpoints resume after interruption and
+   never block recent reads on complete history or delay the first visible slice.
+2. Enable the new renderer only for supported turn capabilities. Older clients
+   retain their existing reader; unsupported or unmigrated turns use corrected
+   Work log rendering. Every turn selects exactly one presentation from the same
+   producer view; never render both. Unknown versions fall back with a diagnostic.
 3. Cut over after conformance tests below and desktop/mobile screenshots. On
    failure, disable the new renderer and retain additive projection metadata.
    Remove the legacy grouping path only after shipped client compatibility and
@@ -234,17 +260,19 @@ Implementation acceptance (not claims made by this spec-only PR):
 
 | Lowest useful layer | Required evidence |
 | --- | --- |
-| Producer/unit | Replayed prompt appears once; parallel calls, result-before-call, real retries, missing IDs, legacy partial history, multiple answers, and phase ambiguity preserve ownership and order. Refresh/restart/Older keep identities, totals, aliases and removals. |
+| Producer/unit | Preview-to-canonical replacement and queued/delivered/failed/cancelled prompts keep one item and stable keys, including absent canonical receipts, repeated admission observations and restart. Privacy/admission retirement retracts provisional items and fences late publication. Replayed prompts, parallel calls, result-before-call, real retries, missing IDs, legacy partial history, multiple answers and phase ambiguity preserve ownership and order. Refresh/Older keep totals, aliases and removals. |
 | Reader/unit | Bounded tail and JSON behavior; truncation marker; privacy, stale detail renewal, pending/unavailable detail; large turn never exceeds existing budgets or forces an archive scan. |
-| Shared React/unit | One summary per turn despite narration; no raw JSON titles or orphan expanders; lazy detail mounting; final answer emphasis; approval reachable collapsed; cancelled/incomplete states stop spinning; expansion survives refresh. |
+| Shared React/unit | Pending prompt is visible while delivery is queued, replaces once in place, and never duplicates on capture or reconnect. Provisional markers clear on canonical replacement without moving rows. One summary per turn despite narration; no raw JSON titles or orphan expanders; lazy detail mounting; final answer emphasis; approval reachable collapsed; cancelled/incomplete states stop spinning; expansion survives refresh. |
 | Browser | Normal desktop and narrow Remote Chat flows; 100+ steps, huge output, failed/retried tool, live final answer, scrolling up during output, Older across a turn, reconnect, keyboard/touch, light/dark/reduced motion. Capture changed states for implementation PRs. |
-| Native/remote integration | Same committed projection through Tauri and authenticated remote reader; provider capture/restart and permission actions preserve real lifecycle behavior. Mock UI evidence alone cannot prove this. |
+| Native/remote integration | Same committed projection through Tauri and authenticated remote reader; Chat usable within one second on cold and warm open, including large agents with capture/indexing still pending. Usable means admitted prompt/recent narrative and composer painted and interactive, not merely a spinner; an empty conversation shows its interactive empty state. Measure open-to-usable with native/PWA UI timing, report fixture size and cold/warm conditions, and separately prove bounded reads. Queued prompts remain visible before delivery drains. Capture/restart and permission actions preserve real lifecycle behavior; mock UI alone cannot prove this. |
 
-Coder handoff after spec approval: producer membership/contract and bounded
-detail tail first, shared presentation second, migration/compatibility removal
-last. Measure native incremental-publication cost and remote scroll behavior
-in implementation; the size thresholds above are product defaults, not measured
-performance claims. Public Chat guides and screenshots change with implementation.
+Coder handoff after spec approval: deliver the producer contract and shared
+presentation for new turns together, including immediate provisional previews,
+pending prompts and bounded detail. Migrate legacy history incrementally and
+remove compatibility last. Measure native incremental-publication cost and
+remote scroll behavior in implementation; the size thresholds above are product
+defaults, not measured performance claims. Public Chat guides and screenshots
+change with implementation.
 
 ## Mockups
 
