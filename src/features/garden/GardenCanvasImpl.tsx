@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { collectCanvasLabels, resolveCanvasLabels } from "./canvasLabels";
 import { Group, Layer, Stage } from "react-konva";
 import { revealBetween } from "./gardenSpatialZoom";
 import type Konva from "konva";
@@ -27,6 +29,8 @@ import { GARDEN_WHEEL_ZOOM_STEP, wheelZoomFactor } from "../../utils/wheelZoom";
 import "./garden-canvas.css";
 
 export interface GardenCanvasProps {
+  /** Reserved view chrome keeps controls outside the camera's interactive area. */
+  controlsHost?: HTMLElement | null;
   /** Semantic opens stay in Garden; canonical sessions use onOpenAgent. */
   onEnter?: (ref: GardenEntityRef) => void;
   onClearSelection?: () => void;
@@ -87,6 +91,7 @@ const KEY_ZOOM_STEP = 1.25;
 const PAN_STEP = 80;
 
 export const GardenCanvas: React.FC<GardenCanvasProps> = ({
+  controlsHost,
   agentUnits,
   selectedKey,
   highlightedAgentIds,
@@ -520,6 +525,24 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
   const populations = districtPopulations(agentUnits, districts, bands, scale, districtByAgentId);
   const clusteredAgents = new Set([...populations.values()].filter((population) => population.clustered).flatMap((population) => population.agentIds));
   const labelWidths = agentLabelWidths(continuousZoom ? agentUnits : agentUnits.filter(isWorkstream), scale);
+  const visibleLabelIds = resolveCanvasLabels(collectCanvasLabels({
+    districts, populations, bands, cells: paintedTerrainCells, routes: visibleRoutes,
+    agents: paintedAgents.filter((unit) => continuousZoom || !clusteredAgents.has(unit.ref.id)).map((unit) => ({
+      unit, signal: !isWorkstream(unit), dragging: unit.ref.id === draggingAgentId,
+      populationOpacity: continuousZoom && clusteredAgents.has(unit.ref.id)
+        ? revealBetween((districts.get(agentDistrict(unit, districts, districtByAgentId) ?? "")?.radius ?? 120) * 2 * scale, 80, 240) : 1,
+    })),
+    labelWidths, scale, labelSize: theme.labelSize, subLabelSize: theme.subLabelSize,
+    selectedKey: keyboardKey ?? selectedKey, selectedPath: selectedTerrainPath, continuousZoom, viewport: paintViewport,
+  }), scale, paintViewport, paintedAgents.filter((unit) => {
+    // Invisible inhabitants must not hide the population count replacing them.
+    if (!continuousZoom) return isWorkstream(unit) && !clusteredAgents.has(unit.ref.id);
+    if (scale * 32 <= 12) return false;
+    return !clusteredAgents.has(unit.ref.id)
+      || (districts.get(agentDistrict(unit, districts, districtByAgentId) ?? "")?.radius ?? 120) * 2 * scale > 80;
+  }).map((unit) => ({
+    x: unit.position.x - 16, y: unit.position.y - 16, width: 32, height: 32,
+  })));
   const objects: { ref: GardenEntityRef; label: string; position: { x: number; y: number } }[] = [
     ...[...districts].map(([id, district]) => ({ ref: { kind: "district" as const, id }, label: `${districtLabels?.get(id) ?? id}, district, ${populations.get(id)?.summary ?? "0 agents"}`, position: { x: district.origin.x, y: populations.get(id)?.clustered ? district.origin.y : district.origin.y - district.radius } })),
     ...agentUnits.filter((unit) => !clusteredAgents.has(unit.ref.id)).map((unit) => ({ ref: unit.ref, label: `${unit.label}, agent, ${unit.status}`, position: unit.position })),
@@ -590,11 +613,12 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
       >
         <Layer ref={layerRef}>
           <Group opacity={continuousZoom ? 1 - revealBetween(scale, 4, 18) * .96 : 1}>
-          <DistrictLayer viewport={paintViewport} continuousZoom={continuousZoom} districts={districts} labels={districtLabels} populations={populations} bands={bands} scale={scale} selectedKey={keyboardKey ?? selectedKey} theme={theme}
+          <DistrictLayer visibleLabelIds={visibleLabelIds} viewport={paintViewport} continuousZoom={continuousZoom} districts={districts} labels={districtLabels} populations={populations} bands={bands} scale={scale} selectedKey={keyboardKey ?? selectedKey} theme={theme}
             onSelect={(id) => onSelect({ kind: "district", id })} onOpen={(id) => enterObject({ kind: "district", id })} />
           {terrainCells && terrainCells.length > 0 && terrainDistricts && (
             <Group opacity={continuousZoom ? revealBetween(scale, .35, .8) : 1}>
               <TerrainLayer
+                visibleLabelIds={visibleLabelIds}
                 cells={paintedTerrainCells}
                 districts={terrainDistricts}
                 scale={scale}
@@ -617,7 +641,7 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
               )}
             </Group>
           )}
-          <AutomationRoutesLayer viewport={paintViewport} continuousZoom={continuousZoom} mode="routes" routes={visibleRoutes} theme={theme} scale={scale} selectedKey={keyboardKey ?? selectedKey} onSelect={onSelect} onOpen={enterObject} />
+          <AutomationRoutesLayer visibleLabelIds={visibleLabelIds} viewport={paintViewport} continuousZoom={continuousZoom} mode="routes" routes={visibleRoutes} theme={theme} scale={scale} selectedKey={keyboardKey ?? selectedKey} onSelect={onSelect} onOpen={enterObject} />
           </Group>
           {paintedAgents.filter((unit) => continuousZoom || !clusteredAgents.has(unit.ref.id)).map((unit) => (
             <AgentUnit
@@ -633,6 +657,8 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
               continuousZoom={continuousZoom}
               populationOpacity={continuousZoom && clusteredAgents.has(unit.ref.id) ? revealBetween((districts.get(agentDistrict(unit, districts, districtByAgentId) ?? "")?.radius ?? 120) * 2 * scale, 80, 240) : 1}
               labelWidthPx={labelWidths.get(unit.ref.id)}
+              labelVisible={visibleLabelIds.has(`agent:${unit.ref.id}`)}
+              visibleLabelIds={visibleLabelIds}
               draggable={!compositionActive && isWorkstream(unit)}
               theme={theme}
               selectedSkillRef={selectedSkillRef}
@@ -643,7 +669,7 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
               onDragEnd={handleDragAgent}
             />
           ))}
-          <Group opacity={continuousZoom ? 1 - revealBetween(scale, 4, 18) * .96 : 1}><AutomationRoutesLayer viewport={paintViewport} continuousZoom={continuousZoom} mode="markers" routes={visibleRoutes} theme={theme} scale={scale} selectedKey={keyboardKey ?? selectedKey} onSelect={onSelect} onOpen={enterObject} /></Group>
+          <Group opacity={continuousZoom ? 1 - revealBetween(scale, 4, 18) * .96 : 1}><AutomationRoutesLayer visibleLabelIds={visibleLabelIds} viewport={paintViewport} continuousZoom={continuousZoom} mode="markers" routes={visibleRoutes} theme={theme} scale={scale} selectedKey={keyboardKey ?? selectedKey} onSelect={onSelect} onOpen={enterObject} /></Group>
         </Layer>
       </Stage>
       {!compositionActive && <div className="garden-object-controls" aria-label="Garden objects">
@@ -672,11 +698,11 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
           }}>{object.label}</button>)}
       </div>}
       {!compositionActive && selectedObject && <button type="button" className="garden-enter-control" onClick={() => enterObject(selectedObject.ref)}>Enter {selectedObject.label.split(",")[0]}</button>}
-      <div
+      {(controlsHost ? (content: React.ReactNode) => createPortal(content, controlsHost) : (content: React.ReactNode) => content)(<div
         hidden={compositionActive}
         style={compositionActive ? { display: "none" } : undefined}
         data-testid="garden-viewport-controls"
-        className="absolute bottom-3 right-3 z-40 flex items-center gap-1 rounded-md border border-wardian-border bg-[var(--color-wardian-bg)]/90 px-1 py-1 text-[11px] shadow-sm backdrop-blur"
+        className={controlsHost ? "garden-viewport-controls" : "garden-viewport-controls absolute bottom-3 right-3"}
       >
         <button
           type="button"
@@ -714,10 +740,15 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
         >
           Fit
         </button>
-      </div>
-      <div className="pointer-events-none absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-md border border-wardian-border bg-[var(--color-wardian-bg)]/80 px-2 py-1 text-[10px] text-muted-neutral shadow-sm backdrop-blur">
-        {continuousZoom ? "Wheel to zoom · Alt + wheel to read · drag to pan · Escape to return" : compositionActive ? "Scroll to read · Escape or breadcrumbs to return" : "Scroll to zoom · drag to pan · arrows to move · 0 to fit"}
-      </div>
+        <details className="garden-help">
+          <summary aria-label="Garden help" title="Garden help">?</summary>
+          <div>
+            <p>Click to select. Double-click or Enter to explore; Space to select a focused object.</p>
+            <p>{continuousZoom ? "Wheel to zoom; Alt + wheel to scroll inside an object." : compositionActive ? "Scroll to read." : "Scroll or + / − to zoom."}</p>
+            <p>Drag or arrow keys to pan. 0 to fit. Escape or breadcrumbs to return.</p>
+          </div>
+        </details>
+      </div>)}
       {menu && !compositionActive && (
         <GardenContextMenu
           x={menu.x}

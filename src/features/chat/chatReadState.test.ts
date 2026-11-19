@@ -15,6 +15,24 @@ const page = (events: AgentChatEvent[], overrides: Partial<AgentChatPage> = {}):
 });
 
 describe("bounded Chat state", () => {
+  it("renders an accepted prompt only from the projection when delivery has no row receipt", () => {
+    const prompt = "Check the sections against last year.";
+    const acknowledgement = { delivery_state: "provider_accepted", provider: "claude" };
+    const submitted = submittedChatEvent("agent", "claude", prompt, acknowledgement);
+    const current = addChatSubmission([], page([]), submitted);
+    const native = { ...event("source:claude:prompt"), provider: "claude", text: prompt };
+    expect(current).toEqual([]);
+    expect(applyChatPage(current, page([native]), "recent")).toEqual([expect.objectContaining({ id: native.id })]);
+  });
+
+  it("does not append unreceipted local prompts before the first page or from another agent", () => {
+    const existing = [event("source:previous")];
+    for (const acknowledgement of [undefined, { delivery_state: "queued" }, { ...receipt, chat_agent_id: "other" }]) {
+      const submitted = submittedChatEvent("agent", "claude", "Repeated prompt", acknowledgement);
+      expect(addChatSubmission(existing, null, submitted)).toEqual(existing);
+    }
+  });
+
   it("shares the original empty-window spacing and opening budget with admitted previews only", () => {
     for (const elapsed of [-1, 0, 99, 999, 1_000, 4_000]) {
       for (const interval of [50, 3_000]) {

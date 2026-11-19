@@ -34,6 +34,10 @@ interface AgentUnitProps {
   populationOpacity?: number;
   /** Available screen pixels between neighboring name labels. Full name stays in the selection summary. */
   labelWidthPx?: number;
+  /** Result for this agent from the shared canvas collision pass. */
+  labelVisible?: boolean;
+  /** Shared result also controls deployed skill captions on this agent. */
+  visibleLabelIds?: ReadonlySet<string>;
   theme: GardenTheme;
   /** entry_ref of the selected skill, so its glyph rings on every carrier. */
   selectedSkillRef?: string | null;
@@ -58,6 +62,8 @@ const AgentUnitImpl: React.FC<AgentUnitProps> = ({
   continuousZoom = false,
   populationOpacity = 1,
   labelWidthPx = 140,
+  labelVisible = true,
+  visibleLabelIds,
   theme,
   selectedSkillRef = null,
   onSelect,
@@ -73,6 +79,9 @@ const AgentUnitImpl: React.FC<AgentUnitProps> = ({
   const bodyOpacity = continuousZoom ? revealBetween(scale * 32, 12, 28) : signal ? 0 : 1;
   const showBody = continuousZoom || !signal;
   const crownOpacity = continuousZoom ? 1 - revealBetween(scale, 6, 12) : 1;
+  // The DOM nucleus starts appearing at 70 screen pixels. Finish this text
+  // handoff first: crossfading two differently sized monograms doubles the ink.
+  const monogramOpacity = continuousZoom && !dragging ? 1 - revealBetween(scale * 32, 48, 70) : exteriorOpacity;
 
   return (
     <Group
@@ -145,9 +154,11 @@ const AgentUnitImpl: React.FC<AgentUnitProps> = ({
       />
       {continuousZoom && <Circle radius={4 / scale} opacity={1 - bodyOpacity} fill={fill} hitStrokeWidth={16 / scale} />}
       {showBody && <Circle opacity={exteriorOpacity * bodyOpacity} radius={4} x={10} y={10} fill={fill} listening={false} />}
-      {showBody && <Text opacity={exteriorOpacity * bodyOpacity} text={agentMonogram(unit.label)} x={-14} y={continuousZoom ? -Math.min(22, 13 * scale) / (2 * scale) : -7} width={28}
+      {showBody && monogramOpacity > 0 && <Text opacity={monogramOpacity * bodyOpacity} text={agentMonogram(unit.label)} x={-14} y={continuousZoom ? -Math.min(22, 13 * scale) / (2 * scale) : -7} width={28}
         align="center" fontSize={continuousZoom ? Math.min(22, 13 * scale) / scale : 13} fontFamily={theme.font} fill={theme.label} listening={false} />}
       {showBody && crownOpacity > 0 && <Group opacity={crownOpacity}><SkillCrown
+        agentId={unit.ref.id}
+        visibleLabelIds={visibleLabelIds}
         crown={continuousZoom ? unit.crown : unit.crown.slice(0, 3)}
         scale={continuousZoom ? scale : undefined}
         convergence={continuousZoom ? revealBetween(scale, 4, 10) : 0}
@@ -159,7 +170,7 @@ const AgentUnitImpl: React.FC<AgentUnitProps> = ({
       /></Group>}
       {!continuousZoom && !signal && unit.crown.length > 3 && <Text text={`+${unit.crown.length - 3}`} x={24} y={-28}
         fontSize={theme.subLabelSize / scale} fontFamily={theme.font} fill={theme.labelMuted} listening={false} />}
-      {showBody && labelWidthPx >= 40 && <Text
+      {showBody && labelVisible && labelWidthPx >= 40 && <Text
         opacity={(continuousZoom && !dragging ? 1 - revealBetween(scale * 32, 180, 300) : exteriorOpacity) * bodyOpacity}
         text={unit.label}
         fontSize={Math.min(14, Math.max(12, theme.labelSize)) / scale}
@@ -211,6 +222,8 @@ function propsEqual(previous: AgentUnitProps, next: AgentUnitProps): boolean {
     previous.continuousZoom === next.continuousZoom &&
     previous.populationOpacity === next.populationOpacity &&
     previous.labelWidthPx === next.labelWidthPx &&
+    previous.labelVisible === next.labelVisible &&
+    previous.visibleLabelIds === next.visibleLabelIds &&
     previous.theme === next.theme &&
     previous.selectedSkillRef === next.selectedSkillRef &&
     previous.onSelect === next.onSelect &&

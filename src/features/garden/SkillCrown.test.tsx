@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SkillCrown } from "./SkillCrown";
 import { crownPositions, type GardenSkillGlyph } from "./skillGlyphs";
 import { GARDEN_THEME_FALLBACK as theme } from "./useGardenTheme";
+import { crownLabelId } from "./canvasLabels";
 
 const captured = vi.hoisted(() => ({ groups: [] as ComponentProps<typeof Group>[], circles: [] as ComponentProps<typeof Circle>[] }));
 vi.mock("react-konva", () => ({
@@ -24,6 +25,27 @@ const props = { crown, detail: "mid" as const, theme, selectedEntryRef: "SKILLS/
 beforeEach(() => { captured.groups.length = 0; captured.circles.length = 0; vi.clearAllMocks(); });
 
 describe("SkillCrown", () => {
+  it("suppresses caption and overflow paint while preserving glyph monograms and actions", () => {
+    const view = render(<SkillCrown {...props} scale={3} agentId="carrier" visibleLabelIds={new Set()} />);
+    expect(screen.queryByText(crown[0].label)).not.toBeInTheDocument();
+    expect(screen.queryByText("+3")).not.toBeInTheDocument();
+    expect(screen.getByText("S0")).toBeInTheDocument();
+    const glyph = captured.groups.find((group) => group.onClick)!;
+    expect(glyph.listening).toBe(true);
+    const event = { cancelBubble: false } as Parameters<NonNullable<typeof glyph.onClick>>[0];
+    glyph.onClick!(event);
+    expect(props.onSelect).toHaveBeenCalledWith(crown[0]);
+    expect(event.cancelBubble).toBe(true);
+    glyph.onDblClick!(event);
+    expect(props.onOpen).toHaveBeenCalledWith(crown[0]);
+    view.rerender(<SkillCrown {...props} scale={3} agentId="carrier"
+      visibleLabelIds={new Set([crownLabelId("carrier", crown[0].entryRef)])} />);
+    expect(screen.getByText(crown[0].label)).toBeInTheDocument();
+    expect(screen.queryByText(crown[1].label)).not.toBeInTheDocument();
+    view.rerender(<SkillCrown {...props} scale={3} agentId="other-carrier"
+      visibleLabelIds={new Set([crownLabelId("carrier", crown[0].entryRef)])} />);
+    expect(screen.queryByText(crown[0].label)).not.toBeInTheDocument();
+  });
   it("avoids shell compositing buffers and reversibly hides unrevealed keyed marks", () => {
     const view = render(<SkillCrown {...props} scale={0.32} />);
     for (const scale of [0.32, 0.75, 0.32]) {

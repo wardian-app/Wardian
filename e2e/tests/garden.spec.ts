@@ -156,7 +156,7 @@ test.describe("Garden View", () => {
       garden.getByRole("region", { name: "Garden status legend" }),
     ).toContainText("Action Required");
     await expect(garden.getByTestId("garden-selection-summary")).toContainText(
-      "Select to inspect",
+      "No selection",
     );
 
     if (process.env.WARDIAN_GARDEN_SCREENSHOT) {

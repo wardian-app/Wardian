@@ -41,6 +41,16 @@ Chat mode shows normalized user, assistant, status, tool, approval, and terminal
 
 Chat text and attachments remain editable while an agent is processing. With content in the composer, the action submits a queueable message and is labeled **Queue message**; with an empty composer, it remains **Interrupt agent**.
 
+Work logs show tool names and short descriptions. Expand a work log to inspect
+each item, then use **Show output** or that item's **Show full details** to read
+its output. Collapsing the work log hides its details. Structured tool output
+stays inside the item instead of becoming the work-log title.
+
+Accepted prompts appear once their conversation row is available. When delivery
+does not provide a saved-row receipt, Chat waits for the history refresh instead
+of adding a separate local copy. Repeating the same prompt still creates a new
+message for each submission.
+
 Wardian preserves terminal state across tab changes, pane moves, Agents layout changes, and remote handoff. Reclaimed renderers restore and fit automatically when their presentation becomes visible.
 
 Restoring a live terminal keeps the broker's retained scrollback above the current

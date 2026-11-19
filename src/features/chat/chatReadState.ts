@@ -47,6 +47,10 @@ export function submittedChatEvent(sessionId: string, provider: string, text: st
 }
 
 export function addChatSubmission(current: AgentChatEvent[], page: AgentChatPage | null, event: AgentChatEvent): AgentChatEvent[] {
+  // Acceptance proves delivery, not a transcript identity. Without the archive's
+  // exact row receipt a local echo can never be reconciled with the provider row.
+  const receipt = chatInputReceipt(event.metadata.chat_receipt);
+  if (!receipt || receipt.chat_agent_id !== event.session_id) return current;
   const next = [...current, event];
   return page ? applyChatPage(next, { ...page, unchanged: false, reset: false,
     events: current.filter((row) => row.metadata.optimistic !== true), aliases: [], removed_ids: [] }, "recent") : boundedChatEvents(next);
