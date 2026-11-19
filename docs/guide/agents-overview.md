@@ -90,6 +90,10 @@ Each card can show either:
 Chat messages and activity rows share a centered, readable transcript column that
 expands fluidly on narrow surfaces.
 
+Codex custom `exec` calls appear as work steps even when their input is code
+rather than a shell command. Open **Show full details** on the step to inspect
+the original input alongside the tool's output.
+
 Chat can stay open before the first turn. Readable messages appear automatically
 as history becomes available, including when a large source record is skipped.
 The history status describes capture progress while available messages remain readable.

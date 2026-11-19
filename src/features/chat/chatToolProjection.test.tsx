@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentChatEvent } from "../../types";
 import { derivePresentedChatRows } from "../grid/workLogPresentation";
 import { ChatTranscriptRow } from "./ChatTranscriptRows";
-import { toolPatchText } from "./chatPresentation";
+import { shouldShowChatEvent, toolPatchText } from "./chatPresentation";
 import { withTurnChangeSummaries } from "./chatTurns";
 import fixtures from "./chatToolProjectionFixture.json";
 import { structuredEditFromEvent } from "./structuredEdit";
@@ -12,6 +12,32 @@ import { structuredEditFromEvent } from "./structuredEdit";
 // then verifies these metadata fields and detail bytes through the real header/body helpers.
 // This test consumes that same projected contract, never raw provider metadata.
 describe("metadata-backed tool projection contract", () => {
+  it("retains Codex custom exec input and pairs its completion after visibility filtering", async () => {
+    const input = 'const result = await tools.exec_command({ cmd: "cat audit.txt" }); text(result);';
+    const call: AgentChatEvent = {
+      id: "exec-call", session_id: "agent-1", provider: "codex", kind: "tool_call", role: null,
+      text: null, title: "exec", status: "running", turn_id: "turn-1", source: "provider_log", command: null,
+      exit_code: null, path: null, language: null, created_at: null, sequence: 1,
+      metadata: { raw_type: "custom_tool_call", tool_name: "exec", tool_input_text: input,
+        call_id: "exec-1", chat_detail_ref: "exec-input:0" },
+    };
+    const result: AgentChatEvent = { ...call, id: "exec-result", kind: "tool_result", title: "Tool result",
+      text: "Script completed", status: "succeeded", sequence: 2,
+      metadata: { raw_type: "custom_tool_call_output", call_id: "exec-1" } };
+    const rows = derivePresentedChatRows([call, result].filter(shouldShowChatEvent));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "event", event: { id: call.id },
+      entry: { merged_result_events: [{ id: result.id }] } });
+    const load = vi.fn().mockResolvedValue({ event_id: call.id, text: input, next: null, complete: true });
+    const view = render(<ChatTranscriptRow row={rows[0]} agentIsWorking={false}
+      isSubmitting={false} onApprovalSubmit={vi.fn()} onLoadDetail={load} />);
+    expect(screen.getByText("exec", { exact: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show full details" }));
+    await waitFor(() => expect(load).toHaveBeenCalledWith("exec-input:0"));
+    await waitFor(() => expect([...view.container.querySelectorAll("pre")].some((node) => node.textContent === input)).toBe(true));
+    view.unmount();
+  });
+
   for (const fixture of fixtures) {
     it(`presents ${fixture.provider} ${fixture.title} and opens the original input`, async () => {
       const event: AgentChatEvent = {
