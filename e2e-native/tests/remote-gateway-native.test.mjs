@@ -433,9 +433,12 @@ process.stdout.write(JSON.stringify({ response: "Read attachments", status: "ok"
   assert.equal(rows[0].files.length, 2);
   for (let index = 0; index < files.length; index += 1) {
     const file = rows[0].files[index];
-    assert.ok(path.relative(workspace, file.path).startsWith(path.join(".wardian", "attachments", "remote")));
+    // Runner temp paths may use a short-name or junction alias; the gateway
+    // resolves the workspace before constructing provider-facing references.
+    const relativePath = path.relative(fs.realpathSync.native(workspace), fs.realpathSync.native(file.path));
+    assert.ok(relativePath.startsWith(path.join(".wardian", "attachments", "remote") + path.sep));
     assert.equal(file.bytes, files[index].bytes.toString("base64"));
-    execFileSync("git", ["check-ignore", "--quiet", "--", path.relative(workspace, file.path)], { cwd: workspace });
+    execFileSync("git", ["check-ignore", "--quiet", "--", relativePath], { cwd: workspace });
   }
   if (process.env.WARDIAN_REMOTE_ATTACHMENT_PROBE_FILE) {
     fs.writeFileSync(process.env.WARDIAN_REMOTE_ATTACHMENT_PROBE_FILE, JSON.stringify({
