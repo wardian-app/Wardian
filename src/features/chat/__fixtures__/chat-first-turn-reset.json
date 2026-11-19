@@ -1,0 +1,959 @@
+{
+  "claude": {
+    "pending": {
+      "session_id": "first-turn-claude",
+      "conversation_id": null,
+      "generation": null,
+      "source_epoch": null,
+      "revision": "none.absent~none",
+      "events": [],
+      "next_before": null,
+      "unchanged": false,
+      "reset": false,
+      "progress": "no_source",
+      "aliases": [],
+      "removed_ids": [],
+      "detail": null,
+      "bytes_read": 0,
+      "records_decoded": 0
+    },
+    "completed": {
+      "session_id": "first-turn-claude",
+      "conversation_id": "claude-conversation",
+      "generation": "claude-generation",
+      "source_epoch": "claude-source-epoch",
+      "revision": "claude-first-turn",
+      "events": [
+        {
+          "id": "source:claude-0",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "message",
+          "role": "user",
+          "text": "Inspect the sample file.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 0,
+          "metadata": {
+            "chat_page_key": "00000000000000000000",
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-0"
+          }
+        },
+        {
+          "id": "source:claude-1",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "message",
+          "role": "assistant",
+          "text": "Sample transcript row 1.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 1,
+          "metadata": {
+            "chat_page_key": "00000000000000000001",
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-1"
+          }
+        },
+        {
+          "id": "source:claude-2",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "tool_call",
+          "role": null,
+          "text": "Sample transcript row 2.",
+          "title": "Read",
+          "status": "running",
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 2,
+          "metadata": {
+            "chat_page_key": "00000000000000000002",
+            "provider_log": true,
+            "tool_name": "Read",
+            "chat_body_pending": false,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-2"
+          }
+        },
+        {
+          "id": "source:claude-3",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "tool_result",
+          "role": "tool",
+          "text": "Sample transcript row 3.",
+          "title": null,
+          "status": "succeeded",
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 3,
+          "metadata": {
+            "chat_page_key": "00000000000000000003",
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-3"
+          }
+        },
+        {
+          "id": "first-turn-claude:claude-4",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "message",
+          "role": "assistant",
+          "text": "Sample transcript row 4.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 4,
+          "metadata": {
+            "chat_page_key": "00000000000000000004"
+          }
+        },
+        {
+          "id": "source:claude-5",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "message",
+          "role": "assistant",
+          "text": "Sample transcript row 5.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 5,
+          "metadata": {
+            "chat_page_key": "00000000000000000005",
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-5"
+          }
+        },
+        {
+          "id": "source:claude-6",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "tool_call",
+          "role": null,
+          "text": "Sample transcript row 6.",
+          "title": "Read",
+          "status": "running",
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 6,
+          "metadata": {
+            "chat_page_key": "00000000000000000006",
+            "provider_log": true,
+            "tool_name": "Edit",
+            "chat_body_pending": false,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-6"
+          }
+        },
+        {
+          "id": "source:claude-7",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "tool_result",
+          "role": "tool",
+          "text": "Sample transcript row 7.",
+          "title": null,
+          "status": "succeeded",
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 7,
+          "metadata": {
+            "chat_page_key": "00000000000000000007",
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-7"
+          }
+        },
+        {
+          "id": "source:claude-8",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "message",
+          "role": "assistant",
+          "text": "Sample transcript row 8.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 8,
+          "metadata": {
+            "chat_page_key": "00000000000000000008",
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-8"
+          }
+        },
+        {
+          "id": "source:claude-9",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "tool_call",
+          "role": null,
+          "text": "Sample transcript row 9.",
+          "title": "Read",
+          "status": "running",
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 9,
+          "metadata": {
+            "chat_page_key": "00000000000000000009",
+            "provider_log": true,
+            "tool_name": "Bash",
+            "chat_body_pending": false,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-9"
+          }
+        },
+        {
+          "id": "source:claude-10",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "tool_result",
+          "role": "tool",
+          "text": "Sample transcript row 10.",
+          "title": null,
+          "status": "succeeded",
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 10,
+          "metadata": {
+            "chat_page_key": "00000000000000000010",
+            "provider_log": true,
+            "chat_body_pending": false,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-10"
+          }
+        },
+        {
+          "id": "source:claude-11",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "message",
+          "role": "assistant",
+          "text": "First turn completed for claude.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "stream_json",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 11,
+          "metadata": {
+            "chat_page_key": "00000000000000000011",
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-11"
+          }
+        },
+        {
+          "id": "source:claude-12",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "status",
+          "role": null,
+          "text": "Sample transcript row 12.",
+          "title": null,
+          "status": "processing",
+          "turn_id": "first-turn",
+          "source": "assistant",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 12,
+          "metadata": {
+            "chat_provisional": true,
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-12",
+            "chat_source_admission": "claude-admission"
+          }
+        },
+        {
+          "id": "source:claude-13",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "status",
+          "role": null,
+          "text": "Sample transcript row 13.",
+          "title": null,
+          "status": "processing",
+          "turn_id": "first-turn",
+          "source": "assistant",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 13,
+          "metadata": {
+            "chat_provisional": true,
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-13",
+            "chat_source_admission": "claude-admission"
+          }
+        },
+        {
+          "id": "source:claude-14",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "status",
+          "role": null,
+          "text": "Sample transcript row 14.",
+          "title": null,
+          "status": "succeeded",
+          "turn_id": "first-turn",
+          "source": "assistant",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 14,
+          "metadata": {
+            "chat_provisional": true,
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-14",
+            "chat_source_admission": "claude-admission"
+          }
+        },
+        {
+          "id": "source:claude-15",
+          "session_id": "first-turn-claude",
+          "provider": "claude",
+          "kind": "status",
+          "role": null,
+          "text": "Sample transcript row 15.",
+          "title": null,
+          "status": "succeeded",
+          "turn_id": "first-turn",
+          "source": "turn_duration",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 15,
+          "metadata": {
+            "chat_provisional": true,
+            "provider_log": true,
+            "chat_source_epoch": "claude-source-epoch",
+            "chat_source_ref": "source:claude-15",
+            "chat_source_admission": "claude-admission"
+          }
+        }
+      ],
+      "next_before": null,
+      "unchanged": false,
+      "reset": true,
+      "progress": "oversized_record",
+      "aliases": [
+        {
+          "observation_id": "source:claude-1",
+          "canonical_id": "source:claude-1"
+        },
+        {
+          "observation_id": "source:claude-2",
+          "canonical_id": "source:claude-2"
+        },
+        {
+          "observation_id": "source:claude-3",
+          "canonical_id": "source:claude-3"
+        },
+        {
+          "observation_id": "source:claude-5",
+          "canonical_id": "source:claude-5"
+        },
+        {
+          "observation_id": "source:claude-6",
+          "canonical_id": "source:claude-6"
+        },
+        {
+          "observation_id": "source:claude-7",
+          "canonical_id": "source:claude-7"
+        },
+        {
+          "observation_id": "source:claude-8",
+          "canonical_id": "source:claude-8"
+        },
+        {
+          "observation_id": "source:claude-9",
+          "canonical_id": "source:claude-9"
+        },
+        {
+          "observation_id": "source:claude-10",
+          "canonical_id": "source:claude-10"
+        },
+        {
+          "observation_id": "source:claude-11",
+          "canonical_id": "source:claude-11"
+        },
+        {
+          "observation_id": "source:claude-0",
+          "canonical_id": "source:claude-0"
+        }
+      ],
+      "removed_ids": [],
+      "detail": null,
+      "bytes_read": 424133,
+      "records_decoded": 77
+    }
+  },
+  "codex": {
+    "pending": {
+      "session_id": "first-turn-codex",
+      "conversation_id": null,
+      "generation": null,
+      "source_epoch": null,
+      "revision": "none.absent~none",
+      "events": [],
+      "next_before": null,
+      "unchanged": false,
+      "reset": false,
+      "progress": "no_source",
+      "aliases": [],
+      "removed_ids": [],
+      "detail": null,
+      "bytes_read": 0,
+      "records_decoded": 0
+    },
+    "completed": {
+      "session_id": "first-turn-codex",
+      "conversation_id": "codex-conversation",
+      "generation": "codex-generation",
+      "source_epoch": "codex-source-epoch",
+      "revision": "codex-first-turn",
+      "events": [
+        {
+          "id": "source:codex-0",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "message",
+          "role": "system",
+          "text": "Sample transcript row 0.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 0,
+          "metadata": {
+            "chat_page_key": "00000000000000000000",
+            "provider_log": true,
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-0"
+          }
+        },
+        {
+          "id": "source:codex-1",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "tool_call",
+          "role": null,
+          "text": "Sample transcript row 1.",
+          "title": "Read",
+          "status": "running",
+          "turn_id": "first-turn",
+          "source": "event_msg",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 1,
+          "metadata": {
+            "chat_page_key": "00000000000000000001",
+            "provider_log": true,
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-1"
+          }
+        },
+        {
+          "id": "display:codex-4",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "message",
+          "role": "user",
+          "text": "Inspect the sample file.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "event_msg",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 2,
+          "metadata": {
+            "chat_page_key": "00000000000000000003",
+            "provider_log": true,
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-2",
+            "chat_display_physical_id": "source:codex-2",
+            "chat_display_member_ids": [
+              "source:codex-2",
+              "source:codex-3"
+            ]
+          }
+        },
+        {
+          "id": "source:codex-6",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "message",
+          "role": "assistant",
+          "text": "Sample transcript row 3.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 3,
+          "metadata": {
+            "chat_page_key": "00000000000000000005",
+            "provider_log": true,
+            "provider_phase": "commentary",
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-5",
+            "chat_display_physical_id": "source:codex-5",
+            "chat_display_member_ids": [
+              "source:codex-6",
+              "source:codex-5"
+            ]
+          }
+        },
+        {
+          "id": "source:codex-7",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "tool_call",
+          "role": null,
+          "text": "Sample transcript row 4.",
+          "title": "Read",
+          "status": "running",
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 4,
+          "metadata": {
+            "chat_page_key": "00000000000000000006",
+            "provider_log": true,
+            "tool_name": "exec",
+            "chat_body_pending": false,
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-7"
+          }
+        },
+        {
+          "id": "source:codex-8",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "tool_result",
+          "role": "tool",
+          "text": "Sample transcript row 5.",
+          "title": null,
+          "status": "succeeded",
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 5,
+          "metadata": {
+            "chat_page_key": "00000000000000000007",
+            "provider_log": true,
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-8"
+          }
+        },
+        {
+          "id": "source:codex-10",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "message",
+          "role": "assistant",
+          "text": "Sample transcript row 6.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 6,
+          "metadata": {
+            "chat_page_key": "00000000000000000009",
+            "provider_log": true,
+            "provider_phase": "commentary",
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-9",
+            "chat_display_physical_id": "source:codex-9",
+            "chat_display_member_ids": [
+              "source:codex-10",
+              "source:codex-9"
+            ]
+          }
+        },
+        {
+          "id": "source:codex-11",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "tool_call",
+          "role": null,
+          "text": "Sample transcript row 7.",
+          "title": "Read",
+          "status": "running",
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 7,
+          "metadata": {
+            "chat_page_key": "00000000000000000010",
+            "provider_log": true,
+            "tool_name": "exec",
+            "chat_body_pending": false,
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-11"
+          }
+        },
+        {
+          "id": "source:codex-12",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "tool_result",
+          "role": "tool",
+          "text": "Sample transcript row 8.",
+          "title": null,
+          "status": "succeeded",
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 8,
+          "metadata": {
+            "chat_page_key": "00000000000000000011",
+            "provider_log": true,
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-12"
+          }
+        },
+        {
+          "id": "source:codex-14",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "message",
+          "role": "assistant",
+          "text": "Sample transcript row 9.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 9,
+          "metadata": {
+            "chat_page_key": "00000000000000000013",
+            "provider_log": true,
+            "provider_phase": "commentary",
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-13",
+            "chat_display_physical_id": "source:codex-13",
+            "chat_display_member_ids": [
+              "source:codex-14",
+              "source:codex-13"
+            ]
+          }
+        },
+        {
+          "id": "source:codex-15",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "tool_call",
+          "role": null,
+          "text": "Sample transcript row 10.",
+          "title": "Read",
+          "status": "running",
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 10,
+          "metadata": {
+            "chat_page_key": "00000000000000000014",
+            "provider_log": true,
+            "tool_name": "exec",
+            "chat_body_pending": false,
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-15"
+          }
+        },
+        {
+          "id": "source:codex-16",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "tool_result",
+          "role": "tool",
+          "text": "Sample transcript row 11.",
+          "title": null,
+          "status": "succeeded",
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 11,
+          "metadata": {
+            "chat_page_key": "00000000000000000015",
+            "provider_log": true,
+            "chat_body_pending": false,
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-16"
+          }
+        },
+        {
+          "id": "display:codex-19",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "message",
+          "role": "assistant",
+          "text": "First turn completed for codex.",
+          "title": null,
+          "status": null,
+          "turn_id": "first-turn",
+          "source": "response_item",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 12,
+          "metadata": {
+            "chat_page_key": "00000000000000000017",
+            "provider_log": true,
+            "provider_phase": "final_answer",
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-17",
+            "chat_display_physical_id": "source:codex-17",
+            "chat_display_member_ids": [
+              "source:codex-18",
+              "source:codex-17"
+            ]
+          }
+        },
+        {
+          "id": "source:codex-20",
+          "session_id": "first-turn-codex",
+          "provider": "codex",
+          "kind": "status",
+          "role": null,
+          "text": "Sample transcript row 13.",
+          "title": null,
+          "status": "succeeded",
+          "turn_id": "first-turn",
+          "source": "task_complete",
+          "command": null,
+          "exit_code": null,
+          "path": null,
+          "language": null,
+          "created_at": "2026-11-19T00:00:00Z",
+          "sequence": 13,
+          "metadata": {
+            "chat_provisional": true,
+            "provider_log": true,
+            "chat_source_epoch": "codex-source-epoch",
+            "chat_source_ref": "source:codex-20",
+            "chat_source_admission": "codex-admission"
+          }
+        }
+      ],
+      "next_before": null,
+      "unchanged": false,
+      "reset": true,
+      "progress": "oversized_record",
+      "aliases": [
+        {
+          "observation_id": "source:codex-1",
+          "canonical_id": "source:codex-1"
+        },
+        {
+          "observation_id": "source:codex-3",
+          "canonical_id": "display:codex-4"
+        },
+        {
+          "observation_id": "source:codex-2",
+          "canonical_id": "display:codex-4"
+        },
+        {
+          "observation_id": "source:codex-6",
+          "canonical_id": "source:codex-6"
+        },
+        {
+          "observation_id": "source:codex-5",
+          "canonical_id": "source:codex-6"
+        },
+        {
+          "observation_id": "source:codex-7",
+          "canonical_id": "source:codex-7"
+        },
+        {
+          "observation_id": "source:codex-8",
+          "canonical_id": "source:codex-8"
+        },
+        {
+          "observation_id": "source:codex-10",
+          "canonical_id": "source:codex-10"
+        },
+        {
+          "observation_id": "source:codex-9",
+          "canonical_id": "source:codex-10"
+        },
+        {
+          "observation_id": "source:codex-11",
+          "canonical_id": "source:codex-11"
+        },
+        {
+          "observation_id": "source:codex-12",
+          "canonical_id": "source:codex-12"
+        },
+        {
+          "observation_id": "source:codex-14",
+          "canonical_id": "source:codex-14"
+        },
+        {
+          "observation_id": "source:codex-13",
+          "canonical_id": "source:codex-14"
+        },
+        {
+          "observation_id": "source:codex-15",
+          "canonical_id": "source:codex-15"
+        },
+        {
+          "observation_id": "source:codex-16",
+          "canonical_id": "source:codex-16"
+        },
+        {
+          "observation_id": "source:codex-18",
+          "canonical_id": "display:codex-19"
+        },
+        {
+          "observation_id": "source:codex-17",
+          "canonical_id": "display:codex-19"
+        },
+        {
+          "observation_id": "source:codex-0",
+          "canonical_id": "source:codex-0"
+        }
+      ],
+      "removed_ids": [],
+      "detail": null,
+      "bytes_read": 485106,
+      "records_decoded": 67
+    }
+  }
+}
