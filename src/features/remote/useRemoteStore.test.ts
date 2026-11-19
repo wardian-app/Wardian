@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_WATCHLIST_PREFS } from "../../layout/watchlist/types";
 import type { AgentChatEvent, QueueItem } from "../../types";
-import { type RemoteAgentChatPage, RemoteChatTimeoutError, RemoteRequestError, remoteClient } from "./remoteClient";
+import { type RemoteAgentChatPage, RemoteChatTimeoutError, RemoteRequestError, RemoteTransportError, remoteClient } from "./remoteClient";
 import { useRemoteStore } from "./useRemoteStore";
 import { actualEmptyOwnedCapture, actualProducerBatch, actualProducerPage } from "../../test/chatRevalidationTestFixture";
 import { applyChatPage } from "../chat/chatReadState";
@@ -86,6 +86,22 @@ function emptyCaptureStop(): RemoteAgentChatPage {
 }
 
 describe("useRemoteStore watchlists", () => {
+  it("keeps the desktop connected when a successful older page cannot establish source scope", async () => {
+    const recent = chatMessage("recent", "Recent reply stays visible", 33);
+    const initial = { ...chatPageFields, events: [recent], next_before: "older-cursor" };
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: [recent], chatPage: initial, chatNextBefore: "older-cursor", chatHasOlder: true });
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce({
+      ...chatPageFields, conversation_id: null, progress: "provisional", reset: false,
+      events: Array.from({ length: 32 }, (_, i) => chatMessage(`older-${i}`, `Older ${i}`, i)),
+      next_before: "next-cursor",
+    });
+    await useRemoteStore.getState().loadOlderActiveAgentChat();
+    expect(useRemoteStore.getState()).toMatchObject({ status: "ready", chatEvents: [recent],
+      chatPage: initial, chatNextBefore: "older-cursor", chatHasOlder: true, chatLoadingOlder: false,
+      chatError: "Chat history could not be updated. Retry." });
+  });
+
   it("refreshes an admitted nonempty remote preview within the original opening burst", async () => {
     vi.useFakeTimers();
     const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -1778,7 +1794,7 @@ describe("useRemoteStore watchlists", () => {
   it.each([
     [new RemoteRequestError("expired", 401), "session_expired"],
     [new RemoteRequestError("revoked", 403, "device_revoked"), "device_revoked"],
-    [new TypeError("Failed to fetch"), "unreachable"],
+    [new RemoteTransportError(new TypeError("Failed to fetch")), "unreachable"],
   ] as const)("does not dispatch queued foreground demand after %s", async (error, status) => {
     vi.useFakeTimers();
     const first = deferred<RemoteAgentChatPage>();
@@ -1860,7 +1876,7 @@ describe("useRemoteStore watchlists", () => {
 
   it("treats chat transport and gateway loss and session expiry as connection failures", async () => {
     useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat" });
-    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteTransportError(new TypeError("Failed to fetch")));
     await useRemoteStore.getState().refreshActiveAgentChat();
     expect(useRemoteStore.getState().status).toBe("unreachable");
 

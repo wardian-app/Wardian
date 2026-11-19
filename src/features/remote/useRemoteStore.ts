@@ -43,7 +43,7 @@ import {
   signRemoteAuthChallenge,
   type StoredRemoteDeviceIdentity,
 } from "./remoteIdentity";
-import { remoteClient, RemoteChatBodyError, RemoteChatTimeoutError, RemoteRequestError } from "./remoteClient";
+import { remoteClient, RemoteChatBodyError, RemoteChatTimeoutError, RemoteRequestError, RemoteTransportError } from "./remoteClient";
 
 type RemoteStatus =
   | "loading"
@@ -141,7 +141,9 @@ const statusFromError = (error: unknown): RemoteStatus => {
 };
 
 const chatConnectionStatusFromError = (error: unknown): RemoteStatus | null => {
-  if (error instanceof RemoteChatTimeoutError || error instanceof RemoteChatBodyError) return null;
+  // Connectivity is established at the request boundary, never by local page application.
+  if (error instanceof RemoteTransportError) return "unreachable";
+  if (!(error instanceof RemoteRequestError)) return null;
   if (error instanceof RemoteRequestError && error.code === "agent_chat_read_retryable" && error.status === 503) return null;
   const status = statusFromError(error);
   // Ordinary chat failures and HTTP 500 do not establish status-stream loss; gateway failures still do.
