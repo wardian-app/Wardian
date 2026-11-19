@@ -22,6 +22,10 @@ The setup script:
 - on Windows, can download a matching `msedgedriver.exe` into `tools/e2e-native/`
 - on macOS/Linux, prints the WebDriver package or `WARDIAN_NATIVE_WEBDRIVER` guidance when automatic setup is not reliable
 
+Windows downloads use Node.js and extract with the system `tar.exe` under
+`SystemRoot/System32`. Setup does not load PowerShell archive modules, so an
+inherited `PSModulePath` cannot select an incompatible ZIP implementation.
+
 `e2e-native/tests/claude-mod-delivery-native.test.mjs` is an opt-in real-Claude
 acceptance probe (`WARDIAN_E2E_REAL_CLAUDE_MOD=1`). It requires a prebuilt app
 with `terminal-trace`, a frontend built with `VITE_WARDIAN_TERMINAL_DEBUG=1`,

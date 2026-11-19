@@ -1,9 +1,9 @@
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { cacheLayout, main as cacheMain } from './rust-build-cache.mjs';
+import { extractWindowsZip } from './windows-zip.mjs';
 
 const VERSION = '0.18.0';
 
@@ -44,10 +44,7 @@ export async function main(argv = process.argv.slice(2)) {
   const archive = path.join(attempt, asset);
   writeFileSync(archive, bytes);
   const extracted = path.join(attempt, 'unpacked');
-  const script = 'Expand-Archive -LiteralPath $env:WARDIAN_SCCACHE_ARCHIVE -DestinationPath $env:WARDIAN_SCCACHE_UNPACK';
-  const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
-    env: { ...process.env, WARDIAN_SCCACHE_ARCHIVE: archive, WARDIAN_SCCACHE_UNPACK: extracted }, windowsHide: true, encoding: 'utf8' });
-  if (result.error || result.status !== 0) throw new Error('Official ZIP extraction failed; attempt retained for inspection');
+  extractWindowsZip(archive, extracted);
   const folder = readdirSync(extracted).find((name) => name === asset.slice(0, -4));
   const executable = folder && path.join(extracted, folder, 'sccache.exe');
   if (!executable || !existsSync(executable)) throw new Error('Official archive has unexpected executable layout');
