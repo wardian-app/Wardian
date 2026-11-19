@@ -32,6 +32,7 @@ import { clearResolvedColorCache } from "./resolveColor";
 import { CANVAS_LABEL_FONT, CANVAS_LABEL_SIZE } from "../../utils/canvasTypography";
 import type { GardenSkillGlyph } from "./skillGlyphs";
 import { GARDEN_THEME_FALLBACK, type GardenTheme } from "./useGardenTheme";
+import { crownLabelId } from "./canvasLabels";
 
 const theme: GardenTheme = {
   ...GARDEN_THEME_FALLBACK,
@@ -83,6 +84,46 @@ function circles() {
 }
 
 describe("AgentUnit", () => {
+  it("forwards carrier identity and collision updates through memoization to crown captions", () => {
+    const skill = glyph();
+    const props = { unit: { ...unit, crown: [skill] }, selected: false, detail: "near" as const, theme,
+      continuousZoom: true, scale: 3, onSelect: vi.fn(), onOpen: vi.fn(),
+      onSelectSkill: vi.fn(), onOpenSkill: vi.fn(), onDragEnd: vi.fn() };
+    const { rerender } = render(<AgentUnit {...props} visibleLabelIds={new Set()} />);
+    expect(screen.queryByText(skill.label)).not.toBeInTheDocument();
+    expect(screen.getByText(skill.monogram)).toBeInTheDocument();
+    rerender(<AgentUnit {...props} visibleLabelIds={new Set([crownLabelId(unit.ref.id, skill.entryRef)])} />);
+    expect(screen.getByText(skill.label)).toBeInTheDocument();
+    rerender(<AgentUnit {...props} visibleLabelIds={new Set()} />);
+    expect(screen.queryByText(skill.label)).not.toBeInTheDocument();
+    expect(screen.getByText(skill.monogram)).toBeInTheDocument();
+  });
+  it("hands monogram paint to the DOM nucleus before scale three and restores it on zoom out", () => {
+    const props = { unit, selected: false, detail: "near" as const, theme, continuousZoom: true,
+      onSelect: vi.fn(), onOpen: vi.fn(), onSelectSkill: vi.fn(), onOpenSkill: vi.fn(), onDragEnd: vi.fn() };
+    const { rerender } = render(<AgentUnit {...props} scale={1} />);
+    expect(screen.getByText("A")).toBeInTheDocument();
+    rerender(<AgentUnit {...props} scale={70 / 32} />);
+    expect(screen.queryByText("A")).not.toBeInTheDocument();
+    rerender(<AgentUnit {...props} scale={3} />);
+    expect(screen.queryByText("A")).not.toBeInTheDocument();
+    rerender(<AgentUnit {...props} scale={1} />);
+    expect(screen.getByText("A")).toBeInTheDocument();
+    rerender(<AgentUnit {...props} scale={3} dragging />);
+    expect(screen.getByText("A")).toBeInTheDocument();
+  });
+  it("updates collision visibility through memoization while retaining its body", () => {
+    const props = { unit, selected: false, detail: "near" as const, theme,
+      onSelect: vi.fn(), onOpen: vi.fn(), onSelectSkill: vi.fn(), onOpenSkill: vi.fn(), onDragEnd: vi.fn() };
+    const { rerender } = render(<AgentUnit {...props} labelVisible />);
+    expect(screen.getByText("Alpha")).toBeInTheDocument();
+    rerender(<AgentUnit {...props} labelVisible={false} />);
+    expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
+    expect(screen.getByText("A")).toBeInTheDocument();
+    expect(circles().length).toBeGreaterThan(0);
+    rerender(<AgentUnit {...props} labelVisible />);
+    expect(screen.getByText("Alpha")).toBeInTheDocument();
+  });
   beforeEach(() => clearResolvedColorCache());
   it.each([0.5, 1, 2.5])("keeps names at 12 screen pixels and bounds long labels at scale %s", (scale) => {
     renderUnit({ scale, labelWidthPx: 100, unit: { ...unit, label: "Long agent name that must stay on one line" } });

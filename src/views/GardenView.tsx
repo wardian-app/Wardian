@@ -163,6 +163,7 @@ export const GardenView: React.FC<GardenViewProps> = ({
   const [contentsCache] = useState(createGardenContentsCache);
   const [draggingAgentId, setDraggingAgentId] = useState<string | null>(null);
   const viewRef = useRef<HTMLDivElement>(null);
+  const [controlsHost, setControlsHost] = useState<HTMLDivElement | null>(null);
   const motion = useGardenCameraMotion(camera, setCamera);
   const panStart = useRef<{ pointer: number; x: number; y: number; camera: GardenCamera } | null>(null);
   const panned = useRef(false);
@@ -608,7 +609,7 @@ export const GardenView: React.FC<GardenViewProps> = ({
   };
 
   return (
-    <div ref={viewRef} className="garden-view relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+    <div className="garden-view relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       onPointerDownCapture={(event) => {
         if (event.button !== 0 || !camera || !(event.target instanceof Element)
           || !event.target.matches(".garden-spatial-cell, .garden-agent-interior, .garden-agent-interior-region, .garden-spatial-contents")) return;
@@ -711,98 +712,104 @@ export const GardenView: React.FC<GardenViewProps> = ({
         )}
       </section>
       {recoveryNotice && <p role="status" className="garden-recovery-notice">{recoveryNotice}</p>}
-      <div
-        id="garden-selection-summary"
-        data-testid="garden-selection-summary"
-        aria-live="polite"
-        className="garden-selection"
-      >
-        {selectionRef ? (
-          <><span className="font-semibold text-primary">{summaryLabel ?? labelFor(selectionRef)}</span><span className="text-muted">{summaryStatus ?? selectionRef.kind}</span>{(!currentFrame || unitKey(currentFrame.ref) !== unitKey(selectionRef)) && <button onClick={() => enterObject(selectionRef)}>{gardenRecordKind(selectionRef.kind) ? "Open record" : "Enter"}</button>}{selectedAgentId && <button onClick={() => openCanonicalAgent(selectedAgentId)}>Open agent session</button>}</>
-        ) : (
-          <span className="text-muted">Select to inspect · double-click or Enter to explore</span>
+      {automationError && <div className="garden-data-notice" role="status">Automation data is incomplete or stale. <button onClick={() => void refreshAutomations()}>Retry</button><details><summary>Details</summary>{automationError}</details></div>}
+      <div ref={viewRef} className="garden-scene">
+        {rendererActive ? <GardenCanvas
+          controlsHost={controlsHost}
+          continuousZoom
+          agentUnits={agentUnits}
+          automationUnits={automationUnits}
+          automationProjections={automationInputs}
+          districtLabels={districtLabels}
+          districtByAgentId={districtByAgentId}
+          focusedDistrictId={[...trail].reverse().find((frame) => frame.ref.kind === "district")?.ref.id}
+          camera={camera}
+          onCameraChange={setCamera}
+          onDraggingAgentChange={setDraggingAgentId}
+          onEnter={enterObject}
+          onOpenParent={() => returnTo(Math.max(0, trail.length - 1))}
+          onClearSelection={() => { setSelectedKey(null); onSelectionChange(new Set()); }}
+          selectedKey={activeSelectionKey}
+          highlightedAgentIds={highlightedAgentIds}
+          terrainCells={activityCells}
+          terrainDistricts={layout.districts}
+          terrainPaint={changes.paint}
+          highlightedPaths={highlightedPaths}
+          onSelectPath={handleSelectPath}
+          onOpenPath={(path) => enterObject({ kind: terrain.cells.some((cell) => cell.path === path && cell.isDir) ? "workspace" : "path", id: path })}
+          onViewportChange={setViewport}
+          onSelect={selectObject}
+          onOpenAgent={(agentId) => (onOpenAgent ?? onOpenAgentInGrid)?.(agentId)}
+          onOpenSkill={(glyph) => openLibraryAt("skills", glyph.entryRef)}
+          onMoveUnit={(key, x, y) => {
+            // A drag is a pin, stored relative to the unit's district so the
+            // placement survives the district being relocated on the grid.
+            const where = placement.get(key);
+            if (!where) return;
+            pinUnit(key, where.districtId, clampToDistrict({ x, y }, where), where.districtOrigin);
+          }}
+          onResetLayout={() => {
+            resetLayout();
+            setSelectedKey(null);
+          }}
+        /> : (
+          // A visible surface reaches this branch too: the renderer is mounted
+          // from an effect so the surface frame paints first, and the Konva chunk
+          // is fetched after that. Saying "paused while hidden" there would be
+          // wrong, so the two states read differently.
+          <div className="flex flex-1 items-center justify-center text-sm text-muted">
+            {visibility === "hidden"
+              ? "Garden renderer paused while hidden"
+              : "Preparing the garden…"}
+          </div>
         )}
+        {rendererActive && camera && <div className="garden-spatial-world">
+          {agentUnits.map((unit) => {
+            if (unit.ref.id === draggingAgentId) return null;
+            const bounds = agentCellBounds(unit.position);
+            const screen = projectBounds(bounds, camera);
+            const size = viewSize();
+            if (screen.width < 70 || screen.x + screen.width < 0 || screen.y + screen.height < 0 || screen.x > size.width || screen.y > size.height) return null;
+            const agent = filteredAgents.find((item) => item.session_id === unit.ref.id);
+            if (!agent) return null;
+            return <GardenSpatialCell key={unitKey(unit.ref)} target={unit.ref} bounds={bounds} camera={camera}
+              viewport={viewSize()}
+              focused={currentFrame?.ref.kind === "agent" && currentFrame.ref.id === unit.ref.id}
+              label={unit.label} status={gardenAgentStatusColor(unit.status)} onSelect={() => selectObject(unit.ref)} onEnter={() => enterObject(unit.ref)}>
+              <GardenAgentInterior agent={agent} status={unit.status} crown={unit.crown}
+                projectedWidth={screen.width} contentsCache={contentsCache}
+                automations={automationInputs} selectedKey={activeSelectionKey} onSelect={selectObject} onEnter={enterObject} onOpenAgent={openCanonicalAgent} />
+            </GardenSpatialCell>;
+          })}
+          {spatialFrames.map((frame, index) => {
+            const bounds = frame.bounds ?? boundsFor(frame.ref);
+            if (!bounds) return null;
+            return <GardenSpatialCell key={`${index}:${unitKey(frame.ref)}`} target={frame.ref} bounds={bounds} camera={camera}
+              viewport={viewSize()}
+              receding={index < spatialFrames.length - 1}
+              focused={currentFrame === frame}
+              revealFromScale={frame === candidate ? frame.camera?.scale : undefined}
+              label={frame.label} onSelect={() => selectObject(frame.ref)} onEnter={() => enterObject(frame.ref)}>
+              {renderContents(frame)}
+            </GardenSpatialCell>;
+          })}
+        </div>}
       </div>
-      {automationError && <div className="absolute top-16 right-3 z-30 max-w-sm rounded-md border border-wardian-border bg-[var(--color-wardian-bg)] p-2 text-xs" role="status">Automation data is incomplete or stale. <button onClick={() => void refreshAutomations()}>Retry</button><details><summary>Details</summary>{automationError}</details></div>}
-      {rendererActive ? <GardenCanvas
-        continuousZoom
-        agentUnits={agentUnits}
-        automationUnits={automationUnits}
-        automationProjections={automationInputs}
-        districtLabels={districtLabels}
-        districtByAgentId={districtByAgentId}
-        focusedDistrictId={[...trail].reverse().find((frame) => frame.ref.kind === "district")?.ref.id}
-        camera={camera}
-        onCameraChange={setCamera}
-        onDraggingAgentChange={setDraggingAgentId}
-        onEnter={enterObject}
-        onOpenParent={() => returnTo(Math.max(0, trail.length - 1))}
-        onClearSelection={() => { setSelectedKey(null); onSelectionChange(new Set()); }}
-        selectedKey={activeSelectionKey}
-        highlightedAgentIds={highlightedAgentIds}
-        terrainCells={activityCells}
-        terrainDistricts={layout.districts}
-        terrainPaint={changes.paint}
-        highlightedPaths={highlightedPaths}
-        onSelectPath={handleSelectPath}
-        onOpenPath={(path) => enterObject({ kind: terrain.cells.some((cell) => cell.path === path && cell.isDir) ? "workspace" : "path", id: path })}
-        onViewportChange={setViewport}
-        onSelect={selectObject}
-        onOpenAgent={(agentId) => (onOpenAgent ?? onOpenAgentInGrid)?.(agentId)}
-        onOpenSkill={(glyph) => openLibraryAt("skills", glyph.entryRef)}
-        onMoveUnit={(key, x, y) => {
-          // A drag is a pin, stored relative to the unit's district so the
-          // placement survives the district being relocated on the grid.
-          const where = placement.get(key);
-          if (!where) return;
-          pinUnit(key, where.districtId, clampToDistrict({ x, y }, where), where.districtOrigin);
-        }}
-        onResetLayout={() => {
-          resetLayout();
-          setSelectedKey(null);
-        }}
-      /> : (
-        // A visible surface reaches this branch too: the renderer is mounted
-        // from an effect so the surface frame paints first, and the Konva chunk
-        // is fetched after that. Saying "paused while hidden" there would be
-        // wrong, so the two states read differently.
-        <div className="flex flex-1 items-center justify-center text-sm text-muted">
-          {visibility === "hidden"
-            ? "Garden renderer paused while hidden"
-            : "Preparing the garden…"}
+      <div className="garden-footer">
+        <div
+          id="garden-selection-summary"
+          data-testid="garden-selection-summary"
+          aria-live="polite"
+          className="garden-selection"
+        >
+          {selectionRef ? (
+            <><span className="font-semibold text-primary">{summaryLabel ?? labelFor(selectionRef)}</span><span className="text-muted">{summaryStatus ?? selectionRef.kind}</span>{(!currentFrame || unitKey(currentFrame.ref) !== unitKey(selectionRef)) && <button onClick={() => enterObject(selectionRef)}>{gardenRecordKind(selectionRef.kind) ? "Open record" : "Enter"}</button>}{selectedAgentId && <button onClick={() => openCanonicalAgent(selectedAgentId)}>Open agent session</button>}</>
+          ) : (
+            <span className="text-muted">No selection</span>
+          )}
         </div>
-      )}
-      {rendererActive && camera && <div className="garden-spatial-world">
-        {agentUnits.map((unit) => {
-          if (unit.ref.id === draggingAgentId) return null;
-          const bounds = agentCellBounds(unit.position);
-          const screen = projectBounds(bounds, camera);
-          const size = viewSize();
-          if (screen.width < 70 || screen.x + screen.width < 0 || screen.y + screen.height < 0 || screen.x > size.width || screen.y > size.height) return null;
-          const agent = filteredAgents.find((item) => item.session_id === unit.ref.id);
-          if (!agent) return null;
-          return <GardenSpatialCell key={unitKey(unit.ref)} target={unit.ref} bounds={bounds} camera={camera}
-            viewport={viewSize()}
-            focused={currentFrame?.ref.kind === "agent" && currentFrame.ref.id === unit.ref.id}
-            label={unit.label} status={gardenAgentStatusColor(unit.status)} onSelect={() => selectObject(unit.ref)} onEnter={() => enterObject(unit.ref)}>
-            <GardenAgentInterior agent={agent} status={unit.status} crown={unit.crown}
-              projectedWidth={screen.width} contentsCache={contentsCache}
-              automations={automationInputs} selectedKey={activeSelectionKey} onSelect={selectObject} onEnter={enterObject} onOpenAgent={openCanonicalAgent} />
-          </GardenSpatialCell>;
-        })}
-        {spatialFrames.map((frame, index) => {
-          const bounds = frame.bounds ?? boundsFor(frame.ref);
-          if (!bounds) return null;
-          return <GardenSpatialCell key={`${index}:${unitKey(frame.ref)}`} target={frame.ref} bounds={bounds} camera={camera}
-            viewport={viewSize()}
-            receding={index < spatialFrames.length - 1}
-            focused={currentFrame === frame}
-            revealFromScale={frame === candidate ? frame.camera?.scale : undefined}
-            label={frame.label} onSelect={() => selectObject(frame.ref)} onEnter={() => enterObject(frame.ref)}>
-            {renderContents(frame)}
-          </GardenSpatialCell>;
-        })}
-      </div>}
+        <div ref={setControlsHost} className="garden-controls-host" />
+      </div>
     </div>
   );
 };

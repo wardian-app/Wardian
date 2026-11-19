@@ -38,6 +38,7 @@ const schedule: AutomationSchedule = {
 
 /** All data is synthetic. The shared bridge records calls and implements file resources and CAS persistence. */
 export async function installGardenCompositionMock(page: Page, options: {
+  incompleteData?: boolean;
   memoryCount?: number;
   conversationCount?: number;
   historicalOneOffRunCount?: number;
@@ -65,9 +66,14 @@ export async function installGardenCompositionMock(page: Page, options: {
     started_at: new Date(Date.now() - (index + 1) * 60_000).toISOString(),
     updated_at: new Date(Date.now() - index * 60_000).toISOString(),
   }));
+  const surface = makeWorkbenchSurface("garden-main", "garden");
+  if (options.incompleteData) surface.state = { ...surface.state as object,
+    trail: [{ ref: { kind: "memory", id: "missing-record" }, label: "Saved record" }],
+  };
   return installWorkbenchIpcMock(page, {
+    errors: options.incompleteData ? { schedule_list: "Synthetic schedule data is unavailable." } : undefined,
     load_result: { source: "primary", notice: null, durable_revision: 0, durable_token: "garden-token",
-      document: makeWorkbenchDocument({ surfaces: [makeWorkbenchSurface("garden-main", "garden")],
+      document: makeWorkbenchDocument({ surfaces: [surface],
         shell: { left_sidebar_collapsed: true, right_sidebar_collapsed: true } }),
     },
     agents: [
@@ -96,7 +102,7 @@ export async function installGardenCompositionMock(page: Page, options: {
         { path: "docs/evidence.md", old_path: null, change_kind: "added", insertions: 4, deletions: 0, evidence: "attributed", agent_ids: [GARDEN_AGENT], turn_indices: [4] },
       ] } },
       load_agent_reach: { schema: 1, agents: [], skipped_turn_records: 0 },
-      automation_list_blueprints: { blueprints: [{ id: blueprint.id, path: "/synthetic/library/design-review.md" }], truncated: false, next_offset: null },
+      automation_list_blueprints: { blueprints: [{ id: blueprint.id, path: "/synthetic/library/design-review.md" }], truncated: options.incompleteData ?? false, next_offset: options.incompleteData ? 1 : null },
       automation_parse: { blueprint }, schedule_list: schedules,
       automation_list_runs: { runs: [
         { run_id: GARDEN_RUN, blueprint_id: blueprint.id, schedule_id: schedule.id, status: scheduledRunStatus, node_count: 2, path: `/synthetic/runs/${GARDEN_RUN}`, started_at: timestamp },
