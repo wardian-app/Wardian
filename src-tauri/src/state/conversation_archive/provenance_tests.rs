@@ -1286,6 +1286,20 @@ fn claude_assistant_mirror_projection_requires_unique_native_message() {
     )
     .unwrap();
     assert_eq!(ambiguous_native.len(), 3);
+
+    for key in ["provider_session_id", "conversation_archive_id"] {
+        let mut watch = observation("watch", false, "msg-1");
+        let mut native = observation("native", true, "msg-1");
+        watch.metadata[key] = serde_json::json!("first");
+        native.metadata[key] = serde_json::json!("second");
+        let distinct_scopes =
+            provenance::merge_current_capture(Vec::new(), vec![watch, native]).unwrap();
+        assert_eq!(
+            distinct_scopes.len(),
+            2,
+            "conflicting {key} must remain separate"
+        );
+    }
 }
 
 use crate::commands::chat::archive_identity as native_identity;

@@ -11776,6 +11776,128 @@ pub(crate) fn read(
 }
 
 #[test]
+fn claude_narration_reconciles_live_and_provider_log_in_committed_pages() {
+    let text = "I'll start by reading `audit.txt`.";
+    assert_claude_narration_projection(text, text);
+}
+
+#[test]
+fn claude_artifact_narration_reconciles_complete_bodies_without_matching_excerpts() {
+    let prefix = "Long narration. ".repeat(700);
+    let text = format!("{prefix}First ending.");
+    assert_claude_narration_projection(&text, &text);
+    let different = format!("{prefix}Other ending.");
+    assert_eq!(text.len(), different.len());
+    assert_claude_narration_projection(&text, &different);
+}
+
+fn assert_claude_narration_projection(text: &str, watch_text: &str) {
+    let (_guard, temp) = isolated_home();
+    let expected = if text == watch_text { 1 } else { 2 };
+    let path = temp.path().join("claude-narration.jsonl");
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            json!({
+                "type": "assistant", "sessionId": "fixture-session", "uuid": "text-observation",
+                "message": {"id": "msg-narration", "role": "assistant",
+                    "content": [{"type": "text", "text": text}]}
+            })
+        ),
+    )
+    .unwrap();
+    let mut ctx = ConversationArchiveContext::for_agent_id("agent-1", "claude");
+    ctx.provider_session_ids = vec!["fixture-session".into()];
+    ctx.provider_source_key = Some("claude:session:fixture-session".into());
+    let mut source = snapshot(&ctx);
+    source.resume_session = Some("fixture-session".into());
+    source.log_path = Some(path.clone());
+    let archive = ConversationArchiveState::default();
+    let mut watch = event("agent-1:0000000000000003:stream_json", watch_text);
+    watch.provider = "claude".into();
+    watch.role = Some(AgentChatRole::Assistant);
+    watch.source = Some("stream_json".into());
+    watch.turn_id = Some("msg-narration".into());
+    watch.metadata = json!({"provider_source": "event", "transcript_cursor": "watch:3"});
+    archive
+        .append_chat_events_with_context(ctx.clone(), &[watch.clone()])
+        .unwrap();
+    finish_projection(&archive);
+    let before = read(&ctx, &source, None, None, None).unwrap();
+    assert!(before.events.iter().any(|row| row.id == watch.id));
+
+    let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "claude",
+        &path,
+        ctx.provider_source_key.as_deref().unwrap(),
+        None,
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut batch.events, "claude", &path);
+    let native_id = batch.events[0].id.clone();
+    archive
+        .append_verified_provider_log_batch_with_context(
+            ctx.clone(),
+            &batch.events,
+            None,
+            &batch.next,
+            batch.source_proof(),
+        )
+        .unwrap();
+    finish_projection(&archive);
+    finish_source_index(&source);
+    for revision in [None, Some(before.revision.as_str())] {
+        let page = read(&ctx, &source, None, revision, None).unwrap();
+        let rows: Vec<_> = page
+            .events
+            .iter()
+            .filter(|row| row.turn_id.as_deref() == Some("msg-narration"))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            expected,
+            "one provider text block must have one committed row"
+        );
+        assert!(rows.iter().any(|row| row.id == native_id));
+        assert_eq!(
+            page.aliases
+                .iter()
+                .any(|alias| alias.observation_id == watch.id && alias.canonical_id == native_id),
+            text == watch_text
+        );
+    }
+    let physical = archive.chat_events_for_capture(&ctx).unwrap();
+    assert_eq!(
+        physical
+            .iter()
+            .filter(|row| row.turn_id.as_deref() == Some("msg-narration"))
+            .count(),
+        2,
+        "the display relation preserves both physical observations"
+    );
+    drop(archive);
+    let reopened = read(&ctx, &source, None, None, None).unwrap();
+    assert_eq!(
+        reopened
+            .events
+            .iter()
+            .filter(|row| row.turn_id.as_deref() == Some("msg-narration"))
+            .count(),
+        expected
+    );
+    assert_eq!(
+        reopened
+            .aliases
+            .iter()
+            .any(|alias| alias.observation_id == watch.id && alias.canonical_id == native_id),
+        text == watch_text
+    );
+}
+
+#[test]
 fn claude_chat_render_fixture_preserves_one_prompt_across_recent_and_older_pages() {
     let (_guard, temp) = isolated_home();
     // Sanitized from the reported log's 17 record types. Pad history so the
