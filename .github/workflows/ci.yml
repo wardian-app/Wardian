@@ -145,6 +145,8 @@ jobs:
       - name: Test Windows native supervisor contract
         # local-verify: backend
         run: node --test scripts/native-e2e-windows-supervisor.test.mjs
+      - name: Test Windows installer ZIP extraction
+        run: node --test scripts/windows-zip.test.mjs
       - name: Install dependencies
         run: npm ci
       # Runs after `cargo check --workspace` so every dependency is already
