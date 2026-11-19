@@ -373,6 +373,10 @@ boundary.
   open and earlier chat remains visible. Select **Retry Chat**. If the error
   repeats, inspect the host's chat and archive diagnostics; re-pairing does not
   resolve an error from the chat endpoint.
+- **Loading older Chat reports that history could not be updated:** the desktop
+  remains connected. Earlier messages and the history position stay available
+  when a received page cannot be safely applied. Retry **Load older transcript**;
+  re-pairing is unnecessary for a local history validation failure.
 - **Chat is briefly busy while the desktop is healthy:** the selected Chat
   retries automatically, including for an Off agent. Earlier readable rows
   stay visible. A recent window can be readable while older history is still

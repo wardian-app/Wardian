@@ -26,6 +26,14 @@ const REMOTE_STATUS_STREAM_PATH = "/remote/api/status-stream";
 const REMOTE_REQUEST_TIMEOUT_MS = 15_000;
 const REMOTE_CHAT_READ_TIMEOUT_MS = 60_000;
 
+/** Only a failed fetch establishes transport loss; page application errors do not. */
+export class RemoteTransportError extends Error {
+  constructor(readonly cause: unknown) {
+    super("Remote transport failed");
+    this.name = "RemoteTransportError";
+  }
+}
+
 /** A Chat read deadline does not establish that the desktop is unreachable. */
 export class RemoteChatTimeoutError extends Error {
   constructor() {
@@ -99,6 +107,9 @@ async function remoteJson<T>(path: string, init?: RequestInit, chatRead = false)
       credentials: "same-origin",
       headers,
       signal: controller.signal,
+    }).catch((error: unknown) => {
+      if (!chatRead || controller.signal.aborted) throw error;
+      throw new RemoteTransportError(error);
     });
     if (!response.ok) {
       let code: string | undefined;
