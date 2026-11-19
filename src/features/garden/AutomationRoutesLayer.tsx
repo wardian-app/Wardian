@@ -4,9 +4,12 @@ import type { GardenEntityRef } from "./garden.types";
 import type { GardenTheme } from "./useGardenTheme";
 import { revealBetween } from "./gardenSpatialZoom";
 import { pointInCanvasViewport, rectInCanvasViewport, type CanvasWorldRect } from "./canvasVisibility";
+import { automationLabel, automationStageLabel } from "./canvasLabels";
 
 /** Derived attachments and execution paths; deliberately never draggable. */
-export function AutomationRoutesLayer({ routes, theme, scale, selectedKey, onSelect, onOpen, mode = "all", viewport = null, continuousZoom = false }: {
+export function AutomationRoutesLayer({ routes, theme, scale, selectedKey, onSelect, onOpen, mode = "all", viewport = null, continuousZoom = false, visibleLabelIds }: {
+  /** Use the same result for both route and marker passes. */
+  visibleLabelIds?: ReadonlySet<string>;
   viewport?: CanvasWorldRect | null;
   continuousZoom?: boolean;
   routes: readonly SituatedRoute[];
@@ -46,7 +49,8 @@ export function AutomationRoutesLayer({ routes, theme, scale, selectedKey, onSel
         dash={presentation.paused ? [7 / scale, 4 / scale, 1 / scale, 4 / scale] : !presentation.live ? [5 / scale, 4 / scale] : undefined}
         pointerLength={5 / scale} pointerWidth={5 / scale} />
       {anchorVisible && <Circle perfectDrawEnabled={false} x={anchor.x} y={anchor.y} radius={6 / scale} fill={theme.groundFile} stroke={selected ? theme.selection : theme.labelMuted} />}
-      {anchorVisible && labelOpacity > 0 && <Text opacity={labelOpacity} x={labelX} y={anchor.y - 6 / scale} text={presentation.summary}
+      {anchorVisible && labelOpacity > 0 && (!visibleLabelIds || visibleLabelIds.has(automationLabel(input.id, anchor, scale, labelOnLeft).id)) && <Text opacity={labelOpacity} x={labelX} y={anchor.y - 6 / scale} text={presentation.summary}
+        height={12 / scale}
         width={labelWidth} align={labelOnLeft ? "right" : "left"} wrap="none" ellipsis fontFamily={theme.font} fontSize={12 / scale} fill={theme.label} />}</Group>}
       {mode !== "routes" && presentation.markers.map((marker) => {
         const positionKey = `${marker.position.x}:${marker.position.y}`;
@@ -60,7 +64,7 @@ export function AutomationRoutesLayer({ routes, theme, scale, selectedKey, onSel
           {marker.attention === "awaiting_approval" && <Circle name="stage-attention" radius={18 / scale} stroke={color} strokeWidth={2 / scale} />}
           {marker.attention && <Text x={10 / scale} y={-18 / scale} text={marker.attention === "failed" ? "×" : "!"}
             fontSize={15 / scale} fontFamily={theme.font} fill={color} />}
-          {labelOpacity > 0 && <Text opacity={labelOpacity} width={200 / scale} wrap="none" ellipsis x={28 / scale} y={(-24 + labelRow * 16) / scale} text={marker.label}
+          {labelOpacity > 0 && (!visibleLabelIds || visibleLabelIds.has(automationStageLabel(input.id, marker.key, marker.position, labelRow, scale).id)) && <Text opacity={labelOpacity} width={200 / scale} height={12 / scale} wrap="none" ellipsis x={28 / scale} y={(-24 + labelRow * 16) / scale} text={marker.label}
             fontFamily={theme.font} fontSize={12 / scale} fill={color}
             shadowColor={theme.labelBackdrop} shadowBlur={4 / scale} shadowOpacity={1} />}
         </Group>;

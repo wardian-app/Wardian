@@ -3,15 +3,16 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("react-konva", () => {
-  type Props = { children?: ReactNode; text?: string; name?: string; id?: string; x?: number; y?: number; points?: number[]; dash?: number[]; opacity?: number; listening?: boolean; visible?: boolean; onClick?: () => void; onDblClick?: () => void };
+  type Props = { children?: ReactNode; text?: string; name?: string; id?: string; x?: number; y?: number; height?: number; points?: number[]; dash?: number[]; opacity?: number; listening?: boolean; visible?: boolean; onClick?: () => void; onDblClick?: () => void };
   const shape = (kind: string) => (props: Props) => <div data-shape={kind} data-name={props.name} data-id={props.id}
-    data-x={props.x} data-y={props.y} data-points={props.points?.join(",")} data-dash={props.dash?.join(",")}
+    data-x={props.x} data-y={props.y} data-height={props.height} data-points={props.points?.join(",")} data-dash={props.dash?.join(",")}
     data-opacity={props.opacity} data-listening={props.listening} data-visible={props.visible}
     onClick={props.onClick} onDoubleClick={props.onDblClick}>{props.text}{props.children}</div>;
   return { Group: shape("Group"), Circle: shape("Circle"), Rect: shape("Rect"), Arrow: shape("Arrow"), Text: shape("Text") };
 });
 
 import { DistrictLayer } from "./DistrictLayer";
+import { TerrainLayer } from "./TerrainLayer";
 import { AutomationRoutesLayer } from "./AutomationRoutesLayer";
 import { districtPopulations, situatedRoutes } from "./canvasHierarchy";
 import type { CanvasAutomationInput } from "./automationCanvasPresentation";
@@ -22,6 +23,58 @@ const districts = new Map([["d", { origin: { x: 0, y: 0 }, radius: 100, roots: [
 const agents: GardenAgentUnit[] = ["a", "b"].map((id, index) => ({ ref: { kind: "agent", id }, label: id, status: index ? "Error" : "Idle", color: "", crown: [], position: { x: index * 10, y: 0 } }));
 
 describe("canvas aggregate and route paint", () => {
+  it("suppresses only cluster count text while retaining the cluster hit target", () => {
+    const bands = new Map([["d", "habitat" as const]]);
+    const populations = districtPopulations(agents, districts, bands, 1);
+    const onSelect = vi.fn();
+    const props = { districts, populations, bands, scale: 2, selectedKey: null, theme, onSelect, onOpen: vi.fn() };
+    const { container, rerender } = render(<DistrictLayer {...props} visibleLabelIds={new Set(["district-count:d"])} />);
+    expect(screen.getByText("2")).toHaveAttribute("data-height", String(theme.labelSize / 2));
+    rerender(<DistrictLayer {...props} visibleLabelIds={new Set()} />);
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
+    const cluster = container.querySelector('[data-name="district-population"]')!;
+    expect(cluster.querySelectorAll('[data-shape="Circle"]').length).toBeGreaterThan(0);
+    fireEvent.click(cluster);
+    expect(onSelect).toHaveBeenCalledWith("d");
+  });
+  it("suppresses district text without removing selectable ground", () => {
+    const onSelect = vi.fn();
+    const { container } = render(<DistrictLayer districts={districts} labels={new Map([["d", "District heading"]])}
+      scale={1} selectedKey={null} theme={theme} visibleLabelIds={new Set()} onSelect={onSelect} onOpen={vi.fn()} />);
+    expect(screen.queryByText("District heading")).not.toBeInTheDocument();
+    fireEvent.click(container.querySelector('[data-shape="Circle"]')!);
+    expect(onSelect).toHaveBeenCalledWith("d");
+  });
+
+  it("suppresses nested terrain labels locally and respects a shared collision result", () => {
+    const cells = [0, 1].map((depth) => ({ path: `/root/${depth}`, name: `Folder ${depth}`, depth,
+      districtId: "d", isDir: true, truncated: false, rect: { x: -50 + depth, y: -50 + depth, width: 150, height: 100 } }));
+    const onSelect = vi.fn();
+    const { container, rerender } = render(<TerrainLayer cells={cells} districts={districts} scale={1} theme={theme} onSelectPath={onSelect} />);
+    expect(screen.getByText("Folder 0")).toBeInTheDocument();
+    expect(screen.queryByText("Folder 1")).not.toBeInTheDocument();
+    rerender(<TerrainLayer cells={cells} districts={districts} scale={1} theme={theme} visibleLabelIds={new Set()} onSelectPath={onSelect} />);
+    expect(screen.queryByText("Folder 0")).not.toBeInTheDocument();
+    expect(container.querySelectorAll('[data-shape="Rect"]')).toHaveLength(2);
+    fireEvent.click(container.querySelector('[data-shape="Rect"]')!);
+    expect(onSelect).toHaveBeenCalledWith("/root/0");
+  });
+
+  it("keeps route hits and failure markers when their captions lose collisions", () => {
+    const input: CanvasAutomationInput = { id: "r", label: "Collision route", nodeCount: 1, agentIds: ["a"], runStatus: "running",
+      stages: [{ nodeId: "step", agentId: "a", status: "failed" }],
+      runEvidence: [{ summary: { run_id: "run", blueprint_id: "bp", status: "running", node_count: 1, path: "run" }, invocation: null, detail: null }] };
+    const routes = situatedRoutes([input], agents, districts);
+    const onSelect = vi.fn();
+    const { container } = render(<AutomationRoutesLayer routes={routes} theme={theme} scale={1} selectedKey={null}
+      visibleLabelIds={new Set()} onSelect={onSelect} onOpen={vi.fn()} />);
+    expect(screen.queryByText(routes[0].presentation.summary)).not.toBeInTheDocument();
+    expect(screen.queryByText(routes[0].presentation.markers[0].label)).not.toBeInTheDocument();
+    expect(screen.getByText("×")).toBeInTheDocument();
+    fireEvent.click(container.querySelector('[data-shape="Arrow"]')!);
+    expect(onSelect).toHaveBeenCalledWith({ kind: "automation", id: "r" });
+  });
+
   it("culls offscreen districts while retaining ground enclosing the viewport", () => {
     const { rerender } = render(<DistrictLayer districts={districts} scale={1} selectedKey={null} theme={theme}
       viewport={{ x: 500, y: 500, width: 100, height: 100 }} onSelect={vi.fn()} onOpen={vi.fn()} />);

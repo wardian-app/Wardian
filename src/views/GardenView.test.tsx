@@ -171,7 +171,7 @@ describe("GardenView", () => {
     );
     expect(screen.getByTestId("garden-canvas")).toHaveTextContent("1:1");
     expect(screen.getByRole("region", { name: "Garden status legend" })).toHaveTextContent("Action Required");
-    expect(screen.getByTestId("garden-selection-summary")).toHaveTextContent("Select to inspect");
+    expect(screen.getByTestId("garden-selection-summary")).toHaveTextContent("No selection");
   });
 
   it.each([
