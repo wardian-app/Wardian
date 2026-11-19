@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { AgentChatEvent } from "../../types";
 import { toActivityBlock } from "../grid/activityBlocks";
+import { derivePresentedChatRows } from "../grid/workLogPresentation";
 import {
   isProcessingAgentStatus,
   liveApprovalEventId,
@@ -10,6 +11,7 @@ import {
   shouldShowChatEvent,
   sortTranscriptEvents,
   workGroupDurationLabel,
+  workGroupTitleFromEntries,
 } from "./chatPresentation";
 
 it("ends collapsed output at a complete word", () => {
@@ -150,6 +152,26 @@ describe("shouldShowChatEvent", () => {
       metadata: {},
     });
     expect(shouldShowChatEvent(rawOutput)).toBe(true);
+  });
+});
+
+describe("workGroupTitleFromEntries", () => {
+  it.each(["failed", "cancelled"] as const)("keeps a paired %s result visible in the collapsed group title", (status) => {
+    const row = derivePresentedChatRows([
+      event({ id: "call", title: "Browser snapshot", metadata: { tool_use_id: "tool-1" } }),
+      event({ id: "result", kind: "tool_result", status, text: '{"error":"disconnected"}',
+        metadata: { tool_use_id: "tool-1" } }),
+      event({ id: "second" }), event({ id: "third" }),
+    ])[0];
+    if (row.kind !== "work_group") throw new Error("Expected grouped work");
+    expect(workGroupTitleFromEntries(row.entries)).toBe("Work log with error");
+  });
+
+  it("includes an attached action-required result in the group attention summary", () => {
+    const row = derivePresentedChatRows([event({ id: "call", command: "inspect" })])[0];
+    if (row.kind !== "event" || !row.entry) throw new Error("Expected work entry");
+    row.entry.merged_result_events.push(event({ kind: "tool_result", status: "action_required" }));
+    expect(workGroupTitleFromEntries([row.entry])).toBe("Work log needs attention");
   });
 });
 

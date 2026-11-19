@@ -64,13 +64,40 @@ vi.mock("react-konva", async () => {
 });
 
 vi.mock("./TerrainLayer", () => ({
-  TerrainLayer: ({ cells, onSelectPath, onOpenPath }: { cells: readonly TerrainCell[]; onSelectPath?: (path: string) => void; onOpenPath?: (path: string) => void }) =>
-    <div>{cells.map((cell) => <button key={cell.path} data-testid={`terrain:${cell.path}`} onClick={() => onSelectPath?.(cell.path)} onDoubleClick={() => onOpenPath?.(cell.path)}>{cell.name}</button>)}</div>,
+  TerrainLayer: ({ cells, visibleLabelIds, onSelectPath, onOpenPath }: { cells: readonly TerrainCell[]; visibleLabelIds?: ReadonlySet<string>; onSelectPath?: (path: string) => void; onOpenPath?: (path: string) => void }) =>
+    <div>{cells.map((cell) => <button key={cell.path} data-testid={`terrain:${cell.path}`} data-label-visible={visibleLabelIds?.has(`terrain:${cell.path}`)} onClick={() => onSelectPath?.(cell.path)} onDoubleClick={() => onOpenPath?.(cell.path)}>{cell.name}</button>)}</div>,
 }));
 
 describe("Garden semantic controls", () => {
   const agent = { ref: { kind: "agent" as const, id: "a1" }, label: "Alpha", status: "Idle", color: "", position: { x: 0, y: 0 }, crown: [] };
   const defaults = { agentUnits: [agent], automationUnits: [], selectedKey: null, onSelect: vi.fn(), onOpenAgent: vi.fn(), onMoveUnit: vi.fn(), onResetLayout: vi.fn() };
+
+  it("hides a terrain caption crossing an agent body while preserving the terrain action", () => {
+    const onSelectPath = vi.fn();
+    const cell: TerrainCell = { path: "/workspace/file", name: "File", isDir: false, depth: 0,
+      districtId: "d", rect: { x: -12, y: -12, width: 200, height: 100 }, truncated: false };
+    render(<GardenCanvas {...defaults} continuousZoom camera={{ scale: 1, position: { x: 0, y: 0 } }}
+      terrainCells={[cell]} terrainDistricts={new Map([["d", { origin: { x: 0, y: 0 }, radius: 200, roots: [] }]])}
+      onSelectPath={onSelectPath} />);
+    const target = screen.getByTestId(`terrain:${cell.path}`);
+    expect(target).toHaveAttribute("data-label-visible", "false");
+    fireEvent.click(target);
+    expect(onSelectPath).toHaveBeenCalledWith(cell.path);
+  });
+
+  it("places help and zoom in the reserved controls host without a second gesture caption", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const { container, unmount } = render(<GardenCanvas {...defaults} controlsHost={host} continuousZoom />);
+    expect(host.querySelector('[data-testid="garden-viewport-controls"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="garden-viewport-controls"]')).toBeNull();
+    expect(host.querySelector("summary")).toHaveAccessibleName("Garden help");
+    expect(host.querySelector("details")).not.toHaveAttribute("open");
+    expect(host).toHaveTextContent("Alt + wheel");
+    expect(container).not.toHaveTextContent("Wheel to zoom");
+    unmount();
+    host.remove();
+  });
 
   it("keeps the backing canvas drawable across zero-size mount, resize, hide and restore without reporting a fake viewport", () => {
     let measured = { width: 0, height: 0 };

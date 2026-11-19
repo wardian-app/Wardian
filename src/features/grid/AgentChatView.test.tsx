@@ -497,8 +497,9 @@ describe("AgentChatView", () => {
     expect(input).toBeDisabled();
     expect(screen.queryByLabelText("user message")).not.toBeInTheDocument();
     await act(async () => { second.resolve(undefined); });
-    await waitFor(() => expect(screen.getByLabelText("user message")).toHaveTextContent("New input"));
-    expect(screen.getByLabelText("user message")).not.toHaveTextContent("Old input");
+    await waitFor(() => expect(input).not.toBeDisabled());
+    expect(screen.queryByLabelText("user message")).not.toBeInTheDocument();
+    expect(input).toHaveValue("");
   });
 
   it("hides routine status lifecycle rows covered by the card header", async () => {
@@ -806,9 +807,8 @@ describe("AgentChatView", () => {
       sessionId: "agent-1",
       prompt: "2",
     }));
-    await waitFor(() => {
-      expect(within(screen.getByLabelText("user message")).getByText("2")).toBeInTheDocument();
-    });
+    await waitFor(() => expect(allowButton).not.toBeDisabled());
+    expect(screen.queryByLabelText("user message")).not.toBeInTheDocument();
   });
 
   it("groups adjacent work events and surfaces changed files", async () => {
@@ -2039,7 +2039,9 @@ describe("AgentChatView", () => {
 
     const { container } = render(<AgentChatView sessionId="agent-1" />);
 
-    expect(await screen.findByText("JSON output")).toBeInTheDocument();
+    const jsonRow = (await screen.findByText("JSON output")).closest("article") as HTMLElement;
+    expect(container.querySelector('[data-token="json-key"]')).toBeNull();
+    fireEvent.click(within(jsonRow).getByRole("button", { name: "Show output" }));
     expect(container.querySelector('[data-token="json-key"]')).not.toBeNull();
     expect(container.querySelector('[data-token="json-string"]')).not.toBeNull();
     expect(container.querySelector('[data-token="diff-add"]')).not.toBeNull();
@@ -2258,10 +2260,13 @@ describe("AgentChatView", () => {
     }
   });
 
-  it("keeps a submitted row visible while the same first read enters passive waiting", async () => {
+  it("keeps a receipted submitted row visible while the same first read enters passive waiting", async () => {
     vi.useFakeTimers();
     const first = deferred<AgentChatEvent[]>();
-    invokeMock.mockImplementation((command) => command === "load_agent_chat_page" ? first.promise : Promise.resolve(undefined));
+    invokeMock.mockImplementation((command) => command === "load_agent_chat_page" ? first.promise : Promise.resolve({
+      chat_event_id: "generated:conversation:pending", chat_agent_id: "agent-1",
+      chat_conversation_id: "conversation", chat_source_epoch: null,
+    }));
     try {
       render(<AgentChatView sessionId="agent-1" refreshIntervalMs={60_000} />);
       fireEvent.change(screen.getByLabelText("Message agent"), { target: { value: "Retained pending message" } });
@@ -2282,12 +2287,13 @@ describe("AgentChatView", () => {
     }
   });
 
-  it("submits chat input through the provider submit command and renders an optimistic user message", async () => {
+  it("submits chat input through the provider command and renders its receipted user message", async () => {
     invokeMock.mockImplementation((command, args) => {
       if (command === "load_agent_chat_page") return Promise.resolve([]);
       if (command === "submit_prompt_to_agent") {
         expect(args).toEqual({ sessionId: "agent-1", prompt: "Run the focused tests." });
-        return Promise.resolve(undefined);
+        return Promise.resolve({ chat_event_id: "generated:conversation:focused", chat_agent_id: "agent-1",
+          chat_conversation_id: "conversation", chat_source_epoch: null });
       }
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -3050,7 +3056,8 @@ describe("AgentChatView", () => {
     await waitFor(() => expect(input).toHaveValue(""));
   });
 
-  it("does not clear repeated optimistic prompts from older matching transcript text", async () => {
+  it("does not clear repeated receipted prompts from older matching transcript text", async () => {
+    let sends = 0;
     invokeMock.mockImplementation((command) => {
       if (command === "load_agent_chat_page") {
         return Promise.resolve([
@@ -3063,7 +3070,10 @@ describe("AgentChatView", () => {
           }),
         ]);
       }
-      if (command === "submit_prompt_to_agent") return Promise.resolve(undefined);
+      if (command === "submit_prompt_to_agent") return Promise.resolve({
+        chat_event_id: `generated:conversation:${++sends}`, chat_agent_id: "agent-1",
+        chat_conversation_id: "conversation", chat_source_epoch: null,
+      });
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
 

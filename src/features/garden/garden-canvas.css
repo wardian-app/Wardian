@@ -3,3 +3,9 @@
 .garden-object-control:focus-visible { opacity: 1; width: max-content; max-width: 240px; height: auto; min-height: 32px; padding: 6px; z-index: 2; border: 2px solid var(--color-wardian-accent); border-radius: 8px; background: var(--color-wardian-bg); color: var(--color-wardian-text); }
 .garden-enter-control { position: absolute; left: 12px; bottom: 12px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--color-wardian-border); border-radius: 8px; background: var(--color-wardian-bg); color: var(--color-wardian-text); }
 .garden-enter-control:focus-visible { outline: 2px solid var(--color-wardian-accent); outline-offset: 2px; }
+.garden-viewport-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px; border: 1px solid var(--color-wardian-border); border-radius: 8px; background: var(--color-wardian-bg); color: var(--color-wardian-text); font-size: 12px; }
+.garden-help summary { cursor: pointer; padding: 4px 10px; list-style: none; border-radius: 6px; }
+.garden-help summary::marker { content: ""; }
+.garden-help[open] { flex-basis: 100%; }
+.garden-help > div { padding: 4px 8px; max-width: 360px; color: var(--color-wardian-text-muted); }
+.garden-help p { margin: 6px 0; line-height: 1.5; }

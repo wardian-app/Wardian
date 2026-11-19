@@ -337,10 +337,11 @@ export function workGroupDurationLabel(entries: readonly PresentedWorkEntry[]): 
 }
 
 export function workGroupTitleFromEntries(entries: PresentedWorkEntry[]): string {
-  if (entries.some((entry) => entry.primary_event.kind === "error" || entry.primary_event.status === "failed")) {
+  const events = entries.flatMap((entry) => [entry.primary_event, ...entry.merged_result_events]);
+  if (events.some((event) => event.kind === "error" || event.status === "failed" || event.status === "cancelled" || (typeof event.exit_code === "number" && event.exit_code !== 0))) {
     return "Work log with error";
   }
-  if (entries.some((entry) => entry.primary_event.status === "action_required")) return "Work log needs attention";
+  if (events.some((event) => event.status === "action_required")) return "Work log needs attention";
   return "Work log";
 }
 

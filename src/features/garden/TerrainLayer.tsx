@@ -5,8 +5,11 @@ import type Konva from "konva";
 import type { TerrainCell, TerrainDistrict } from "./terrain";
 import { changeAlpha, type TerrainPaint } from "./terrainPaint";
 import type { GardenTheme } from "./useGardenTheme";
+import { resolveCanvasLabels, terrainLabel } from "./canvasLabels";
 
 interface TerrainLayerProps {
+  /** Shared collision result across all canvas layers. */
+  visibleLabelIds?: ReadonlySet<string>;
   cells: readonly TerrainCell[];
   districts: ReadonlyMap<string, TerrainDistrict>;
   /** Live world-to-screen factor, for the label legibility gate only. */
@@ -27,10 +30,6 @@ interface TerrainLayerProps {
   onSelectPath?: (path: string) => void;
   onOpenPath?: (path: string) => void;
 }
-
-/** Smallest cell, in screen pixels, that gets a name written on it. */
-const LABEL_MIN_WIDTH_PX = 100;
-const LABEL_MIN_HEIGHT_PX = 36;
 
 /**
  * Ground opacity by depth.
@@ -68,7 +67,14 @@ export const TerrainLayer: React.FC<TerrainLayerProps> = React.memo(
     highlightedPaths,
     onSelectPath,
     onOpenPath,
+    visibleLabelIds,
   }) => {
+    const acceptedLabels = useMemo(() => visibleLabelIds ?? resolveCanvasLabels(
+      cells.flatMap((cell) => {
+        const label = terrainLabel(cell, scale, selectedPath === cell.path);
+        return label ? [label] : [];
+      }), scale,
+    ), [visibleLabelIds, cells, scale, selectedPath]);
     // Grouped per district so each can be clipped to its own territory. The
     // ground is the bounding square of the district's disc, so without the clip
     // a populous district would paint into the gap its neighbours rely on.
@@ -102,6 +108,7 @@ export const TerrainLayer: React.FC<TerrainLayerProps> = React.memo(
                 <TerrainCellShape
                   key={cell.path}
                   cell={cell}
+                  labelVisible={acceptedLabels.has(`terrain:${cell.path}`)}
                   scale={scale}
                   theme={theme}
                   paint={paint?.get(cell.path)}
@@ -122,6 +129,7 @@ TerrainLayer.displayName = "TerrainLayer";
 
 const TerrainCellShape: React.FC<{
   cell: TerrainCell;
+  labelVisible: boolean;
   scale: number;
   theme: GardenTheme;
   paint?: TerrainPaint;
@@ -129,13 +137,12 @@ const TerrainCellShape: React.FC<{
   highlighted: boolean;
   onSelectPath?: (path: string) => void;
   onOpenPath?: (path: string) => void;
-}> = ({ cell, scale, theme, paint, selected, highlighted, onSelectPath, onOpenPath }) => {
+}> = ({ cell, labelVisible, scale, theme, paint, selected, highlighted, onSelectPath, onOpenPath }) => {
   const { rect } = cell;
   const fill = cell.depth === 0 ? theme.ground : cell.isDir ? theme.groundDir : theme.groundFile;
   // Crisp material edges remain screen-sized while the authored footprint is fixed.
   const cornerRadius = Math.min(Math.min(rect.width, rect.height) * .08, (cell.isDir ? 8 : 3) / scale);
-  const showLabel =
-    rect.width * scale >= LABEL_MIN_WIDTH_PX && rect.height * scale >= LABEL_MIN_HEIGHT_PX;
+  const showLabel = labelVisible && terrainLabel(cell, scale) !== null;
 
   return (
     <>
@@ -216,6 +223,7 @@ const TerrainCellShape: React.FC<{
           text={paint ? `${cell.name} · ${paint.count} changed · ${paint.agentIds.length} agents` : cell.name}
           fontFamily={theme.font}
           fontSize={12 / scale}
+          height={12 / scale}
           fill={theme.label}
           opacity={0.95}
           ellipsis
