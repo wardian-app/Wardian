@@ -90,6 +90,10 @@ Each card can show either:
 Chat messages and activity rows share a centered, readable transcript column that
 expands fluidly on narrow surfaces.
 
+Codex custom `exec` calls appear as work steps even when their input is code
+rather than a shell command. Open **Show full details** on the step to inspect
+the original input alongside the tool's output.
+
 Chat keeps saved messages readable when provider-log capture pauses. A replaced,
 truncated, or rewritten log shows the specific reason in the transcript. A
 replacement cannot inherit the old log's privacy boundaries automatically, so

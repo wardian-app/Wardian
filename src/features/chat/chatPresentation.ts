@@ -394,7 +394,7 @@ export function sortTranscriptEvents(events: AgentChatEvent[]): AgentChatEvent[]
 }
 
 /**
- * A tool call with no command, no text, and no recognizable identity is a
+ * A tool call with no command, text, input, or recognizable identity is a
  * provider keepalive rather than work worth a row. Actionable approvals and
  * explicit failures remain visible even when their provider payload is thin.
  * Status events only earn a row when they carry a failure or the synthetic
@@ -406,6 +406,7 @@ export function shouldShowChatEvent(event: AgentChatEvent): boolean {
     event.kind === "tool_call" &&
     !event.command?.trim() &&
     !event.text?.trim() &&
+    !stringMetadata(event.metadata, "tool_input_text") &&
     !hasMeaningfulToolIdentity(event) &&
     event.status !== "action_required" &&
     event.status !== "failed" &&

@@ -108,6 +108,11 @@ describe("liveApprovalEventId", () => {
 });
 
 describe("shouldShowChatEvent", () => {
+  it.each(["", "  \n ", null, 42])("does not treat empty or non-text custom input as work: %s", (input) => {
+    expect(shouldShowChatEvent(event({ title: "exec", status: "running",
+      metadata: { tool_name: "exec", tool_input_text: input } }))).toBe(false);
+  });
+
   it("hides an anonymous in-flight tool call that carries no work", () => {
     expect(shouldShowChatEvent(event({ status: "running" }))).toBe(false);
   });
