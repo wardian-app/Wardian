@@ -5,8 +5,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
+import os from "node:os";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import WebSocket from "ws";
+import { chromium } from "@playwright/test";
+import { acquireHomeLock, releaseHomeLock } from "../lib/sessionHome.mjs";
 
 import {
   createNativeHarness,
@@ -327,6 +331,146 @@ async function assertStatus(response, expectedStatus, label) {
   if (response.status === expectedStatus) return;
   throw new Error(`${label} returned ${response.status}: ${await response.text()}`);
 }
+
+test("remote attachments reach an agent as readable workspace paths without duplicate delivery", { timeout: 120000 }, async (t) => {
+  const harness = await createNativeHarness();
+  // This fixture runs the selected worktree artifact directly in a fresh home.
+  // It neither resets a shared home nor creates private binary copies.
+  harness.isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-e2e-native-attachments-"));
+  acquireHomeLock({ home: harness.isolatedHome, runId: harness.runId });
+  let session;
+  t.after(async () => {
+    try { await session?.close(); }
+    finally { releaseHomeLock({ home: harness.isolatedHome, runId: harness.runId }); }
+  });
+  fs.writeFileSync(path.join(harness.isolatedHome, "custom_classes.json"), JSON.stringify([
+    { name: "TestClass", description: "Native attachment fixture", is_default: false },
+  ]));
+  const port = await getFreePort();
+  writeRemoteGatewayConfig(harness, port);
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const origin = `https://127.0.0.1:${port}`;
+  const workspace = path.join(harness.isolatedHome, "attachment-workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+  const observed = path.join(harness.isolatedHome, "attachment-deliveries.jsonl");
+  const script = path.join(harness.isolatedHome, "attachment-reader.cjs");
+  fs.writeFileSync(script, `
+const fs = require("node:fs");
+const prompt = process.argv[process.argv.indexOf("--print") + 1];
+const paths = prompt.split("Attached files:\\n").at(-1).split("\\n").filter(line => line.startsWith("- ")).slice(0, 2).map(line => line.slice(2));
+const files = paths.map(file => ({ path: file, bytes: fs.readFileSync(file).toString("base64") }));
+fs.appendFileSync(${JSON.stringify(observed)}, JSON.stringify({ prompt, files }) + "\\n");
+process.stdout.write(JSON.stringify({ response: "Read attachments", status: "ok", result: "Read attachments" }) + "\\n");
+`, "utf8");
+  const prior = process.env.WARDIAN_MOCK_SCRIPT;
+  process.env.WARDIAN_MOCK_SCRIPT = script;
+  try {
+    if (!skipNativeBuild) ensureNativeAppBuilt(harness);
+    session = await startNativeSession(harness);
+  } finally {
+    if (prior === undefined) delete process.env.WARDIAN_MOCK_SCRIPT;
+    else process.env.WARDIAN_MOCK_SCRIPT = prior;
+  }
+  await waitForAppShell(session.driver, 20000);
+  await waitForGateway(baseUrl);
+  const agent = await invokeTauri(session.driver, "spawn_agent", { req: {
+    sessionName: "Attachment-Fixture", agentClass: "TestClass", folder: workspace,
+    isOff: true, configOverride: { provider: "mock" },
+  } });
+  const keys = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const offer = await invokeTauri(session.driver, "create_remote_pairing_offer");
+  const jsonPost = (route, body, headers = {}) => fetch(`${baseUrl}${route}`, {
+    method: "POST", headers: { Origin: origin, "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+  const pairingResponse = await jsonPost("/remote/api/pairing/submit", {
+    pairing_offer_id: offer.pairing_offer_id, nonce: offer.nonce, device_label: "Attachment phone",
+    public_key_spki_der_base64: keys.publicKey.export({ type: "spki", format: "der" }).toString("base64"),
+  });
+  await assertStatus(pairingResponse, 202, "attachment pairing");
+  const pairing = await pairingResponse.json();
+  await invokeTauri(session.driver, "approve_remote_pairing_request", { requestId: pairing.pairing_request_id });
+  const challenge = await (await jsonPost("/remote/api/auth/challenge", { device_id: pairing.device_id })).json();
+  const auth = await jsonPost("/remote/api/auth/session", {
+    challenge_id: challenge.challenge_id, device_id: pairing.device_id,
+    signature_der_base64: crypto.createSign("SHA256").update(authSignatureMessage(challenge)).sign(keys.privateKey).toString("base64"),
+  });
+  await assertStatus(auth, 200, "attachment auth");
+  const cookie = auth.headers.get("set-cookie").split(";", 1)[0];
+  const { csrf_nonce } = await auth.json();
+  const headers = { Cookie: cookie, Origin: origin, "x-wardian-csrf": csrf_nonce };
+  const files = [
+    { name: "evidence.txt", type: "text/plain", bytes: Buffer.from("native-attachment-marker-1753") },
+    { name: "camera.png", type: "image/png", bytes: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAgElEQVR4nNXOQREAIAzAsFIhaEInKhGxB9coyNr3UCZxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEidxEufvwNQDB60BmAyWdhQAAAAASUVORK5CYII=", "base64") },
+  ];
+  const ids = [];
+  for (const file of files) {
+    const id = crypto.randomUUID();
+    const response = await fetch(`${baseUrl}/remote/api/agents/${agent.session_id}/attachments/${id}`, {
+      method: "POST", headers: { ...headers, "Content-Type": file.type, "x-wardian-filename": encodeURIComponent(file.name) }, body: file.bytes,
+    });
+    await assertStatus(response, 200, "attachment upload");
+    const metadata = await response.json();
+    assert.equal(metadata.upload_id, id);
+    assert.equal(metadata.size_bytes, file.bytes.length);
+    assert.equal(JSON.stringify(metadata).includes(workspace), false);
+    ids.push(id);
+  }
+  // Match browser same-origin GETs: no Origin header on recovery reads.
+  const readHeaders = { Cookie: cookie, "Sec-Fetch-Site": "same-origin" };
+  const recoveredUpload = await fetch(`${baseUrl}/remote/api/agents/${agent.session_id}/attachments/${ids[0]}`, { headers: readHeaders });
+  await assertStatus(recoveredUpload, 200, "browser-style upload recovery");
+  assert.equal((await recoveredUpload.json()).upload_id, ids[0]);
+  const submission = { action: "send_prompt", target: agent.session_id, prompt: "Read these files.", input_mode: "message", attachment_ids: ids, submission_id: `${Date.now()}.${crypto.randomUUID()}` };
+  const sent = await jsonPost("/remote/api/agents/action", submission, headers);
+  await assertStatus(sent, 200, "attachment send");
+  assert.equal((await sent.json()).state, "accepted");
+  const record = await waitFor("provider reads uploaded bytes", 30000, async () => ({ ok: fs.existsSync(observed) }));
+  assert.equal(record.ok, true);
+  const rows = fs.readFileSync(observed, "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].files.length, 2);
+  for (let index = 0; index < files.length; index += 1) {
+    const file = rows[0].files[index];
+    assert.ok(path.relative(workspace, file.path).startsWith(path.join(".wardian", "attachments", "remote")));
+    assert.equal(file.bytes, files[index].bytes.toString("base64"));
+    execFileSync("git", ["check-ignore", "--quiet", "--", path.relative(workspace, file.path)], { cwd: workspace });
+  }
+  if (process.env.WARDIAN_REMOTE_ATTACHMENT_PROBE_FILE) {
+    fs.writeFileSync(process.env.WARDIAN_REMOTE_ATTACHMENT_PROBE_FILE, JSON.stringify({
+      workspace, paths: rows[0].files.map((file) => file.path),
+    }));
+  }
+  const duplicate = await jsonPost("/remote/api/agents/action", submission, headers);
+  await assertStatus(duplicate, 200, "duplicate attachment send");
+  assert.equal((await duplicate.json()).state, "accepted");
+  assert.equal(fs.readFileSync(observed, "utf8").trim().split("\n").length, 1);
+  const status = await fetch(`${baseUrl}/remote/api/agents/${agent.session_id}/attachment-submissions/${submission.submission_id}`, { headers: readHeaders });
+  assert.equal((await status.json()).state, "accepted");
+  // Exercise the browser-generated GET headers against the actual native
+  // gateway, rather than masking Origin behavior with a mocked browser route.
+  const browser = await chromium.launch({ headless: true, ...(process.platform === "win32" ? { channel: "msedge" } : {}) });
+  try {
+    const context = await browser.newContext();
+    const [cookieName, cookieValue] = cookie.split("=", 2);
+    await context.addCookies([{ name: cookieName, value: cookieValue, url: origin, secure: true, httpOnly: true, sameSite: "Strict" }]);
+    const page = await context.newPage();
+    await page.goto(`${baseUrl}/remote/api/health`);
+    for (const relative of [
+      `/remote/api/agents/${agent.session_id}/attachments/${ids[0]}`,
+      `/remote/api/agents/${agent.session_id}/attachment-submissions/${submission.submission_id}`,
+    ]) {
+      const observedRequest = page.waitForRequest((request) => new URL(request.url()).pathname === relative);
+      const recovered = await page.evaluate(async (route) => {
+        const response = await fetch(route, { credentials: "include" });
+        return { status: response.status, body: await response.json() };
+      }, relative);
+      assert.equal((await (await observedRequest).allHeaders()).origin, undefined);
+      assert.equal(recovered.status, 200);
+    }
+  } finally { await browser.close(); }
+});
 
 async function assertStatusStreamClosesWithoutTicket(baseUrl, canonicalOrigin, port) {
   await new Promise((resolve, reject) => {

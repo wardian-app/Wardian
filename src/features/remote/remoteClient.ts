@@ -18,6 +18,7 @@ import type {
   RemoteAutomationSummary,
   RemoteAutomationMonitorSnapshot,
 } from "../../types";
+import type { RemoteAttachment, RemoteAttachmentSubmission } from "../../types/remote";
 
 export type RemoteAgentChatPage = AgentChatPage;
 
@@ -48,6 +49,7 @@ export class RemoteRequestError extends Error {
     readonly status: number,
     readonly code?: string,
     readonly detail?: string,
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "RemoteRequestError";
@@ -115,6 +117,7 @@ async function remoteJson<T>(path: string, init?: RequestInit, chatRead = false)
         response.status,
         code,
         detail,
+        retryAfterMilliseconds(response.headers.get("Retry-After")),
       );
     }
     try {
@@ -133,6 +136,16 @@ async function remoteJson<T>(path: string, init?: RequestInit, chatRead = false)
     requestSignal?.removeEventListener("abort", abortRequest);
   }
 }
+
+function retryAfterMilliseconds(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, delay) : undefined;
+}
+
+const attachmentPath = (sessionId: string, uploadId: string) =>
+  `/remote/api/agents/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(uploadId)}`;
 
 export const remoteClient = {
   setCsrfNonce(nextNonce: string | null) {
@@ -225,15 +238,68 @@ export const remoteClient = {
     );
     return result.snapshot;
   },
-  async sendPrompt(target: string, prompt: string, inputMode: RemoteAgentInputMode = "message", inboxItemId?: string) {
+  async sendPrompt(target: string, prompt: string, inputMode: RemoteAgentInputMode = "message", inboxItemId?: string,
+    attachments?: { attachment_ids: string[]; submission_id: string }) {
     const request: RemoteAgentActionRequest =
       inputMode === "command"
         ? { action: "send_prompt", target, prompt, input_mode: "command", ...(inboxItemId ? { inbox_item_id: inboxItemId } : {}) }
         : { action: "send_prompt", target, prompt, ...(inboxItemId ? { inbox_item_id: inboxItemId } : {}) };
-    return remoteJson<{ ok: true } & ChatReceiptFields>("/remote/api/agents/action", {
+    return remoteJson<{ ok: true } & ChatReceiptFields & Partial<Pick<RemoteAttachmentSubmission, "submission_id" | "state">>>("/remote/api/agents/action", {
       method: "POST",
-      body: JSON.stringify(request),
+      body: JSON.stringify({ ...request, ...attachments }),
+      ...(attachments ? { signal: AbortSignal.timeout(60_000) } : {}),
     });
+  },
+  /** Upload raw bytes; transfer completion remains validating until HTTP acceptance. */
+  uploadAttachment(sessionId: string, uploadId: string, file: File, mediaType: string,
+    signal: AbortSignal, onProgress: (percent: number) => void): Promise<RemoteAttachment> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const abort = () => xhr.abort();
+      const finish = () => signal.removeEventListener("abort", abort);
+      xhr.open("POST", attachmentPath(sessionId, uploadId));
+      xhr.withCredentials = true;
+      xhr.timeout = 60_000;
+      xhr.setRequestHeader("Content-Type", mediaType);
+      xhr.setRequestHeader("x-wardian-filename", encodeURIComponent(file.name));
+      if (csrfNonce) xhr.setRequestHeader(REMOTE_CSRF_HEADER_NAME, csrfNonce);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(Math.min(100, Math.round(event.loaded / event.total * 100)));
+      };
+      xhr.upload.onload = () => onProgress(100);
+      xhr.onload = () => {
+        finish();
+        if (xhr.status < 200 || xhr.status >= 300) {
+          let code: string | undefined;
+          try { const body = JSON.parse(xhr.responseText) as { code?: unknown }; if (typeof body.code === "string") code = body.code; } catch { /* Status remains authoritative. */ }
+          reject(new RemoteRequestError("Upload failed", xhr.status, code, undefined,
+            retryAfterMilliseconds(xhr.getResponseHeader("Retry-After"))));
+          return;
+        }
+        try {
+          const body = JSON.parse(xhr.responseText) as RemoteAttachment;
+          if (body.upload_id !== uploadId || typeof body.name !== "string" || typeof body.size_bytes !== "number"
+            || typeof body.media_type !== "string" || typeof body.expires_at !== "string") throw new Error("Invalid metadata");
+          resolve(body);
+        } catch { reject(new Error("Invalid upload response. Check status before retrying.")); }
+      };
+      xhr.onerror = xhr.ontimeout = () => { finish(); reject(new Error("Upload interrupted. Retry to check status.")); };
+      xhr.onabort = () => { finish(); reject(new DOMException("Upload cancelled", "AbortError")); };
+      if (signal.aborted) { reject(new DOMException("Upload cancelled", "AbortError")); return; }
+      signal.addEventListener("abort", abort, { once: true });
+      xhr.send(file);
+    });
+  },
+  getAttachment(sessionId: string, uploadId: string) {
+    return remoteJson<RemoteAttachment>(attachmentPath(sessionId, uploadId), { cache: "no-store" });
+  },
+  deleteAttachment(sessionId: string, uploadId: string) {
+    return remoteJson<unknown>(attachmentPath(sessionId, uploadId), { method: "DELETE" });
+  },
+  getAttachmentSubmission(sessionId: string, submissionId: string) {
+    return remoteJson<RemoteAttachmentSubmission>(
+      `/remote/api/agents/${encodeURIComponent(sessionId)}/attachment-submissions/${encodeURIComponent(submissionId)}`,
+      { cache: "no-store" });
   },
   async runAgentAction(action: string, target: string) {
     const request: RemoteAgentActionRequest = { action, target };

@@ -92,6 +92,27 @@ pub(crate) fn authority_failure_code_in_message(message: &str) -> Option<&'stati
 }
 
 impl ClientSendAuthority {
+    /// Reuse provider-boundary authority fencing for a PWA attachment send.
+    /// This is created only after the gateway has checked the session and CSRF;
+    /// it does not turn PWA cookies into paired-client bearer credentials.
+    pub(crate) fn for_pwa(
+        state: &AppState,
+        session: &crate::remote::models::RemoteSessionRecord,
+        gateway_origin: String,
+    ) -> Self {
+        let deadline_ms = (chrono::Utc::now().timestamp_millis() + 30_000)
+            .min(session.expires_at_ms)
+            .min(session.absolute_expires_at_ms);
+        Self::from_binding(
+            state,
+            session.device_id.clone(),
+            gateway_origin.clone(),
+            gateway_origin,
+            RemoteCredentialAudience::Pwa.as_str().to_string(),
+            millis_to_rfc3339(deadline_ms),
+        )
+    }
+
     /// Rechecks the original deadline and live grants, returning guards that
     /// serialize the send against origin removal and device revocation. The
     /// deadline is checked again after persisted authority validation; the
@@ -117,13 +138,16 @@ impl ClientSendAuthority {
         let config = crate::remote::storage::load_remote_config()
             .map_err(|_| "service_unavailable")?
             .ok_or("service_unavailable")?;
-        if !config.enabled
-            || config.canonical_origin != self.gateway_origin
-            || !crate::remote::policy::is_approved_client_origin(
+        let pwa = self.audience == RemoteCredentialAudience::Pwa.as_str();
+        let origin_allowed = if pwa {
+            self.client_origin == self.gateway_origin
+        } else {
+            crate::remote::policy::is_approved_client_origin(
                 &config.client_origin_allowlist,
                 &self.client_origin,
             )
-        {
+        };
+        if !config.enabled || config.canonical_origin != self.gateway_origin || !origin_allowed {
             return Err("origin_forbidden");
         }
         let store =
@@ -136,12 +160,18 @@ impl ClientSendAuthority {
         if device.revoked_at.is_some() {
             return Err("device_revoked");
         }
-        if device.credential_kind != DeviceCredentialKind::PairedClient
-            || device.audience != RemoteCredentialAudience::PairedClientV1
-            || device.audience.as_str() != self.audience
-            || device.client_origin.as_deref() != Some(self.client_origin.as_str())
-            || !device.send_grants.contains(&RemoteSendGrant::ChatSend)
-        {
+        let authorized = if pwa {
+            device.credential_kind == DeviceCredentialKind::Pwa
+                && device.audience == RemoteCredentialAudience::Pwa
+                && device.client_origin.is_none()
+        } else {
+            device.credential_kind == DeviceCredentialKind::PairedClient
+                && device.audience == RemoteCredentialAudience::PairedClientV1
+                && device.audience.as_str() == self.audience
+                && device.client_origin.as_deref() == Some(self.client_origin.as_str())
+                && device.send_grants.contains(&RemoteSendGrant::ChatSend)
+        };
+        if !authorized {
             return Err("grant_required");
         }
         if now() >= deadline {
@@ -315,6 +345,50 @@ mod tests {
         for text in ["hi\u{1b}[13u", "hi\r", "hi\u{009b}13u", "hi\0"] {
             assert!(!valid_message_text(text));
         }
+    }
+
+    #[tokio::test]
+    async fn pwa_send_authority_keeps_credential_kinds_separate_and_rechecks_revocation() {
+        let temp = tempfile::tempdir().expect("isolated authority home");
+        let _home = IsolatedWardianHome::set(temp.path()).await;
+        configure_send_authority_home(temp.path());
+        let state = AppState::new();
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut runtime = crate::remote::models::RemoteRuntimeState::default();
+        let session = crate::remote::auth::create_session(&mut runtime, "client-device", now);
+        let authority =
+            ClientSendAuthority::for_pwa(&state, &session, "https://gateway.example".to_string());
+        assert!(matches!(authority.acquire().await, Err("grant_required")));
+
+        crate::remote::storage::update_device_store_at(temp.path(), |store| {
+            let mut device = store.devices[0].clone();
+            device.device_id = "pwa-device".to_string();
+            device.credential_kind = DeviceCredentialKind::Pwa;
+            device.audience = RemoteCredentialAudience::Pwa;
+            device.client_origin = None;
+            device.send_grants.clear();
+            store.devices.push(device);
+            Ok(())
+        })
+        .unwrap();
+        let session = crate::remote::auth::create_session(&mut runtime, "pwa-device", now);
+        let authority =
+            ClientSendAuthority::for_pwa(&state, &session, "https://gateway.example".to_string());
+        drop(authority.acquire().await.expect("PWA authority"));
+        let mut paired = bound_send_authority(&state, millis_to_rfc3339(now + 30_000));
+        paired.device_id = "pwa-device".to_string();
+        assert!(matches!(paired.acquire().await, Err("grant_required")));
+        crate::remote::storage::update_device_store_at(temp.path(), |store| {
+            store
+                .devices
+                .iter_mut()
+                .find(|device| device.device_id == "pwa-device")
+                .unwrap()
+                .revoked_at = Some("2026-11-19T00:00:00Z".to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert!(matches!(authority.acquire().await, Err("device_revoked")));
     }
 
     #[test]
@@ -1656,13 +1730,15 @@ pub(crate) async fn dispatch_if_admitted(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ClientMessageDispatchOutcome {
+pub(crate) enum ClientMessageDispatchOutcome {
     Observed(String),
     SubmittedUnconfirmed,
     FailedBeforeSubmit(Option<String>),
 }
 
-fn classify_dispatch_error(details: Option<&serde_json::Value>) -> ClientMessageDispatchOutcome {
+pub(crate) fn classify_dispatch_error(
+    details: Option<&serde_json::Value>,
+) -> ClientMessageDispatchOutcome {
     let Some(details) = details else {
         return ClientMessageDispatchOutcome::SubmittedUnconfirmed;
     };

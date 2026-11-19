@@ -5,6 +5,47 @@ PWA handlers return machine-readable `code` values; paired-client handlers use
 the `{ "error": "stable_code" }` shape. Both keep internal errors out of
 remote responses.
 
+## PWA Chat attachments
+
+PWA uploads use the session-authenticated namespace, independently of the
+paired-client text-only API. `POST /remote/api/agents/{session_id}/attachments/{upload_id}`
+accepts one raw file body, its validated Content-Type, and an
+`x-wardian-filename` header encoded with encodeURIComponent. The upload ID is
+a client-generated canonical UUIDv4. Host, exact Origin, live device/session,
+CSRF and rate limits are checked before body consumption. Actual streamed
+bytes are limited to 10 MiB under a 60-second deadline.
+
+GET returns metadata without bytes; DELETE discards an unsubmitted upload.
+GET permits the absent Origin header produced by ordinary same-origin browser
+fetches, using the existing canonical-Host/read-only boundary policy. A supplied
+foreign Origin or cross-site fetch metadata is still rejected. Mutations require
+explicit Origin and CSRF.
+Ownership is bound to device, origin and target. Responses never contain host
+paths. The server resolves bytes into the target workspace's
+`.wardian/attachments/remote/` directory so ordinary provider read permissions
+apply. The metadata index lives under `<wardian-home>/remote/attachments/`.
+Pending files expire after one hour; admitted files retain seven days.
+The owned upload root carries a managed `.gitignore` excluding its contents.
+Uploads fail closed on a conflicting or linked marker; project ignore rules
+are preserved.
+
+PWA `send_prompt` accepts optional `attachment_ids` and `submission_id`. The
+server resolves IDs into file references using the desktop prompt formatting
+contract. Image bytes use those same references; no clipboard/paste staging
+occurs. Attachment sends require message mode, not provider commands or Inbox
+choices. `GET /remote/api/agents/{session_id}/attachment-submissions/{submission_id}`
+recovers the persisted status after response loss. An uncertain send is never
+replayed automatically. All attachment responses are no-store, and the PWA
+service worker bypasses the whole API namespace.
+
+Attachment submission IDs are `<issued_epoch_ms>.<UUIDv4>`. Fresh admission
+allows five minutes of age and sixty seconds of future clock skew; existing
+proofs have a fixed 24-hour recovery lifetime. The ledger is limited to 2,048
+records and 8 MiB, with terminal payload-digest tombstones and expired-proof
+cleanup. Unknown stale IDs and expired proofs return 410 instead of creating a
+new operation. A status 404 permits an explicit retry with the same ID and
+frozen payload, preserving duplicate safety when the original request is late.
+
 ## Paired-client v1 authentication
 
 Paired clients use the isolated `/remote/client/v1` namespace. The persisted

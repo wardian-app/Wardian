@@ -292,7 +292,22 @@ export interface RemoteAgentActionRequest {
   prompt?: string;
   input_mode?: RemoteAgentInputMode;
   inbox_item_id?: string;
+  attachment_ids?: string[];
+  submission_id?: string;
 }
+
+export interface RemoteAttachment {
+  upload_id: string;
+  name: string;
+  size_bytes: number;
+  media_type: string;
+  expires_at: string;
+}
+
+export type RemoteAttachmentSubmission = import("./index").ChatReceiptFields & {
+  submission_id: string;
+  state: "accepted" | "dispatching" | "submitted_unconfirmed" | "failed";
+};
 
 export interface RemoteAutomationSummary {
   id: string;

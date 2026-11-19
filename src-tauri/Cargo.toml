@@ -44,6 +44,7 @@ tokio = { version = "1.49.0", features = ["io-util", "net", "process", "sync", "
 tokio-tungstenite = { version = "0.29.0", features = ["connect"] }
 futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
 fs2 = { workspace = true }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 uuid = { version = "1.21.0", features = ["v4"] }
 portable-pty = "0.9.0"
 vt100 = "0.16.2"

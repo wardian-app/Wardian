@@ -12,6 +12,40 @@ automations, filesystem access, provider CLIs, PTYs, and telemetry.
 - A trusted HTTPS origin such as `https://<machine>.<tailnet>.ts.net`.
 - Remote access configured to bind only to the Wardian loopback gateway.
 
+## Attach Files from Chat
+
+In an agent's Chat tab, select **Attach file**, then **Files** or **Camera**.
+Camera opens the phone's capture picker when supported. Each selected file
+appears in a compact chip with upload progress, a thumbnail or file icon, and
+a remove button. Send becomes available when every attachment is ready.
+You can send attachments without entering a prompt.
+
+![Mobile Chat composer with a ready photo attachment and a compact remove control](../assets/screenshots/remote-attachments/mobile-chat-attachment.png)
+
+Attach up to four files, each no larger than 10 MiB and together no larger
+than 25 MiB. Supported files are PNG, JPEG, WebP, GIF, BMP, PDF, UTF-8 text,
+Markdown, CSV and JSON. If the phone returns HEIC instead of JPEG, export or
+select a supported image format. A failed chip has explicit retry and remove
+actions; uploads do not retry in the background.
+If a pending attachment expires, remove its failed chip and attach the file
+again. The composer preserves the prompt while you do this.
+
+The desktop stores the files inside the selected agent's workspace and sends
+their path references to the agent. The agent reads them with its ordinary
+tools and permissions. Upload directories are excluded from normal Git staging.
+An explicit provider read restriction still applies.
+Pending uploads expire after one hour; submitted files are temporary and
+remain available for seven days. Ask the agent to preserve useful material
+in its normal project files before that period ends.
+
+Removing a chip cancels its upload or discards the pending file. It cannot
+retract a message already accepted for delivery. If a send loses its response,
+use the composer's status recovery action before attempting another send;
+an uncertain delivery must not be sent twice automatically.
+If no submission is found, the composer offers an explicit retry that preserves
+the same delivery ID. Recovery records last 24 hours. An expired delivery ID
+cannot submit again; the preserved draft can be sent as a new user action.
+
 Use Tailscale Serve, not Tailscale Funnel, for the v1 remote-control path.
 Serve keeps Wardian private to devices in the tailnet. Funnel publishes a
 service to the public internet and is outside the v1 security model.
