@@ -4,8 +4,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AgentChatDetail, AgentChatEvent, AgentChatRole } from "../../types";
 import { utf8Window } from "./chatReadState";
 import {
+  classifyActivityLanguage,
+  countLines,
   isGenericActivityTitle,
   isLowSignalActivityTitle,
+  shouldCollapseActivity,
   toActivityBlock,
   type ActivityBlockModel,
 } from "../grid/activityBlocks";
@@ -17,6 +20,7 @@ import {
   changedPathsFromEvents,
   formatPresentedEntryForCopy,
   formatPresentedWorkGroupForCopy,
+  isSuppressibleToolResult,
   type PresentedChatRow,
   type PresentedWorkEntry,
 } from "../grid/workLogPresentation";
@@ -73,6 +77,8 @@ export interface ChatTranscriptRowProps {
   onLoadDetail?: (reference: string) => Promise<AgentChatDetail>;
 }
 
+type ChatDetailLoader = NonNullable<ChatTranscriptRowProps["onLoadDetail"]>;
+
 /** Keep body chunks attached to the producer's physical source across stable display aliases. */
 function chatBodyCacheIdentity(event: AgentChatEvent): string {
   const sourceRef = typeof event.metadata.chat_source_ref === "string" ? event.metadata.chat_source_ref : null;
@@ -95,10 +101,10 @@ export function ChatTranscriptRow({
   onLoadDetail,
 }: ChatTranscriptRowProps) {
   if (row.kind === "turn_change_summary") return <TurnChangeCard onOpenFile={onOpenFile} row={row} />;
-  const content = row.kind === "work_group" ? <WorkGroupRow agentIsWorking={agentIsWorking} row={row} />
-    : row.event.kind === "memory" ? <MemoryRow event={row.event} linkHandling={linkHandling} />
+  return row.kind === "work_group" ? <WorkGroupRow agentIsWorking={agentIsWorking} onLoadDetail={onLoadDetail} row={row} />
+    : row.event.kind === "memory" ? <MemoryRow event={row.event} linkHandling={linkHandling} onLoadDetail={onLoadDetail} />
     : row.event.kind === "message" ? (
-    <MessageRow event={row.event} linkHandling={linkHandling} />
+    <MessageRow event={row.event} linkHandling={linkHandling} onLoadDetail={onLoadDetail} />
   ) : (
     <ActivityEvent
       agentIsWorking={agentIsWorking}
@@ -107,19 +113,25 @@ export function ChatTranscriptRow({
       event={row.event}
       isSubmitting={isSubmitting}
       onApprovalSubmit={onApprovalSubmit}
+      onLoadDetail={onLoadDetail}
     />
   );
-  const events = row.kind === "work_group" ? row.entries.flatMap((entry) => [entry.primary_event, ...entry.merged_result_events]) : [row.event];
+}
+
+function hasChatBodyDetails(event: AgentChatEvent): boolean {
+  return typeof event.metadata.chat_detail_ref === "string" || event.metadata.chat_body_pending === true || event.metadata.chat_body_unavailable === true;
+}
+
+function ChatEventDetails({ events, load }: { events: AgentChatEvent[]; load?: ChatDetailLoader }) {
   return <>
-    {content}
-    {onLoadDetail ? events.filter((event) => typeof event.metadata.chat_detail_ref === "string" || event.metadata.chat_body_pending === true || event.metadata.chat_body_unavailable === true).map((event) => {
+    {events.filter(hasChatBodyDetails).map((event) => {
       const displayKey = typeof event.metadata.chat_display_key === "string" ? event.metadata.chat_display_key : event.id;
-      return <ChatBodyDetails event={event} key={JSON.stringify([displayKey, chatBodyCacheIdentity(event)])} load={onLoadDetail} />;
-    }) : null}
+      return <ChatBodyDetails event={event} key={JSON.stringify([displayKey, chatBodyCacheIdentity(event)])} load={load} />;
+    })}
   </>;
 }
 
-function ChatBodyDetails({ event, load }: { event: AgentChatEvent; load: (reference: string) => Promise<AgentChatDetail> }) {
+function ChatBodyDetails({ event, load }: { event: AgentChatEvent; load?: ChatDetailLoader }) {
   const unavailable = event.metadata.chat_body_unavailable === true;
   const initial = typeof event.metadata.chat_detail_ref === "string" ? event.metadata.chat_detail_ref : null;
   const [next, setNext] = useState(initial);
@@ -150,7 +162,7 @@ function ChatBodyDetails({ event, load }: { event: AgentChatEvent; load: (refere
   // checkpoint without discarding chunks already requested by the reader.
   useEffect(() => { if (consumed.current === 0 && initial) setNext(initial); }, [initial]);
   const readMore = async () => {
-    if (!next || busy) return;
+    if (!next || busy || !load) return;
     const epoch = scope.current;
     setBusy(true); setOpened(true); setError("");
     try {
@@ -176,7 +188,7 @@ function ChatBodyDetails({ event, load }: { event: AgentChatEvent; load: (refere
   };
   return <div className="px-3 py-1 text-xs text-muted-neutral">
     {opened && (text || !unavailable) ? <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words text-primary">{text || "Details are updating."}</pre> : null}
-    {next ? <button type="button" className="underline hover:text-primary" disabled={busy} onClick={() => void readMore()}>{busy ? "Loading details..." : text ? "Read more" : "Show full details"}</button>
+    {next && load ? <button type="button" className="underline hover:text-primary" disabled={busy} onClick={() => void readMore()}>{busy ? "Loading details..." : text ? "Read more" : "Show full details"}</button>
       : !unavailable && event.metadata.chat_body_pending === true ? <span>Details are updating.</span> : null}
     {unavailable ? <span role="status" className="ml-2">Saved details are unavailable.</span>
       : error ? <span role="status" className="ml-2">Details are updating. Retry when history is ready.</span> : null}
@@ -186,12 +198,16 @@ function ChatBodyDetails({ event, load }: { event: AgentChatEvent; load: (refere
 function MemoryRow({
   event,
   linkHandling,
+  onLoadDetail,
 }: {
   event: AgentChatEvent;
   linkHandling?: ChatMarkdownLinkHandling;
+  onLoadDetail?: ChatDetailLoader;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [hasOpened, setHasOpened] = useState(false);
   const details = event.text?.trim() ?? "";
+  const hasDetails = Boolean(details) || hasChatBodyDetails(event);
   return (
     <article
       aria-label={event.title ?? "Memory event"}
@@ -200,22 +216,23 @@ function MemoryRow({
     >
       <button
         className="flex w-full items-center gap-2 text-left text-[12px] leading-5 text-primary"
-        onClick={() => details && setExpanded((value) => !value)}
+        onClick={() => { if (hasDetails) { setHasOpened(true); setExpanded((value) => !value); } }}
         type="button"
       >
         <Check className="h-3.5 w-3.5 text-[var(--color-wardian-idle)]" aria-hidden="true" />
         <span className="font-medium">{event.title ?? "Memory"}</span>
         {event.created_at ? <span className="ml-auto text-muted-neutral">{formatTimestamp(event.created_at)}</span> : null}
-        {details ? (
+        {hasDetails ? (
           <ChevronRight
             className={`h-3.5 w-3.5 text-muted-neutral transition-transform ${expanded ? "rotate-90" : ""}`}
             aria-hidden="true"
           />
         ) : null}
       </button>
-      {expanded && details ? (
-        <div className="mt-2 border-t border-[var(--color-wardian-border)] pt-2 text-[12px] text-secondary">
+      {hasOpened && hasDetails ? (
+        <div hidden={!expanded} className="mt-2 border-t border-[var(--color-wardian-border)] pt-2 text-[12px] text-secondary">
           <ChatMarkdown linkHandling={linkHandling} source={details} />
+          <ChatEventDetails events={[event]} load={onLoadDetail} />
         </div>
       ) : null}
     </article>
@@ -225,19 +242,21 @@ function MemoryRow({
 export function MessageRow({
   event,
   linkHandling,
+  onLoadDetail,
 }: {
   event: AgentChatEvent;
   linkHandling?: ChatMarkdownLinkHandling;
+  onLoadDetail?: ChatDetailLoader;
 }) {
   const role = event.role ?? "assistant";
   const text = event.text?.trimEnd() || event.title || "";
   const isAssistant = role === "assistant";
   const isCardRole = role === "system" || role === "tool";
-  const content = text ? (
+  const content = <>{text ? (
     <ChatMarkdown linkHandling={linkHandling} source={text} />
   ) : (
     <div className="text-[13px] leading-5 text-muted-neutral">No message content</div>
-  );
+  )}<ChatEventDetails events={[event]} load={onLoadDetail} /></>;
 
   if (isCardRole) {
     return (
@@ -288,6 +307,7 @@ export function ActivityEvent({
   approvalIsLive,
   isSubmitting,
   onApprovalSubmit,
+  onLoadDetail,
 }: {
   event: AgentChatEvent;
   entry?: PresentedWorkEntry;
@@ -295,17 +315,18 @@ export function ActivityEvent({
   approvalIsLive: boolean;
   isSubmitting: boolean;
   onApprovalSubmit: (response: string) => void;
+  onLoadDetail?: ChatDetailLoader;
 }) {
-  const baseBlock = entry?.block ?? toActivityBlock(event);
+  const baseBlock = entry ? workEntryBlock(entry) : toActivityBlock(event);
   const block: ActivityBlockModel = {
     ...baseBlock,
     tone: resolvedActivityTone(baseBlock.tone, agentIsWorking),
   };
   if (isThinkingIndicator(event)) return <ThinkingRow />;
-  if (event.kind === "status") return <StatusRow event={event} block={block} />;
-  if (event.kind === "terminal_output") return <TerminalFallback block={block} />;
+  if (event.kind === "status") return <StatusRow event={event} block={block} onLoadDetail={onLoadDetail} />;
+  if (event.kind === "terminal_output") return <TerminalFallback block={block} event={event} onLoadDetail={onLoadDetail} />;
   if (shouldRenderCompactToolCall(event, entry, block)) {
-    return <CompactToolCallRow agentIsWorking={agentIsWorking} block={block} entry={entry} event={event} />;
+    return <CompactToolCallRow agentIsWorking={agentIsWorking} block={block} entry={entry} event={event} onLoadDetail={onLoadDetail} />;
   }
   return (
     <ActivityRow
@@ -315,6 +336,7 @@ export function ActivityEvent({
       event={event}
       isSubmitting={isSubmitting}
       onApprovalSubmit={onApprovalSubmit}
+      onLoadDetail={onLoadDetail}
     />
   );
 }
@@ -338,11 +360,13 @@ export function CompactToolCallRow({
   entry,
   block,
   agentIsWorking,
+  onLoadDetail,
 }: {
   event: AgentChatEvent;
   entry?: PresentedWorkEntry;
   block: ActivityBlockModel;
   agentIsWorking: boolean;
+  onLoadDetail?: ChatDetailLoader;
 }) {
   const presentation = toolPresentation(event, block);
   const Icon = presentation.icon;
@@ -366,6 +390,7 @@ export function CompactToolCallRow({
         {details.length > 0 ? <span className="shrink-0 truncate text-[11px] text-muted-neutral">{details.join(" - ")}</span> : null}
       </div>
       <ChatRowActions actions={[{ label: "Copy tool call", value: copyValue }]} className="chat-row-actions--overlay" label="Tool call actions" />
+      <ChatEventDetails events={entry ? [event, ...entry.merged_result_events] : [event]} load={onLoadDetail} />
     </article>
   );
 }
@@ -389,7 +414,7 @@ export function ThinkingRow() {
   );
 }
 
-export function StatusRow({ event, block }: { event: AgentChatEvent; block: ActivityBlockModel }) {
+export function StatusRow({ event, block, onLoadDetail }: { event: AgentChatEvent; block: ActivityBlockModel; onLoadDetail?: ChatDetailLoader }) {
   const statusText = event.text?.trim() || formatStatus(event.status) || block.title;
   return (
     <div className="flex items-center gap-2 py-0.5 text-[11px] leading-4 text-muted-neutral">
@@ -398,6 +423,7 @@ export function StatusRow({ event, block }: { event: AgentChatEvent; block: Acti
         {block.title}: <span className="text-primary">{statusText}</span>
       </span>
       {event.created_at ? <span className="ml-auto shrink-0">{formatTimestamp(event.created_at)}</span> : null}
+      <ChatEventDetails events={[event]} load={onLoadDetail} />
     </div>
   );
 }
@@ -409,6 +435,7 @@ export function ActivityRow({
   approvalIsLive,
   isSubmitting,
   onApprovalSubmit,
+  onLoadDetail,
 }: {
   event: AgentChatEvent;
   entry?: PresentedWorkEntry;
@@ -416,6 +443,7 @@ export function ActivityRow({
   approvalIsLive: boolean;
   isSubmitting: boolean;
   onApprovalSubmit: (response: string) => void;
+  onLoadDetail?: ChatDetailLoader;
 }) {
   const block = withPatchContent(event, rawBlock);
   const isApproval = block.kind === "approval" || block.tone === "warning";
@@ -428,10 +456,14 @@ export function ActivityRow({
   // The panel names the file and counts the lines, so the path chips below it
   // would only repeat what the reader is already looking at.
   const changedPaths = structuredEdit ? [] : entry?.changed_paths ?? changedPathsFromEvents([event]);
-  const collapsedByDefault = shouldCollapseRoutineActivity(event, block, isApproval, structuredEdit, changedPaths);
+  const result = entry?.merged_result_events[entry.merged_result_events.length - 1];
+  const resultStatus = result?.status ?? event.status;
+  const collapsedByDefault = shouldCollapseRoutineActivity({ ...event, status: resultStatus }, block, isApproval, structuredEdit, changedPaths);
   const [expanded, setExpanded] = useState(!collapsedByDefault);
   const visibleContent = expanded ? block.content : previewContent(block.content);
-  const copyValue = structuredEdit
+  const copyValue = structuredEdit && entry?.merged_result_events.length
+    ? `${structuredEditDiffText(structuredEdit)}\n\n${formatPresentedEntryForCopy(entry)}`
+    : structuredEdit
     ? structuredEditDiffText(structuredEdit)
     : entry && entry.merged_result_events.length > 0
       ? formatPresentedEntryForCopy(entry)
@@ -528,16 +560,32 @@ export function ActivityRow({
           ))}
         </div>
       ) : null}
-      <ToolBody
+      {expanded || (block.language !== "json" && !/^\s*[[{]/.test(output)) ? <WorkToolBody
+        entry={entry}
         block={block}
         content={event.command ? outputWithoutCommandPrefix(visibleContent, event.command) : visibleContent}
         output={output}
         presentation={presentation}
         structuredEdit={structuredEdit}
         inputTruncated={event.metadata.chat_tool_input_truncated === true}
-      />
+      /> : null}
+      <ChatEventDetails events={entry ? [event, ...entry.merged_result_events] : [event]} load={onLoadDetail} />
     </article>
   );
+}
+
+/** A specialized invocation panel must not replace the tool's result evidence. */
+function WorkToolBody(props: Parameters<typeof ToolBody>[0] & { entry?: PresentedWorkEntry }) {
+  const specialized = Boolean(props.structuredEdit) || props.presentation.kind === "todo";
+  const invocation = specialized && props.entry
+    ? withPatchContent(props.entry.primary_event, toActivityBlock(props.entry.primary_event)) : null;
+  return <>
+    <ToolBody {...props} {...(invocation ? { block: invocation, content: invocation.content,
+      output: outputWithoutCommandPrefix(invocation.content, props.entry?.primary_event.command ?? null) } : {})} />
+    {specialized ? props.entry?.merged_result_events
+      .filter((event) => !isSuppressibleToolResult(event) && event.text?.trim())
+      .map((event) => <CodePanel key={event.id} content={event.text ?? ""} language={classifyActivityLanguage(event)} />) : null}
+  </>;
 }
 
 function shouldCollapseRoutineActivity(
@@ -677,8 +725,9 @@ export function StructuredEditPanel({ edit }: { edit: StructuredEdit }) {
   );
 }
 
-export function TerminalFallback({ block }: { block: ActivityBlockModel }) {
+export function TerminalFallback({ block, event, onLoadDetail }: { block: ActivityBlockModel; event?: AgentChatEvent; onLoadDetail?: ChatDetailLoader }) {
   const [expanded, setExpanded] = useState(false);
+  const [hasOpened, setHasOpened] = useState(false);
   const lineLabel = `${block.lineCount} ${block.lineCount === 1 ? "line" : "lines"}`;
   const preview = compactTerminalPreview(block.content);
 
@@ -696,7 +745,7 @@ export function TerminalFallback({ block }: { block: ActivityBlockModel }) {
           <button
             type="button"
             className="rounded border border-wardian-light px-2 py-1 text-[11px] font-semibold leading-4 text-muted-neutral hover:text-primary"
-            onClick={() => setExpanded((value) => !value)}
+            onClick={() => { setHasOpened(true); setExpanded((value) => !value); }}
           >
             {expanded ? "Hide details" : "Show terminal"}
           </button>
@@ -717,6 +766,7 @@ export function TerminalFallback({ block }: { block: ActivityBlockModel }) {
           </code>
         </pre>
       ) : null}
+      {hasOpened && event ? <div hidden={!expanded}><ChatEventDetails events={[event]} load={onLoadDetail} /></div> : null}
     </article>
   );
 }
@@ -724,12 +774,15 @@ export function TerminalFallback({ block }: { block: ActivityBlockModel }) {
 export function WorkGroupRow({
   row,
   agentIsWorking,
+  onLoadDetail,
 }: {
   row: Extract<PresentedChatRow, { kind: "work_group" }>;
   agentIsWorking: boolean;
+  onLoadDetail?: ChatDetailLoader;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const visibleEntries = expanded ? row.entries : [];
+  const [hasOpened, setHasOpened] = useState(false);
+  const toggle = () => { setHasOpened(true); setExpanded((value) => !value); };
   const title = workGroupTitleFromEntries(row.entries);
   const duration = workGroupDurationLabel(row.entries);
   const latestEntry = row.entries[row.entries.length - 1];
@@ -747,7 +800,7 @@ export function WorkGroupRow({
           type="button"
           aria-expanded={expanded}
           className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-          onClick={() => setExpanded((value) => !value)}
+          onClick={toggle}
         >
           <span className="shrink-0 text-[11px] font-semibold leading-5 text-primary">{title}</span>
           <span className="shrink-0 text-[11px] leading-5 text-muted-neutral">
@@ -774,7 +827,7 @@ export function WorkGroupRow({
             type="button"
             aria-expanded={expanded}
             className="chat-work-group-toggle inline-flex h-7 w-7 items-center justify-center rounded border border-wardian-light text-muted-neutral hover:text-primary"
-            onClick={() => setExpanded((value) => !value)}
+            onClick={toggle}
             title={expanded ? "Collapse work log" : "Show all work"}
           >
             <ChevronRight aria-hidden="true" className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-90" : ""}`} />
@@ -782,22 +835,40 @@ export function WorkGroupRow({
           </button>
         </div>
       </div>
-      {expanded ? (
-        <>
+      {hasOpened ? (
+        <div hidden={!expanded}>
           {row.changedPaths.length > 0 ? <ChangedFiles paths={row.changedPaths} /> : null}
           <div className="mt-2 space-y-1">
-            {visibleEntries.map((entry) => (
-              <WorkEntry agentIsWorking={agentIsWorking} entry={entry} key={entry.id} />
+            {row.entries.map((entry) => (
+              <WorkEntry agentIsWorking={agentIsWorking} entry={entry} key={entry.id} onLoadDetail={onLoadDetail} />
             ))}
           </div>
-        </>
+        </div>
       ) : null}
     </article>
   );
 }
 
-export function WorkEntry({ entry, agentIsWorking }: { entry: PresentedWorkEntry; agentIsWorking: boolean }) {
+function workEntryBlock(entry: PresentedWorkEntry): ActivityBlockModel {
+  return {
+    ...entry.block,
+    content: entry.content,
+    language: classifyActivityLanguage({ ...entry.primary_event, text: entry.content }),
+    lineCount: countLines(entry.content),
+    defaultCollapsed: shouldCollapseActivity(entry.content),
+  };
+}
+
+/** Keep previews and lazy bodies, including paired results, within their owning work item. */
+export function WorkEntry({ entry, agentIsWorking, onLoadDetail }: { entry: PresentedWorkEntry; agentIsWorking: boolean; onLoadDetail?: ChatDetailLoader }) {
+  const [expanded, setExpanded] = useState(false);
   const tone = resolvedActivityTone(entry.block.tone, agentIsWorking);
+  const event = entry.primary_event;
+  const block = withPatchContent(event, workEntryBlock(entry));
+  const output = outputWithoutCommandPrefix(block.content, event.command);
+  const structuredEdit = structuredEditFromEvent(event);
+  // The activity block may contain only a status fallback already in the label.
+  const hasOutput = Boolean(structuredEdit || (output.trim() && (event.text?.trim() || block.content !== entry.block.content)));
   return (
     <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 rounded border border-transparent py-1 text-[12px] leading-4">
       <span className={`mt-1 h-1.5 w-1.5 rounded-full ${toneDotClass(tone)}`} aria-hidden="true" />
@@ -811,6 +882,13 @@ export function WorkEntry({ entry, agentIsWorking }: { entry: PresentedWorkEntry
         {entry.details.length > 0 ? (
           <div className="truncate text-[11px] text-muted-neutral">{entry.details.join(" - ")}</div>
         ) : null}
+        {hasOutput ? <button type="button" aria-expanded={expanded}
+          className="text-[11px] text-muted-neutral underline hover:text-primary"
+          onClick={() => setExpanded((value) => !value)}>{expanded ? "Hide output" : "Show output"}</button> : null}
+        {expanded ? <WorkToolBody entry={entry} block={block} content={output} output={output}
+          presentation={toolPresentation(event, block)} structuredEdit={structuredEdit}
+          inputTruncated={event.metadata.chat_tool_input_truncated === true} /> : null}
+        <ChatEventDetails events={[event, ...entry.merged_result_events]} load={onLoadDetail} />
       </div>
     </div>
   );

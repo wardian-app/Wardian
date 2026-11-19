@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import userEvent from '@testing-library/user-event';
@@ -107,6 +107,212 @@ const memoryEvent: AgentChatEvent = {
   sequence: 1,
   metadata: { memory_action: 'loaded' },
 };
+
+describe('owned transcript details', () => {
+  const work = (id: string, overrides: Partial<AgentChatEvent> = {}): AgentChatEvent => ({
+    ...memoryEvent, id, kind: 'tool_call', role: 'assistant', title: `Read ${id}`,
+    text: `preview ${id}`, language: 'text', metadata: {}, ...overrides,
+  });
+  const props = { agentIsWorking: false, isSubmitting: false, onApprovalSubmit: vi.fn() };
+
+  it('does not offer output expansion for status-only work items', () => {
+    const row = derivePresentedChatRows(['one', 'two', 'three'].map((id) => work(id, {
+      text: null, status: 'succeeded', metadata: {},
+    })))[0];
+    render(<ChatTranscriptRow {...props} row={row} />);
+    fireEvent.click(screen.getByTitle('Show all work'));
+    expect(screen.queryByRole('button', { name: 'Show output' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Show full details' })).toBeNull();
+  });
+
+  it.each(['work group', 'memory', 'terminal'] as const)('retains loaded chunks and continuation when a %s is reopened', async (owner) => {
+    const first = work('first', { metadata: { chat_detail_ref: 'first:0' } });
+    const row = owner === 'work group' ? derivePresentedChatRows([first, work('second'), work('third')])[0]
+      : { kind: 'event' as const, event: { ...memoryEvent, id: 'first',
+        kind: owner === 'terminal' ? 'terminal_output' as const : 'memory' as const, metadata: first.metadata } };
+    let resolveContinuation!: (detail: AgentChatDetail) => void;
+    const continuation = new Promise<AgentChatDetail>((resolve) => { resolveContinuation = resolve; });
+    const load = vi.fn((reference: string) => reference === 'first:0' ? Promise.resolve({ event_id: 'first',
+      text: 'First saved chunk', next: 'first:more', complete: false,
+    }) : continuation);
+    render(<ChatTranscriptRow {...props} onLoadDetail={load} row={row} />);
+    const toggle = () => owner === 'work group'
+      ? fireEvent.click(screen.getByTitle(screen.queryByTitle('Show all work') ? 'Show all work' : 'Collapse work log'))
+      : owner === 'memory' ? fireEvent.click(screen.getByRole('button', { name: /Memory loaded/ }))
+        : fireEvent.click(screen.getByRole('button', { name: screen.queryByRole('button', { name: 'Show terminal' }) ? 'Show terminal' : 'Hide details' }));
+    toggle();
+    fireEvent.click(screen.getByRole('button', { name: 'Show full details' }));
+    expect(await screen.findByText('First saved chunk')).toBeVisible();
+    toggle();
+    expect(screen.getByText('First saved chunk')).not.toBeVisible();
+    toggle();
+    expect(screen.getByText('First saved chunk')).toBeVisible();
+    expect(load).toHaveBeenCalledExactlyOnceWith('first:0');
+    fireEvent.click(screen.getByRole('button', { name: 'Read more' }));
+    toggle();
+    await act(async () => {
+      resolveContinuation({ event_id: 'first', text: ' and its continuation', next: null, complete: true });
+      await continuation;
+    });
+    toggle();
+    expect(await screen.findByText('First saved chunk and its continuation')).toBeVisible();
+    expect(load).toHaveBeenLastCalledWith('first:more');
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])('keeps failed edit diagnostics beside the proposed edit, grouped=%s', async (grouped) => {
+    const call = work('edit', { title: 'Edit', text: null, turn_id: 'edit-call', metadata: {
+      tool_name: 'Edit', tool_input: { file_path: 'example.txt', old_string: 'old', new_string: 'new' },
+    } });
+    const result = work('edit-result', { kind: 'tool_result', status: 'failed', turn_id: 'edit-call',
+      text: 'old_string was not found' });
+    const row = derivePresentedChatRows([call, result, ...(grouped ? [work('second'), work('third')] : [])])[0];
+    render(<ChatTranscriptRow {...props} row={row} />);
+    if (grouped) {
+      fireEvent.click(screen.getByTitle('Show all work'));
+      fireEvent.click(screen.getAllByRole('button', { name: 'Show output' })[0]);
+    }
+    expect(screen.getByText('old_string was not found')).toBeVisible();
+    if (!grouped) {
+      fireEvent.click(screen.getByRole('button', { name: 'Copy activity output' }));
+      await waitFor(() => expect(vi.mocked(writeText).mock.lastCall?.[0]).toContain('old_string was not found'));
+    }
+  });
+
+  it('preserves todo invocation items and a linked failure diagnostic', () => {
+    const row = derivePresentedChatRows([
+      work('todo', { title: 'TodoWrite', text: '- [ ] Check the reference', turn_id: 'todo-call' }),
+      work('todo-result', { kind: 'tool_result', text: 'The task list could not be saved',
+        status: 'failed', turn_id: 'todo-call' }),
+    ])[0];
+    render(<ChatTranscriptRow {...props} row={row} />);
+    expect(screen.getByTestId('tool-todo-list')).toHaveTextContent('Check the reference');
+    expect(screen.getByText('The task list could not be saved')).toBeVisible();
+  });
+
+  it('opens a grouped structured edit even without status or text', () => {
+    const row = derivePresentedChatRows([
+      work('edit', { title: 'Edit', text: null, status: null, metadata: { tool_name: 'Edit',
+        tool_input: { file_path: 'example.txt', old_string: 'old', new_string: 'new' } } }),
+      work('second'), work('third'),
+    ])[0];
+    render(<ChatTranscriptRow {...props} row={row} />);
+    fireEvent.click(screen.getByTitle('Show all work'));
+    const item = screen.getByText('Edit').parentElement!;
+    fireEvent.click(within(item).getByRole('button', { name: 'Show output' }));
+    expect(screen.getByTestId('tool-structured-edit')).toHaveTextContent('example.txt');
+  });
+
+  it('keeps grouped body controls and merged results inside the owning output', async () => {
+    const row = derivePresentedChatRows([
+      work('first', { metadata: { chat_detail_ref: 'first:0' } }),
+      work('result', { kind: 'tool_result', title: 'Tool result', text: 'ok',
+        metadata: { chat_detail_ref: 'result:0' } }),
+      work('pending', { metadata: { chat_body_pending: true } }),
+      work('missing', { metadata: { chat_body_unavailable: true } }),
+    ])[0];
+    if (row.kind !== 'work_group') throw new Error('Expected grouped work');
+    const load = vi.fn((reference: string) => Promise.resolve({
+      event_id: reference.split(':')[0], text: `owned ${reference}`, next: null, complete: true,
+    }));
+    const view = render(<ChatTranscriptRow {...props} onLoadDetail={load} row={row} />);
+    const group = screen.getByTestId('chat-work-group');
+    expect(view.container.children).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Show full details' })).toBeNull();
+    expect(screen.queryByText('Details are updating.')).toBeNull();
+    expect(screen.queryByText('Saved details are unavailable.')).toBeNull();
+    fireEvent.click(screen.getByTitle('Show all work'));
+    expect(load).not.toHaveBeenCalled();
+    const controls = within(group).getAllByRole('button', { name: 'Show full details' });
+    expect(controls).toHaveLength(2);
+    fireEvent.click(controls[1]);
+    await waitFor(() => expect(within(group).getByText('owned result:0')).toBeInTheDocument());
+    expect(load).toHaveBeenCalledExactlyOnceWith('result:0');
+    expect(within(group).getByText('Details are updating.')).toBeInTheDocument();
+    expect(within(group).getByText('Saved details are unavailable.')).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('Collapse work log'));
+    expect(screen.queryByRole('button', { name: 'Show full details' })).toBeNull();
+    expect(screen.getByText('owned result:0')).not.toBeVisible();
+    expect(screen.getByText('Details are updating.')).not.toBeVisible();
+    expect(screen.getByText('Saved details are unavailable.')).not.toBeVisible();
+  });
+
+  it('keeps a compact call and its merged result details together', async () => {
+    const row = derivePresentedChatRows([
+      work('call', { title: 'exec', command: 'npm test', text: null }),
+      work('result', { kind: 'tool_result', title: 'Tool result', text: 'ok',
+        metadata: { chat_detail_ref: 'result:0' } }),
+    ])[0];
+    const load = vi.fn().mockResolvedValue({ event_id: 'result', text: 'saved result', next: null, complete: true });
+    render(<ChatTranscriptRow {...props} onLoadDetail={load} row={row} />);
+    const owner = screen.getByTestId('chat-tool-call-summary');
+    fireEvent.click(within(owner).getByRole('button', { name: 'Show full details' }));
+    await waitFor(() => expect(within(owner).getByText('saved result')).toBeInTheDocument());
+  });
+
+  it('shows a linked JSON result under its tool call with its failed status', () => {
+    const row = derivePresentedChatRows([
+      work('call', { title: 'Browser snapshot', text: null, metadata: { tool_use_id: 'tool-1' } }),
+      work('result', { kind: 'tool_result', title: 'Tool result', status: 'failed', language: 'json',
+        text: '{"error":"browser disconnected"}', metadata: { tool_use_id: 'tool-1' } }),
+    ])[0];
+    render(<ChatTranscriptRow {...props} row={row} />);
+    const owner = screen.getByTestId('chat-activity-row');
+    expect(owner).toHaveTextContent('Browser snapshot');
+    expect(owner).toHaveTextContent('failed');
+    expect(owner).toHaveTextContent('browser disconnected');
+  });
+
+  it('keeps JSON inside the standalone output expander and saved details inside its owner', async () => {
+    const event = work('json', { kind: 'tool_result', title: 'Tool result',
+      text: '{"content":[{"type":"text","text":"browser payload"}]}', language: 'json',
+      metadata: { chat_detail_ref: 'json:0' } });
+    const load = vi.fn().mockResolvedValue({ event_id: 'json', text: 'saved browser payload', next: null, complete: true });
+    render(<ChatTranscriptRow {...props} onLoadDetail={load} row={derivePresentedChatRows([event])[0]} />);
+    const owner = screen.getByTestId('chat-activity-row');
+    expect(owner).not.toHaveTextContent('browser payload');
+    expect(within(owner).getByRole('button', { name: 'Show full details' })).toBeInTheDocument();
+    fireEvent.click(within(owner).getByRole('button', { name: 'Show output' }));
+    expect(owner).toHaveTextContent('browser payload');
+    fireEvent.click(within(owner).getByRole('button', { name: 'Collapse' }));
+    expect(owner).not.toHaveTextContent('browser payload');
+    fireEvent.click(within(owner).getByRole('button', { name: 'Show full details' }));
+    await waitFor(() => expect(within(owner).getByText('saved browser payload')).toBeInTheDocument());
+  });
+
+  it('aligns assistant details with its message content and action gutter', () => {
+    render(<ChatTranscriptRow {...props} onLoadDetail={vi.fn()} row={{ kind: 'event',
+      event: { ...memoryEvent, kind: 'message', role: 'assistant', metadata: { chat_detail_ref: 'message:0' } } }} />);
+    const owner = screen.getByRole('article', { name: 'assistant message' });
+    const details = within(owner).getByRole('button', { name: 'Show full details' });
+    expect(owner.querySelector('.chat-message-content')).toContainElement(details);
+    expect(owner.querySelector('.chat-message-layout--assistant')?.children).toHaveLength(2);
+  });
+
+  it('drops late grouped chunks when the physical source changes under a stable display key', async () => {
+    let resolveOld!: (detail: AgentChatDetail) => void;
+    const oldChunk = new Promise<AgentChatDetail>((resolve) => { resolveOld = resolve; });
+    const current = (source: string) => derivePresentedChatRows([
+      work('first', { metadata: { chat_display_key: 'slot', chat_source_ref: source, chat_detail_ref: `${source}:0` } }),
+      work('second'), work('third'),
+    ])[0];
+    const load = vi.fn((reference: string) => reference === 'old:0' ? oldChunk : Promise.resolve({
+      event_id: 'first', text: 'new owned body', next: null, complete: true,
+    }));
+    const view = render(<ChatTranscriptRow {...props} onLoadDetail={load} row={current('old')} />);
+    fireEvent.click(screen.getByTitle('Show all work'));
+    fireEvent.click(screen.getByRole('button', { name: 'Show full details' }));
+    view.rerender(<ChatTranscriptRow {...props} onLoadDetail={load} row={current('new')} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Show full details' }));
+    await waitFor(() => expect(screen.getByText('new owned body')).toBeInTheDocument());
+    await act(async () => {
+      resolveOld({ event_id: 'first', text: 'stale old body', next: null, complete: true });
+      await oldChunk;
+    });
+    expect(view.container).not.toHaveTextContent('stale old body');
+    expect(view.container).toHaveTextContent('new owned body');
+  });
+});
 
 const actualProducerPage = (label: string): AgentChatPage => {
   const page = (producerFixture.pages as Array<{ label: string; dto: AgentChatPage }>).find((candidate) => candidate.label === label);

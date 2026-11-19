@@ -58,7 +58,7 @@ export type ChatTranscriptRowModel = PresentedChatRow | TurnChangeSummaryRow;
 type ChatAction = AgentChatEvent[];
 
 function actionsOfRow(row: PresentedChatRow): ChatAction[] {
-  if (row.kind === "event") return [[row.event]];
+  if (row.kind === "event") return [[row.event, ...(row.entry?.merged_result_events ?? [])]];
   return row.entries.map((entry) => [entry.primary_event, ...entry.merged_result_events]);
 }
 

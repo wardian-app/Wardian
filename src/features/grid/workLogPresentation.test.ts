@@ -24,6 +24,69 @@ const event = (overrides: Partial<AgentChatEvent>): AgentChatEvent => ({
 });
 
 describe("workLogPresentation", () => {
+  it.each([null, "json"])("keeps JSON output out of compact summaries with language %s", (language) => {
+    const text = '{"content":[{"type":"text","text":"browser result"}]}';
+    const row = derivePresentedChatRows([event({ text, language, title: "Tool result" })])[0];
+    if (row.kind !== "event") throw new Error("Expected an output row");
+    expect(row.entry?.title).toBe("Output");
+    expect(row.entry?.summary).toBe("");
+    expect(row.entry?.content).toBe(text);
+  });
+
+  it("labels generic MCP calls with their tool name and a bounded input description", () => {
+    const description = `Inspect the page ${"with useful context ".repeat(20)}`;
+    const row = derivePresentedChatRows([event({ kind: "tool_call", title: "tool_use",
+      text: '{"tool":"browser","input":{"description":"raw wrapper"}}',
+      metadata: { tool_name: "mcp__browser__inspect", tool_input: { description, code: "raw code" } },
+    })])[0];
+    if (row.kind !== "event") throw new Error("Expected a call row");
+    expect(row.entry?.title).toBe("mcp__browser__inspect");
+    expect(row.entry?.summary).toMatch(/^Inspect the page/);
+    expect(row.entry?.summary.length).toBeLessThanOrEqual(140);
+    expect(row.entry?.summary).not.toContain("{");
+    expect(row.entry?.content).toContain('"raw wrapper"');
+  });
+
+  it("uses a known tool name for generic results without exposing a truncated JSON body", () => {
+    const row = derivePresentedChatRows([event({ title: "Tool result", text: '{"data":[',
+      metadata: { tool_name: "browser_snapshot", chat_detail_ref: "result:0" },
+    })])[0];
+    if (row.kind !== "event") throw new Error("Expected a result row");
+    expect(row.entry?.title).toBe("browser_snapshot");
+    expect(row.entry?.summary).toBe("");
+    expect(row.entry?.content).toBe('{"data":[');
+  });
+
+  it.each(["succeeded", "failed", "cancelled"] as const)("pairs linked JSON results without losing %s status or payload", (status) => {
+    const payload = '{"content":[{"type":"text","text":"exact result bytes"}]}';
+    const rows = derivePresentedChatRows([
+      event({ id: "call", kind: "tool_call", title: "browser_snapshot", status: "running",
+        metadata: { tool_use_id: "tool-1" } }),
+      event({ id: "result", kind: "tool_result", title: "Tool result", text: payload, status,
+        metadata: { tool_use_id: "tool-1", chat_detail_ref: "result:0" } }),
+    ]);
+    expect(rows).toHaveLength(1);
+    if (rows[0].kind !== "event") throw new Error("Expected paired call row");
+    const entry = rows[0].entry;
+    expect(entry?.title).toBe("browser_snapshot");
+    expect(entry?.merged_result_events.map((result) => result.id)).toEqual(["result"]);
+    expect(entry?.content).toContain(payload);
+    expect(entry?.details).toContain(status);
+    expect(entry?.block.tone).toBe(status === "succeeded" ? "success" : "error");
+  });
+
+  it("does not pair different explicit tool IDs merely because they share a turn", () => {
+    const rows = derivePresentedChatRows([
+      event({ id: "call", kind: "tool_call", title: "browser_snapshot", turn_id: "shared-turn",
+        metadata: { tool_use_id: "tool-1" } }),
+      event({ id: "other-result", kind: "tool_result", title: "Tool result", text: '{"data":[]}',
+        turn_id: "shared-turn", metadata: { tool_use_id: "tool-2" } }),
+    ]);
+    expect(rows).toHaveLength(2);
+    if (rows[0].kind !== "event") throw new Error("Expected call row");
+    expect(rows[0].entry?.merged_result_events).toEqual([]);
+  });
+
   it("promotes the actual command over an exec lifecycle title", () => {
     const rows = derivePresentedChatRows([
       event({

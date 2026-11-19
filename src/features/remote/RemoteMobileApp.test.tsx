@@ -1794,7 +1794,7 @@ describe("RemoteMobileApp", () => {
     expect(screen.getByRole("button", { name: "Send prompt" })).toBeDisabled();
   });
 
-  it("shows an optimistic remote user message while the post-send chat refresh is pending", async () => {
+  it("waits for the projected user row when remote delivery has no display receipt", async () => {
     let chatCalls = 0;
     let resolveRefresh: ((response: Response) => void) | null = null;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
@@ -1855,7 +1855,7 @@ describe("RemoteMobileApp", () => {
     await userEvent.type(await screen.findByLabelText("Prompt Coder"), "show status");
     await userEvent.click(screen.getByRole("button", { name: "Send prompt" }));
 
-    expect(await screen.findByLabelText("user message")).toHaveTextContent("show status");
+    expect(screen.queryByLabelText("user message")).not.toBeInTheDocument();
 
     act(() => {
       resolveRefresh?.(
@@ -1890,6 +1890,7 @@ describe("RemoteMobileApp", () => {
     });
 
     await waitFor(() => expect(screen.getAllByLabelText("user message")).toHaveLength(1));
+    expect(screen.getByLabelText("user message")).toHaveTextContent("show status");
   });
 
   it("clears the active remote chat immediately after a clear action succeeds", async () => {
