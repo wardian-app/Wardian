@@ -11774,3 +11774,113 @@ pub(crate) fn read(
 ) -> io::Result<AgentChatPage> {
     read_with_recent_limit(context, snapshot, cursor, revision, detail_ref, PAGE_ROWS)
 }
+
+#[test]
+fn claude_chat_render_fixture_preserves_one_prompt_across_recent_and_older_pages() {
+    let (_guard, temp) = isolated_home();
+    // Sanitized from the reported log's 17 record types. Pad history so the
+    // public read crosses the canonical recent window and native older pages.
+    let mut contents = String::new();
+    for index in 0..90 {
+        contents.push_str(&format!("{}\n", json!({
+            "type": "assistant", "sessionId": "fixture-session", "uuid": format!("earlier-{index}"),
+            "message": {"id": format!("earlier-message-{index}"), "role": "assistant",
+                "content": [{"type": "text", "text": format!("Earlier reply {index}")}]}
+        })));
+    }
+    contents.push_str(include_str!(
+        "../../providers/fixtures/claude-chat-render.jsonl"
+    ));
+    let path = temp.path().join("claude.jsonl");
+    fs::write(&path, &contents).unwrap();
+    let native_session = contents
+        .lines()
+        .find_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).ok()?["sessionId"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap();
+    let base = ConversationArchiveContext::for_agent_id("agent-1", "claude");
+    let mut snapshot = snapshot(&base);
+    snapshot.resume_session = Some(native_session);
+    snapshot.log_path = Some(path.clone());
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let archive = ConversationArchiveState::default();
+    let mut capture = None;
+    loop {
+        let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "claude",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            capture.clone(),
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut batch.events,
+            "claude",
+            &path,
+        );
+        archive
+            .append_verified_provider_log_batch_with_context(
+                context.clone(),
+                &batch.events,
+                capture.as_ref(),
+                &batch.next,
+                batch.source_proof(),
+            )
+            .unwrap();
+        let more = batch.continue_immediately;
+        capture = Some(batch.next);
+        finish_projection(&archive);
+        if !more {
+            break;
+        }
+    }
+    finish_source_index(&snapshot);
+    let mut page = read(&context, &snapshot, None, None, None).unwrap();
+    let mut prompts = BTreeSet::new();
+    let mut page_count = 0;
+    let mut public_rows = HashMap::new();
+    for _ in 0..32 {
+        for row in &page.events {
+            if row.kind == AgentChatEventKind::Message && row.role == Some(AgentChatRole::User) {
+                assert_eq!(
+                    row.text.as_deref(),
+                    Some("Check the sections against last year.")
+                );
+                prompts.insert(row.id.clone());
+            }
+            public_rows.insert(row.id.clone(), row.kind.clone());
+        }
+        let next = page.next_before.clone();
+        let revision = page.revision.clone();
+        page_count += 1;
+        let Some(next) = next else {
+            break;
+        };
+        page = read(&context, &snapshot, Some(&next), Some(&revision), None).unwrap();
+    }
+    assert_eq!(
+        prompts.len(),
+        1,
+        "one provider prompt has one projected identity"
+    );
+    assert!(page_count > 1, "exercise the older-page boundary");
+    assert_eq!(
+        public_rows
+            .values()
+            .filter(|kind| **kind == AgentChatEventKind::ToolCall)
+            .count(),
+        4
+    );
+    assert_eq!(
+        public_rows
+            .values()
+            .filter(|kind| **kind == AgentChatEventKind::ToolResult)
+            .count(),
+        4
+    );
+}

@@ -1,5 +1,5 @@
 import type { AgentChatEvent } from "../../types";
-import { isLowSignalActivityTitle, toActivityBlock, type ActivityBlockModel } from "./activityBlocks";
+import { isGenericActivityTitle, isLowSignalActivityTitle, toActivityBlock, type ActivityBlockModel } from "./activityBlocks";
 import { chatEventDisplayKey } from "../chat/chatEventIdentity";
 
 /**
@@ -99,19 +99,21 @@ export function derivePresentedChatRows(
     }
 
     const boundary = boundaries?.get(chatEventDisplayKey(event));
-    if (event.kind === "tool_result" && isSuppressibleToolResult(event) && boundary?.kind !== "event") {
+    if (event.kind === "tool_result" && boundary?.kind !== "event") {
       const linkedEntry = findLinkedPendingCall(event);
-      if (linkedEntry) {
+      if (linkedEntry && canPair(linkedEntry.primary_event, event)) {
         mergeResultIntoEntry(linkedEntry, event);
         forgetPendingCall(linkedEntry);
         return;
       }
 
-      if (providerLinkKeys(event).length === 0 && lastUnpairedCall && canPair(lastUnpairedCall.primary_event, event)) {
-        mergeResultIntoEntry(lastUnpairedCall, event);
-        forgetPendingCall(lastUnpairedCall);
+      if (isSuppressibleToolResult(event)) {
+        if (providerLinkKeys(event).length === 0 && lastUnpairedCall && canPair(lastUnpairedCall.primary_event, event)) {
+          mergeResultIntoEntry(lastUnpairedCall, event);
+          forgetPendingCall(lastUnpairedCall);
+        }
+        return;
       }
-      return;
     }
 
     const entry = createWorkEntry(event);
@@ -244,14 +246,20 @@ function summaryDistinctFromTitle(summary: string, title: string): string {
 
 function presentedTitle(event: AgentChatEvent, block: ActivityBlockModel): string {
   const title = event.title?.trim();
-  if (event.kind === "tool_result" && (!title || /^tool result$/i.test(title) || isLowSignalActivityTitle(title))) return "Output";
+  if (!title || /^tool result$/i.test(title) || isGenericActivityTitle(title) || isLowSignalActivityTitle(title)) {
+    const toolName = ["tool_name", "function_name", "name", "tool"]
+      .map((key) => metadataString(event.metadata, key)?.trim()).find(Boolean);
+    if (toolName) return toolName;
+    if (event.kind === "tool_result") return "Output";
+  }
   return block.title;
 }
 
 function mergeResultIntoEntry(entry: PresentedWorkEntry, result: AgentChatEvent) {
   entry.merged_result_events.push(result);
   entry.diagnostic_events.push(result);
-  entry.block = { ...entry.block, tone: "success" };
+  const resultTone = toActivityBlock(result).tone;
+  entry.block = { ...entry.block, tone: resultTone === "neutral" ? entry.block.tone : resultTone };
   entry.details = detailsFromEvents(entry.primary_event, entry.merged_result_events, entry.block);
   entry.content = mergedContent(entry);
   entry.changed_paths = uniquePaths([...entry.changed_paths, ...changedPathsFromEvents([result])]);
@@ -259,6 +267,7 @@ function mergeResultIntoEntry(entry: PresentedWorkEntry, result: AgentChatEvent)
 
 function canPair(call: AgentChatEvent, result: AgentChatEvent): boolean {
   if (call.kind !== "tool_call" || result.kind !== "tool_result") return false;
+  if (call.session_id !== result.session_id || call.provider !== result.provider) return false;
   if (call.turn_id && result.turn_id && call.turn_id !== result.turn_id) return false;
   return true;
 }
@@ -280,17 +289,34 @@ function detailsFromEvents(primary: AgentChatEvent, mergedResults: AgentChatEven
 
 function mergedContent(entry: PresentedWorkEntry): string {
   const diagnosticText = entry.merged_result_events
+    .filter((event) => !isSuppressibleToolResult(event))
     .map((event) => event.text?.trimEnd())
-    .filter((text): text is string => Boolean(text?.trim()))
-    .filter((text) => !isNonMeaningfulResultText(text));
+    .filter((text): text is string => Boolean(text?.trim()));
 
   if (diagnosticText.length === 0) return entry.block.content;
-  return [entry.block.content, ...diagnosticText].filter((part) => part.trim()).join("\n\n");
+  const primaryContent = entry.primary_event.text?.trim() || entry.primary_event.command?.trim() ? entry.block.content : "";
+  return [primaryContent, ...diagnosticText].filter((part) => part.trim()).join("\n\n");
 }
 
 function workEntrySummary(event: AgentChatEvent, block: ActivityBlockModel): string {
   const command = event.command?.trim();
   if (command) return truncate(command);
+
+  // Compact labels describe the invocation. Serialized tool envelopes and
+  // result bodies remain available in the item's expandable content.
+  if (event.kind === "tool_call") {
+    const input = event.metadata.tool_input;
+    if (input && typeof input === "object" && !Array.isArray(input)) {
+      const record = input as Record<string, unknown>;
+      for (const key of ["description", "title", "query", "pattern", "url", "file_path", "path", "command"]) {
+        const value = record[key];
+        if (typeof value === "string" && value.trim() && !/^\s*[[{]/.test(value)) {
+          return truncate(value.trim().replace(/\s+/g, " "));
+        }
+      }
+    }
+  }
+  if (block.language === "json" || /^\s*[[{]/.test(block.content)) return "";
 
   const content = firstContentLine(block.content);
   const status = formatStatus(event.status);
@@ -329,10 +355,12 @@ function formatStatus(status: AgentChatEvent["status"]): string | null {
 
 function providerLinkKeys(event: AgentChatEvent): string[] {
   const keys = new Set<string>();
-  addProviderLinkKey(keys, event.turn_id);
   addProviderLinkKey(keys, metadataString(event.metadata, "call_id"));
   addProviderLinkKey(keys, metadataString(event.metadata, "tool_call_id"));
   addProviderLinkKey(keys, metadataString(event.metadata, "tool_use_id"));
+  // Explicit tool IDs outrank a shared conversation turn. Legacy providers
+  // place the tool-use ID in turn_id when no explicit key is supplied.
+  if (keys.size === 0) addProviderLinkKey(keys, event.turn_id);
   return Array.from(keys);
 }
 

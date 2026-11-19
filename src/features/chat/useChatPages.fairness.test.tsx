@@ -133,7 +133,10 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
     const beforeScope = h.hook.result.current.submissionScope();
     const publicRow = generatedRow("public-during-recent");
     const publicSecond = generatedRow("public-second-during-recent");
-    const submitted = row("submitted-during-recent", { optimistic: true });
+    const submitted = row("submitted-during-recent", { optimistic: true, chat_receipt: {
+      chat_event_id: generatedId("submitted-during-recent"), chat_agent_id: "agent",
+      chat_conversation_id: "conversation", chat_source_epoch: "source",
+    } });
     act(() => {
       h.hook.result.current.setEvents(current => [
         ...current.map(event => event.id === h.ready.id ? { ...event, text: "synthetic prefix extended while pending" } : event),
@@ -222,7 +225,10 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
     const beforeScope = hook.result.current.submissionScope();
     const publicRow = generatedRow("canonical-public-one");
     const publicSecond = generatedRow("canonical-public-two");
-    const submitted = row("canonical-local-submission", { optimistic: true });
+    const submitted = row("canonical-local-submission", { optimistic: true, chat_receipt: {
+      chat_event_id: generatedId("canonical-local-submission"), chat_agent_id: "agent",
+      chat_conversation_id: "conversation", chat_source_epoch: null,
+    } });
     act(() => {
       hook.result.current.setEvents(current => [
         ...current.map(event => event.id === target.id ? { ...event, text: "a longer body prefix kept while the canonical poll is held" } : event),
