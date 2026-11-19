@@ -310,6 +310,7 @@ pub(super) struct Candidate {
 
 struct Work {
     candidate: Candidate,
+    claude_relations: HashMap<String, super::chat_logical_index::Relation>,
     head: Head,
     todo: VecDeque<usize>,
     signatures: Vec<(String, String)>,
@@ -2056,7 +2057,25 @@ impl ProjectionOwner {
         Ok(pending)
     }
 
-    pub(super) fn committed(&self, candidate: Candidate, capture_stamp: String) -> io::Result<()> {
+    pub(super) fn committed(
+        &self,
+        mut candidate: Candidate,
+        capture_stamp: String,
+    ) -> io::Result<()> {
+        // Reconcile complete, admitted observations before header clipping loses
+        // Watch provenance. Keep physical archives intact and carry the exact
+        // pair into the published row so loaded live IDs can be replaced.
+        let claude_relations: HashMap<_, _> =
+            super::provenance::collapse_claude_stream_watch_mirrors(&mut candidate.events)
+                .into_iter()
+                .map(|(native, watch)| {
+                    let relation = super::chat_logical_index::Relation {
+                        id: native.clone(),
+                        members: vec![native.clone(), watch],
+                    };
+                    (native, relation)
+                })
+                .collect();
         let source_proof = super::chat_logical_index::source_proof(&candidate.context)?;
         let source_coverage =
             super::chat_logical_index::mock_canonical_coverage(&candidate.context)?;
@@ -2077,8 +2096,9 @@ impl ProjectionOwner {
                     .unwrap_or_default();
                 let signature = digest(
                     format!(
-                        "{}:{body:?}:{body_binding}",
-                        serde_json::to_string(&display).unwrap_or_default()
+                        "{}:{body:?}:{body_binding}:{:?}",
+                        serde_json::to_string(&display).unwrap_or_default(),
+                        claude_relations.get(&event.id)
                     )
                     .as_bytes(),
                 );
@@ -2204,6 +2224,7 @@ impl ProjectionOwner {
             agent_id.clone(),
             Work {
                 candidate,
+                claude_relations,
                 head,
                 todo,
                 signatures,
@@ -2288,7 +2309,7 @@ impl ProjectionOwner {
                 key: format!("{:020}", index),
                 event: header(event),
                 body: None,
-                relation: None,
+                relation: work.claude_relations.get(&event.id).cloned(),
                 removed_display_ids: Vec::new(),
             };
             row.event.sequence = Some(index as u64 + 1);

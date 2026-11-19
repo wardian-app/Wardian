@@ -6,6 +6,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::io;
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use wardian_core::conversations::ConversationNarrativeRecord;
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 
@@ -21,6 +22,49 @@ const PROVENANCE_KEYS: &[&str] = &[
     "codex_user_text_sha256",
     "provider_step_source",
 ];
+
+const CLAUDE_TEXT_SHA256: &str = "claude_display_text_sha256";
+const CLAUDE_TEXT_BYTES: &str = "claude_display_text_bytes";
+
+/// Preserve complete-body evidence before the archive externalizes narration.
+/// Excerpts and artifact-backed text cannot mint a new body identity.
+pub(super) fn retain_claude_text_identity(event: &mut AgentChatEvent) {
+    if event.provider != "claude"
+        || event.kind != AgentChatEventKind::Message
+        || event.role != Some(AgentChatRole::Assistant)
+        || event.source.as_deref() != Some("stream_json")
+        || !event.metadata["text_excerpt"].is_null()
+        || !event.metadata["text_artifact_refs"].is_null()
+    {
+        return;
+    }
+    if let Some(text) = event.text.as_deref().filter(|text| !text.is_empty()) {
+        event.metadata[CLAUDE_TEXT_SHA256] =
+            serde_json::json!(format!("{:x}", Sha256::digest(text.as_bytes())));
+        event.metadata[CLAUDE_TEXT_BYTES] = serde_json::json!(text.len());
+    }
+}
+
+fn claude_text_identity(event: &AgentChatEvent) -> Option<(String, u64)> {
+    if event.metadata["text_artifact_refs"].is_null() && event.metadata["text_excerpt"].is_null() {
+        let text = event.text.as_deref().filter(|text| !text.is_empty())?;
+        return Some((
+            format!("{:x}", Sha256::digest(text.as_bytes())),
+            text.len() as u64,
+        ));
+    }
+    // Only the archive writer's complete-text digest can identify an external
+    // body. Legacy artifacts without that evidence remain separate.
+    event.metadata["text_artifact_refs"]
+        .as_array()
+        .filter(|refs| !refs.is_empty())?;
+    let digest = event.metadata[CLAUDE_TEXT_SHA256].as_str()?;
+    let bytes = event.metadata[CLAUDE_TEXT_BYTES]
+        .as_u64()
+        .filter(|bytes| *bytes > 0)?;
+    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| (digest.to_owned(), bytes))
+}
 
 fn string<'a>(event: &'a AgentChatEvent, key: &str) -> Option<&'a str> {
     event
@@ -711,8 +755,11 @@ pub fn merge_current_capture(
 /// Collapse Claude's uniquely identified provider/watch mirror while
 /// keeping both observation IDs. A missing or ambiguous native match remains
 /// visible.
-fn collapse_claude_stream_watch_mirrors(events: &mut Vec<AgentChatEvent>) {
+pub(super) fn collapse_claude_stream_watch_mirrors(
+    events: &mut Vec<AgentChatEvent>,
+) -> Vec<(String, String)> {
     let mut removed = BTreeSet::new();
+    let mut pairs = Vec::new();
 
     for mirror_index in 0..events.len() {
         if removed.contains(&mirror_index) || !is_claude_watch_mirror(&events[mirror_index]) {
@@ -742,6 +789,7 @@ fn collapse_claude_stream_watch_mirrors(events: &mut Vec<AgentChatEvent>) {
 
         let mut canonical = events[native_index].clone();
         retain_provider_observation_ids(&mut canonical, &events[mirror_index]);
+        pairs.push((canonical.id.clone(), events[mirror_index].id.clone()));
         events[native_index] = canonical;
         removed.insert(mirror_index);
     }
@@ -753,6 +801,7 @@ fn collapse_claude_stream_watch_mirrors(events: &mut Vec<AgentChatEvent>) {
             .filter_map(|(index, event)| (!removed.contains(&index)).then_some(event))
             .collect();
     }
+    pairs
 }
 
 fn is_claude_watch_mirror(event: &AgentChatEvent) -> bool {
@@ -778,8 +827,15 @@ fn is_claude_stream_watch_pair(mirror: &AgentChatEvent, native: &AgentChatEvent)
         && string(native, "log_path").is_some()
         && mirror.session_id == native.session_id
         && mirror.turn_id == native.turn_id
-        && mirror.text.as_deref().is_some_and(|text| !text.is_empty())
-        && mirror.text.as_deref() == native.text.as_deref()
+        && ["provider_session_id", "conversation_archive_id"]
+            .iter()
+            .all(|key| match (string(mirror, key), string(native, key)) {
+                (Some(left), Some(right)) => left == right,
+                _ => true,
+            })
+        && claude_text_identity(mirror)
+            .zip(claude_text_identity(native))
+            .is_some_and(|(mirror, native)| mirror == native)
 }
 
 /// Collapse only Codex's identityless assistant stream mirror when the

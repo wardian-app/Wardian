@@ -194,6 +194,19 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 - Resume launches use `--resume <session_id>` and do not resend `--session-id` or `--name`.
 - Fresh resume of an existing Wardian agent uses a new transient Claude provider session ID while keeping the Wardian agent ID stable. After launch, Wardian stores the transient Claude ID as the next `resume_session`.
 
+### Chat observation identity
+
+Claude assistant narration can arrive through live `stream_json` and its
+provider log. The committed Chat projection reconciles a unique pair with the
+same agent, native message ID, and complete text, preserving the provider-log
+row and aliasing the live observation to it. Conflicting explicit provider
+session or archive identities, different message IDs, and ambiguous pairs stay
+separate. Reconciliation runs before bounded display headers discard Watch
+provenance. Before externalizing a large narration body, the archive writer
+preserves its full-text SHA-256 and byte length for the same comparison.
+Excerpts cannot establish body identity; older artifacts without this evidence
+stay separate. Physical archive records remain inspectable.
+
 ### Peer delivery mod
 
 Interactive Claude launches load the bundled `wardian` mod through

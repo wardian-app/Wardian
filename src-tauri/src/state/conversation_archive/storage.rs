@@ -529,6 +529,7 @@ pub(super) fn event_record_for_jsonl(
     }
 
     let mut event = event.clone();
+    super::provenance::retain_claude_text_identity(&mut event);
     event.text = None;
     let metadata = event
         .metadata
