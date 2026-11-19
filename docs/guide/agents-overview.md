@@ -94,6 +94,10 @@ Codex custom `exec` calls appear as work steps even when their input is code
 rather than a shell command. Open **Show full details** on the step to inspect
 the original input alongside the tool's output.
 
+Chat can stay open before the first turn. Readable messages appear automatically
+as history becomes available, including when a large source record is skipped.
+The history status describes capture progress while available messages remain readable.
+
 Chat keeps saved messages readable when provider-log capture pauses. A replaced,
 truncated, or rewritten log shows the specific reason in the transcript. A
 replacement cannot inherit the old log's privacy boundaries automatically, so

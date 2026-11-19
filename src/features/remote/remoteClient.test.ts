@@ -1,7 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RemoteChatTimeoutError, RemoteRequestError, remoteClient } from "./remoteClient";
+import { RemoteChatTimeoutError, RemoteRequestError, RemoteTransportError, remoteClient } from "./remoteClient";
 
 describe("remoteClient error propagation", () => {
+  it("classifies fetch rejection at the transport boundary", async () => {
+    const cause = new TypeError("Failed to fetch");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(cause));
+    await expect(remoteClient.loadAgentChatPage("agent-1", "older"))
+      .rejects.toMatchObject({ name: "RemoteTransportError", cause });
+    await expect(remoteClient.loadAgentChatPage("agent-1", "older"))
+      .rejects.toBeInstanceOf(RemoteTransportError);
+  });
+
   it("opts into preview only for explicit recent reads", async () => {
     const fetcher = vi.fn().mockImplementation(async () => new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", fetcher);

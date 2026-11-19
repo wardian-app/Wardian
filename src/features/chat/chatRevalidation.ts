@@ -161,7 +161,10 @@ function usableBootstrapPage(page: AgentChatPage): boolean {
   const canonicalIndexingSnapshot = page.progress === "indexing" && page.reset
     && page.source_epoch === null;
   const archive = isArchiveReadPage(page);
-  if ((!archive && page.progress !== "ready" && page.progress !== "provisional" && !canonicalIndexingSnapshot)
+  // A large skipped source record is a capture diagnostic, not a rejection of
+  // the readable rows already returned in this snapshot.
+  if ((!archive && page.progress !== "ready" && page.progress !== "provisional"
+    && page.progress !== "oversized_record" && !canonicalIndexingSnapshot)
     || page.unchanged || page.events.length === 0
     || page.detail !== null
     || (page.revalidated_ids !== undefined && page.revalidated_ids !== null)
@@ -175,6 +178,10 @@ function usableBootstrapPage(page: AgentChatPage): boolean {
   if (!completeScope(page)) return false;
   return page.events.every((event) => {
     if (isCanonicalGeneratedEvent(event, page)) return true;
+    // Stored observations can accompany native rows in an ordinary snapshot.
+    // They have canonical session IDs and make no native renewal claim.
+    if (event.metadata.generated !== true && event.id.startsWith(page.session_id + ":")
+      && !eventHasProducerEvidence(event)) return true;
     const ids = chatSourceIdsForEvent(event);
     return ids.length > 0 && event.metadata.chat_source_epoch === page.source_epoch;
   });
