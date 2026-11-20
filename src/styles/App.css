@@ -812,6 +812,10 @@ summary,
   max-width: var(--chat-prose-max, 100ch);
 }
 
+.chat-turn-narration .text-primary {
+  color: var(--color-wardian-text-muted);
+}
+
 .chat-row {
   position: relative;
 }

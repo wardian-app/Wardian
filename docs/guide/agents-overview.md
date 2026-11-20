@@ -90,8 +90,18 @@ Each card can show either:
 Chat messages and activity rows share a centered, readable transcript column that
 expands fluidly on narrow surfaces.
 
+Qualified saved Codex and Claude turns show one collapsed work summary followed
+by the final answer, in both desktop and Remote Chat. Open the summary to see
+ordered steps and muted narration, then **Show output** on a step to inspect
+its input and retained output. JSON is formatted only inside that detail.
+Long output stays in a bounded scrolling area; **Earlier output not shown**
+marks a clipped tail. Counts marked **at least** are incomplete. Older history,
+unproven turn membership, other providers, and native previews retain the
+existing Work log presentation.
+
 Codex custom `exec` calls appear as work steps even when their input is code
-rather than a shell command. Open **Show full details** on the step to inspect
+rather than a shell command. Open **Show output** (or **Show full details** in
+legacy Work logs) on the step to inspect
 the original input alongside the tool's output.
 
 Chat can stay open before the first turn. Readable messages appear automatically

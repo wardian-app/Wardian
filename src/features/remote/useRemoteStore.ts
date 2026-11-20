@@ -3,12 +3,14 @@ import type {
   AgentChatEvent,
   AgentChatPage,
   AgentChatDetail,
+  ChatStepDetail,
   QueueItem,
   RemoteAgentInputMode,
   RemoteAgentSummary,
   RemoteTerminalSnapshot,
   RemoteAutomationSummary,
 } from "../../types";
+import { chatPresentationV1 } from "../chat/committedChatPresentation";
 import {
   addChatSubmission,
   applyChatPage,
@@ -91,6 +93,8 @@ interface RemoteState {
   chatHasOlder: boolean;
   chatNextBefore: string | null;
   chatPage: AgentChatPage | null;
+  /** Exact admitted response envelope; history keeps its independent recent-read cursor. */
+  chatPresentationPage: AgentChatPage | null;
   chatError: string;
   sending: boolean;
   load: () => Promise<void>;
@@ -112,6 +116,7 @@ interface RemoteState {
   loadOlderActiveAgentChat: () => Promise<void>;
   jumpToLatestActiveAgentChat: () => void;
   loadActiveAgentChatDetail: (reference: string) => Promise<AgentChatDetail>;
+  loadActiveAgentChatStepDetail: (reference: string) => Promise<ChatStepDetail>;
   sendPromptToActiveAgent: (prompt: string, inputMode?: RemoteAgentInputMode) => Promise<void>;
   sendPromptToAgent: (sessionId: string, prompt: string, inboxItemId?: string) => Promise<void>;
   runAgentAction: (action: string, target: string) => Promise<void>;
@@ -122,6 +127,61 @@ type RemoteSet = (
   partial: Partial<RemoteState> | ((state: RemoteState) => Partial<RemoteState>),
 ) => void;
 type RemoteGet = () => RemoteState;
+
+/** Carry the incoming committed metadata without replacing the selected history cursor. */
+const remoteChatPresentationFields = (page: AgentChatPage) => ({
+  presentation: page.presentation,
+  events: page.events,
+});
+
+/** Both detail formats use the same request and conversation/privacy fences. */
+async function loadActiveRemoteChatDetailPage(get: RemoteGet, reference: string, step = false): Promise<AgentChatPage> {
+  const agentId = get().activeAgentId;
+  const serial = chatRefreshRequestSerial;
+  const requestedWindow = chatWindowRequestSerial;
+  const previous = get().chatPage;
+  const revision = (get().chatPresentationPage ?? previous)?.revision;
+  if (!agentId) throw new Error("Conversation is closed");
+  const currentScope = () => {
+    const current = get().chatPage;
+    return serial === chatRefreshRequestSerial && requestedWindow === chatWindowRequestSerial
+      && get().activeAgentId === agentId && current?.generation === previous?.generation
+      && current?.conversation_id === previous?.conversation_id && current?.source_epoch === previous?.source_epoch
+      && current?.recent_admission === previous?.recent_admission
+      && (!step || (get().chatPresentationPage ?? current)?.revision === revision)
+      && (current?.archive_read_ready === true) === (previous?.archive_read_ready === true);
+  };
+  // Detail formats share one physical slot with each other and ordinary page reads.
+  for (;;) {
+    const pending = chatDetailReadsInFlight.get(agentId)
+      ?? (chatReadInFlight?.agentId === agentId ? chatReadInFlight.promise : null)
+      ?? (chatOlderReadInFlight?.agentId === agentId ? chatOlderReadInFlight.physical : null);
+    if (!pending) break;
+    await pending;
+    if (!currentScope()) throw new Error("Conversation changed during detail read");
+  }
+  if (!currentScope()) throw new Error("Conversation changed during detail read");
+  let releaseRead = () => {};
+  const done = new Promise<void>((resolve) => { releaseRead = resolve; });
+  chatDetailReadsInFlight.set(agentId, done);
+  try {
+    const page = await remoteClient.loadAgentChatPage(agentId, undefined, undefined, reference);
+    if (!currentScope() || page.generation !== previous?.generation
+      || page.conversation_id !== previous?.conversation_id || page.source_epoch !== previous?.source_epoch
+      || page.recent_admission !== previous?.recent_admission || page.session_id !== agentId
+      || (step && page.revision !== revision)) throw new Error("Conversation changed during detail read");
+    if (previous?.archive_read_ready === true || page.archive_read_ready === true) {
+      if (!previous || !isArchiveReadPage(page)
+        || chatPageScopeRelation(previous, page, get().chatEvents) !== "canonical") {
+        throw new Error("Conversation changed during detail read");
+      }
+    }
+    return page;
+  } finally {
+    if (chatDetailReadsInFlight.get(agentId) === done) chatDetailReadsInFlight.delete(agentId);
+    releaseRead();
+  }
+}
 
 const PAIRING_EXPIRED_ERROR_CODES = new Set([
   "pairing_offer_not_found",
@@ -274,6 +334,7 @@ interface OlderChatReadFlight extends ChatReadFlight {
   settle: () => void;
 }
 let chatReadInFlight: ChatReadFlight | null = null;
+const chatDetailReadsInFlight = new Map<string, Promise<void>>();
 let chatOlderReadInFlight: OlderChatReadFlight | null = null;
 let chatOlderCursor: { serial: number; generation: string | null; before: string | null } | null = null;
 let chatWindowRequestSerial = 0;
@@ -916,6 +977,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   chatHasOlder: false,
   chatNextBefore: null,
   chatPage: null,
+  chatPresentationPage: null,
   chatError: "",
   sending: false,
   async load() {
@@ -1034,7 +1096,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     failedChatRevalidationKey = null;
     chatRefreshRequestSerial += 1;
     chatWindowRefreshQueued = false; chatForceRecentRead = false;
-    set({ chatPage: null, sending: false, chatBrowsingOlder: false });
+    set({ chatPage: null, chatPresentationPage: null, sending: false, chatBrowsingOlder: false });
     clearBackgroundChatRefresh(true);
     const activeAgent = get().agents.find((agent) => agent.session_id === id);
     lastActiveAgentRefreshKey = activeAgent ? activeAgentRefreshKey(activeAgent) : null;
@@ -1062,7 +1124,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     failedChatRevalidationKey = null;
     chatRefreshRequestSerial += 1;
     chatWindowRefreshQueued = false; chatForceRecentRead = false;
-    set({ chatPage: null, chatBrowsingOlder: false });
+    set({ chatPage: null, chatPresentationPage: null, chatBrowsingOlder: false });
     if (options?.syncHistory !== false && isRemoteAgentDetailHistoryState()) {
       try {
         window.history.back();
@@ -1091,7 +1153,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     failedChatRevalidationKey = null;
     chatRefreshRequestSerial += 1;
     chatWindowRefreshQueued = false; chatForceRecentRead = false;
-    set({ chatPage: null, chatBrowsingOlder: false, chatLoading: false, chatLoadingOlder: false });
+    set({ chatPage: null, chatPresentationPage: null, chatBrowsingOlder: false, chatLoading: false, chatLoadingOlder: false });
     set((state) => ({
       activeAgentViewMode: mode,
       activeAgentViewModesById: state.activeAgentId
@@ -1116,6 +1178,15 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   async refreshActiveAgentChat(options) {
     const activeAgentId = get().activeAgentId;
     if (!activeAgentId) return;
+    const detailRead = chatDetailReadsInFlight.get(activeAgentId);
+    if (detailRead) {
+      const serial = chatRefreshRequestSerial;
+      const requestedWindow = chatWindowRequestSerial;
+      await detailRead;
+      if (get().activeAgentId !== activeAgentId || serial !== chatRefreshRequestSerial
+        || requestedWindow !== chatWindowRequestSerial) return;
+      return get().refreshActiveAgentChat(options);
+    }
     if (!options?.background) {
       blockedSelectedChatRefreshSerial = null;
       chatForegroundRefreshDemandSerial += 1;
@@ -1181,13 +1252,13 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         chatOlderCursor = null;
         chatForceRecentRead = !page.reset;
         if (page.reset || previous.recent_admission != null || page.recent_admission != null) {
-          set({ chatEvents: applyChatPage([], page, "recent"), chatPage: page, chatBrowsingOlder: false,
+          set({ chatEvents: applyChatPage([], page, "recent"), chatPage: page, chatPresentationPage: page, chatBrowsingOlder: false,
             chatHasOlder: page.next_before !== null, chatNextBefore: page.next_before, chatLoading: false,
             chatLoadingOlder: false, chatError: "" });
         } else {
           chatWindowRequestSerial += 1;
           chatWindowRefreshQueued = true;
-          set({ chatEvents: [], chatPage: null, chatBrowsingOlder: false, chatHasOlder: false,
+          set({ chatEvents: [], chatPage: null, chatPresentationPage: null, chatBrowsingOlder: false, chatHasOlder: false,
             chatNextBefore: null, chatLoading: true, chatLoadingOlder: false, chatError: "" });
         }
         return;
@@ -1220,7 +1291,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
             chatLoading: false,
             chatLoadingOlder: hasCurrentOlderDemand(),
             chatError: "",
-            chatPage: state.chatPage ? { ...state.chatPage, revision: page.revision, progress: page.progress,
+            chatPresentationPage: page,
+            chatPage: state.chatPage ? { ...state.chatPage, ...remoteChatPresentationFields(page), revision: page.revision, progress: page.progress,
               archive_read_ready: isArchiveReadPage(page) ? true : undefined,
               next_before: state.chatNextBefore } : state.chatPage,
           };
@@ -1235,7 +1307,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         if (!page.unchanged && (page.reset || !chatOlderCursor || chatOlderCursor.serial !== requestSerial || chatOlderCursor.generation !== page.generation)) chatOlderCursor = null;
         const nextBefore = chatOlderCursor ? chatOlderCursor.before : page.next_before;
         const nextPage = page.unchanged && state.chatPage
-          ? { ...state.chatPage, progress: page.progress, archive_read_ready: isArchiveReadPage(page) ? true : undefined,
+          ? { ...state.chatPage, ...remoteChatPresentationFields(page), progress: page.progress, archive_read_ready: isArchiveReadPage(page) ? true : undefined,
             bytes_read: page.bytes_read, records_decoded: page.records_decoded }
           : { ...page, next_before: nextBefore };
         chatForceRecentRead = false;
@@ -1248,6 +1320,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
             chatHasOlder: page.unchanged ? state.chatHasOlder : nextBefore !== null,
             chatNextBefore: page.unchanged ? state.chatNextBefore : nextBefore,
             chatPage: nextPage,
+            chatPresentationPage: page,
             chatBrowsingOlder,
             chatError: "",
           };
@@ -1259,6 +1332,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
           chatHasOlder: nextBefore !== null,
           chatNextBefore: nextBefore,
           chatPage: nextPage,
+          chatPresentationPage: page,
           chatBrowsingOlder,
           chatError: "",
         };
@@ -1273,7 +1347,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         chatWindowRefreshQueued = true;
         chatOlderCursor = null;
         failedChatRevalidationKey = null;
-        set({ chatEvents: [], chatPage: null, chatBrowsingOlder: false, chatHasOlder: false,
+        set({ chatEvents: [], chatPage: null, chatPresentationPage: null, chatBrowsingOlder: false, chatHasOlder: false,
           chatNextBefore: null, chatLoading: true, chatLoadingOlder: false, chatError: "" });
         return;
       }
@@ -1316,6 +1390,16 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     return promise;
   },
   async loadOlderActiveAgentChat() {
+    const agentId = get().activeAgentId;
+    const detailRead = agentId ? chatDetailReadsInFlight.get(agentId) : null;
+    if (detailRead) {
+      const serial = chatRefreshRequestSerial;
+      const requestedWindow = chatWindowRequestSerial;
+      await detailRead;
+      if (get().activeAgentId !== agentId || serial !== chatRefreshRequestSerial
+        || requestedWindow !== chatWindowRequestSerial) return;
+      return get().loadOlderActiveAgentChat();
+    }
     const pendingRecent = chatReadInFlight;
     if (pendingRecent?.agentId === get().activeAgentId && pendingRecent.serial === chatRefreshRequestSerial) {
       await pendingRecent.promise;
@@ -1360,6 +1444,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     set({ chatLoadingOlder: true, chatError: "" });
     read.resume = () => {
       if (read.physical) return read.physical;
+      const detailRead = chatDetailReadsInFlight.get(activeAgentId);
+      if (detailRead) return detailRead.then(() => read.resume());
       if (chatReadInFlight?.serial === requestSerial && chatReadInFlight.agentId === activeAgentId) return chatReadInFlight.promise;
       if (settled || read.controller.signal.aborted || !ownsDemand()) {
         read.settle(); return Promise.resolve();
@@ -1390,13 +1476,13 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
             failedChatRevalidationKey = null;
             chatForceRecentRead = !page.reset;
             if (page.reset) {
-              set({ chatEvents: applyChatPage([], page, "recent"), chatPage: page, chatBrowsingOlder: false,
+              set({ chatEvents: applyChatPage([], page, "recent"), chatPage: page, chatPresentationPage: page, chatBrowsingOlder: false,
                 chatHasOlder: page.next_before !== null, chatNextBefore: page.next_before, chatLoading: false,
                 chatLoadingOlder: false, chatError: "" });
             } else {
               chatWindowRequestSerial += 1;
               chatWindowRefreshQueued = true;
-              set({ chatEvents: [], chatPage: null, chatBrowsingOlder: false, chatHasOlder: false,
+              set({ chatEvents: [], chatPage: null, chatPresentationPage: null, chatBrowsingOlder: false, chatHasOlder: false,
                 chatNextBefore: null, chatLoading: true, chatLoadingOlder: false, chatError: "" });
             }
             read.settle(); return;
@@ -1405,8 +1491,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
             && page.progress === "indexing" && page.next_before === chatNextBefore) {
             // Preserve the user's demand until the cold index has older rows, not just a successful response.
             read.recentDue = true;
-            set((state) => ({ chatLoadingOlder: true, chatError: "",
-              chatPage: state.chatPage ? { ...state.chatPage, progress: page.progress,
+            set((state) => ({ chatLoadingOlder: true, chatError: "", chatPresentationPage: page,
+              chatPage: state.chatPage ? { ...state.chatPage, ...remoteChatPresentationFields(page), progress: page.progress,
                 archive_read_ready: isArchiveReadPage(page) ? true : undefined } : state.chatPage }));
             return;
           }
@@ -1427,15 +1513,16 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
               read.settle(); return;
             }
             if (page.reset) {
-              set((state) => ({ chatEvents: renewed, chatLoadingOlder: false, chatError: "",
-                chatPage: state.chatPage ? { ...state.chatPage, revision: page.revision, progress: page.progress,
+              set((state) => ({ chatEvents: renewed, chatLoadingOlder: false, chatError: "", chatPresentationPage: page,
+                chatPage: state.chatPage ? { ...state.chatPage, ...remoteChatPresentationFields(page), revision: page.revision, progress: page.progress,
                   archive_read_ready: isArchiveReadPage(page) ? true : undefined,
                   next_before: state.chatNextBefore } : state.chatPage }));
             } else {
               chatOlderCursor = { serial: requestSerial, generation: page.generation, before: page.next_before };
               set((state) => ({ chatEvents: renewed, chatLoadingOlder: false, chatBrowsingOlder: true,
                 chatHasOlder: page.next_before !== null, chatNextBefore: page.next_before,
-                chatPage: state.chatPage ? { ...state.chatPage, revision: page.revision, progress: page.progress,
+                chatPresentationPage: page,
+                chatPage: state.chatPage ? { ...state.chatPage, ...remoteChatPresentationFields(page), revision: page.revision, progress: page.progress,
                   archive_read_ready: isArchiveReadPage(page) ? true : undefined,
                   next_before: page.next_before } : page, chatError: "" }));
             }
@@ -1453,7 +1540,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
               chatBrowsingOlder: !page.reset,
               chatHasOlder: page.next_before !== null,
               chatNextBefore: page.next_before,
+              chatPresentationPage: page,
               chatPage: page.reset ? page : state.chatPage ? { ...state.chatPage,
+                ...remoteChatPresentationFields(page),
                 archive_read_ready: isArchiveReadPage(page) ? true : undefined } : state.chatPage,
               chatError: "",
             };
@@ -1468,7 +1557,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
             chatWindowRefreshQueued = true;
             chatOlderCursor = null;
             failedChatRevalidationKey = null;
-            set({ chatEvents: [], chatPage: null, chatBrowsingOlder: false, chatHasOlder: false,
+            set({ chatEvents: [], chatPage: null, chatPresentationPage: null, chatBrowsingOlder: false, chatHasOlder: false,
               chatNextBefore: null, chatLoading: true, chatLoadingOlder: false, chatError: "" });
             read.settle();
             return;
@@ -1519,29 +1608,24 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     olderRead?.controller.abort(); olderRead?.settle();
     set({ chatEvents: state.chatEvents.filter((event) => event.metadata.optimistic === true),
       chatPage: state.chatPage ? { ...state.chatPage, events: [], next_before: null } : null,
+      chatPresentationPage: null,
       chatBrowsingOlder: false, chatHasOlder: false, chatNextBefore: null, chatLoading: true, chatError: "" });
     if (!chatReadInFlight && !olderRead?.physical) {
       chatWindowRefreshQueued = false; void get().refreshActiveAgentChat();
     }
   },
   async loadActiveAgentChatDetail(reference) {
-    const agentId = get().activeAgentId;
-    const serial = chatRefreshRequestSerial;
-    const requestedWindow = chatWindowRequestSerial;
-    const generation = get().chatPage?.generation;
-    const previous = get().chatPage;
-    if (!agentId) throw new Error("Conversation is closed");
-    const page = await remoteClient.loadAgentChatPage(agentId, undefined, undefined, reference);
-    if (serial !== chatRefreshRequestSerial || requestedWindow !== chatWindowRequestSerial || get().activeAgentId !== agentId || get().chatPage?.generation !== generation
-      || page.generation !== generation || page.session_id !== agentId || !page.detail) throw new Error("Conversation changed during detail read");
-    if (previous?.archive_read_ready === true || page.archive_read_ready === true) {
-      if (!previous || !isArchiveReadPage(page)
-        || chatPageScopeRelation(previous, page, get().chatEvents) !== "canonical"
-        || get().chatPage?.archive_read_ready !== previous.archive_read_ready) {
-        throw new Error("Conversation changed during detail read");
-      }
-    }
+    const page = await loadActiveRemoteChatDetailPage(get, reference);
+    if (!page.detail) throw new Error("Conversation changed during detail read");
     return page.detail;
+  },
+  async loadActiveAgentChatStepDetail(reference) {
+    const page = await loadActiveRemoteChatDetailPage(get, reference, true);
+    const presentation = chatPresentationV1(page);
+    if (!presentation?.detail || presentation.detail.revision !== page.revision) {
+      throw new Error("Conversation changed during detail read");
+    }
+    return presentation.detail;
   },
   async sendPromptToActiveAgent(prompt, inputMode = "message") {
     const trimmed = prompt.trim();
@@ -1598,6 +1682,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
           chatOlderCursor = null;
           set({
             chatPage: null,
+            chatPresentationPage: null,
             chatBrowsingOlder: false,
             sending: false,
             terminalSnapshot: null,

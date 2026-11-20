@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import type { AgentChatEvent, AgentChatPage } from "../../types";
+import { chatPresentationV1 } from "./committedChatPresentation";
 import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, chatRecentRefreshDelay, type ChatWindowDirection } from "./chatReadState";
 import {
   ChatRevalidationError,
@@ -291,7 +292,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
             if (epoch !== scope.current || requestedWindow !== windowVersion.current) return;
             forceRecentRead.current = false;
             setEvents(patched);
-            const updated = { ...latest.current!, revision: next.revision, progress: next.progress,
+            const updated = { ...latest.current!, revision: next.revision, progress: next.progress, presentation: next.presentation,
               archive_read_ready: isArchiveReadPage(next) ? true : undefined,
               next_before: olderCursor.current?.before ?? latest.current!.next_before };
             latest.current = updated; setPage(updated); setError(null);
@@ -326,7 +327,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
                 if (epoch !== scope.current || requestedWindow !== windowVersion.current) return;
                 windowDirection.current = "older"; setBrowsingOlder(true);
                 setEvents(candidate);
-                const updated = { ...latest.current!, revision: next.revision, progress: next.progress,
+                const updated = { ...latest.current!, revision: next.revision, progress: next.progress, presentation: next.presentation,
                   archive_read_ready: isArchiveReadPage(next) ? true : undefined,
                   next_before: olderCursor.current?.before ?? latest.current!.next_before };
                 latest.current = updated; setPage(updated); setError(null);
@@ -485,16 +486,18 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
     }
   }, [loadOlder]);
 
-  const loadDetail = useCallback(async (detailRef: string) => {
+  const loadDetailPage = useCallback(async (detailRef: string, step = false) => {
     const epoch = scope.current;
     const generation = latest.current?.generation;
     const conversation = latest.current?.conversation_id;
     const source = latest.current?.source_epoch;
+    const revision = latest.current?.revision;
     const archiveRead = latest.current !== null && isArchiveReadPage(latest.current);
     const requestedWindow = windowVersion.current;
     const currentScope = () => epoch === scope.current && requestedWindow === windowVersion.current
       && latest.current?.generation === generation && latest.current?.conversation_id === conversation
       && latest.current?.source_epoch === source
+      && (!step || latest.current?.revision === revision)
       && (latest.current !== null && isArchiveReadPage(latest.current)) === archiveRead;
     // Every invocation of the shared loader owns the same physical slot.
     while (readPool.reads.has(sessionId)) {
@@ -512,10 +515,10 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
       const next = await loader({ sessionId, detailRef });
       if (!currentScope() || next.generation !== generation || next.conversation_id !== conversation
         || next.source_epoch !== source || next.session_id !== sessionId
-        || isArchiveReadPage(next) !== archiveRead || !next.detail) {
+        || isArchiveReadPage(next) !== archiveRead || (step ? next.revision !== revision || chatPresentationV1(next)?.detail?.revision !== revision : !next.detail)) {
         throw new Error("Conversation changed during detail read");
       }
-      return next.detail;
+      return next;
     } finally {
       if (readPool.reads.get(sessionId)?.request === request) readPool.reads.delete(sessionId);
       releaseRead();
@@ -527,6 +530,9 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
     }
   }, [loader, readPool, sessionId]);
 
+  const loadDetail = useCallback(async (reference: string) => (await loadDetailPage(reference)).detail!, [loadDetailPage]);
+  const loadStepDetail = useCallback(async (reference: string) => chatPresentationV1(await loadDetailPage(reference, true))!.detail!, [loadDetailPage]);
+
   const addSubmitted = useCallback((event: AgentChatEvent) => {
     setEvents((current) => addChatSubmission(current, latest.current, event));
   }, [setEvents]);
@@ -536,6 +542,6 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
     && (!submitted.conversation || !latest.current?.conversation_id || submitted.conversation === latest.current.conversation_id)
     && (!submitted.source || !latest.current?.source_epoch || submitted.source === latest.current.source_epoch), []);
   const errorDirection = error === null ? null : failedReadDirection.current;
-  return { events, setEvents, page, error, errorDirection, loading, waiting, loadingOlder, browsingOlder, loadOlder, loadDetail, retry, addSubmitted,
+  return { events, setEvents, page, error, errorDirection, loading, waiting, loadingOlder, browsingOlder, loadOlder, loadDetail, loadStepDetail, retry, addSubmitted,
     submissionScope, isCurrentScope, reset, jumpToLatest };
 }

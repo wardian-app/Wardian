@@ -25,14 +25,13 @@ import { matchingSlashCommands } from "../chat/slashCommands";
 import {
   isProcessingAgentStatus,
   liveApprovalEventId,
-  shouldShowChatEvent,
   sortTranscriptEvents,
 } from "../chat/chatPresentation";
-import { chatTranscriptRowKey, withTurnChangeSummaries, type ChatTranscriptRowModel } from "../chat/chatTurns";
+import { chatTranscriptRowKey, type ChatTranscriptRowModel } from "../chat/chatTurns";
+import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
 import { useAppShellWorkbenchNavigation } from "../../layout/AppShell";
 import { openFileWithSettings } from "../files/fileOpenRouting";
 import { type ChatMarkdownLinkHandling } from "./markdown/ChatMarkdown";
-import { derivePresentedChatRows } from "./workLogPresentation";
 import {
   fileNameFromPath,
   getDroppedFilePaths,
@@ -96,7 +95,7 @@ export function AgentChatView({
   const [awaitingResponse, setAwaitingResponse] = useState<AwaitingResponseMarker | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const chat = useChatPages(sessionId, loadChatPage, refreshIntervalMs, reloadKey);
-  const { events, page, loadingOlder, loadOlder, loadDetail, reset: resetChat, isCurrentScope: isCurrentChatScope } = chat;
+  const { events, page, loadingOlder, loadOlder, loadDetail, loadStepDetail, reset: resetChat, isCurrentScope: isCurrentChatScope } = chat;
   const error = chat.error;
   const loadState: LoadState = events.length === 0 && chat.waiting ? "waiting"
     : chat.loading && events.length === 0 ? "loading" : error !== null && events.length === 0 ? "error" : "ready";
@@ -178,9 +177,10 @@ export function AgentChatView({
   );
   const presentationScope = JSON.stringify([sessionId, provider ?? agent?.provider, page?.conversation_id, page?.generation, page?.source_epoch]);
   const readingPresentation = useChatReadingPresentation(presentationScope, displayEvents, page !== null);
+  const committedPresentation = useCommittedChatPresentation(page, events);
   const chatRows = useMemo<ChatTranscriptRowModel[]>(
-    () => withTurnChangeSummaries(derivePresentedChatRows(displayEvents.filter(shouldShowChatEvent), readingPresentation.boundaries)),
-    [displayEvents, readingPresentation.boundaries],
+    () => deriveCommittedChatRows(displayEvents, committedPresentation, readingPresentation.boundaries),
+    [displayEvents, committedPresentation, readingPresentation.boundaries],
   );
   const visibleChatRows = chatRows;
   const progressText = page ? chatReadProgress(page.progress, visibleChatRows.length > 0) : null;
@@ -435,6 +435,7 @@ export function AgentChatView({
                   liveApprovalId={liveApprovalId}
                   onOpenFile={openChangedFile}
                   onLoadDetail={loadDetail}
+                  onLoadStepDetail={loadStepDetail}
                   row={row}
                 />
               </li>

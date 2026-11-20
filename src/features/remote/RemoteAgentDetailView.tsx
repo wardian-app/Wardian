@@ -6,6 +6,8 @@ import "@xterm/xterm/css/xterm.css";
 import type {
   AgentChatEvent,
   AgentChatDetail,
+  AgentChatPage,
+  ChatStepDetail,
   RemoteAgentSummary,
   RemoteTerminalBrokerEvent,
   TerminalSnapshot,
@@ -22,8 +24,8 @@ import {
   shouldShowChatEvent,
   sortTranscriptEvents,
 } from "../chat/chatPresentation";
-import { chatTranscriptRowKey, withTurnChangeSummaries } from "../chat/chatTurns";
-import { derivePresentedChatRows } from "../grid/workLogPresentation";
+import { chatTranscriptRowKey } from "../chat/chatTurns";
+import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
 import { RemoteAttachmentComposer } from "./RemoteAttachmentComposer";
 import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
@@ -450,6 +452,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const terminalLoading = useRemoteStore((state) => state.terminalLoading);
   const terminalError = useRemoteStore((state) => state.terminalError);
   const chatEvents = useRemoteStore((state) => state.chatEvents);
+  const presentationPage = useRemoteStore((state) => state.chatPresentationPage ?? state.chatPage);
   const chatLoading = useRemoteStore((state) => state.chatLoading);
   const chatLoadingOlder = useRemoteStore((state) => state.chatLoadingOlder);
   const chatHasOlder = useRemoteStore((state) => state.chatHasOlder);
@@ -461,6 +464,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
     state.chatPage?.conversation_id, state.chatPage?.generation, state.chatPage?.source_epoch]));
   const chatScopeReady = useRemoteStore((state) => state.chatPage !== null);
   const loadChatDetail = useRemoteStore((state) => state.loadActiveAgentChatDetail);
+  const loadChatStepDetail = useRemoteStore((state) => state.loadActiveAgentChatStepDetail);
   const sending = useRemoteStore((state) => state.sending);
   const closeAgent = useRemoteStore((state) => state.closeAgent);
   const setActiveAgentViewMode = useRemoteStore((state) => state.setActiveAgentViewMode);
@@ -563,6 +567,8 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
           scopeReady={chatScopeReady}
           key={agent.session_id}
           agent={agent}
+          presentationPage={presentationPage}
+          chatEvents={chatEvents}
           visibleEvents={visibleEvents}
           loading={chatLoading}
           loadingOlder={chatLoadingOlder}
@@ -576,6 +582,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
           onLoadOlder={loadOlderActiveAgentChat}
           onRetryChat={() => void refreshActiveAgentChat()}
           onLoadDetail={loadChatDetail}
+          onLoadStepDetail={loadChatStepDetail}
           progress={chatProgress}
         />
       ) : (
@@ -982,6 +989,8 @@ function ChatPane({
   presentationScope,
   scopeReady,
   agent,
+  presentationPage,
+  chatEvents,
   visibleEvents,
   loading,
   loadingOlder,
@@ -995,11 +1004,14 @@ function ChatPane({
   onLoadOlder,
   onRetryChat,
   onLoadDetail,
+  onLoadStepDetail,
   progress,
 }: {
   presentationScope: string;
   scopeReady: boolean;
   agent: RemoteAgentSummary;
+  presentationPage: AgentChatPage | null;
+  chatEvents: AgentChatEvent[];
   visibleEvents: AgentChatEvent[];
   loading: boolean;
   loadingOlder: boolean;
@@ -1013,12 +1025,14 @@ function ChatPane({
   onLoadOlder: () => Promise<void>;
   onRetryChat: () => void;
   onLoadDetail: (reference: string) => Promise<AgentChatDetail>;
+  onLoadStepDetail: (reference: string) => Promise<ChatStepDetail>;
   progress: string;
 }) {
   const scrollRef = useRef<HTMLElement>(null);
   const prepend = useRef<ChatScrollAnchor | null>(null);
   const [settledPrepend, setSettledPrepend] = useState<ChatScrollAnchor | null>(null);
   const readingPresentation = useChatReadingPresentation(presentationScope, visibleEvents, scopeReady);
+  const committedPresentation = useCommittedChatPresentation(presentationPage, chatEvents);
   const loadOlder = async () => {
     if (!hasOlder || loadingOlder || prepend.current) return;
     const scroll = scrollRef.current;
@@ -1046,13 +1060,9 @@ function ChatPane({
   const progressText = chatReadProgress(progress, visibleEvents.some(shouldShowChatEvent));
   const rows = useMemo(
     () =>
-      withTurnChangeSummaries(derivePresentedChatRows(visibleEvents.filter(shouldShowChatEvent), readingPresentation.boundaries), {
-        // Remote pages from the newest end, so while older events remain
-        // unloaded the leading rows are the tail of a turn whose earlier edits
-        // are off-page. Summarizing them would understate that turn.
-        has_older_events: hasOlder,
-      }),
-    [hasOlder, visibleEvents, readingPresentation.boundaries],
+      deriveCommittedChatRows(visibleEvents, committedPresentation,
+        readingPresentation.boundaries, hasOlder),
+    [hasOlder, visibleEvents, committedPresentation, readingPresentation.boundaries],
   );
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
   return (
@@ -1110,6 +1120,7 @@ function ChatPane({
               linkHandling={REMOTE_CHAT_LINK_HANDLING}
               onApprovalSubmit={onApprovalSubmit}
               onLoadDetail={onLoadDetail}
+              onLoadStepDetail={onLoadStepDetail}
               row={row}
             />
           </div>

@@ -3,6 +3,7 @@ import { changedPathsFromEvents, type PresentedChatRow } from "../grid/workLogPr
 import { toolPatchText } from "./chatPresentation";
 import { chatEventDisplayKey } from "./chatEventIdentity";
 import { structuredEditFromEvent } from "./structuredEdit";
+import type { CommittedTurnRow } from "./committedChatPresentation";
 
 /**
  * Turn segmentation for the chat transcript.
@@ -52,7 +53,7 @@ export interface TurnChangeSummaryRow {
   scope: "turn" | "whole_history";
 }
 
-export type ChatTranscriptRowModel = PresentedChatRow | TurnChangeSummaryRow;
+export type ChatTranscriptRowModel = PresentedChatRow | TurnChangeSummaryRow | CommittedTurnRow;
 
 /** One tool action: the call plus whatever results were merged into it. */
 type ChatAction = AgentChatEvent[];
