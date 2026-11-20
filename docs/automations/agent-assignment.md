@@ -87,6 +87,11 @@ Use **direct agent targeting** when:
 
 Prefer **Inherit Fresh** when you want an existing agent's profile without conversation-history token growth. Reserve **Inherit Resume** for automations whose purpose is to continue that exact agent session.
 
+With Codex, both modes use the selected agent's MCP server settings, including
+each server's enabled tools. **Inherit Fresh** applies those settings to a
+separate run-owned Codex home. Temporary provider runs use the upstream Codex
+configuration.
+
 The global regular-agent session setting does not change automation Agent node behavior. Automation runs follow the node's run mode.
 
 ## Related References
