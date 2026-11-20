@@ -485,6 +485,8 @@ pub(crate) struct ProjectionOwner {
     recent: Arc<Mutex<RecentSlots>>,
     #[cfg(test)]
     fail_checkpoint_stage: std::sync::atomic::AtomicU8,
+    #[cfg(test)]
+    recent_scope_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 struct RecentSlot {
@@ -1126,6 +1128,8 @@ impl ProjectionOwner {
         hints: Option<Vec<String>>,
     ) -> impl FnOnce() -> io::Result<Option<AgentChatPage>> + Send + 'static {
         let cache = self.recent.clone();
+        #[cfg(test)]
+        let scope_reads = self.recent_scope_reads.clone();
         move || {
             if !(1..=PAGE_ROWS).contains(&limit) {
                 return Err(io::Error::new(
@@ -1133,20 +1137,41 @@ impl ProjectionOwner {
                     "invalid recent limit",
                 ));
             }
-            let native_source = cache
-                .lock()
-                .map_err(|_| io::Error::other("recent owner poisoned"))?
-                .slots
-                .iter()
-                .find(|slot| {
+            let native_source = {
+                let recent = cache
+                    .lock()
+                    .map_err(|_| io::Error::other("recent owner poisoned"))?;
+                let current_owner = |slot: &RecentSlot| {
                     slot.agent_id == snapshot.session_id
                         && slot.runtime.ptr_eq(&Arc::downgrade(&runtime))
                         && slot.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
-                })
-                .and_then(|slot| slot.native_source.clone());
+                };
+                let native_source = recent
+                    .slots
+                    .iter()
+                    .find(|slot| current_owner(slot))
+                    .and_then(|slot| slot.native_source.clone());
+                // An aware first read without a published owner has nothing
+                // to certify. Let its ordinary reader open immediately. A
+                // later publication follows this miss and keeps its fences.
+                if revision.is_none()
+                    && hints.as_ref().is_some_and(Vec::is_empty)
+                    && native_source.is_none()
+                    && recent.global_boundaries == 0
+                    && !recent.boundaries.contains_key(&snapshot.session_id)
+                    && !recent.slots.iter().any(|slot| {
+                        current_owner(slot) && slot.published && slot.native_source.is_none()
+                    })
+                {
+                    return Ok(None);
+                }
+                native_source
+            };
             let source_valid = native_source
                 .as_ref()
                 .is_none_or(|source| source.valid().unwrap_or(false));
+            #[cfg(test)]
+            scope_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let scope = recent_scope(&snapshot);
             let mut recent = cache
                 .lock()

@@ -77,6 +77,263 @@ fn settle(owner: &ProjectionOwner) {
 }
 
 #[test]
+fn recent_cold_first_miss_skips_source_scope_io() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+
+    for pending in [false, true] {
+        if pending {
+            owner.begin_recent(&source, &runtime).unwrap();
+        }
+        owner
+            .recent_scope_reads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let page = owner.recent_reader_with_hints(
+            source.clone(),
+            runtime.clone(),
+            None,
+            8,
+            Some(Vec::new()),
+        )()
+        .unwrap();
+        assert!(
+            page.is_none(),
+            "an unpublished owner cannot serve a recent page"
+        );
+        assert_eq!(
+            owner
+                .recent_scope_reads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "cold misses must reach the ordinary reader without source-certificate IO"
+        );
+    }
+}
+
+#[test]
+fn recent_cold_first_miss_preserves_existing_reader_and_privacy_paths() {
+    let (_guard, temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+
+    for (revision, hints) in [
+        (None, None),
+        (None, Some(vec!["literal-preview-backing".to_owned()])),
+        (
+            Some("ordinary-canonical-revision".to_owned()),
+            Some(Vec::new()),
+        ),
+    ] {
+        owner
+            .recent_scope_reads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(owner.recent_reader_with_hints(
+            source.clone(),
+            runtime.clone(),
+            revision,
+            8,
+            hints,
+        )()
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            owner
+                .recent_scope_reads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    for agent in [Some("agent-1"), None] {
+        let fence = owner.recent_boundary(agent).unwrap();
+        owner
+            .recent_scope_reads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let page = owner.recent_reader_with_hints(
+            source.clone(),
+            runtime.clone(),
+            None,
+            8,
+            Some(Vec::new()),
+        )()
+        .unwrap()
+        .unwrap();
+        assert!(page.events.is_empty() && page.reset);
+        assert_eq!(page.progress, "source_changed");
+        assert_eq!(
+            owner
+                .recent_scope_reads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        drop(fence);
+    }
+
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(
+            &source,
+            &runtime,
+            &receipt,
+            vec![event("published-preview", "Synthetic preview output.")],
+        )
+        .unwrap();
+    owner
+        .recent_scope_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let page =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.recent_admission.as_deref(), Some(receipt.0.as_str()));
+    assert!(!page.events.is_empty());
+    assert_eq!(
+        owner
+            .recent_scope_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    owner.retire_recent(&source.session_id).unwrap();
+    owner
+        .recent_scope_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let retired = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(page.revision),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(retired.events.is_empty() && retired.reset);
+    assert!(retired.recent_admission.is_none());
+    assert_eq!(
+        owner
+            .recent_scope_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    let native_path = temp.path().join("native-watch.log");
+    fs::write(&native_path, b"Synthetic native observation.").unwrap();
+    let native = crate::commands::chat_recent_database::Source::watch(&native_path).unwrap();
+    owner
+        .begin_recent_with_source(&source, &runtime, Some(native))
+        .unwrap();
+    owner
+        .recent_scope_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    assert!(owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        None,
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .is_none());
+    assert_eq!(
+        owner
+            .recent_scope_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    fs::write(&native_path, b"x").unwrap();
+    owner
+        .recent_scope_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let changed =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    assert!(changed.events.is_empty() && changed.reset);
+    assert_eq!(changed.progress, "source_changed");
+    assert_eq!(
+        owner
+            .recent_scope_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    owner
+        .recent_scope_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let invalid =
+        owner.recent_reader_with_hints(source, runtime, None, 0, Some(Vec::new()))().unwrap_err();
+    assert_eq!(invalid.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        owner
+            .recent_scope_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[test]
+fn recent_cold_first_miss_keeps_another_runtime_owners_admission() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let original_runtime = Arc::new(Mutex::new("Idle".into()));
+    let receipt = owner.begin_recent(&source, &original_runtime).unwrap();
+    owner
+        .publish_recent(
+            &source,
+            &original_runtime,
+            &receipt,
+            vec![event("original-preview", "Synthetic original output.")],
+        )
+        .unwrap();
+
+    owner
+        .recent_scope_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let replacement_runtime = Arc::new(Mutex::new("Idle".into()));
+    assert!(owner.recent_reader_with_hints(
+        source.clone(),
+        replacement_runtime,
+        None,
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .is_none());
+    assert_eq!(
+        owner
+            .recent_scope_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+
+    let original =
+        owner.recent_reader_with_hints(source, original_runtime, None, 8, Some(Vec::new()))()
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        original.recent_admission.as_deref(),
+        Some(receipt.0.as_str())
+    );
+    assert_eq!(
+        original.events[0].text.as_deref(),
+        Some("Synthetic original output.")
+    );
+    assert_eq!(
+        owner
+            .recent_scope_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[test]
 fn recent_identity_handoff_is_one_owned_revision_and_privacy_retires_its_receipt() {
     let (_guard, _temp) = isolated_home();
     let owner = ProjectionOwner::default();
