@@ -1171,6 +1171,164 @@ fn source_row(source_id: &str) -> ConversationSourceRecord {
     }
 }
 
+#[test]
+fn antigravity_database_sources_keep_native_identity_across_display_and_payload_updates() {
+    let event = antigravity_event();
+    let original = source_record_from_chat_event(&event, 3).unwrap();
+    let mut updated = event.clone();
+    updated.id = "another-presentation-id".to_string();
+    updated.sequence = Some(90);
+    updated.text = Some("updated output".to_string());
+    updated.command = Some("updated arguments".to_string());
+    updated.metadata["raw_type"] = serde_json::json!("updated_tool_name");
+    updated.metadata["hash"] = serde_json::json!("mutable-payload-version");
+    assert_eq!(
+        source_record_from_chat_event(&updated, 91).unwrap(),
+        original
+    );
+    assert!(original
+        .source_id
+        .starts_with("src_antigravity_observation_"));
+    assert_eq!(original.cursor.as_deref(), Some("7"));
+    assert_eq!(
+        original.provider_session_id.as_deref(),
+        Some("conversation-one")
+    );
+    assert_eq!(
+        original.source_path.as_deref(),
+        Some("conversations/conversation-one.db")
+    );
+}
+
+#[test]
+fn antigravity_database_sources_distinguish_databases_kinds_steps_and_call_ordinals() {
+    let event = antigravity_event();
+    let mut other_database = event.clone();
+    other_database.metadata["log_path"] = serde_json::json!("conversations/conversation-two.db");
+    let mut other_kind = event.clone();
+    other_kind.kind = AgentChatEventKind::ToolResult;
+    let mut other_step = event.clone();
+    other_step.metadata["step_index"] = serde_json::json!(8);
+    let mut other_call = event.clone();
+    other_call.metadata["tool_ordinal"] = serde_json::json!(1);
+    let sources = [event, other_database, other_kind, other_step, other_call]
+        .map(|event| source_record_from_chat_event(&event, 1).unwrap().source_id);
+    assert_eq!(
+        sources
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        sources.len()
+    );
+}
+
+#[test]
+fn antigravity_legacy_retry_preserves_the_published_row_with_session_enrichment() {
+    let archived = antigravity_event();
+    let mut published =
+        super::records::fallback_source_record_from_chat_event(&archived, 41).unwrap();
+    published.cursor = Some("17".to_string());
+    let mut retry = archived.clone();
+    retry.sequence = Some(90);
+    retry.metadata["provider_session_id"] = serde_json::json!("conversation-one");
+    retry.metadata["raw_type"] = serde_json::json!("updated_tool_name");
+    retry.metadata["hash"] = serde_json::json!("new-payload-version");
+    retry.path = Some("updated-tool-target.txt".to_string());
+    assert_eq!(
+        super::antigravity_sources::legacy_source_for_retry(
+            &retry,
+            Some(&archived),
+            41,
+            &published
+        )
+        .unwrap(),
+        published
+    );
+}
+
+#[test]
+fn antigravity_legacy_retry_rejects_unproven_identity_and_explicit_cursor_changes() {
+    let archived = antigravity_event();
+    let published = super::records::fallback_source_record_from_chat_event(&archived, 41).unwrap();
+    let mutations = [
+        ("log_path", serde_json::json!("conversations/other.db")),
+        ("step_index", serde_json::json!(8)),
+        ("tool_ordinal", serde_json::json!(1)),
+        ("provider_session_id", serde_json::json!("foreign-session")),
+        ("cursor", serde_json::json!("physical-provider-cursor")),
+    ];
+    for (key, value) in mutations {
+        let mut retry = archived.clone();
+        retry.metadata[key] = value;
+        assert!(
+            super::antigravity_sources::legacy_source_for_retry(
+                &retry,
+                Some(&archived),
+                41,
+                &published
+            )
+            .is_err(),
+            "changed {key} must not reuse a legacy source"
+        );
+    }
+    let mut another_event = archived.clone();
+    another_event.id = "another-observation".to_string();
+    assert!(super::antigravity_sources::legacy_source_for_retry(
+        &another_event,
+        Some(&archived),
+        41,
+        &published
+    )
+    .is_err());
+    assert!(
+        super::antigravity_sources::legacy_source_for_retry(&archived, None, 41, &published)
+            .is_err()
+    );
+    let mut corrupt = published.clone();
+    corrupt.source_kind = "provider_log".to_string();
+    assert!(super::antigravity_sources::legacy_source_for_retry(
+        &archived,
+        Some(&archived),
+        41,
+        &corrupt
+    )
+    .is_err());
+}
+
+#[test]
+fn antigravity_native_sources_preserve_broker_and_watch_source_ownership() {
+    let mut brokered = antigravity_event();
+    brokered.metadata["sender_agent_id"] = serde_json::json!("sender");
+    let source = source_record_from_chat_event(&brokered, 3).unwrap();
+    assert_eq!(source.source_id, "agent:sender");
+    assert_eq!(source.source_kind, "wardian_agent");
+
+    let mut watch = antigravity_event();
+    watch.id = "agent-1:watch_native:observation".to_string();
+    watch.metadata["transcript_cursor"] = serde_json::json!("watch-cursor");
+    let source = source_record_from_chat_event(&watch, 3).unwrap();
+    assert_eq!(source.source_id, format!("watch:{}", watch.id));
+    assert_eq!(source.cursor, None);
+}
+
+fn antigravity_event() -> AgentChatEvent {
+    let mut event = source_event("agent-1:antigravity_tool:stable", "tool arguments");
+    event.provider = "antigravity".to_string();
+    event.kind = AgentChatEventKind::ToolCall;
+    event.source = Some("conversation_database".to_string());
+    event.sequence = Some(3);
+    event.path = Some("a-tool-target.txt".to_string());
+    event.metadata = serde_json::json!({
+        "provider_log": true,
+        "log_path": "conversations/conversation-one.db",
+        "step_index": 7,
+        "provider_step_type": 15,
+        "tool_ordinal": 0,
+        "raw_type": "run_command"
+    });
+    event
+}
+
 fn watch_event() -> AgentChatEvent {
     let mut event = source_event("agent-1:0000000000000006:model", "Completed the change.");
     event.source = Some("model".to_string());

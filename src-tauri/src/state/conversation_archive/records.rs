@@ -73,6 +73,14 @@ pub(super) fn source_record_from_chat_event(
     event: &AgentChatEvent,
     seq: u64,
 ) -> Option<ConversationSourceRecord> {
+    super::antigravity_sources::source_record(event)
+        .or_else(|| fallback_source_record_from_chat_event(event, seq))
+}
+
+pub(super) fn fallback_source_record_from_chat_event(
+    event: &AgentChatEvent,
+    seq: u64,
+) -> Option<ConversationSourceRecord> {
     if let Some(sender_agent_id) = metadata_string(&event.metadata, "sender_agent_id") {
         return Some(ConversationSourceRecord {
             schema: CONVERSATION_SCHEMA,
