@@ -6,6 +6,7 @@ import type { AgentChatEvent, AgentChatPage, RemoteAgentSummary } from "../../ty
 import { RemoteAgentDetailView } from "./RemoteAgentDetailView";
 import { remoteClient } from "./remoteClient";
 import { useRemoteStore } from "./useRemoteStore";
+import { committedChatFixture } from "../../test/committedChatFixture";
 
 const agent: RemoteAgentSummary = {
   session_id: "agent-1",
@@ -179,6 +180,48 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     expect(screen.getByText("No chat transcript yet.")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry Chat" })).not.toBeInTheDocument();
+  });
+
+  it("renders committed remote turns with hidden state refs and loads step output through the store", async () => {
+    const { page, events, presentation, detail } = committedChatFixture();
+    const stateEvent: AgentChatEvent = { ...events[0], id: "hidden-state", kind: "status", role: "system", text: null };
+    const remoteEvents = [...events, stateEvent].map((event) => ({ ...event, session_id: agent.session_id }));
+    const remotePage = { ...page, session_id: agent.session_id, events: remoteEvents,
+      presentation: { version: 1, payload: { ...presentation,
+        state_event_refs: [{ event_id: stateEvent.id, turn_key: presentation.turns[0].turn_key }] } } };
+    const load = vi.spyOn(remoteClient, "loadAgentChatPage").mockResolvedValue({ ...remotePage, events: [],
+      presentation: { version: 1, payload: { ...presentation, detail } } });
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatEvents: remoteEvents, chatPage: remotePage });
+    render(<RemoteAgentDetailView agent={agent} />);
+    expect(screen.getByTestId("chat-committed-turn")).toBeVisible();
+    expect(screen.getByText(/All 42 tests passed/)).toBeVisible();
+    expect(load).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Worked.*2 steps/ }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Show output" })[0]);
+    expect(await screen.findByText(detail.result_summary!)).toBeVisible();
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(load.mock.calls[0].slice(0, 4)).toEqual([agent.session_id, undefined, undefined, "step:read"]);
+  });
+
+  it("merges same-revision page metadata and drops prior metadata on a new revision or preview", () => {
+    const { page, events, presentation } = committedChatFixture();
+    const remoteEvents = events.map((event) => ({ ...event, session_id: agent.session_id }));
+    const remotePage = { ...page, session_id: agent.session_id, events: remoteEvents };
+    const head = { ...remotePage, events: remoteEvents.slice(0, 2),
+      presentation: { version: 1, payload: { ...presentation, items: presentation.items.slice(0, 2) } } };
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatEvents: remoteEvents.slice(0, 2), chatPage: head });
+    render(<RemoteAgentDetailView agent={agent} />);
+    expect(screen.getByTestId("chat-committed-turn")).toBeVisible();
+    act(() => useRemoteStore.setState({ chatEvents: remoteEvents, chatPresentationPage: { ...remotePage,
+      events: remoteEvents.slice(2), presentation: { version: 1, payload: { ...presentation, items: presentation.items.slice(2) } } } }));
+    expect(screen.getByTestId("chat-committed-turn")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Worked.*2 steps/ }));
+    expect(screen.getByText("Read sample.json")).toBeVisible();
+    act(() => useRemoteStore.setState({ chatPresentationPage: { ...remotePage, revision: "new-revision",
+      events: remoteEvents.slice(2), presentation: { version: 1, payload: { ...presentation, items: presentation.items.slice(2) } } } }));
+    expect(screen.queryByText("Read sample.json")).not.toBeInTheDocument();
+    act(() => useRemoteStore.setState({ chatPresentationPage: { ...remotePage, recent_admission: "preview" } }));
+    expect(screen.queryByTestId("chat-committed-turn")).not.toBeInTheDocument();
   });
 
   it("shows indexing progress while an empty read is unfinished", () => {

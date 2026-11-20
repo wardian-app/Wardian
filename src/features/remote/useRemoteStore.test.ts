@@ -5,6 +5,7 @@ import { type RemoteAgentChatPage, RemoteChatTimeoutError, RemoteRequestError, R
 import { useRemoteStore } from "./useRemoteStore";
 import { actualEmptyOwnedCapture, actualProducerBatch, actualProducerPage } from "../../test/chatRevalidationTestFixture";
 import { applyChatPage } from "../chat/chatReadState";
+import { committedChatFixture } from "../../test/committedChatFixture";
 
 type StatusStreamHandlers = Parameters<typeof remoteClient.openStatusStream>[0];
 
@@ -748,6 +749,109 @@ describe("useRemoteStore watchlists", () => {
     vi.useRealTimers();
   });
 
+  it("loads versioned step detail through the existing detail request and rejects mismatched revisions", async () => {
+    const { page, presentation, detail } = committedChatFixture();
+    useRemoteStore.setState({ activeAgentId: page.session_id, chatPage: page, chatEvents: page.events });
+    const response = { ...page, events: [], presentation: { version: 1, payload: { ...presentation, detail } } };
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValue(response);
+    await expect(useRemoteStore.getState().loadActiveAgentChatStepDetail("step:read")).resolves.toEqual(detail);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledWith(page.session_id, undefined, undefined, "step:read");
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValue({ ...response, revision: "different-revision" });
+    await expect(useRemoteStore.getState().loadActiveAgentChatStepDetail("step:read")).rejects.toThrow("Conversation changed during detail read");
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValue({ ...response,
+      presentation: { version: 1, payload: { ...presentation, detail: { ...detail, revision: "stale-detail" } } } });
+    await expect(useRemoteStore.getState().loadActiveAgentChatStepDetail("step:read")).rejects.toThrow("Conversation changed during detail read");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValue({ ...response, presentation: { version: 2, payload: { detail } } });
+    await expect(useRemoteStore.getState().loadActiveAgentChatStepDetail("step:read")).rejects.toThrow("Conversation changed during detail read");
+    warning.mockRestore();
+  });
+
+  it.each(["revision", "conversation_id", "generation", "source_epoch", "archive_read_ready"] as const)(
+    "rejects remote step detail after the selected %s changes", async (field) => {
+      const { page, presentation, detail } = committedChatFixture();
+      useRemoteStore.setState({ activeAgentId: page.session_id, chatPage: page, chatEvents: page.events });
+      const read = deferred<RemoteAgentChatPage>();
+      vi.mocked(remoteClient.loadAgentChatPage).mockReturnValue(read.promise);
+      const pending = useRemoteStore.getState().loadActiveAgentChatStepDetail("step:read");
+      useRemoteStore.setState({ chatPage: { ...page, [field]: field === "archive_read_ready" ? true : "changed" } });
+      read.resolve({ ...page, presentation: { version: 1, payload: { ...presentation, detail } } });
+      await expect(pending).rejects.toThrow("Conversation changed during detail read");
+    },
+  );
+
+  it("serializes legacy and step details with recent and older physical reads", async () => {
+    vi.useFakeTimers();
+    const fixture = committedChatFixture();
+    const page = { ...fixture.page, source_epoch: null, next_before: "before" };
+    const legacy = deferred<RemoteAgentChatPage>();
+    const step = deferred<RemoteAgentChatPage>();
+    const recent = deferred<RemoteAgentChatPage>();
+    const older = deferred<RemoteAgentChatPage>();
+    useRemoteStore.setState({ status: "loading", activeAgentId: page.session_id, activeAgentViewMode: "chat",
+      chatPage: page, chatEvents: page.events, chatNextBefore: "before", chatHasOlder: true });
+    vi.mocked(remoteClient.loadAgentChatPage).mockReturnValueOnce(legacy.promise).mockReturnValueOnce(step.promise)
+      .mockReturnValueOnce(recent.promise).mockReturnValueOnce(older.promise);
+    const legacyRead = useRemoteStore.getState().loadActiveAgentChatDetail("legacy-ref");
+    const stepRead = useRemoteStore.getState().loadActiveAgentChatStepDetail("step:read");
+    const recentRead = useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    const olderRead = useRemoteStore.getState().loadOlderActiveAgentChat();
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+    const body = { event_id: "answer", text: "Full answer", next: null, complete: true };
+    legacy.resolve({ ...page, detail: body });
+    await expect(legacyRead).resolves.toEqual(body);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[1][3]).toBe("step:read");
+    step.resolve({ ...page, presentation: { version: 1, payload: { ...fixture.presentation, detail: fixture.detail } } });
+    await expect(stepRead).resolves.toEqual(fixture.detail);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(3);
+    recent.resolve({ ...page, events: [], unchanged: true });
+    await recentRead;
+    await vi.waitFor(() => expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(4));
+    older.resolve({ ...page, events: [], next_before: null });
+    await olderRead;
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[3][1]).toBe("before");
+  });
+
+  it("retires a queued step detail without dispatch after its conversation closes", async () => {
+    const { page } = committedChatFixture();
+    useRemoteStore.setState({ activeAgentId: page.session_id, chatPage: page, chatEvents: page.events });
+    const read = deferred<RemoteAgentChatPage>();
+    vi.mocked(remoteClient.loadAgentChatPage).mockReturnValue(read.promise);
+    const legacy = useRemoteStore.getState().loadActiveAgentChatDetail("legacy-ref");
+    const queued = useRemoteStore.getState().loadActiveAgentChatStepDetail("step:read");
+    useRemoteStore.getState().closeAgent({ syncHistory: false });
+    read.resolve({ ...page, detail: { event_id: "answer", text: "Retired answer", next: null, complete: true } });
+    await expect(legacy).rejects.toThrow("Conversation changed during detail read");
+    await expect(queued).rejects.toThrow("Conversation changed during detail read");
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates pinned and older presentation envelopes without moving the recent reader revision", async () => {
+    vi.useFakeTimers();
+    const fixture = committedChatFixture();
+    const page = { ...fixture.page, source_epoch: null, next_before: "before" };
+    const olderEvent = { ...page.events[0], id: "older", sequence: -1 };
+    const older = { ...page, revision: "older-revision", events: [olderEvent], next_before: "older-before",
+      presentation: { version: 1, payload: { ...fixture.presentation, items: [] } } };
+    useRemoteStore.setState({ status: "loading", activeAgentId: page.session_id, activeAgentViewMode: "chat",
+      chatPage: page, chatEvents: page.events, chatNextBefore: "before", chatHasOlder: true });
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(older);
+    await useRemoteStore.getState().loadOlderActiveAgentChat();
+    expect(useRemoteStore.getState().chatPage).toMatchObject({ revision: page.revision, presentation: older.presentation, events: older.events });
+    expect(useRemoteStore.getState().chatPresentationPage).toBe(older);
+    const loadedIds = useRemoteStore.getState().chatEvents.map((event) => event.id);
+    const incoming = { ...page, revision: "fresh-revision", presentation: undefined,
+      events: [page.events[0], { ...page.events[0], id: "unseen" }], next_before: "fresh-head" };
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(incoming);
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual(loadedIds);
+    expect(useRemoteStore.getState().chatPage?.presentation).toBeUndefined();
+    expect(useRemoteStore.getState().chatPage?.events).toBe(incoming.events);
+    expect(useRemoteStore.getState().chatPresentationPage).toBe(incoming);
+    expect(useRemoteStore.getState().chatNextBefore).toBe("older-before");
+  });
+
   it("bootstraps stopped owned archive rows, Older and lazy bodies without native renewal", async () => {
     vi.useFakeTimers();
     const memberA = "source:agent-1:retired-epoch:00000000000000000001:assistant-a:0";
@@ -928,10 +1032,11 @@ describe("useRemoteStore watchlists", () => {
     const body = deferred<RemoteAgentChatPage>();
     useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
       chatEvents: initial.events, chatPage: initial });
-    vi.mocked(remoteClient.loadAgentChatPage).mockReturnValueOnce(body.promise)
-      .mockResolvedValueOnce({ ...initial, archive_read_ready: undefined, reset: true, events: [] });
+    vi.mocked(remoteClient.loadAgentChatPage).mockReturnValueOnce(body.promise);
     const pending = useRemoteStore.getState().loadActiveAgentChatDetail("owned-body");
-    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    // An external qualification change must retire the body even while the
+    // detail read owns the slot and ordinary refreshes cannot dispatch.
+    useRemoteStore.setState({ chatPage: { ...initial, archive_read_ready: undefined, reset: true, events: [] } });
     body.resolve(stoppedArchivePage({ detail: { event_id: "owned", text: "Retired body", next: null, complete: true } }));
     await expect(pending).rejects.toThrow("Conversation changed during detail read");
     expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls.every((call) => call[5] === undefined)).toBe(true);

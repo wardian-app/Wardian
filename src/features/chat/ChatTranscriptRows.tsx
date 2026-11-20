@@ -1,7 +1,8 @@
 import { Check, ChevronRight } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import type { AgentChatDetail, AgentChatEvent, AgentChatRole } from "../../types";
+import type { AgentChatDetail, AgentChatEvent, AgentChatRole, ChatStepDetail } from "../../types";
+import { CommittedTurn } from "./CommittedTurn";
 import { utf8Window } from "./chatReadState";
 import {
   classifyActivityLanguage,
@@ -75,6 +76,7 @@ export interface ChatTranscriptRowProps {
   /** The one approval a response can still reach; null when none is pending. */
   liveApprovalId?: string | null;
   onLoadDetail?: (reference: string) => Promise<AgentChatDetail>;
+  onLoadStepDetail?: (reference: string) => Promise<ChatStepDetail>;
 }
 
 type ChatDetailLoader = NonNullable<ChatTranscriptRowProps["onLoadDetail"]>;
@@ -99,7 +101,11 @@ export function ChatTranscriptRow({
   onOpenFile,
   liveApprovalId = null,
   onLoadDetail,
+  onLoadStepDetail,
 }: ChatTranscriptRowProps) {
+  if (row.kind === "committed_turn") return <CommittedTurn row={row} agentIsWorking={agentIsWorking} isSubmitting={isSubmitting}
+    linkHandling={linkHandling} onApprovalSubmit={onApprovalSubmit} onOpenFile={onOpenFile} liveApprovalId={liveApprovalId}
+    onLoadDetail={onLoadDetail} onLoadStepDetail={onLoadStepDetail} />;
   if (row.kind === "turn_change_summary") return <TurnChangeCard onOpenFile={onOpenFile} row={row} />;
   return row.kind === "work_group" ? <WorkGroupRow agentIsWorking={agentIsWorking} onLoadDetail={onLoadDetail} row={row} />
     : row.event.kind === "memory" ? <MemoryRow event={row.event} linkHandling={linkHandling} onLoadDetail={onLoadDetail} />
