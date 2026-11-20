@@ -22,6 +22,8 @@ mod chat_logical_index;
 pub(crate) mod chat_read;
 mod chat_read_store;
 mod chat_source_index;
+mod chat_turn_closure;
+mod chat_turn_index;
 mod compatibility_claims;
 mod mock_mirrors;
 pub(crate) mod provenance;
@@ -807,7 +809,7 @@ impl ConversationArchiveState {
         &self,
         mut context: ConversationArchiveContext,
         events: &[AgentChatEvent],
-        capture: Option<CapturePreparation<'_>>,
+        mut capture: Option<CapturePreparation<'_>>,
         native_messages: Option<&crate::commands::chat_recent_database::MessageAuthority>,
         watch: Option<&crate::commands::chat::MockWatchAuthority>,
         adoption: Option<&adoption::ArchiveAdoptionAuthority>,
@@ -817,13 +819,24 @@ impl ConversationArchiveState {
         } else {
             false
         };
-        if !events
+        let closure_receipts = chat_turn_closure::prepare(&context, events, capture.as_ref())?;
+        let lifecycle_handle = if !events
             .iter()
             .any(|event| record_kind_from_chat_event_kind(&event.kind).is_some())
             && !recovering
         {
-            return Ok((0, None));
-        }
+            if closure_receipts.is_empty() {
+                return Ok((0, None));
+            }
+            // A closing observation may enrich only an already-owned source.
+            // Never allocate a conversation from a status-only batch.
+            let Some(handle) = storage::existing_handle_for_source(&context)? else {
+                return Ok((0, None));
+            };
+            Some(handle)
+        } else {
+            None
+        };
         let provider_source_key = context
             .provider_source_key
             .clone()
@@ -847,7 +860,7 @@ impl ConversationArchiveState {
                 ));
             }
         }
-        let sanitized: Vec<_> = events
+        let mut sanitized: Vec<_> = events
             .iter()
             .cloned()
             .map(|mut event| {
@@ -862,6 +875,7 @@ impl ConversationArchiveState {
                 // Generic provider/Watch strings cannot establish this binding.
                 if let Some(metadata) = event.metadata.as_object_mut() {
                     metadata.remove(crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING);
+                    metadata.remove(chat_turn_closure::METADATA_KEY);
                 }
                 if let Some(authority) =
                     native_messages.filter(|authority| authority.proves(&context, &event))
@@ -878,6 +892,7 @@ impl ConversationArchiveState {
                 Ok(event)
             })
             .collect::<io::Result<_>>()?;
+        chat_turn_closure::attach(&closure_receipts, &mut sanitized, capture.as_ref())?;
         let events = sanitized.as_slice();
         let active_events = events
             .iter()
@@ -885,7 +900,9 @@ impl ConversationArchiveState {
             .cloned()
             .collect::<Vec<_>>();
         let batch_events = coalesce_batch_observations(&active_events)?;
-        let mut handle = if let Some(authority) = adoption {
+        let mut handle = if let Some(handle) = lifecycle_handle {
+            handle
+        } else if let Some(authority) = adoption {
             if lock_active(&self.active)?
                 .get(&context.agent_id)
                 .is_some_and(|active| active.conversation_id != authority.conversation_id())
@@ -952,7 +969,7 @@ impl ConversationArchiveState {
             }
         }
         let before_compatibility_events = existing_events.clone();
-        let (batch_events, compatibility_overlay) = if let Some(capture) = capture {
+        let (batch_events, mut compatibility_overlay) = if let Some(capture) = capture.as_mut() {
             #[cfg(test)]
             if self
                 .fail_compatibility_stage
@@ -992,6 +1009,14 @@ impl ConversationArchiveState {
         } else {
             (batch_events, HashMap::new())
         };
+        chat_turn_closure::attach(&closure_receipts, &mut existing_events, capture.as_ref())?;
+        for event in compatibility_overlay.values_mut() {
+            chat_turn_closure::attach(
+                &closure_receipts,
+                std::slice::from_mut(event),
+                capture.as_ref(),
+            )?;
+        }
         // Only the capture owner's sealed, durable Codex reservation admits
         // this historical coordinate upgrade. Generic identity matching keeps
         // rejecting unframed-to-framed aliases.

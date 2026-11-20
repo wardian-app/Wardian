@@ -4,6 +4,9 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 
 use serde::{Deserialize, Serialize, Serializer};
+use wardian_core::models::chat_presentation::{
+    ChatPresentation, ChatPresentationV1, CHAT_PRESENTATION_VERSION,
+};
 
 use super::super::chat_read_store::{digest, valid_ref, Dependency, Store, OBJECT_BYTES};
 use super::{Head, Row, PAGE_ROWS};
@@ -55,6 +58,7 @@ impl Binding {
 pub(in crate::state::conversation_archive) struct PackedPage {
     pub(super) entries: Vec<PackedEntry>,
     pub(super) has_older: bool,
+    pub(super) presentation: Option<ChatPresentation>,
     binding: Binding,
     headers: Vec<String>,
     lookahead: Option<(String, String)>,
@@ -82,6 +86,10 @@ struct EncodedPage {
     entries: Vec<EncodedEntry>,
     has_older: bool,
     lookahead: Option<(String, String)>,
+    // The legacy header read skips the additive records. Their dedicated
+    // bounded read runs only after the final canonical window is selected.
+    #[serde(default, rename = "presentation")]
+    _presentation: Option<serde::de::IgnoredAny>,
 }
 
 impl Serialize for PackedPage {
@@ -98,6 +106,8 @@ impl Serialize for PackedPage {
             entries: Vec<Entry<'a>>,
             has_older: bool,
             lookahead: &'a Option<(String, String)>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            presentation: &'a Option<ChatPresentation>,
         }
         Page {
             binding: &self.binding,
@@ -113,6 +123,7 @@ impl Serialize for PackedPage {
                 .collect(),
             has_older: self.has_older,
             lookahead: &self.lookahead,
+            presentation: &self.presentation,
         }
         .serialize(serializer)
     }
@@ -182,10 +193,23 @@ impl PackedPage {
             headers,
             has_older: encoded.has_older,
             lookahead: encoded.lookahead,
+            presentation: None,
         })
     }
 
     fn validate(&self, head: &Head) -> io::Result<()> {
+        if let Some(presentation) = &self.presentation {
+            if head.turns.is_empty() {
+                return Err(io::Error::other("unowned packed turn presentation"));
+            }
+            if presentation
+                .decode_v1()
+                .map_err(io::Error::other)?
+                .is_none()
+            {
+                return Err(io::Error::other("unsupported packed turn presentation"));
+            }
+        }
         if self.binding != Binding::from_head(head)?
             || self.entries.len() > PAGE_ROWS
             || self.entries.len() != self.headers.len()
@@ -302,12 +326,41 @@ pub(super) fn prepare(store: &mut Store, head: &Head) -> io::Result<Option<Strin
         });
         headers.push(header);
     }
+    let preparing_turns = head.progress == "ready" && !head.turns.is_empty();
+    let presentation = if preparing_turns {
+        let events = super::canonical_display_window(
+            entries
+                .iter()
+                .rev()
+                .map(|entry| super::display_event(entry.row.clone(), &entry.reference))
+                .collect(),
+        );
+        store
+            .read_allowance(1024, 1024 * 1024, |store| {
+                head.turns.page(store, &events, true)
+            })
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    if preparing_turns && !store.can_prepare_packed_recent() {
+        return Ok(None);
+    }
+    let presentation = presentation
+        .map(|value| -> io::Result<_> {
+            Ok(ChatPresentation {
+                version: CHAT_PRESENTATION_VERSION,
+                payload: serde_json::to_value(value).map_err(io::Error::other)?,
+            })
+        })
+        .transpose()?;
     let packed = PackedPage {
         binding: Binding::from_head(head)?,
         has_older: lookahead.is_some(),
         lookahead,
         entries,
         headers,
+        presentation,
     };
     packed.validate(head)?;
     store.put_packed_recent(&packed)
@@ -321,6 +374,51 @@ pub(super) fn read(store: &mut Store, reference: &str, head: &Head) -> io::Resul
     let page = store.read_packed_recent(reference)?;
     page.validate(head)?;
     Ok(page)
+}
+
+/// Read only the additive metadata from the authenticated pack. Existing Row
+/// decoding already proved the event window; skip its embedded header strings
+/// rather than charging and decoding the same Rows a second time.
+pub(super) fn read_presentation(
+    store: &mut Store,
+    reference: &str,
+    head: &Head,
+) -> io::Result<Option<ChatPresentationV1>> {
+    #[derive(Deserialize)]
+    struct Metadata {
+        binding: Binding,
+        #[serde(default)]
+        presentation: Option<ChatPresentation>,
+    }
+    let bytes = store.read_bytes(reference, PACKED_BYTES)?;
+    let metadata: Metadata = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if metadata.binding != Binding::from_head(head)? {
+        return Err(io::Error::other("stale packed turn presentation"));
+    }
+    let presentation = metadata
+        .presentation
+        .map(|value| {
+            let decoded = value.decode_v1().map_err(io::Error::other)?;
+            if decoded.is_none() {
+                eprintln!(
+                    "Chat presentation version {} is unsupported; using legacy events",
+                    value.version
+                );
+            }
+            Ok::<_, io::Error>(decoded)
+        })
+        .transpose()?
+        .flatten();
+    if let Some(presentation) = &presentation {
+        for _ in 0..presentation.items.len()
+            + presentation.turns.len()
+            + presentation.state_event_refs.len()
+            + presentation.legacy_turns.len()
+        {
+            store.account_packed_header()?;
+        }
+    }
+    Ok(presentation)
 }
 
 #[cfg(test)]

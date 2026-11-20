@@ -139,12 +139,20 @@ impl ProviderLogSourceProof {
                     && row.text == event.text
                     && row.title == event.title
                     && row.command == event.command
+                    && row.status == event.status
+                    && row.exit_code == event.exit_code
                     && [
                         "chat_source_ref",
                         "chat_source_start",
                         "chat_source_end",
                         "chat_source_epoch",
                         "provider_turn_id",
+                        "provider_phase",
+                        "request_root_id",
+                        "call_id",
+                        "chat_turn_adapter",
+                        "chat_turn_membership_complete",
+                        "chat_turn_membership_partial",
                         "provider_event_id",
                         "input_origin",
                         "raw_type",

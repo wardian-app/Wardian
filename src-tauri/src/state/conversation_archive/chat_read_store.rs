@@ -149,6 +149,23 @@ impl Store {
             || self.write_bytes.get() > 6 * READ_BYTES
     }
 
+    /// Spend a smaller read allowance on optional derived metadata. Counters
+    /// remain charged even on failure; restoring limits never renews a budget.
+    pub(super) fn read_allowance<T>(
+        &mut self,
+        objects: usize,
+        bytes: usize,
+        read: impl FnOnce(&mut Self) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let limits = (self.object_limit, self.byte_limit);
+        self.object_limit = self.object_limit.min(self.objects.saturating_add(objects));
+        self.byte_limit = self.byte_limit.min(self.bytes.saturating_add(bytes));
+        let result = read(self);
+        self.object_limit = limits.0;
+        self.byte_limit = limits.1;
+        result
+    }
+
     pub(super) fn read_bytes(&mut self, reference: &str, limit: usize) -> io::Result<Vec<u8>> {
         if !valid_ref(reference) || self.objects >= self.object_limit {
             return Err(io::Error::other("chat read reference/budget invalid"));

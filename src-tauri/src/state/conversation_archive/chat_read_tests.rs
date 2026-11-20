@@ -3,6 +3,67 @@ use crate::state::conversation_archive::{tests::isolated_home, ConversationArchi
 use wardian_core::conversations::AgentConversationLoggingSetting;
 use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
 
+fn presentation_contract_page() -> AgentChatPage {
+    serde_json::from_value(json!({
+        "session_id": "fixture-agent", "conversation_id": "fixture-conversation",
+        "generation": "fixture-generation", "source_epoch": null,
+        "revision": "fixture-revision", "events": [], "next_before": null,
+        "unchanged": false, "reset": false, "progress": "ready", "aliases": [],
+        "removed_ids": [], "detail": null, "bytes_read": 0, "records_decoded": 0,
+        "presentation": serde_json::from_str::<serde_json::Value>(include_str!(
+            "../../../../crates/wardian-core/src/chat_presentation/fixtures/presentation-v1.json"
+        )).unwrap()
+    }))
+    .unwrap()
+}
+
+#[test]
+fn turn_capability_fallback_preserves_the_entire_legacy_view() {
+    let mut original = presentation_contract_page();
+    original.events = vec![event("fixture-row", "Legacy content")];
+    assert!(finish(original.clone()).unwrap().presentation.is_some());
+    for invalid in [
+        json!({"version": 9000, "payload": ["future shape"]}),
+        json!({"version": 1, "payload": {"items": [], "turns": ["bad turn"]}}),
+    ] {
+        let mut page = original.clone();
+        page.presentation = Some(serde_json::from_value(invalid).unwrap());
+        let result = finish(page).unwrap();
+        assert!(result.presentation.is_none());
+        assert_eq!(result.events, original.events);
+        assert_eq!(result.revision, original.revision);
+        assert_eq!(result.progress, original.progress);
+        assert!(!result.reset);
+    }
+}
+
+#[test]
+fn turn_capability_is_dropped_atomically_before_combined_page_budget_repair() {
+    let mut page = presentation_contract_page();
+    page.presentation.as_mut().unwrap().payload["future_extension"] = json!("x".repeat(220 * 1024));
+    page.events = vec![event("fixture-row", &"y".repeat(40 * 1024))];
+    assert!(page.presentation.as_ref().unwrap().decode_v1().is_ok());
+    assert!(serde_json::to_vec(&page).unwrap().len() > IPC_BYTES);
+    let result = finish(page.clone()).unwrap();
+    assert!(result.presentation.is_none());
+    assert_eq!(result.events, page.events);
+    assert_eq!(result.revision, page.revision);
+    assert_eq!(result.progress, "ready");
+    assert!(serde_json::to_vec(&result).unwrap().len() <= IPC_BYTES);
+}
+
+#[test]
+fn step_detail_from_another_view_revision_drops_the_whole_capability() {
+    let mut page = presentation_contract_page();
+    page.presentation.as_mut().unwrap().payload["detail"] = json!({
+        "step_key": "step:fixture", "revision": "stale-revision", "text": "output",
+        "format": "text", "pending": false, "unavailable": false, "complete": true,
+        "truncated_before": false, "total_bytes": 6
+    });
+    assert!(page.presentation.as_ref().unwrap().decode_v1().is_ok());
+    assert!(finish(page).unwrap().presentation.is_none());
+}
+
 #[test]
 fn narrative_header_preview_ends_at_a_complete_word() {
     let prefix = format!("{}Actions → ", "A complete sentence. ".repeat(48));
@@ -1071,7 +1132,7 @@ fn tool_arguments_and_artifact_output_share_the_bounded_body_without_losing_eith
     );
 }
 
-fn event(id: &str, text: &str) -> AgentChatEvent {
+pub(super) fn event(id: &str, text: &str) -> AgentChatEvent {
     AgentChatEvent {
         id: id.into(),
         session_id: "agent-1".into(),
@@ -1093,13 +1154,13 @@ fn event(id: &str, text: &str) -> AgentChatEvent {
     }
 }
 
-fn context() -> ConversationArchiveContext {
+pub(super) fn context() -> ConversationArchiveContext {
     let mut context = ConversationArchiveContext::for_agent_id("agent-1", "mock");
     context.provider_source_key = Some("mock:one".into());
     context
 }
 
-fn snapshot(
+pub(super) fn snapshot(
     context: &ConversationArchiveContext,
 ) -> crate::commands::chat::AgentArchiveCaptureSnapshot {
     crate::commands::chat::AgentArchiveCaptureSnapshot {
@@ -1123,7 +1184,7 @@ fn snapshot(
     }
 }
 
-fn candidate(events: Vec<AgentChatEvent>) -> Candidate {
+pub(super) fn candidate(events: Vec<AgentChatEvent>) -> Candidate {
     Candidate {
         context: context(),
         conversation_id: "conversation".into(),
@@ -3106,7 +3167,7 @@ fn commentary_item_line_with_text(id: &str, text: &str) -> String {
     .to_string()
 }
 
-fn finish_source_index(snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot) {
+pub(super) fn finish_source_index(snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot) {
     for _ in 0..128 {
         if !super::advance_source_index(snapshot).unwrap() {
             return;
@@ -4830,7 +4891,7 @@ fn provisional_explicit_turn_pair_joins_across_windows_and_older_page_boundary()
     assert!(head("agent-1").unwrap().is_none());
 }
 
-fn finish_projection(archive: &ConversationArchiveState) {
+pub(super) fn finish_projection(archive: &ConversationArchiveState) {
     for _ in 0..128 {
         if !archive.chat_projection.advance("agent-1").unwrap() {
             return;
@@ -10505,7 +10566,7 @@ fn rejected_source_frontier_keeps_its_cursor_without_older_attestation() {
     );
 }
 
-fn owned_native_source_for_provider_session(
+pub(super) fn owned_native_source_for_provider_session(
     path: &Path,
     contents: &str,
     agent_id: &str,

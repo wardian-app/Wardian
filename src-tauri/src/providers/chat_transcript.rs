@@ -38,6 +38,8 @@ pub(crate) struct TranscriptNormalizationState {
     pending_context_indices: Vec<usize>,
     tool_request_roots: HashMap<String, ToolRequestRootState>,
     seen_gemini_messages: HashSet<String>,
+    #[serde(default)]
+    turn_membership: super::chat_turn_membership::State,
 }
 
 impl Default for TranscriptNormalizationState {
@@ -53,6 +55,7 @@ impl Default for TranscriptNormalizationState {
             pending_context_indices: Vec::new(),
             tool_request_roots: HashMap::new(),
             seen_gemini_messages: HashSet::new(),
+            turn_membership: Default::default(),
         }
     }
 }
@@ -239,9 +242,12 @@ pub(crate) fn normalize_chat_lines_with_state(
                 }
             }
         }
+        let turn_record = matches!(normalized_provider.as_str(), "codex" | "claude")
+            .then(|| serde_json::from_str::<Value>(raw_line).ok())
+            .flatten();
         let codex_turn_context = if normalized_provider == "codex" {
-            serde_json::from_str::<Value>(raw_line)
-                .ok()
+            turn_record
+                .as_ref()
                 .filter(|value| value.get("type").and_then(Value::as_str) == Some("turn_context"))
         } else {
             None
@@ -289,6 +295,11 @@ pub(crate) fn normalize_chat_lines_with_state(
         let Some(mut event) =
             normalize_chat_line(session_id, normalized_provider.as_str(), raw_line, sequence)
         else {
+            if let Some(raw) = &turn_record {
+                state
+                    .turn_membership
+                    .observe(&normalized_provider, raw, None);
+            }
             continue;
         };
         if enforce_limits && normalized_provider == "claude" {
@@ -567,6 +578,11 @@ pub(crate) fn normalize_chat_lines_with_state(
             }
         }
 
+        if let Some(raw) = &turn_record {
+            state
+                .turn_membership
+                .observe(&normalized_provider, raw, Some(&mut event));
+        }
         let pending_context = normalized_provider == "codex"
             && input_origin.as_deref() == Some("context_injection")
             && metadata_string(&event.metadata, "request_root_id").is_none()

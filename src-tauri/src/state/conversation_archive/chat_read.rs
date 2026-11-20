@@ -21,6 +21,8 @@ use super::ConversationArchiveContext;
 mod cold_bootstrap;
 #[path = "chat_read_packed_recent.rs"]
 pub(super) mod packed_recent;
+#[path = "chat_turn_read.rs"]
+mod turn_read;
 
 pub(crate) const PAGE_ROWS: usize = 80;
 pub(crate) const PREVIEW_BYTES: usize = 1024;
@@ -206,6 +208,11 @@ pub(crate) struct Head {
     pub(crate) identities: Option<String>,
     #[serde(default)]
     logical: super::chat_logical_index::Index,
+    #[serde(
+        default,
+        skip_serializing_if = "super::chat_turn_index::Index::is_empty"
+    )]
+    turns: super::chat_turn_index::Index,
     pub(crate) committed_output_bytes: u64,
     pub(crate) capture_stamp: String,
     pub(crate) progress: String,
@@ -251,6 +258,11 @@ impl Head {
             .chain(self.identities.iter())
             .map(|root| Dependency::Node(root.clone()))
             .collect::<Vec<_>>();
+        roots.extend(
+            self.turns
+                .node_roots()
+                .map(|root| Dependency::Node(root.to_owned())),
+        );
         roots.extend(
             self.logical
                 .node_roots()
@@ -318,6 +330,16 @@ struct Work {
     bodies: VecDeque<BodyWork>,
     source_proof: Option<super::chat_logical_index::SourceProof>,
     archive_display_handoff: bool,
+    step_orders: HashMap<(String, String), String>,
+    request_starts: HashMap<String, RequestStart>,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RequestStart {
+    order: String,
+    event_id: String,
+    source_ref: Option<String>,
+    native_key: Option<String>,
 }
 
 impl Work {
@@ -1080,6 +1102,7 @@ impl ProjectionOwner {
                 recent_admission: admission,
                 archive_read_ready: false,
                 revision: token,
+                presentation: None,
                 events: if unchanged { Vec::new() } else { headers },
                 next_before: None,
                 unchanged,
@@ -1876,6 +1899,9 @@ pub(crate) fn header(event: &AgentChatEvent) -> AgentChatEvent {
         "mock_watch_alias",
         "chat_identity_resolution",
         "tool_name",
+        "chat_turn_adapter",
+        "chat_turn_membership_complete",
+        "chat_turn_membership_partial",
     ] {
         if let Some(value) = event.metadata.get(key) {
             if let Some(value) = value.as_str() {
@@ -1919,6 +1945,29 @@ pub(crate) fn header(event: &AgentChatEvent) -> AgentChatEvent {
     }
     if truncated {
         metadata.insert("chat_tool_input_truncated".into(), json!(true));
+    }
+    if matches!(
+        event.kind,
+        wardian_core::models::chat::AgentChatEventKind::ToolCall
+            | wardian_core::models::chat::AgentChatEventKind::ToolResult
+            | wardian_core::models::chat::AgentChatEventKind::Approval
+    ) {
+        let no_artifacts = ["text_artifact_refs", "artifact_refs"]
+            .iter()
+            .all(|key| event.metadata[*key].as_array().is_none_or(Vec::is_empty))
+            && event.metadata["archive_record"]["artifact_refs"]
+                .as_array()
+                .is_none_or(Vec::is_empty);
+        let inline_complete = event
+            .text
+            .as_ref()
+            .is_some_and(|text| text.len() <= PREVIEW_BYTES)
+            && event.metadata["text_excerpt"].is_null()
+            && (event.metadata["archive_record"]["excerpt"].is_null()
+                || !event.metadata["archive_record"]["text"].is_null())
+            && no_artifacts
+            && !truncated;
+        metadata.insert("chat_step_inline_complete".into(), json!(inline_complete));
     }
     AgentChatEvent {
         id: event.id.clone(),
@@ -2079,10 +2128,73 @@ impl ProjectionOwner {
         let source_proof = super::chat_logical_index::source_proof(&candidate.context)?;
         let source_coverage =
             super::chat_logical_index::mock_canonical_coverage(&candidate.context)?;
+        let mut step_orders = HashMap::new();
+        let mut request_starts = HashMap::new();
         let signatures = candidate
             .events
             .iter()
             .map(|event| {
+                let admitted = source_proof.as_ref().is_none_or(|proof| {
+                    event.metadata["chat_source_start"]
+                        .as_u64()
+                        .zip(event.metadata["chat_source_end"].as_u64())
+                        .is_none_or(|(start, end)| proof.policy.admits(start, end))
+                });
+                if admitted
+                    && event.kind == wardian_core::models::chat::AgentChatEventKind::Message
+                    && event.role == Some(wardian_core::models::chat::AgentChatRole::User)
+                    && matches!(
+                        event.metadata["input_origin"].as_str(),
+                        Some("human_input" | "agent_input")
+                    )
+                    && matches!(
+                        event.metadata["input_purpose"].as_str(),
+                        None | Some("request")
+                    )
+                {
+                    if let Some((root, order)) = event.metadata["request_root_id"]
+                        .as_str()
+                        .zip(presentation_order(event))
+                    {
+                        let native = event.metadata["chat_recent_native_key"]
+                            .as_str()
+                            .filter(|key| valid_ref(key))
+                            .map(str::to_owned);
+                        let value = RequestStart {
+                            order,
+                            event_id: event.id.clone(),
+                            source_ref: event.metadata["chat_source_ref"]
+                                .as_str()
+                                .map(str::to_owned),
+                            native_key: native,
+                        };
+                        let start = request_starts
+                            .entry(root.to_owned())
+                            .or_insert_with(|| value.clone());
+                        if value < *start {
+                            *start = value;
+                        }
+                    }
+                }
+                if admitted
+                    && event.kind == wardian_core::models::chat::AgentChatEventKind::ToolCall
+                {
+                    if let Some((root, call)) = event.metadata["request_root_id"]
+                        .as_str()
+                        .zip(super::chat_turn_index::call_identity(event))
+                    {
+                        if let Some(order) = presentation_order(event) {
+                            step_orders
+                                .entry((root.to_owned(), call.to_owned()))
+                                .and_modify(|known: &mut String| {
+                                    if order < *known {
+                                        *known = order.clone();
+                                    }
+                                })
+                                .or_insert(order);
+                        }
+                    }
+                }
                 let display = header(event);
                 let body = event.metadata["text_artifact_refs"]
                     .as_array()
@@ -2096,9 +2208,10 @@ impl ProjectionOwner {
                     .unwrap_or_default();
                 let signature = digest(
                     format!(
-                        "{}:{body:?}:{body_binding}:{:?}",
+                        "{}:{body:?}:{body_binding}:{:?}:{}",
                         serde_json::to_string(&display).unwrap_or_default(),
-                        claude_relations.get(&event.id)
+                        claude_relations.get(&event.id),
+                        event.metadata[super::chat_turn_closure::METADATA_KEY],
                     )
                     .as_bytes(),
                 );
@@ -2114,6 +2227,7 @@ impl ProjectionOwner {
             root: None,
             identities: None,
             logical: Default::default(),
+            turns: Default::default(),
             committed_output_bytes: candidate.committed_output_bytes,
             capture_stamp,
             progress: "indexing".into(),
@@ -2215,6 +2329,7 @@ impl ProjectionOwner {
                 head.root = old.head.root;
                 head.identities = old.head.identities;
                 head.logical = old.head.logical;
+                head.turns = old.head.turns;
                 head.generation = old.head.generation;
                 published = old.published;
             }
@@ -2232,6 +2347,8 @@ impl ProjectionOwner {
                 bodies,
                 source_proof,
                 archive_display_handoff: false,
+                step_orders,
+                request_starts,
             },
         );
         drop(works);
@@ -2291,6 +2408,7 @@ impl ProjectionOwner {
         let mut changes = HashMap::new();
         let mut new_bodies = VecDeque::new();
         let mut processed_rows = 0;
+        let mut new_requests = HashMap::new();
         for (ordinal, &index) in work.todo.iter().take(limit).enumerate() {
             if store.objects >= 6000 {
                 break;
@@ -2313,7 +2431,72 @@ impl ProjectionOwner {
                 removed_display_ids: Vec::new(),
             };
             row.event.sequence = Some(index as u64 + 1);
+            let admitted = source_proof.as_ref().is_none_or(|proof| {
+                event.metadata["chat_source_start"]
+                    .as_u64()
+                    .zip(event.metadata["chat_source_end"].as_u64())
+                    .is_none_or(|(start, end)| proof.policy.admits(start, end))
+            });
+            if admitted {
+                let can_activate = if let Some(root) = event.metadata["request_root_id"].as_str() {
+                    if let Some(known) = new_requests.get(root) {
+                        *known
+                    } else {
+                        let new = if let Some(start) = work.request_starts.get(root) {
+                            let mut existing = store
+                                .get(&work.head.identities, &digest(start.event_id.as_bytes()))?
+                                .is_some();
+                            if !existing {
+                                if let Some(source) = start
+                                    .source_ref
+                                    .as_ref()
+                                    .filter(|source| *source != &start.event_id)
+                                {
+                                    existing = store
+                                        .get(&work.head.identities, &digest(source.as_bytes()))?
+                                        .is_some();
+                                }
+                            }
+                            if !existing {
+                                if let Some(native) = &start.native_key {
+                                    existing = store
+                                        .get(
+                                            &work.head.identities,
+                                            &recent_native_index_key(native),
+                                        )?
+                                        .is_some();
+                                }
+                            }
+                            !existing
+                        } else {
+                            false
+                        };
+                        new_requests.insert(root.to_owned(), new);
+                        new
+                    }
+                } else {
+                    false
+                };
+                let preferred = event.metadata["request_root_id"]
+                    .as_str()
+                    .zip(super::chat_turn_index::call_identity(event))
+                    .and_then(|(root, call)| {
+                        work.step_orders.get(&(root.to_owned(), call.to_owned()))
+                    })
+                    .map(String::as_str);
+                if let Some((turn_key, item_key)) =
+                    observe_turn(&mut store, &mut head, event, preferred, can_activate)?
+                {
+                    row.event.metadata["chat_turn_key"] = json!(turn_key);
+                    row.event.metadata["chat_turn_item_key"] = json!(item_key);
+                }
+            }
             if let Some(source) = body_source(&work.candidate, event)? {
+                if let Some(input) = tool_input_body(event) {
+                    let offset =
+                        input.len() + usize::from(matches!(source, BodySource::Combined(_))) * 2;
+                    row.event.metadata["chat_step_output_start"] = json!(offset);
+                }
                 row.body = Some(Body {
                     binding: source.binding()?,
                     ..Body::default()
@@ -2526,6 +2709,7 @@ impl ProjectionOwner {
         let (_, objects) = locations(&context.agent_id)?;
         let mut store = Store::checkpoint_writer(&objects);
         let mut head = work.head.clone();
+        let membership = observe_turn(&mut store, &mut head, &event, None, true)?;
         let mut row = Row {
             agent_id: context.agent_id.clone(),
             conversation_id: conversation_id.into(),
@@ -2535,6 +2719,10 @@ impl ProjectionOwner {
             relation: None,
             removed_display_ids: Vec::new(),
         };
+        if let Some((turn_key, item_key)) = membership {
+            row.event.metadata["chat_turn_key"] = json!(turn_key);
+            row.event.metadata["chat_turn_item_key"] = json!(item_key);
+        }
         if let Some(text) = event
             .text
             .as_ref()
@@ -2582,6 +2770,53 @@ impl ProjectionOwner {
             chat_conversation_id: conversation_id.into(),
             chat_source_epoch: work.head.source_epoch.clone(),
         }))
+    }
+}
+
+/// Source coordinates and accepted archive sequences order evidence. The
+/// projection's mutable row ordinal is deliberately excluded.
+fn presentation_order(event: &AgentChatEvent) -> Option<String> {
+    if let Some((start, end)) = event.metadata["chat_source_start"]
+        .as_u64()
+        .zip(event.metadata["chat_source_end"].as_u64())
+    {
+        return Some(format!(
+            "source:{start:020}:{end:020}:{:020}:{}",
+            event.sequence.unwrap_or(0),
+            event.id
+        ));
+    }
+    event.metadata["archive_record"]["seq"]
+        .as_u64()
+        .or(event.sequence)
+        .map(|seq| format!("archive:{seq:020}:{}", event.id))
+}
+
+fn observe_turn(
+    store: &mut Store,
+    head: &mut Head,
+    event: &AgentChatEvent,
+    preferred_step_order: Option<&str>,
+    can_activate: bool,
+) -> io::Result<Option<(String, String)>> {
+    let Some(order) = presentation_order(event) else {
+        return Ok(None);
+    };
+    let scope = super::chat_turn_index::Scope {
+        agent_id: &head.agent_id,
+        conversation_id: &head.conversation_id,
+        source_key: head.source_key.as_deref(),
+        source_epoch: head.source_epoch.as_deref(),
+        can_activate,
+    };
+    if head
+        .turns
+        .observe(store, &scope, event, &order, preferred_step_order)?
+        .is_some()
+    {
+        head.turns.event_keys(store, &event.id)
+    } else {
+        Ok(None)
     }
 }
 
@@ -2747,6 +2982,16 @@ pub(super) fn alias(
 }
 
 fn display_event(mut row: Row, reference: &str) -> AgentChatEvent {
+    // Only the authenticated canonical Row owner can issue this certificate.
+    // Raw-source header construction deliberately does not copy it.
+    row.event.metadata["_wardian_canonical_row"] = json!(true);
+    if row.body.is_some()
+        || row.event.kind == wardian_core::models::chat::AgentChatEventKind::ToolResult
+        || (row.event.metadata["chat_step_inline_complete"] == true
+            && row.event.text.as_ref().is_some_and(|text| !text.is_empty()))
+    {
+        row.event.metadata["chat_step_detail_ref"] = json!(format!("{reference}:tail"));
+    }
     if let Some(relation) = row.relation {
         row.event.metadata["chat_display_physical_id"] = json!(row.event.id);
         row.event.id = relation.id;
@@ -2860,6 +3105,9 @@ fn page_limited(
         let mut event = display_event(row, &reference);
         if let Some(detail) = event.metadata["chat_detail_ref"].as_str() {
             event.metadata["chat_detail_ref"] = json!(format!("{head_ref}:{detail}"));
+        }
+        if let Some(detail) = event.metadata["chat_step_detail_ref"].as_str() {
+            event.metadata["chat_step_detail_ref"] = json!(format!("{head_ref}:{detail}"));
         }
         events.push(event);
     }
@@ -3021,10 +3269,50 @@ pub(crate) fn archive_page_is_current(
 }
 
 pub(crate) fn finish(mut page: AgentChatPage) -> io::Result<AgentChatPage> {
+    // Ownership is an internal staging fact, never a claim accepted from or
+    // exposed to a client. The versioned payload carries the admitted result.
+    for event in &mut page.events {
+        if let Some(metadata) = event.metadata.as_object_mut() {
+            metadata.remove("_wardian_canonical_row");
+        }
+    }
+    if let Some(presentation) = &page.presentation {
+        match presentation.decode_v1() {
+            Ok(Some(value)) => {
+                if value
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.revision != page.revision)
+                {
+                    eprintln!("Stale Chat step detail; using legacy events");
+                    page.presentation = None;
+                }
+            }
+            Ok(None) => {
+                eprintln!(
+                    "Chat presentation version {} is unsupported; using legacy events",
+                    presentation.version
+                );
+                page.presentation = None;
+            }
+            Err(_) => {
+                eprintln!("Invalid Chat turn presentation; using legacy events");
+                page.presentation = None;
+            }
+        }
+    }
     for event in &mut page.events {
         if let Some(metadata) = event.metadata.as_object_mut() {
             metadata.remove(crate::providers::chat_transcript::CODEX_DISPLAY_IDENTITY_SHA256);
         }
+    }
+    if page.presentation.is_some()
+        && serde_json::to_vec(&page).map_err(io::Error::other)?.len() > IPC_BYTES
+    {
+        // Trim one representation only. A partial capability could keep refs
+        // to headers removed by the legacy window's independent budget repair.
+        eprintln!("Chat turn presentation exceeds page budget; using legacy events");
+        page.presentation = None;
     }
     if serde_json::to_vec(&page).map_err(io::Error::other)?.len() > IPC_BYTES {
         page.archive_read_ready = false;
@@ -4012,6 +4300,7 @@ fn read_with_recent_limit(
         recent_admission: None,
         archive_read_ready: false,
         revision: token.clone(),
+        presentation: None,
         events: Vec::new(),
         next_before: None,
         unchanged: false,
@@ -4472,7 +4761,11 @@ fn read_with_recent_limit(
             if pinned.agent_id != context.agent_id || pinned.generation != published.generation {
                 return Err(io::Error::other("stale chat detail generation"));
             }
-            let offset = parts[2].parse().map_err(io::Error::other)?;
+            let offset = if parts[2] == "tail" {
+                None
+            } else {
+                Some(parts[2].parse().map_err(io::Error::other)?)
+            };
             let original: Row = store.read(parts[1])?;
             if original.agent_id != context.agent_id
                 || store.get(&pinned.root, &original.key)?.as_deref() != Some(parts[1])
@@ -4489,9 +4782,28 @@ fn read_with_recent_limit(
             {
                 return Err(io::Error::other("chat body binding changed"));
             }
-            let mut body = detail(&mut store, published, &newest_ref, offset)?;
-            body.next = body.next.map(|next| format!("{reference}:{next}"));
-            result.detail = Some(body);
+            if let Some(offset) = offset {
+                let mut body = detail(&mut store, published, &newest_ref, offset)?;
+                body.next = body.next.map(|next| format!("{reference}:{next}"));
+                result.detail = Some(body);
+            } else {
+                let detail =
+                    turn_read::detail_tail(&mut store, published, &newest_ref, &result.revision)?;
+                result.presentation =
+                    Some(wardian_core::models::chat_presentation::ChatPresentation {
+                        version: wardian_core::models::chat_presentation::CHAT_PRESENTATION_VERSION,
+                        payload: serde_json::to_value(
+                            wardian_core::models::chat_presentation::ChatPresentationV1 {
+                                turns: Vec::new(),
+                                items: Vec::new(),
+                                state_event_refs: Vec::new(),
+                                legacy_turns: Vec::new(),
+                                detail: Some(detail),
+                            },
+                        )
+                        .map_err(io::Error::other)?,
+                    });
+            }
         } else if let Some(cursor) = cursor.filter(|_| !source_page_reset) {
             let (pinned_ref, before) = cursor
                 .split_once(':')
@@ -5258,6 +5570,15 @@ fn read_with_recent_limit(
             result.progress = progress;
         }
     }
+    if detail_ref.is_none() {
+        turn_read::attach(
+            &mut store,
+            current_head.as_ref(),
+            current.as_deref(),
+            cursor.is_none(),
+            &mut result,
+        )?;
+    }
     result.bytes_read += store.bytes;
     result.records_decoded += store.objects;
     finish_recent(result)
@@ -5429,6 +5750,7 @@ fn read_revalidated(
         recent_admission: None,
         archive_read_ready: false,
         revision: revision.to_owned(),
+        presentation: None,
         events,
         next_before: None,
         unchanged: false,
@@ -5496,6 +5818,7 @@ fn finish_revalidated(
         recent_admission: None,
         archive_read_ready: false,
         revision: revision.to_owned(),
+        presentation: None,
         events,
         next_before: None,
         unchanged: false,
@@ -5570,10 +5893,26 @@ pub(crate) fn revalidation_page_is_current(
         && !page.reset
 }
 
-fn project_display_result(result: &mut AgentChatPage) {
+/// Select the same logical window for packed metadata and public pages. Physical
+/// aliases remain in the Store; a certified display ID occupies one page slot.
+fn canonical_display_window(rows: Vec<AgentChatEvent>) -> Vec<AgentChatEvent> {
     let mut positions: HashMap<String, usize> = HashMap::new();
     let mut events: Vec<AgentChatEvent> = Vec::new();
-    for event in std::mem::take(&mut result.events) {
+    for event in rows {
+        if let Some(&index) = positions.get(&event.id) {
+            if events[index].sequence <= event.sequence {
+                events[index] = event;
+            }
+        } else {
+            positions.insert(event.id.clone(), events.len());
+            events.push(event);
+        }
+    }
+    events
+}
+
+fn project_display_result(result: &mut AgentChatPage) {
+    for event in &result.events {
         if let Some(members) = event.metadata["chat_display_member_ids"].as_array() {
             for member in members.iter().filter_map(|m| m.as_str()).take(4) {
                 result
@@ -5591,17 +5930,16 @@ fn project_display_result(result: &mut AgentChatPage) {
                 }
             }
         }
-        if let Some(&index) = positions.get(&event.id) {
-            if events[index].sequence <= event.sequence {
-                events[index] = event;
-            }
-        } else {
-            positions.insert(event.id.clone(), events.len());
-            events.push(event);
-        }
     }
+    let events = canonical_display_window(std::mem::take(&mut result.events));
+    let positions = events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<BTreeSet<_>>();
     // A relation re-established at this watermark supersedes an earlier removal.
-    result.removed_ids.retain(|id| !positions.contains_key(id));
+    result
+        .removed_ids
+        .retain(|id| !positions.contains(id.as_str()));
     result.aliases.sort_by(|a, b| {
         (&a.observation_id, &a.canonical_id).cmp(&(&b.observation_id, &b.canonical_id))
     });
@@ -5617,3 +5955,7 @@ pub(crate) use tests::{read, read_with_revalidation};
 #[cfg(test)]
 #[path = "chat_read_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "chat_turn_publication_tests.rs"]
+mod turn_presentation_tests;

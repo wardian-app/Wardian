@@ -1,0 +1,5 @@
+{"type":"user","uuid":"request","sessionId":"synthetic-session","parentUuid":null,"message":{"role":"user","content":"Run synthetic parallel tests."}}
+{"type":"assistant","uuid":"call-one","sessionId":"synthetic-session","parentUuid":"request","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-one","name":"Bash","input":{"command":"echo one"}}],"stop_reason":"tool_use"}}
+{"type":"assistant","uuid":"call-two","sessionId":"synthetic-session","parentUuid":"call-one","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-two","name":"Bash","input":{"command":"echo two"}}],"stop_reason":"tool_use"}}
+{"type":"user","uuid":"results","sessionId":"synthetic-session","parentUuid":"call-two","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"one passed"},{"type":"tool_result","tool_use_id":"tool-two","content":"two passed"}]}}
+{"type":"assistant","uuid":"answer","sessionId":"synthetic-session","parentUuid":"results","message":{"role":"assistant","content":[{"type":"text","text":"Synthetic tests passed."}],"stop_reason":"end_turn"}}

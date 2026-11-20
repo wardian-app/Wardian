@@ -84,6 +84,8 @@ export interface AgentChatPage {
     /** Complete owned archive read under a native capture stop; no source renewal authority. */
     archive_read_ready?: boolean;
     revision: string;
+    /** Optional producer presentation from this same committed view. */
+    presentation?: ChatPresentation;
     events: AgentChatEvent[];
     next_before: string | null;
     unchanged: boolean;
@@ -104,6 +106,98 @@ export interface AgentChatDetail {
     text: string;
     next: string | null;
     complete: boolean;
+}
+
+/** Interpret payload only after recognizing the version; unknown versions use legacy events. */
+export interface ChatPresentation {
+    version: number;
+    payload: ChatPresentationV1 | Record<string, unknown> | unknown[] | string | number | boolean | null;
+}
+
+/** Scope, revision, aliases, removals and bounded cursors come from the enclosing page. */
+export interface ChatPresentationV1 {
+    turns: ChatPresentedTurn[];
+    items: ChatPresentedItem[];
+    state_event_refs: { event_id: string; turn_key: string }[];
+    legacy_turns: ChatLegacyTurn[];
+    detail: ChatStepDetail | null;
+}
+
+export type ChatTurnStatus = "running" | "completed" | "action_required" | "failed" | "cancelled" | "incomplete" | "unknown";
+export type ChatStepStatus = ChatTurnStatus;
+
+export interface ChatPresentedTurn {
+    turn_key: string;
+    order_key: string;
+    membership_complete: boolean;
+    status: ChatTurnStatus;
+    /** References in this bounded page, not necessarily the whole turn. */
+    prompt_item_keys: string[];
+    answer_item_keys: string[];
+    references_complete: boolean;
+    duration_ms: number | null;
+    reported_changes: { file_count: number; evidence_ref: string } | null;
+    /** Producer totals include unloaded steps. */
+    step_count: number;
+    answer_recorded: boolean;
+    failed_step_count: number;
+    counts_complete: boolean;
+}
+
+export type ChatEvidenceIdentity =
+    | { kind: "source"; source_key: string; source_epoch: string; record_key: string }
+    | { kind: "submission"; submission_id: string };
+
+export interface ChatLegacyTurn {
+    turn_key: string;
+    order_key: string;
+    event_refs: string[];
+    kind: "unmigrated" | "earlier_activity";
+    membership_complete: boolean;
+}
+
+export interface ChatPresentedItem {
+    item_key: string;
+    turn_key: string;
+    order_key: string;
+    kind: "prompt" | "step" | "narration" | "answer";
+    provenance: "pending" | "provisional" | "canonical";
+    evidence: ChatEvidenceIdentity;
+    evidence_version: string;
+    admission_id: string | null;
+    submission_status: "queued" | "delivered" | "failed" | "cancelled" | "uncertain" | null;
+    event_refs: string[];
+    preview: { text: string; attachment_refs: string[] } | null;
+    step: ChatPresentedStep | null;
+}
+
+export interface ChatPresentedStep {
+    tool_name: string;
+    category: "shell" | "read" | "browser" | "edit" | "tool";
+    description: string;
+    status: ChatStepStatus;
+    summary: string | null;
+    invocation_ref: string | null;
+    result_ref: string | null;
+    approval_ref: string | null;
+    detail_availability: "pending" | "available" | "unavailable";
+    detail_ref: string | null;
+}
+
+/** Single retained tail; there is no continuation to accumulate in Chat state. */
+export interface ChatStepDetail {
+    step_key: string;
+    revision: string;
+    text: string;
+    input_text: string | null;
+    input_truncated: boolean;
+    result_summary: string | null;
+    format: "text" | "json";
+    pending: boolean;
+    unavailable: boolean;
+    complete: boolean;
+    truncated_before: boolean;
+    total_bytes: number | null;
 }
 
 export interface ProviderReadiness {

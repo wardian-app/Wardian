@@ -1,8 +1,9 @@
 # Chat turn presentation
 
-Status: proposed for review. Issue: [#1752](https://github.com/wardian-app/Wardian/issues/1752).
+Status: approved for implementation in [#1754](https://github.com/wardian-app/Wardian/pull/1754).
+Issue: [#1752](https://github.com/wardian-app/Wardian/issues/1752).
 Depends on [#1751](https://github.com/wardian-app/Wardian/issues/1751).
-This PR specifies behavior; implementation follows separately after review.
+Implementation proceeds in additive, versioned slices.
 
 ## Decision and evidence
 
@@ -273,6 +274,43 @@ remove compatibility last. Measure native incremental-publication cost and
 remote scroll behavior in implementation; the size thresholds above are product
 defaults, not measured performance claims. Public Chat guides and screenshots
 change with implementation.
+
+## Implementation amendment: identity boundaries
+
+Architect decision, 2026-11-19:
+
+- Committed turn presentation applies to every delivery path wherever canonical,
+  source-scoped request membership and other source identities are proven.
+  Unproven membership stays legacy or Earlier activity. Delivery identity does
+  not gate canonical turn presentation.
+- A provisional pending prompt is a transcript row only when an exact bridge
+  exists: a native broker acknowledgement tied to its provider turn and source
+  records, or a Claude mod transcript token carrying the exact interaction ID.
+  Other submissions, including terminal composer and live PTY input, keep their
+  pending state in the composer until the canonical prompt is committed once.
+  This is a known limitation; text and timing never establish correspondence.
+- Recent previews without canonical conversation identity retain the current
+  fast display and the one-second opening target. Once canonical data is
+  admitted, switch the view once while retaining the scroll anchor. Never mix
+  preview and canonical representations in one render. The preview-identity
+  bridge remains a named follow-up PR.
+- Propose a separate issue to route Claude Chat-composer submissions through
+  the Wardian mod with `asUser: true`, providing the same exact identity bridge.
+
+Canonical membership adapter decision, 2026-11-19:
+
+- This producer stage supports Codex and Claude. Codex membership requires an
+  explicit same-source `turn_context` and `task_started` bracket, closed by
+  `task_complete` with the same turn ID. Claude membership requires an explicit
+  `parentUuid` chain to the real user prompt in that source. Sidechain records
+  require an explicit link to their parent tool call.
+- These adapters stamp canonical request and provider-turn identity before
+  clipping. Neighbouring records, text and timing never establish membership.
+  Open brackets, broken chains and missing links remain partial. Counts cover
+  rooted items and read as "at least N" until the adapter proves closed,
+  complete membership. Unrooted work remains Earlier activity or legacy.
+- Pi, OpenCode, Antigravity and other providers retain the legacy view until
+  they have an independently proven source adapter.
 
 ## Mockups
 

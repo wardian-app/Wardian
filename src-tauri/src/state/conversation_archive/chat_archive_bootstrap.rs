@@ -303,6 +303,7 @@ fn select(
                 root: None,
                 identities: None,
                 logical: Default::default(),
+                turns: Default::default(),
                 committed_output_bytes: 0,
                 capture_stamp: "saved-archive".into(),
                 progress: "indexing".into(),

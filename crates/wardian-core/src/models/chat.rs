@@ -73,6 +73,10 @@ pub struct AgentChatPage {
     #[serde(default, skip_serializing_if = "is_false")]
     pub archive_read_ready: bool,
     pub revision: String,
+    /// Additive producer presentation from this same committed page. Previews
+    /// without canonical scope keep their existing representation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<super::chat_presentation::ChatPresentation>,
     pub events: Vec<AgentChatEvent>,
     pub next_before: Option<String>,
     pub unchanged: bool,

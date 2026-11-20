@@ -3,6 +3,7 @@ pub mod agent_telemetry;
 pub mod app_telemetry;
 pub mod automation;
 pub mod chat;
+pub mod chat_presentation;
 pub mod fs;
 pub mod git;
 pub mod library;
