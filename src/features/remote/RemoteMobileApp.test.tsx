@@ -701,7 +701,7 @@ describe("RemoteMobileApp", () => {
 
     expect(await screen.findByText("Loaded default chat.")).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
-      "/remote/api/agents/agent-1/chat?limit=8&recent_preview=true",
+      "/remote/api/agents/agent-1/chat?limit=8&recent_preview=true&preview_backing_ids=%5B%5D",
       expect.objectContaining({ method: "GET" }),
     );
   });
@@ -2604,34 +2604,46 @@ describe("RemoteMobileApp", () => {
       return Promise.resolve(new Response("{}", { status: 404 }));
     });
 
-    render(<RemoteMobileApp />);
+    const view = render(<RemoteMobileApp />);
+    try {
+      await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+      await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+      expect(await screen.findByText("Initial active message.")).toBeVisible();
+      expect(chatCalls).toBe(1);
+      const statusSocket = MockWebSocket.instances.find((socket) => socket.url.includes("/remote/api/status-stream"));
+      if (!statusSocket) throw new Error("The active status stream must be connected before the repeated frame");
 
-    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
-    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
-    expect(await screen.findByText("Initial active message.")).toBeVisible();
-    expect(chatCalls).toBe(1);
-
-    act(() => {
-      MockWebSocket.instances[0]?.emit("message", {
-        data: JSON.stringify({
-          type: "agent_status",
-          agents: [
-            {
-              session_id: "agent-1",
-              session_name: "Coder",
-              agent_class: "Coder",
-              provider: "codex",
-              workspace: "<absolute-workspace-path>",
-              status: "Processing...",
-              latest_text: null,
-            },
-          ],
-        }),
+      // Navigation may load views asynchronously; only the status-refresh phase needs a clock.
+      vi.useFakeTimers({ shouldClearNativeTimers: true });
+      act(() => {
+        statusSocket.emit("message", {
+          data: JSON.stringify({
+            type: "agent_status",
+            agents: [
+              {
+                session_id: "agent-1",
+                session_name: "Coder",
+                agent_class: "Coder",
+                provider: "codex",
+                workspace: "<absolute-workspace-path>",
+                status: "Processing...",
+                latest_text: null,
+              },
+            ],
+          }),
+        });
       });
-    });
 
-    expect(await screen.findByText("New active message.")).toBeVisible();
-    expect(chatCalls).toBeGreaterThanOrEqual(2);
+      // The remaining hint throttle is at most 750ms, regardless of navigation duration.
+      expect(chatCalls).toBe(1);
+      expect(screen.queryByText("New active message.")).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+      expect(screen.getByText("New active message.")).toBeVisible();
+      expect(chatCalls).toBe(2);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
   });
 
   it("maps touch drag gestures in the terminal pane to xterm scrollback", async () => {

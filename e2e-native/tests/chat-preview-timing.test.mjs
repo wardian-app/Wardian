@@ -1,0 +1,680 @@
+// @tier nightly — App-free observer and evidence contracts; no native app or performance claim.
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import vm from "node:vm";
+import React from "react";
+import Markdown from "react-markdown";
+import { renderToStaticMarkup } from "react-dom/server";
+import { JSDOM } from "jsdom";
+import { randomUUID, createHash } from "node:crypto";
+import { acquireHomeLock } from "../lib/sessionHome.mjs";
+import {
+  CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, chatPreviewWatchdogMs,
+  syntheticCodexSource, stageSyntheticStoppedSource, verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
+  assertPendingCaptureBracket, trustedClickWithPendingCapture,
+  chatTimingReceipt, chatTimingCandidateDetails, chatPreviewObserverScript, assertChatTimingSample, recordChatTimingCase, writeChatTimingReport,
+} from "../lib/chatPreviewTiming.mjs";
+
+const fixture = { sessionId: "owned-agent", provider: "codex", body: "A uniquely completed synthetic answer.", name: "Synthetic Agent",
+  synthetic: true, targetTurn: "synthetic-completed-unit", targetMessageId: "answer-128" };
+
+test("setup watchdog adds one 180-second preparation allowance per surface/mode without changing the UI budget", () => {
+  assert.equal(CHAT_PREVIEW_SEED_TIMEOUT_MS, 180_000); assert.equal(CHAT_PREVIEW_BUDGET_MS, 1_000);
+  assert.equal(chatPreviewWatchdogMs(1), 840_000); assert.equal(chatPreviewWatchdogMs(2), 1_200_000);
+  assert.equal(chatPreviewWatchdogMs(1) - 2 * 180_000, 480_000);
+  assert.equal(chatPreviewWatchdogMs(2) - 4 * 180_000, 480_000);
+  for (const modes of [0, 3, 1.5]) assert.throws(() => chatPreviewWatchdogMs(modes), { code: "invalid_watchdog_fixture_modes" });
+});
+
+function page({ preview = false, provider = "codex", complete = true, body = fixture.body } = {}) {
+  return { session_id: fixture.sessionId, conversation_id: preview ? null : "conversation", generation: preview ? null : "generation",
+    source_epoch: null, revision: preview ? "recent-revision" : "canonical-revision", recent_admission: preview ? "admission" : null,
+    progress: preview ? "provisional" : "ready", events: [{ id: preview ? "preview-id" : "canonical-id", session_id: fixture.sessionId,
+      provider, kind: "message", role: "assistant", text: body, metadata: {} }],
+    presentation: preview ? null : { version: 1, payload: { turns: [{ turn_key: "committed-turn", membership_complete: complete, status: "completed" }],
+      items: [{ turn_key: "committed-turn", kind: "answer", provenance: "canonical", evidence: { kind: "source" }, event_refs: ["canonical-id"] }] } } };
+}
+
+function browser({ surface = "remote", disclosure = false, modeNeedsToggle = false, body = fixture.body, captureDetails = false } = {}) {
+  const observedFixture = { ...fixture, body };
+  let time = 10; let ordinal = 0;
+  const frames = new Map(); const listeners = new Map();
+  const rect = { top: 0, left: 0, bottom: 400, right: 400, width: 400, height: 400 };
+  const element = (attributes = {}) => ({ isConnected: true, hidden: false, inert: false, parentElement: null,
+    attributes, getAttribute(key) { return this.attributes[key] ?? null; }, getBoundingClientRect: () => rect });
+  const host = element({ "data-agent-grid-card-id": fixture.sessionId }); const scroll = element(); const row = element(); const content = element(); const committed = element();
+  const panel = element({ "data-surface-id": "overview" }); const workbench = element();
+  const tab = element({ id: "tab", "aria-controls": "tabpanel", "data-surface-id": "overview" });
+  const tabpanel = element({ "aria-labelledby": "tab" });
+  host.closest = () => panel; panel.closest = () => workbench; workbench.querySelectorAll = () => [tab];
+  const input = { ...element(), value: "", disabled: false, readOnly: false };
+  const workButton = element({ "aria-expanded": "false" }); workButton.closest = () => workButton;
+  const modeButton = element({ title: modeNeedsToggle ? "Switch to Chat" : "Switch to Terminal" }); modeButton.closest = () => modeButton;
+  host.contains = (node) => [input, workButton, scroll, row, content].includes(node);
+  host.querySelector = (selector) => selector === "h1" ? { textContent: fixture.name } : selector === ".chat-transcript-scroll" ? scroll : null;
+  host.querySelectorAll = (selector) => selector === ".chat-transcript-scroll" ? [scroll] : selector === "textarea" ? [input]
+    : selector.includes("Switch to Chat") ? [modeButton] : selector.includes("chat-turn-work") && disclosure ? [workButton] : [];
+  scroll.scrollTop = 50; scroll.scrollHeight = 1_000; scroll.clientHeight = 400;
+  scroll.querySelectorAll = () => [content]; scroll.contains = (value) => value === content;
+  content.textContent = body;
+  Object.defineProperty(content, "outerHTML", { get: () => `<div class="chat-message-content">${content.textContent}</div>` });
+  content.contains = (node) => node === content;
+  let canonical = false;
+  content.closest = (selector) => selector === "[data-chat-row-key]" ? row : canonical ? committed : null;
+  committed.attributes["data-turn-key"] = "committed-turn";
+  const document = { visibilityState: "visible", activeElement: null, querySelectorAll: () => [host], getElementById: () => tabpanel,
+    createRange: () => ({ selectNodeContents() {}, getClientRects: () => [rect] }),
+    addEventListener(name, handler) { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(handler); },
+    removeEventListener(name, handler) { listeners.get(name)?.delete(handler); if (!listeners.get(name)?.size) listeners.delete(name); } };
+  let callback; let active = false; let requests = 0;
+  const window = { __wardianChatPageObservation: { version: 1, subscribe({ onRequest }) {
+    callback = onRequest; active = true;
+    return { active: true, status: () => ({ active, fault_count: 0, request_count: requests }), unsubscribe() { active = false; } };
+  } } };
+  const context = vm.createContext({ window, document, innerWidth: 500, innerHeight: 500, performance: { now: () => time },
+    getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+    requestAnimationFrame: (callback) => { frames.set(++ordinal, callback); return ordinal; },
+    cancelAnimationFrame: (id) => frames.delete(id), setTimeout, clearTimeout, TextEncoder });
+  vm.runInContext(chatPreviewObserverScript({ ...observedFixture, surface, probe: "probe", captureDetails }), context);
+  const api = window.__chatPreviewTiming;
+  const adopt = (dto, marker = true) => {
+    const receipt = chatTimingReceipt(dto, observedFixture);
+    canonical = !dto.recent_admission;
+    scroll.attributes["data-chat-page-scope"] = marker ? JSON.stringify(receipt.scope) : undefined;
+    row.attributes["data-chat-row-key"] = canonical ? "committed-turn" : "preview-id";
+    api.receive(receipt, captureDetails ? chatTimingCandidateDetails(dto, observedFixture) : null);
+  };
+  return { api, adopt, input, content, document, listeners, tab, scroll, workButton,
+    async deliver(dto) { requests++; await callback({ sessionId: fixture.sessionId }, Promise.resolve(dto)); },
+    async reject(error) { requests++; await callback({ sessionId: fixture.sessionId }, Promise.reject(error)); },
+    click(trusted = true) {
+      const button = element({ "aria-label": surface === "desktop" ? `Agent ${fixture.name}` : `Open ${fixture.name} details` }); button.closest = () => button;
+      for (const handler of listeners.get("click")) handler({ isTrusted: trusted, target: button });
+    },
+    normalModeToggle() {
+      for (const handler of listeners.get("click")) handler({ isTrusted: true, target: modeButton });
+      modeButton.attributes.title = "Switch to Terminal";
+    },
+    wheelEvent(trusted = true) { for (const handler of listeners.get("wheel")) handler({ isTrusted: trusted, target: scroll }); },
+    inputEvent(trusted = true) { for (const handler of listeners.get("input")) handler({ isTrusted: trusted, target: input }); },
+    advance(count = 1) {
+      for (let index = 0; index < count; index++) {
+        time += 16; const current = [...frames.values()]; frames.clear(); for (const callback of current) callback();
+      }
+    },
+  };
+}
+
+test("raw synthetic Codex source has explicit request, native turn bracket and successful final output", () => {
+  const source = syntheticCodexSource({ workspace: path.resolve("synthetic-workspace"), turns: 128, padding: 128 });
+  const rows = source.bytes.toString("utf8").trimEnd().split("\n").map(JSON.parse);
+  assert.equal(rows[0].type, "session_meta");
+  assert.equal(rows[0].payload.id, source.nativeSessionId);
+  assert.equal(rows.at(-1).payload.type, "task_complete");
+  assert.equal(rows.at(-1).payload.turn_id, source.targetTurn);
+  assert.equal(rows.at(-1).payload.last_agent_message, source.body);
+  assert.equal(rows.at(-2).payload.phase, "final_answer");
+  assert.equal(rows.at(-2).payload.content[0].text, source.body);
+  assert.equal(Buffer.byteLength(source.body), 950);
+  assert.match(source.body, /^[\x00-\x7f]+$/);
+  assert.equal(source.body.split("\n\n").length, 10);
+  assert.equal(source.bodySha256, createHash("sha256").update(source.body).digest("hex"));
+  assert.equal(rows.filter((row) => row.type === "turn_context").length, 129);
+  const targetPrompt = rows.findIndex((row) => row.type === "response_item" && row.payload.role === "user"
+    && row.payload.internal_chat_message_metadata_passthrough.turn_id === source.targetTurn);
+  const progress = rows.filter((row) => row.payload.type === "agent_message");
+  assert.equal(progress.length, 12);
+  assert.ok(progress.every((row) => row.payload.turn_id === source.targetTurn && row.payload.phase === "commentary"
+    && rows.indexOf(row) > targetPrompt && rows.indexOf(row) < rows.length - 2));
+  assert.ok(rows.slice(-8).every((row) => row.payload.turn_id === source.targetTurn
+    || row.payload.internal_chat_message_metadata_passthrough?.turn_id === source.targetTurn));
+  assert.throws(() => syntheticCodexSource({ workspace: path.resolve("synthetic-workspace"), turns: 20_001 }), /invalid_turn_count/);
+});
+
+test("native response qualification excludes Mock, preview and incomplete membership", () => {
+  assert.equal(chatTimingReceipt(page(), fixture).targets[0].qualifiedTurn, "committed-turn");
+  for (const value of [page({ preview: true }), page({ complete: false })]) {
+    assert.equal(chatTimingReceipt(value, fixture).targets[0].qualifiedTurn, null);
+  }
+  const mock = { ...fixture, provider: "mock" };
+  assert.equal(chatTimingReceipt(page({ provider: "mock" }), mock).targets[0].qualifiedTurn, null);
+  assert.throws(() => chatTimingReceipt({ ...page(), session_id: "foreign" }, fixture), /foreign_or_unbounded_page/);
+  assert.throws(() => chatTimingReceipt({ ...page(), generation: null }, fixture), /invalid_page_scope/);
+});
+
+test("bounded diagnostics retain the full explicit typed-final candidate and its producer evidence without unrelated content", () => {
+  const dto = page();
+  const typed = { ...dto.events[0], text: fixture.body.slice(0, 18), turn_id: fixture.targetMessageId,
+    metadata: { raw_type: "message", provider_phase: "final_answer", provider_turn_id: fixture.targetTurn,
+      chat_source_ref: "opaque-producer-ref", chat_source_start: 185143, chat_source_end: 186425 } };
+  dto.events = [typed, { ...typed, id: "unrelated", turn_id: "answer-older", text: "UNRELATED_CONTENT_MUST_NOT_BE_RETAINED",
+    metadata: { raw_type: "message", provider_phase: "final_answer", provider_turn_id: "synthetic-history-older" } },
+  { ...typed, id: "commentary", turn_id: null, text: "UNRELATED_PROGRESS_CONTENT", metadata: { provider_turn_id: fixture.targetTurn, provider_phase: "commentary" } }];
+  const details = chatTimingCandidateDetails(dto, fixture);
+  assert.equal(details.status, "FULL_SYNTHETIC_TARGETS_ONLY"); assert.equal(details.selected_events, 1);
+  assert.deepEqual(details.events, [typed]); assert.deepEqual(details.items, dto.presentation.payload.items);
+  assert.deepEqual(details.turns, dto.presentation.payload.turns); assert.equal(details.page_fields.revision, dto.revision);
+  assert.equal(JSON.stringify(details).includes("UNRELATED_CONTENT"), false);
+  assert.equal(JSON.stringify(details).includes("UNRELATED_PROGRESS"), false);
+  typed.metadata.provider_phase = "mutated-after-observation";
+  assert.equal(details.events[0].metadata.provider_phase, "final_answer");
+  assert.equal(chatTimingCandidateDetails(dto, { ...fixture, synthetic: false }).status, "EXCLUDED_NON_SYNTHETIC");
+  const oversized = structuredClone(dto); oversized.events[0].metadata.large = "x".repeat(20_000);
+  const excluded = chatTimingCandidateDetails(oversized, fixture);
+  assert.equal(excluded.status, "EXCLUDED_DIAGNOSTIC_BYTE_BOUND"); assert.equal(Object.hasOwn(excluded, "events"), false);
+  const crowded = { ...dto, events: Array.from({ length: 5 }, (_, index) => ({ ...typed, id: `candidate-${index}` })) };
+  assert.equal(chatTimingCandidateDetails(crowded, fixture).status, "EXCLUDED_DIAGNOSTIC_COUNT_BOUND");
+});
+
+test("a failed wait retains matching full synthetic API and legacy DOM before rejection without inventing qualification", async () => {
+  const b = browser({ captureDetails: true }); const dto = page({ preview: true });
+  dto.events[0].turn_id = fixture.targetMessageId;
+  dto.events[0].metadata = { raw_type: "message", provider_phase: "final_answer", provider_turn_id: fixture.targetTurn };
+  b.api.arm("failed-qualified"); b.click(); b.api.noteRequest(); b.adopt(dto); b.advance(3);
+  await assert.rejects(b.api.wait("qualifiedAt", 30), /qualifiedAt timed out/);
+  const saved = b.api.snapshot().candidate_diagnostic;
+  assert.equal(saved.reason, "before_endpoint_deadline"); assert.equal(saved.before_deadline, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.api.events)), dto.events);
+  assert.equal(saved.dom.matching_body_count, 1); assert.equal(saved.dom.bodies[0].text, fixture.body);
+  assert.ok(saved.dom.bodies[0].outer_html.includes(fixture.body)); assert.equal(saved.dom.bodies[0].row_key, "preview-id");
+  assert.equal(saved.dom.bodies[0].committed_turn, null); assert.equal(saved.dom.candidate_qualified, false);
+  b.adopt(page()); b.advance(3);
+  const retained = b.api.snapshot().candidate_diagnostic;
+  assert.equal(retained.api.page_fields.progress, "provisional"); assert.equal(retained.dom.bodies[0].committed_turn, null);
+  b.api.dispose();
+});
+
+test("diagnostics bound full DOM bytes and leave the 128-entry evidence cap unchanged", () => {
+  const body = "x".repeat(20_000); const b = browser({ body, captureDetails: true });
+  b.api.arm("oversized-target"); b.click(); b.api.noteRequest(); b.adopt(page({ body })); b.advance(3);
+  const snapshot = b.api.snapshot();
+  assert.equal(snapshot.candidate_diagnostic.api.status, "EXCLUDED_DIAGNOSTIC_BYTE_BOUND");
+  assert.equal(snapshot.candidate_diagnostic.dom.status, "EXCLUDED_DOM_BYTE_BOUND");
+  assert.ok(JSON.stringify(snapshot).length < 16_384);
+  assert.equal(snapshot.raw_request_count, 1); assert.equal(snapshot.calls.length, 1); b.api.dispose();
+});
+
+test("an endpoint resolving after its diagnostic timer uses the successful current candidate rather than stale failure evidence", async () => {
+  const b = browser({ captureDetails: true }); b.api.arm("late-success"); b.click(); b.api.noteRequest();
+  b.adopt(page({ preview: true })); b.advance(3);
+  const wait = b.api.wait("qualifiedAt", 40);
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  b.adopt(page()); b.advance(5); await wait;
+  const diagnostic = b.api.snapshot().candidate_diagnostic;
+  assert.equal(diagnostic.reason, "snapshot"); assert.equal(diagnostic.api.page_fields.progress, "ready");
+  assert.equal(diagnostic.dom.bodies[0].committed_turn, "committed-turn"); b.api.dispose();
+});
+
+test("an invalid API scope still retains its full synthetic candidate and the decoder error", async () => {
+  const b = browser({ surface: "desktop", captureDetails: true }); const dto = { ...page(), revision: null };
+  dto.events[0].turn_id = fixture.targetMessageId;
+  dto.events[0].metadata = { raw_type: "message", provider_phase: "final_answer", provider_turn_id: fixture.targetTurn };
+  b.api.arm("invalid-api-scope"); b.click(); await b.deliver(dto);
+  const snapshot = b.api.snapshot();
+  assert.deepEqual(Array.from(snapshot.faults), ["invalid_page_scope"]);
+  assert.equal(snapshot.raw_error_count, 1); assert.equal(snapshot.raw_receipt_count, 0);
+  assert.equal(snapshot.candidate_diagnostic.api.page_fields.revision, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.candidate_diagnostic.api.events)), dto.events);
+  assert.equal(snapshot.candidate_diagnostic.dom.bodies[0].committed_turn, null); b.api.dispose();
+});
+
+test("the real Markdown paragraph text matches the full fixture while the wire receipt retains its raw body", () => {
+  const source = syntheticCodexSource({ workspace: path.resolve("synthetic-workspace"), turns: 128, padding: 128 });
+  const dom = new JSDOM(renderToStaticMarkup(React.createElement(Markdown, null, source.body)));
+  const rendered = dom.window.document.body.textContent;
+  assert.notEqual(rendered, source.body);
+  assert.equal(rendered, source.body.split("\n\n").join("\n"));
+  const b = browser({ body: source.body }); b.input.disabled = true;
+  b.content.textContent = rendered;
+  b.api.arm("paragraphs"); b.click(); b.api.noteRequest(); b.adopt(page({ body: source.body })); b.advance(3);
+  assert.ok(b.api.snapshot().phase.readableAt);
+  assert.equal(b.api.snapshot().receipts[0].targets.length, 1);
+  assert.equal(b.api.prepareInteraction().kind, "wheel");
+  b.wheelEvent(); b.scroll.scrollTop -= 4; b.advance(3);
+  assert.equal(assertChatTimingSample(b.api.snapshot(), { requireTransition: false }).usability_probe, "wheel");
+  b.api.dispose(); dom.window.close();
+});
+
+test("native observer uses the maintained subscription and rejects a hidden owning tab", async () => {
+  const b = browser({ surface: "desktop" }); b.api.arm("cold"); b.click();
+  b.adopt(page({ preview: true })); await b.deliver(page({ preview: true }));
+  b.tab.isConnected = false; b.advance(3); assert.equal(b.api.snapshot().phase.readableAt, null);
+  b.tab.isConnected = true; b.advance(3); assert.ok(b.api.snapshot().phase.readableAt);
+  assert.equal(b.api.snapshot().calls.length, 1);
+  assert.equal(b.api.snapshot().subscription.request_count, 1);
+  assert.equal(b.api.dispose().subscription_active, false);
+});
+
+test("a long exact-duplicate poll stream retains raw counts and the two-frame witness without exhausting distinct evidence", async () => {
+  const b = browser({ surface: "desktop" }); const dto = page({ preview: true });
+  b.api.arm("long-poll"); b.click(); b.adopt(dto); b.advance(3);
+  for (let index = 0; index < 2_000; index++) {
+    await b.deliver(dto);
+    if (index % 100 === 0) b.advance();
+  }
+  assert.equal(b.api.prepareInteraction().kind, "input");
+  b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(3);
+  const state = b.api.snapshot();
+  assert.equal(state.raw_request_count, 2_000); assert.equal(state.coalesced_request_count, 1_999);
+  assert.equal(state.raw_receipt_count, 2_001); assert.equal(state.coalesced_receipt_count, 2_000);
+  assert.equal(state.calls.length, 1); assert.equal(state.receipts.length, 1);
+  assert.equal(state.calls[0].count, 2_000); assert.equal(state.receipts[0].count, 2_001);
+  assert.equal(state.receipts[0].first_sequence, 1); assert.equal(state.receipts[0].last_sequence, 2_001);
+  assert.ok(state.receipts[0].last_at > state.receipts[0].at);
+  assert.equal(state.request_overflow_count, 0); assert.equal(state.receipt_overflow_count, 0);
+  assert.equal(state.faults.length, 0);
+  assert.equal(assertChatTimingSample(state, { requireQualified: false, requireTransition: false }).usability_probe, "input");
+  b.api.dispose();
+});
+
+test("coalescing retains changed scope, head, progress, presentation and targets plus distinct errors and current ordering", async () => {
+  const b = browser({ surface: "desktop" }); const dto = page(); b.api.arm("changes"); b.click();
+  const variants = [dto, { ...dto, generation: "changed-generation" }, { ...dto, revision: "changed-head" },
+    { ...dto, progress: "indexing" }, { ...dto, presentation: null },
+    { ...dto, events: [{ ...dto.events[0], id: "changed-target" }] }];
+  for (const value of variants) { await b.deliver(value); b.advance(); }
+  await b.deliver(dto);
+  await b.reject(new Error("changed source scope rejected")); await b.reject(new Error("provider read failed"));
+  const state = b.api.snapshot();
+  assert.equal(state.receipts.length, variants.length); assert.equal(state.coalesced_receipt_count, 1);
+  assert.equal(state.receipts.at(-1).scope.generation, dto.generation);
+  assert.equal(state.receipts.at(-1).scope.revision, dto.revision);
+  assert.equal(state.receipts.at(-1).count, 2); assert.equal(state.receipts.at(-1).last_sequence, 7);
+  assert.ok(state.receipts.some((value) => value.scope.generation === "changed-generation"));
+  assert.ok(state.receipts.some((value) => value.scope.revision === "changed-head"));
+  assert.ok(state.receipts.some((value) => value.progress === "indexing"));
+  assert.ok(state.receipts.some((value) => value.presentation.version === null));
+  assert.ok(state.receipts.some((value) => value.targets[0].id === "changed-target"));
+  assert.deepEqual(Array.from(state.faults), ["changed source scope rejected", "provider read failed"]);
+  assert.equal(state.raw_error_count, 2); assert.equal(state.error_overflow_count, 0);
+  b.api.dispose();
+});
+
+test("distinct request and receipt evidence still fails at the unchanged 128-entry cap", () => {
+  const b = browser(); const receipt = chatTimingReceipt(page(), fixture); b.api.arm("bounded"); b.click();
+  for (let index = 0; index < 129; index++) {
+    b.api.noteRequest({ method: "GET", path: "/chat", query: `?cursor=${index}` });
+    b.api.receive({ ...receipt, scope: { ...receipt.scope, revision: `head-${index}` } });
+  }
+  const state = b.api.snapshot();
+  assert.equal(state.calls.length, 128); assert.equal(state.receipts.length, 128);
+  assert.equal(state.raw_request_count, 129); assert.equal(state.raw_receipt_count, 129);
+  assert.equal(state.coalesced_request_count, 0); assert.equal(state.coalesced_receipt_count, 0);
+  assert.equal(state.request_overflow_count, 1); assert.equal(state.receipt_overflow_count, 1);
+  assert.deepEqual(Array.from(state.faults), ["timing request distinct evidence bound exceeded", "timing receipt distinct evidence bound exceeded"]);
+  assert.throws(() => assertChatTimingSample(state), /observer_fault/); b.api.dispose();
+});
+
+test("coalescing a later duplicate cannot erase pre-click request evidence", () => {
+  const b = browser(); b.api.noteRequest(); b.advance(); b.api.arm("prewarm"); b.click(); b.api.noteRequest();
+  b.adopt(page()); b.advance(3); b.api.prepareInteraction();
+  b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(3);
+  const state = b.api.snapshot();
+  assert.equal(state.calls.length, 1); assert.equal(state.calls[0].count, 2);
+  assert.ok(state.calls[0].at < state.phase.clickAt);
+  assert.throws(() => assertChatTimingSample(state, { requireTransition: false }), /chat_prewarmed/); b.api.dispose();
+});
+
+test("trusted click and two-frame readable/usable endpoints precede an actual qualified transition", () => {
+  const b = browser();
+  b.api.arm("cold"); b.click(); b.api.noteRequest(); b.adopt(page({ preview: true }));
+  b.advance(2); assert.equal(b.api.snapshot().phase.readableAt, null);
+  b.advance(); assert.ok(b.api.snapshot().phase.readableAt);
+  const plan = b.api.prepareInteraction(); assert.equal(plan.kind, "input");
+  b.input.value = "probe"; b.document.activeElement = b.input;
+  b.inputEvent(false); b.advance(3); assert.equal(b.api.snapshot().phase.usableAt, null);
+  b.inputEvent(); b.advance(3); assert.ok(b.api.snapshot().phase.usableAt);
+  b.adopt(page()); b.advance(3);
+  const result = assertChatTimingSample(b.api.snapshot());
+  assert.equal(result.transition, "OBSERVED"); assert.ok(result.usable_ms < 1_000);
+  assert.ok(result.preview_to_qualified_ms > 0);
+  assert.equal(b.api.dispose().disposed, true); assert.equal(b.listeners.size, 0);
+});
+
+test("synthetic click cannot start a timing sample", () => {
+  const b = browser(); b.api.arm("cold"); b.click(false); b.adopt(page()); b.advance(4);
+  assert.equal(b.api.snapshot().phase.clickAt, null);
+  assert.equal(b.api.snapshot().phase.readableAt, null); b.api.dispose();
+});
+
+test("a replaced equal-text body cannot complete the original two-frame witness", () => {
+  const b = browser(); b.api.arm("cold"); b.click(); b.api.noteRequest(); b.adopt(page({ preview: true }));
+  b.advance(2); b.content.isConnected = false; b.advance();
+  assert.equal(b.api.snapshot().phase.readableAt, null); b.api.dispose();
+});
+
+test("Remote renderer DOM and consumer-scope admission remain separately reported", () => {
+  const b = browser(); b.api.arm("cold"); b.click(); b.api.noteRequest(); b.adopt(page(), false); b.advance(3);
+  const state = b.api.snapshot();
+  assert.ok(state.phase.readableAt); assert.equal(state.phase.readable.admitted, false);
+  assert.ok(state.phase.qualifiedAt);
+  assert.throws(() => assertChatTimingSample(state), /missing_/); b.api.dispose();
+});
+
+test("a short readonly transcript has no input or scroll probe even with a disclosure", () => {
+  const b = browser({ disclosure: true });
+  b.input.disabled = true; b.scroll.scrollHeight = b.scroll.clientHeight;
+  b.api.arm("qualified"); b.click(); b.api.noteRequest(); b.adopt(page()); b.advance(3);
+  assert.equal(b.api.prepareInteraction(), null);
+  b.workButton.attributes["aria-expanded"] = "true"; b.advance(3);
+  assert.equal(b.api.snapshot().phase.usableAt, null);
+  b.api.dispose();
+});
+
+function acceptedSnapshot() {
+  return { faults: [], disposed: false, calls: [{ at: 11 }], receipts: [{}], phases: [{ clickAt: 10 }],
+    phase: { clickAt: 10, readableAt: 30, usableAt: 60, previewAt: 30, qualifiedAt: 120, trustedInteractionAt: 40,
+      interaction: "wheel", readable: { admitted: true },
+      frames: { readableAt: [20, 30], usableAt: [50, 60], qualifiedAt: [110, 120] } } };
+}
+
+test("API-only, empty ledgers, prewarm and canonical-first samples cannot pass the cold qualification gate", () => {
+  for (const [mutate, code] of [
+    [(state) => { state.phase.clickAt = null; }, "missing_trusted_click"],
+    [(state) => { state.calls = []; }, "missing_real_page_observation"],
+    [(state) => { state.calls[0].at = 0; }, "chat_prewarmed"],
+    [(state) => { state.phase.previewAt = null; }, "preview_to_qualified_unobserved"],
+    [(state) => { state.phase.frames.usableAt = []; }, "missing_frames_usableAt"],
+    [(state) => { state.phase.trustedInteractionAt = null; }, "missing_trusted_interaction"],
+    [(state) => { state.phase.readable.admitted = false; }, "missing_admitted_scope_marker"],
+  ]) {
+    const state = acceptedSnapshot(); mutate(state);
+    assert.throws(() => assertChatTimingSample(state), { code });
+  }
+  const canonicalFirst = acceptedSnapshot(); canonicalFirst.phase.previewAt = null;
+  assert.equal(assertChatTimingSample(canonicalFirst, { requireTransition: false }).transition, "CANONICAL_FIRST_NO_TRANSITION_SAMPLE");
+});
+
+test("exactly one second fails the strict click-to-usable budget", () => {
+  const state = acceptedSnapshot(); state.phase.usableAt = 1_010; state.phase.frames.usableAt = [1_000, 1_010];
+  assert.throws(() => assertChatTimingSample(state), { code: "chat_open_budget_exceeded" });
+});
+
+test("pending-source UI-only latency stays explicitly unqualified without invented transition metrics", () => {
+  const state = acceptedSnapshot();
+  state.phase.qualifiedAt = null; state.phase.previewAt = null;
+  state.phase.readable = { admitted: false, real_response_observed: true, committed_turn: null };
+  const options = { requireQualified: false, requireTransition: false, requireAdmitted: false };
+  const result = assertChatTimingSample(state, options);
+  assert.equal(result.evidence_level, "UI_ONLY_ADMISSION_UNPROVEN");
+  assert.equal(result.renderer_at_readable, "LEGACY_OR_RECENT_PREVIEW");
+  assert.equal(result.qualified_ms, null); assert.equal(result.preview_to_qualified_ms, null);
+  assert.equal(result.transition, "UNOBSERVED");
+  state.phase.readable.real_response_observed = false;
+  assert.throws(() => assertChatTimingSample(state, options), { code: "missing_real_body_response" });
+});
+
+test("disposal invalidates outstanding endpoint waits and detaches trusted event listeners", async () => {
+  const b = browser(); b.api.arm("cold");
+  const wait = b.api.wait("readableAt", 100); b.api.dispose(); b.advance();
+  await assert.rejects(wait, /invalidated/); assert.equal(b.listeners.size, 0);
+});
+
+test("timeout retires its own wait instead of continuing an unbounded animation loop", async () => {
+  const b = browser(); b.api.arm("cold");
+  await assert.rejects(b.api.wait("readableAt", 1), /timed out/);
+  b.advance(3); assert.equal(b.api.snapshot().phase.readableAt, null); b.api.dispose();
+});
+
+function tempHome(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-e2e-native-chat-timing-unit-"));
+  t.after(() => {
+    const resolved = fs.realpathSync(root);
+    assert.equal(path.dirname(resolved), fs.realpathSync(os.tmpdir()));
+    assert.ok(path.basename(resolved).startsWith("wardian-e2e-native-chat-timing-unit-"));
+    fs.rmSync(resolved, { recursive: true, force: true });
+  });
+  const harness = { isolatedHome: root, runId: randomUUID() };
+  acquireHomeLock({ home: root, runId: harness.runId });
+  return harness;
+}
+
+test("stopped-source staging uses the supported restore layout and never manufactures capture state", (t) => {
+  const harness = tempHome(t);
+  const staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128 });
+  assert.ok(staged.sourcePath.includes(`${path.sep}habitat${path.sep}.codex${path.sep}sessions${path.sep}`));
+  assert.equal(verifySyntheticSource(staged).successful_output, true);
+  const configs = JSON.parse(fs.readFileSync(path.join(harness.isolatedHome, "settings", "state.json")));
+  assert.equal(configs[0].provider, "codex"); assert.equal(configs[0].is_off, true);
+  assert.equal(configs[0].resume_session, staged.nativeSessionId);
+  assert.equal(fs.existsSync(staged.capturePath), false);
+  assert.throws(() => pendingCaptureWitness(staged), { code: "missing_stopped_source_capability" });
+  assert.throws(() => stageSyntheticStoppedSource(harness, { turns: 128, padding: 128 }), /fixture_must_precede_startup/);
+  fs.appendFileSync(staged.sourcePath, "{}\n");
+  assert.throws(() => verifySyntheticSource(staged), /source_size_changed/);
+});
+
+test("pending metadata is a labelled witness and cannot be replaced by complete or foreign-source metadata", (t) => {
+  const harness = tempHome(t); const staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128 });
+  const capture = { path: staged.sourcePath, provider_source_key: staged.sourceKey, status: "pending", committed_offset: 100,
+    native_identity: {}, continuity_anchor: {}, normalizer: {} };
+  // App-free negative-control metadata only. Native staging never writes this synthetic capture state.
+  const write = (source) => fs.writeFileSync(staged.capturePath, JSON.stringify({ provider_log_sources: [source] }));
+  write(capture); assert.equal(pendingCaptureWitness(staged).committed_offset, 100);
+  write({ ...capture, path: path.toNamespacedPath(staged.sourcePath) });
+  assert.equal(pendingCaptureWitness(staged).committed_offset, 100);
+  write({ ...capture, status: "complete" }); assert.throws(() => pendingCaptureWitness(staged), /capture_not_pending_at_open/);
+  write({ ...capture, provider_source_key: "foreign" }); assert.throws(() => pendingCaptureWitness(staged), /missing_owned_capture/);
+});
+
+test("failed measurements persist partial endpoints and never publish successful metrics", async (t) => {
+  const harness = tempHome(t); const file = path.join(harness.isolatedHome, "result.json"); const report = { cases: [] };
+  const original = Object.assign(new Error("native interaction failed"), { code: "native_input_failed" });
+  await assert.rejects(recordChatTimingCase(report, "cold", async () => { throw original; },
+    async () => ({ phase: { clickAt: 10, readableAt: 20, usableAt: null } }), () => writeChatTimingReport(file, report)),
+  (error) => error === original);
+  const retained = JSON.parse(fs.readFileSync(file));
+  assert.equal(retained.cases[0].status, "FAILED"); assert.equal(retained.cases[0].metrics, null);
+  assert.equal(retained.cases[0].observation.phase.readableAt, 20);
+  assert.equal(retained.cases[0].error.code, "native_input_failed");
+});
+
+test("report write failure retains the original measurement error in an aggregate", async () => {
+  const original = new Error("original input failure"); const write = new Error("report write failed");
+  await assert.rejects(recordChatTimingCase({ cases: [] }, "cold", async () => { throw original; },
+    async () => ({ partial: true }), async () => { throw write; }),
+  (error) => error instanceof AggregateError && error.cause === original && error.errors[0] === original && error.errors[1] === write);
+});
+
+test("original operation, observation and report failures all survive with the primary cause", async () => {
+  const original = new Error("original interaction failure"); const observation = new Error("snapshot failure"); const write = new Error("report failure");
+  const report = { cases: [] }; let saveAttempted = false;
+  await assert.rejects(recordChatTimingCase(report, "cold", async () => { throw original; },
+    async () => { throw observation; }, async () => { saveAttempted = true; throw write; }),
+  (error) => error instanceof AggregateError && error.cause === original && error.errors.length === 3
+    && error.errors[0] === original && error.errors[1] === observation && error.errors[2] === write);
+  assert.equal(saveAttempted, true); assert.equal(report.cases[0].status, "FAILED"); assert.equal(report.cases[0].metrics, null);
+  assert.equal(report.cases[0].observation_error, observation.message); assert.equal(report.cases[0].report_error, write.message);
+});
+
+test("observation and report failures retain both causes after a successful operation", async () => {
+  const observation = new Error("snapshot failure"); const write = new Error("report failure"); const report = { cases: [] };
+  await assert.rejects(recordChatTimingCase(report, "cold", async () => ({ usable_ms: 40 }),
+    async () => { throw observation; }, async () => { throw write; }),
+  (error) => error instanceof AggregateError && error.cause === observation && error.errors[0] === observation && error.errors[1] === write);
+  assert.equal(report.cases[0].status, "FAILED"); assert.equal(report.cases[0].metrics, null);
+});
+
+test("a sole report failure retains its identity and invalidates successful metrics", async () => {
+  const write = new Error("report failure"); const report = { cases: [] };
+  await assert.rejects(recordChatTimingCase(report, "cold", async () => ({ usable_ms: 40 }),
+    async () => ({ partial: true }), async () => { throw write; }), (error) => error === write);
+  assert.equal(report.cases[0].status, "FAILED"); assert.equal(report.cases[0].metrics, null);
+});
+
+test("lost final observation clears an otherwise successful metric before persisting", async () => {
+  const report = { cases: [] }; let retained;
+  await assert.rejects(recordChatTimingCase(report, "cold", async () => ({ usable_ms: 40 }),
+    async () => { throw new Error("observation lost"); }, async () => { retained = structuredClone(report); }), /observation lost/);
+  assert.equal(retained.cases[0].status, "FAILED"); assert.equal(retained.cases[0].metrics, null);
+});
+
+test("compiled seeder preserves child failure and rejects zero matched tests or missing receipts", (t) => {
+  for (const [result, code] of [
+    [{ status: 17, stdout: "", stderr: "owned child failure" }, "native_seed_failed"],
+    [{ status: null, error: Object.assign(new Error("owned setup timeout"), { code: "ETIMEDOUT" }), stdout: "running 1 test" }, "native_seed_failed"],
+    [{ status: 0, stdout: "running 0 tests\ntest result: ok. 0 passed; 0 failed;" }, "native_seed_test_not_run"],
+    [{ status: 0, stdout: "state::conversation_archive::chat_read::tests::seed_native_preview_timing_fixture ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored;" }, "native_seed_test_not_run"],
+    [{ status: 0, stdout: "state::conversation_archive::chat_read::tests::seed_native_preview_timing_fixture\ntest result: ok. 1 passed;" }, "native_seed_receipt_missing"],
+  ]) {
+    const harness = tempHome(t); const staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128 });
+    let calls = 0;
+    assert.throws(() => seedNativePreviewSource({ harness, fixture: staged, executable: process.execPath,
+      run(executable, args, options) {
+        calls++; assert.equal(options.timeout, 180_000);
+        assert.equal(path.dirname(executable), path.join(harness.isolatedHome, ".frozen-chat-seeder"));
+        assert.deepEqual(args, ["state::conversation_archive::chat_read::tests::seed_native_preview_timing_fixture", "--exact", "--test-threads=1"]);
+        const request = JSON.parse(fs.readFileSync(options.env.WARDIAN_CHAT_PREVIEW_SEED_REQUEST));
+        assert.equal(request.home, harness.isolatedHome); assert.equal(request.source_path, staged.sourcePath);
+        assert.equal(request.run_id, harness.runId); assert.equal(request.mode, "pending");
+        assert.equal(options.env.WARDIAN_HOME, harness.isolatedHome);
+        return result;
+      } }), (error) => error.code === code && (!result.error || error.cause === result.error));
+    assert.equal(calls, 1, "A setup failure must never retry");
+  }
+});
+
+test("a pre-existing seed result is rejected before spawning rather than accepted as a fresh receipt", (t) => {
+  const harness = tempHome(t); const staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128 });
+  const stale = path.join(harness.isolatedHome, "artifacts", "chat-preview-seed", "pending.request.json.result.json");
+  fs.mkdirSync(path.dirname(stale), { recursive: true }); fs.writeFileSync(stale, JSON.stringify({ stale: true }));
+  let spawned = false;
+  assert.throws(() => seedNativePreviewSource({ harness, fixture: staged, executable: process.execPath,
+    run() { spawned = true; throw new Error("must not spawn"); } }), { code: "native_seed_receipt_already_exists" });
+  assert.equal(spawned, false);
+});
+
+test("compiled v2 seed receipt binds mode, terminal proof count, source extent and persisted Head bytes", (t) => {
+  for (const [mode, fixtureVersion, completedTurns, error] of [
+    ["pending", 2, 0, null], ["qualified", 2, 1, null],
+    ["qualified", 1, 1, "unverified_seed_fixture_version"],
+    ["qualified", 2, 0, "qualified_seed_has_no_completed_turns"],
+    ["qualified", 2, -1, "unverified_seed_fixture_version"],
+    ["qualified", 2, 0.5, "unverified_seed_fixture_version"],
+  ]) {
+    const harness = tempHome(t); const staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128 });
+    const seed = () => seedNativePreviewSource({ harness, fixture: staged, executable: process.execPath, mode,
+      run(_executable, _args, options) {
+        // App-free receipt negative/positive controls; this does not claim backend acquisition or UI timing.
+        const requestFile = options.env.WARDIAN_CHAT_PREVIEW_SEED_REQUEST;
+        const headBytes = JSON.stringify({ receipt_contract_fixture: true });
+        const headHash = createHash("sha256").update(headBytes).digest("hex");
+        const agentRoot = path.join(harness.isolatedHome, "agents", staged.sessionId);
+        fs.mkdirSync(path.join(agentRoot, "chat-read-objects"));
+        fs.writeFileSync(path.join(agentRoot, "chat-read-head.json"), JSON.stringify(headHash) + "\n");
+        fs.writeFileSync(path.join(agentRoot, "chat-read-objects", headHash), headBytes);
+        fs.writeFileSync(`${requestFile}.result.json`, JSON.stringify({ fixture_version: fixtureVersion, completed_turns: completedTurns,
+          session_id: staged.sessionId,
+          native_session_id: staged.nativeSessionId, source_bytes: staged.sourceBytes,
+          capture: { status: mode === "pending" ? "pending" : "complete", committed_offset: mode === "pending" ? 100 : staged.sourceBytes },
+          head: { conversation_id: "conversation", generation: "generation", sha256: headHash } }));
+        return { status: 0, stdout: "state::conversation_archive::chat_read::tests::seed_native_preview_timing_fixture\ntest result: ok. 1 passed;" };
+      } });
+    if (error) { assert.throws(seed, { code: error }); continue; }
+    const result = seed();
+    assert.equal(result.mode, mode); assert.equal(result.capture.status, mode === "pending" ? "pending" : "complete");
+    assert.equal(result.fixture_version, 2); assert.equal(result.completed_turns, completedTurns);
+    assert.match(result.executable_sha256, /^[a-f0-9]{64}$/);
+  }
+});
+
+function capture(offset, at) {
+  return { status: "pending", committed_offset: offset, source_bytes: 1_000, source_key: "codex:session:owned",
+    native_identity_sha256: "identity", dev: "device", ino: "inode", policy_generation: 1, provider: "codex", observed_at_ms: at };
+}
+
+test("pending-at-click bracket rejects completion, cursor rewind and source/policy identity changes", () => {
+  const before = capture(100, 10); const after = capture(200, 20);
+  assert.equal(assertPendingCaptureBracket(before, after).status, "PENDING_BRACKETED_TRUSTED_CLICK");
+  assert.throws(() => assertPendingCaptureBracket(before, { ...after, status: "complete", committed_offset: 1_000 }), { code: "capture_completed_during_click" });
+  assert.throws(() => assertPendingCaptureBracket(before, { ...after, committed_offset: 90 }), { code: "capture_cursor_not_monotonic" });
+  for (const key of ["native_identity_sha256", "ino", "source_key", "policy_generation"]) {
+    assert.throws(() => assertPendingCaptureBracket(before, { ...after, [key]: "changed" }), { code: "capture_identity_changed_during_click" });
+  }
+});
+
+test("pending click wrapper reads after joined trusted input before returning to any body wait", async () => {
+  const order = []; const record = {}; let reads = 0;
+  await trustedClickWithPendingCapture({}, async () => {
+    order.push("click-start"); await Promise.resolve(); order.push("click-joined");
+  }, record, () => { order.push(reads ? "after" : "before"); return capture(100 + reads++ * 10, reads * 10); });
+  assert.deepEqual(order, ["before", "click-start", "click-joined", "after"]);
+  assert.equal(record.after.committed_offset, 110); assert.ok(record.proof);
+});
+
+test("pending click completion retains both witnesses and publishes no pending proof", async () => {
+  const record = {}; let reads = 0;
+  await assert.rejects(trustedClickWithPendingCapture({}, async () => {}, record,
+    () => reads++ ? { ...capture(1_000, 20), status: "complete" } : capture(100, 10)), { code: "capture_completed_during_click" });
+  assert.equal(record.before.status, "pending"); assert.equal(record.after.status, "complete"); assert.equal(record.proof, undefined);
+});
+
+test("readonly overflowing output requires a trusted wheel and actual two-frame scroll change", () => {
+  const b = browser(); b.input.disabled = true;
+  b.api.arm("overflow"); b.click(); b.api.noteRequest(); b.adopt(page()); b.advance(3);
+  assert.equal(b.api.prepareInteraction().kind, "wheel");
+  b.wheelEvent(false); b.scroll.scrollTop -= 4; b.advance(3); assert.equal(b.api.snapshot().phase.usableAt, null);
+  b.scroll.scrollTop += 4; b.wheelEvent(); b.advance(3); assert.equal(b.api.snapshot().phase.usableAt, null);
+  b.scroll.scrollTop -= 4; b.advance(3);
+  assert.equal(assertChatTimingSample(b.api.snapshot(), { requireTransition: false }).usability_probe, "wheel"); b.api.dispose();
+});
+
+test("exact eight-pixel Remote overflow permits a wheel probe but requires trusted movement and two frames", () => {
+  const b = browser(); b.input.disabled = true;
+  b.scroll.scrollHeight = 666; b.scroll.clientHeight = 658; b.scroll.scrollTop = 0;
+  b.api.arm("remote-warm-eight-pixels"); b.click(); b.api.noteRequest(); b.adopt(page()); b.advance(3);
+  const readable = b.api.snapshot().phase.readable;
+  const plan = b.api.prepareInteraction();
+  assert.equal(plan?.kind, "wheel", "the retained 666/658 geometry has positive actual overflow");
+  assert.equal(plan.node, b.scroll); assert.equal(plan.delta, 4);
+  b.wheelEvent(false); b.scroll.scrollTop = 4; b.advance(3);
+  assert.equal(b.api.snapshot().phase.usableAt, null);
+  assert.equal(b.api.snapshot().phase.trustedInteractionAt, null);
+  b.scroll.scrollTop = 0; b.wheelEvent(); b.advance(3);
+  assert.ok(b.api.snapshot().phase.trustedInteractionAt);
+  assert.equal(b.api.snapshot().phase.usableAt, null, "a trusted wheel without movement is insufficient");
+  b.scroll.scrollTop = 4; b.advance(2);
+  assert.equal(b.api.snapshot().phase.usableAt, null, "both post-movement frame checks must finish");
+  b.advance();
+  const snapshot = b.api.snapshot();
+  assert.equal(snapshot.phase.frames.usableAt.length, 2);
+  assert.equal(snapshot.phase.usable_subject.row_key, readable.row_key);
+  assert.equal(snapshot.phase.usable_subject.committed_turn, readable.committed_turn);
+  assert.equal(assertChatTimingSample(snapshot, { requireTransition: false }).usability_probe, "wheel"); b.api.dispose();
+});
+
+test("zero overflow declines a readonly wheel probe and cannot mark output usable", () => {
+  const b = browser(); b.input.disabled = true;
+  b.scroll.scrollHeight = 658; b.scroll.clientHeight = 658; b.scroll.scrollTop = 0;
+  b.api.arm("zero-overflow"); b.click(); b.api.noteRequest(); b.adopt(page()); b.advance(3);
+  assert.ok(b.api.snapshot().phase.readableAt);
+  assert.equal(b.api.prepareInteraction(), null);
+  b.wheelEvent(); b.advance(3);
+  assert.equal(b.api.snapshot().phase.trustedInteractionAt, null);
+  assert.equal(b.api.snapshot().phase.usableAt, null); b.api.dispose();
+});
+
+test("normal desktop Chat activation keeps the original trusted Roster clock and permits retained warm mode", () => {
+  const b = browser({ surface: "desktop", modeNeedsToggle: true }); b.api.arm("cold"); b.click();
+  const clickAt = b.api.snapshot().phase.clickAt;
+  b.advance(4); assert.equal(b.api.modeControl().needsToggle, true); b.normalModeToggle();
+  assert.equal(b.api.snapshot().phase.clickAt, clickAt); assert.equal(b.api.modeControl().needsToggle, false);
+  b.adopt(page()); b.advance(3); assert.ok(b.api.snapshot().phase.readableAt > clickAt);
+  b.api.arm("warm"); b.click(); assert.equal(b.api.modeControl().needsToggle, false);
+  b.api.dispose();
+});
+
+test("usable subject may bind a later real render before the first probe without resetting the click/readable clocks", () => {
+  const b = browser(); b.api.arm("transition"); b.click(); b.api.noteRequest(); b.adopt(page({ preview: true })); b.advance(3);
+  const original = b.api.snapshot().phase;
+  b.adopt(page()); assert.equal(b.api.prepareInteraction().kind, "input");
+  b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(3);
+  const final = b.api.snapshot();
+  assert.equal(final.phase.clickAt, original.clickAt); assert.equal(final.phase.readableAt, original.readableAt);
+  assert.equal(final.phase.probe_uses_later_render, true);
+  assert.equal(final.phase.readable.row_key, "preview-id"); assert.equal(final.phase.usable_subject.row_key, "committed-turn");
+  assert.equal(assertChatTimingSample(final).transition, "OBSERVED"); b.api.dispose();
+});

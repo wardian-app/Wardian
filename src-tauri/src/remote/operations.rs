@@ -1587,23 +1587,25 @@ fn queue_timestamp(value: &str) -> i64 {
         .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis())
 }
 
-pub(crate) async fn remote_agent_chat_page_with_recent(
+/// Forwards optional preview hints to the scoped producer without resolving IDs.
+pub(crate) async fn remote_agent_chat_page_with_preview(
     state: &AppState,
     session_id: &str,
     before: Option<String>,
     revision: Option<String>,
     detail: Option<String>,
     revalidate_ids: Option<Vec<String>>,
-    recent: crate::commands::chat::RecentChatRead,
+    preview: impl Into<crate::commands::chat::PreviewChatRead>,
 ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
-    crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let preview: crate::commands::chat::PreviewChatRead = preview.into();
+    crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         state,
         session_id.to_string(),
         before,
         revision,
         detail,
         revalidate_ids,
-        recent,
+        preview,
     )
     .await
 }
@@ -1860,7 +1862,7 @@ mod tests {
         revalidate_ids: Option<Vec<String>>,
         limit: Option<usize>,
     ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
-        remote_agent_chat_page_with_recent(
+        remote_agent_chat_page_with_preview(
             state,
             session_id,
             before,

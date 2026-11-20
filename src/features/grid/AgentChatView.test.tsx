@@ -14,6 +14,7 @@ import type { WorkbenchNavigationService } from "../workbench/navigationService"
 import { AgentChatView } from "./AgentChatView";
 import { chatPageInvokeFixture } from "../../test/chatPageTestFixture";
 import { actualProducerBatch, actualProducerPage } from "../../test/chatRevalidationTestFixture";
+import { coldSourcePreviewIdentityFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
 
 const markdownWork = vi.hoisted(() => vi.fn());
 vi.mock("react-markdown", async (importOriginal) => {
@@ -130,6 +131,38 @@ function olderReadPage(overrides: Partial<AgentChatPage> = {}): AgentChatPage {
 }
 
 describe("AgentChatView", () => {
+  it.each(["watch", "cold-native"])("switches a %s legacy preview once, preserving shared expansion through canonical closure", async (source) => {
+    vi.useFakeTimers();
+    const fixture = previewIdentityFixture("agent-1");
+    const native = coldSourcePreviewIdentityFixture("agent-1");
+    const { closed } = fixture;
+    const { legacy, provisional, canonical } = source === "watch" ? fixture
+      : { legacy: native.cold, provisional: native.bridge, canonical: native.canonical };
+    let current = legacy;
+    invokeMock.mockImplementation((command) => Promise.resolve(command === "load_agent_chat_page" ? current : []));
+    const view = render(<AgentChatView sessionId="agent-1" provider="codex" refreshIntervalMs={100} readOnly deferModelDiscovery />);
+    try {
+      await act(async () => {});
+      expect(screen.queryByTestId("chat-committed-turn")).toBeNull();
+      fireEvent.click(screen.getByTitle("Show all work"));
+      current = provisional;
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      const section = screen.getByTestId("chat-committed-turn");
+      expect(screen.queryByTestId("chat-work-group")).toBeNull();
+      expect(screen.getByRole("button", { name: /Working.*In progress/ })).toHaveAttribute("aria-expanded", "true");
+      expect(section.querySelector("[data-chat-anchor-key]")).toHaveAttribute("data-chat-anchor-key", legacy.events[0].id);
+      expect(screen.queryByText(/All 42 tests passed/)).toBeNull();
+      for (const next of [canonical, closed]) {
+        current = next;
+        await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+        expect(screen.getByTestId("chat-committed-turn")).toBe(section);
+        expect(screen.queryByTestId("chat-work-group")).toBeNull();
+      }
+      expect(screen.getByRole("button", { name: /Worked.*4 steps/ })).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByText("All 42 tests passed.")).toBeVisible();
+    } finally { view.unmount(); }
+  });
+
   beforeEach(() => {
     invokeMock.mockReset();
     listenMock.mockReset();
@@ -301,7 +334,7 @@ describe("AgentChatView", () => {
     expect(screen.getByText("Read test output")).toBeInTheDocument();
     expect(screen.getByText("npm run test")).toBeInTheDocument();
     expect(container.querySelector('code[data-language="shell"]')?.textContent).toContain("tests failed in AgentChatView");
-    expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_page", { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true });
+    expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_page", { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true, previewBackingIds: [] });
     expect(screen.queryByText("codex")).not.toBeInTheDocument();
     expect(screen.queryByText("Processing")).not.toBeInTheDocument();
     expect(screen.queryByText("Read-only")).not.toBeInTheDocument();
@@ -1502,9 +1535,9 @@ describe("AgentChatView", () => {
       expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
       expect(loadOlder).toHaveBeenCalledOnce();
       expect(invokeMock.mock.calls.filter(([command]) => command === "load_agent_chat_page").map(([, request]) => request)).toEqual([
-        { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
+        { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true, previewBackingIds: [] },
         { sessionId: "agent-1", cursor: "saved-before", revision: undefined, detailRef: undefined, recentPreview: false },
-        { sessionId: "agent-2", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
+        { sessionId: "agent-2", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true, previewBackingIds: [] },
       ]);
       await act(async () => firstOlder.resolve(olderReadPage({
         events: [event({ id: "retired-older", text: "Retired older row", sequence: 1 })],
@@ -2235,8 +2268,8 @@ describe("AgentChatView", () => {
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
       expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
       expect(invokeMock.mock.calls.filter(([command]) => command === "load_agent_chat_page").map(([, request]) => request)).toEqual([
-        { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
-        { sessionId: "agent-2", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
+        { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true, previewBackingIds: [] },
+        { sessionId: "agent-2", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true, previewBackingIds: [] },
       ]);
       await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();

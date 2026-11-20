@@ -7,6 +7,8 @@ import { RemoteAgentDetailView } from "./RemoteAgentDetailView";
 import { remoteClient } from "./remoteClient";
 import { useRemoteStore } from "./useRemoteStore";
 import { committedChatFixture } from "../../test/committedChatFixture";
+import { previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
+import { applyChatPage } from "../chat/chatReadState";
 
 const agent: RemoteAgentSummary = {
   session_id: "agent-1",
@@ -201,6 +203,27 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     expect(await screen.findByText(detail.result_summary!)).toBeVisible();
     expect(load).toHaveBeenCalledTimes(1);
     expect(load.mock.calls[0].slice(0, 4)).toEqual([agent.session_id, undefined, undefined, "step:read"]);
+  });
+
+  it("hands off the same admission to one shared turn with its legacy work expansion intact", () => {
+    const { legacy, provisional, canonical, closed } = previewIdentityFixture(agent.session_id);
+    let events = applyChatPage([], legacy, "recent");
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatEvents: events, chatPage: legacy, chatPresentationPage: legacy });
+    render(<RemoteAgentDetailView agent={agent} />);
+    fireEvent.click(screen.getByTitle("Show all work"));
+    let section: HTMLElement | null = null;
+    for (const page of [provisional, canonical, closed]) {
+      events = applyChatPage(events, page, "recent");
+      act(() => useRemoteStore.setState({ chatEvents: events, chatPage: page, chatPresentationPage: page }));
+      const current = screen.getByTestId("chat-committed-turn");
+      if (section) expect(current).toBe(section);
+      section = current;
+      expect(screen.queryByTestId("chat-work-group")).toBeNull();
+      if (page !== closed) expect(screen.queryByText(/All 42 tests passed/)).toBeNull();
+    }
+    expect(screen.getByRole("button", { name: /Worked.*4 steps/ })).toHaveAttribute("aria-expanded", "true");
+    expect(section!.querySelector("[data-chat-anchor-key]")).toHaveAttribute("data-chat-anchor-key", legacy.events[0].id);
+    expect(screen.getByText("All 42 tests passed.")).toBeVisible();
   });
 
   it("merges same-revision page metadata and drops prior metadata on a new revision or preview", () => {

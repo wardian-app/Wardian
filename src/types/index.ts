@@ -121,6 +121,8 @@ export interface ChatPresentationV1 {
     state_event_refs: { event_id: string; turn_key: string }[];
     legacy_turns: ChatLegacyTurn[];
     detail: ChatStepDetail | null;
+    /** Producer-owned recent continuity, without detail, Older, or renewal authority. */
+    preview_bridge?: { admission_id: string; canonical_head: string } | null;
 }
 
 export type ChatTurnStatus = "running" | "completed" | "action_required" | "failed" | "cancelled" | "incomplete" | "unknown";
@@ -130,6 +132,8 @@ export interface ChatPresentedTurn {
     turn_key: string;
     order_key: string;
     membership_complete: boolean;
+    /** Exact membership of the admitted live prefix, separate from terminal closure. */
+    prefix_attributed?: boolean;
     status: ChatTurnStatus;
     /** References in this bounded page, not necessarily the whole turn. */
     prompt_item_keys: string[];

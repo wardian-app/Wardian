@@ -284,6 +284,10 @@ impl Admission<'_> {
     }
 
     pub(super) fn owned(&self, event: &AgentChatEvent) -> bool {
+        if event.metadata["chat_turn_after_closed"] == true {
+            // Later records cannot enrich a component of an immutable turn.
+            return false;
+        }
         event.kind == AgentChatEventKind::Message
             && event.role.is_some()
             && self.source_owned(event)

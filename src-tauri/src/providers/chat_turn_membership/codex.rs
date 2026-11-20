@@ -19,8 +19,17 @@ pub(crate) struct CodexState {
     agent_id: Option<String>,
     context_turn_id: Option<String>,
     active: Option<Bracket>,
+    last_closed: Option<ClosedTurn>,
     requests: BTreeMap<String, Request>,
     blocked: bool,
+}
+
+/// Retain only the latest proven closure, with the same bounded identity rules
+/// as the active bracket. It grants no membership to subsequent records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ClosedTurn {
+    turn_id: String,
+    root: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -29,6 +38,22 @@ struct Bracket {
     turn_id: String,
     context_seen: bool,
     broken: bool,
+    contradiction: Option<Contradiction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+enum Contradiction {
+    ProviderTurn,
+    RequestRoot,
+}
+
+impl Contradiction {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::ProviderTurn => "codex_provider_turn_conflict",
+            Self::RequestRoot => "codex_request_root_conflict",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -36,6 +61,8 @@ struct Bracket {
 struct Request {
     root: Option<String>,
     conflicting: bool,
+    // Retraction evidence requires proof already granted, not a pending root.
+    certified: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,7 +87,13 @@ impl CodexState {
     /// never certifies totals; only its exact task_complete can do so. A prompt
     /// preceding its context retains its own root without gaining adapter proof.
     /// Capacity exhaustion fails closed until a new source session.
-    pub(crate) fn observe(&mut self, raw: &Value, event: Option<&mut AgentChatEvent>) {
+    pub(crate) fn observe(&mut self, raw: &Value, mut event: Option<&mut AgentChatEvent>) {
+        if let Some(event) = event.as_deref_mut() {
+            super::clear_contradiction(event);
+            if let Some(metadata) = event.metadata.as_object_mut() {
+                metadata.remove("chat_turn_after_closed");
+            }
+        }
         if !self.valid() {
             *self = Self {
                 blocked: true,
@@ -81,14 +114,40 @@ impl CodexState {
         }
 
         let kind = kind(raw);
+        if self.after_closed(raw, kind, event.as_deref()) {
+            // A late mirror or result cannot reopen its closed bracket or
+            // contradict another bracket that has since become active.
+            clear(event.as_deref_mut(), false);
+            if let Some(event) = event {
+                event.metadata["chat_turn_after_closed"] = json!(true);
+            }
+            return;
+        }
         let turn = match explicit_turn(raw) {
             Ok(turn) if !self.blocked => turn,
             _ => {
+                if !self.blocked
+                    && matches!(explicit_turn(raw), Err(TurnError::Conflict))
+                    && matches!(
+                        kind,
+                        Kind::Prompt
+                            | Kind::Assistant
+                            | Kind::Call
+                            | Kind::Result
+                            | Kind::Approval
+                            | Kind::Complete
+                    )
+                {
+                    self.contradict_active(Contradiction::ProviderTurn);
+                }
                 self.break_active();
                 if kind == Kind::Context {
                     self.context_turn_id = None;
                 }
-                clear(event, true);
+                clear(event.as_deref_mut(), true);
+                if let Some(event) = event {
+                    self.emit_contradiction(event);
+                }
                 return;
             }
         };
@@ -128,6 +187,7 @@ impl CodexState {
                     turn_id: turn.to_owned(),
                     context_seen: self.context_turn_id.as_deref() == Some(turn),
                     broken: false,
+                    contradiction: None,
                 });
             }
             if !self.valid() {
@@ -142,6 +202,14 @@ impl CodexState {
                 || (kind == Kind::Complete && turn.is_none())
         });
         if explicit_conflict {
+            if turn.is_some()
+                && matches!(
+                    kind,
+                    Kind::Assistant | Kind::Call | Kind::Result | Kind::Approval | Kind::Complete
+                )
+            {
+                self.contradict_active(Contradiction::ProviderTurn);
+            }
             self.break_active();
         }
         let closes = kind == Kind::Complete
@@ -162,6 +230,20 @@ impl CodexState {
 
         if closes {
             if let Some(active) = self.active.take() {
+                if active.context_seen
+                    && self.context_turn_id.as_deref() == Some(active.turn_id.as_str())
+                {
+                    if let Some(root) = self.requests.get(&active.turn_id).and_then(|request| {
+                        (request.certified && !request.conflicting)
+                            .then_some(request.root.as_deref())
+                            .flatten()
+                    }) {
+                        self.last_closed = Some(ClosedTurn {
+                            turn_id: active.turn_id.clone(),
+                            root: root.to_owned(),
+                        });
+                    }
+                }
                 self.requests.remove(&active.turn_id);
                 if self.context_turn_id.as_deref() == Some(active.turn_id.as_str()) {
                     self.context_turn_id = None;
@@ -170,7 +252,39 @@ impl CodexState {
         }
     }
 
+    fn after_closed(&self, raw: &Value, kind: Kind, event: Option<&AgentChatEvent>) -> bool {
+        let Some(closed) = self.last_closed.as_ref().filter(|_| !self.blocked) else {
+            return false;
+        };
+        if event.is_some_and(|event| {
+            event.provider != "codex" || self.agent_id.as_deref() != Some(event.session_id.as_str())
+        }) {
+            return false;
+        }
+        let turn = explicit_turn(raw).ok().flatten();
+        if kind == Kind::Started || (kind == Kind::Prompt && turn.is_some()) {
+            // A typed new opening/request replaces inherited legacy identity.
+            return turn == Some(closed.turn_id.as_str());
+        }
+        turn.or_else(|| event.and_then(|event| id(event.metadata.get("provider_turn_id"))))
+            == Some(closed.turn_id.as_str())
+            || event.and_then(|event| id(event.metadata.get("request_root_id")))
+                == Some(closed.root.as_str())
+    }
+
     fn observe_event(
+        &mut self,
+        raw: &Value,
+        kind: Kind,
+        turn: Option<&str>,
+        event: &mut AgentChatEvent,
+        explicit_conflict: bool,
+    ) {
+        self.observe_event_inner(raw, kind, turn, event, explicit_conflict);
+        self.emit_contradiction(event);
+    }
+
+    fn observe_event_inner(
         &mut self,
         raw: &Value,
         kind: Kind,
@@ -194,8 +308,7 @@ impl CodexState {
                 .as_deref()
                 .is_some_and(|agent| agent != event.session_id);
         let invalid = foreign
-            || root_invalid
-            || provider_turn_invalid
+            || (kind != Kind::Started && (root_invalid || provider_turn_invalid))
             || event.metadata["codex_display_turn_conflict"] == true;
         let call_id = payload(raw).get("call_id");
         let call_conflict = matches!(kind, Kind::Call | Kind::Result | Kind::Approval)
@@ -224,6 +337,27 @@ impl CodexState {
         if self.stored_id_bytes() > MAX_STORED_ID_BYTES {
             self.block();
             event.metadata["chat_turn_membership_partial"] = json!(true);
+            return;
+        }
+
+        if kind == Kind::Started {
+            // The native opening identifies itself before a prompt is known.
+            // Inherited legacy roots cannot qualify this new provider turn.
+            if let Some(active) = &self.active {
+                event.metadata["chat_turn_adapter"] = json!(ADAPTER);
+                event.metadata["provider_turn_id"] = json!(active.turn_id);
+                event.metadata["chat_turn_membership_partial"] = json!(active.broken);
+                if let Some(metadata) = event.metadata.as_object_mut() {
+                    metadata.remove("request_root_id");
+                }
+                if let Some(root) = self.requests.get(&active.turn_id).and_then(|request| {
+                    (!request.conflicting)
+                        .then_some(request.root.as_deref())
+                        .flatten()
+                }) {
+                    event.metadata["request_root_id"] = json!(root);
+                }
+            }
             return;
         }
 
@@ -264,11 +398,24 @@ impl CodexState {
                 event.metadata["chat_turn_membership_partial"] = json!(true);
                 return;
             }
-            let request = self.requests.entry(turn.to_owned()).or_default();
-            if request.root.as_deref().is_some_and(|known| known != root) {
-                request.root = None;
-                request.conflicting = true;
+            if self
+                .requests
+                .get(turn)
+                .is_some_and(|request| request.root.as_deref().is_some_and(|known| known != root))
+            {
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.turn_id == turn)
+                {
+                    self.contradict_active(Contradiction::RequestRoot);
+                }
+                if let Some(request) = self.requests.get_mut(turn) {
+                    // Retain the old identity solely for contradiction evidence.
+                    request.conflicting = true;
+                }
             }
+            let request = self.requests.entry(turn.to_owned()).or_default();
             if request.conflicting {
                 self.break_active();
                 event.metadata["chat_turn_membership_partial"] = json!(true);
@@ -287,6 +434,9 @@ impl CodexState {
                 // for prompt admission, never work or closed membership counts.
                 event.metadata["chat_turn_adapter"] = json!(ADAPTER);
                 event.metadata["provider_turn_id"] = json!(turn);
+                if let Some(request) = turn.and_then(|turn| self.requests.get_mut(turn)) {
+                    request.certified = true;
+                }
             } else if kind == Kind::Complete {
                 event.metadata["chat_turn_membership_partial"] = json!(true);
             }
@@ -323,6 +473,7 @@ impl CodexState {
             return;
         };
         if root.as_deref().is_some_and(|root| root != request_root) {
+            self.contradict_active(Contradiction::RequestRoot);
             self.break_active();
             clear(Some(event), true);
             return;
@@ -340,6 +491,39 @@ impl CodexState {
                 event.metadata["call_id"] = json!(call);
             }
         }
+        if let Some(request) = self.requests.get_mut(&active.turn_id) {
+            request.certified = true;
+        }
+    }
+
+    fn contradict_active(&mut self, kind: Contradiction) {
+        if let Some(active) = &mut self.active {
+            if active.context_seen
+                && self.context_turn_id.as_deref() == Some(active.turn_id.as_str())
+                && self
+                    .requests
+                    .get(&active.turn_id)
+                    .is_some_and(|request| request.certified && request.root.is_some())
+            {
+                active.contradiction.get_or_insert(kind);
+            }
+        }
+    }
+
+    fn emit_contradiction(&self, event: &mut AgentChatEvent) {
+        if event.provider != "codex" || self.agent_id.as_deref() != Some(event.session_id.as_str())
+        {
+            return;
+        }
+        if let Some(active) = &self.active {
+            if let Some((kind, root)) = active.contradiction.zip(
+                self.requests
+                    .get(&active.turn_id)
+                    .and_then(|request| request.root.as_deref()),
+            ) {
+                super::stamp_contradiction(event, kind.kind(), root, Some(&active.turn_id));
+            }
+        }
     }
 
     fn break_active(&mut self) {
@@ -352,6 +536,7 @@ impl CodexState {
         self.blocked = true;
         self.requests.clear();
         self.active = None;
+        self.last_closed = None;
         self.context_turn_id = None;
     }
 
@@ -361,6 +546,10 @@ impl CodexState {
             self.agent_id.as_deref(),
             self.context_turn_id.as_deref(),
             self.active.as_ref().map(|active| active.turn_id.as_str()),
+            self.last_closed
+                .as_ref()
+                .map(|closed| closed.turn_id.as_str()),
+            self.last_closed.as_ref().map(|closed| closed.root.as_str()),
         ]
         .into_iter()
         .flatten()
@@ -385,6 +574,10 @@ impl CodexState {
                 .active
                 .as_ref()
                 .is_none_or(|active| bounded(&active.turn_id))
+            && self
+                .last_closed
+                .as_ref()
+                .is_none_or(|closed| bounded(&closed.turn_id) && bounded(&closed.root))
             && self.requests.len() <= MAX_REQUESTS
             && self
                 .requests
@@ -410,7 +603,12 @@ fn payload(raw: &Value) -> &Value {
     }
 }
 
-fn explicit_turn(raw: &Value) -> Result<Option<&str>, ()> {
+enum TurnError {
+    Malformed,
+    Conflict,
+}
+
+fn explicit_turn(raw: &Value) -> Result<Option<&str>, TurnError> {
     let payload = payload(raw);
     let mut turn = None;
     for value in [
@@ -423,9 +621,9 @@ fn explicit_turn(raw: &Value) -> Result<Option<&str>, ()> {
     .into_iter()
     .flatten()
     {
-        let candidate = id(Some(value)).ok_or(())?;
+        let candidate = id(Some(value)).ok_or(TurnError::Malformed)?;
         if turn.is_some_and(|known| known != candidate) {
-            return Err(());
+            return Err(TurnError::Conflict);
         }
         turn = Some(candidate);
     }

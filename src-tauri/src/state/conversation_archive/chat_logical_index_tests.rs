@@ -61,6 +61,41 @@ fn commentary_pair(path: &str, epoch: &str) -> Vec<AgentChatEvent> {
 }
 
 #[test]
+fn a_late_wrapper_cannot_enrich_a_closed_turn_component() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let context = context();
+    let epoch = "a".repeat(64);
+    let admission = Admission {
+        context: &context,
+        conversation: Some("conversation"),
+        epoch: &epoch,
+        admission: "policy",
+        path: &path,
+        watermark: 1000,
+        sequence_trusted: true,
+    };
+    let mut events = commentary_pair(&path, &epoch);
+    let mut index = Index::default();
+    let mut store = Store::writer(&temp.path().join("objects"));
+    index
+        .observe(&mut store, &admission, &events[0], "original")
+        .unwrap();
+    let before = store.put(&index).unwrap();
+    events[1].metadata["chat_turn_after_closed"] = json!(true);
+    assert!(index
+        .observe(&mut store, &admission, &events[1], "late-wrapper")
+        .unwrap()
+        .is_empty());
+    assert_eq!(store.put(&index).unwrap(), before);
+}
+
+#[test]
 fn narrative_cross_checkpoint_restart_and_replay_preserve_physical_members() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp

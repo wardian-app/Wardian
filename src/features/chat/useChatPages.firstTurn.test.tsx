@@ -58,8 +58,11 @@ describe.each(["claude", "codex"] as const)("first %s turn in an already-open Ch
       expect(hook.result.current.page?.revision).toBe(completed.revision);
       expect(hook.result.current.events.map((row) => row.id)).toEqual(completed.events.map((row) => row.id));
       expect(hook.result.current.events.some((row) => row.text === `First turn completed for ${provider}.`)).toBe(true);
-      expect(loader).toHaveBeenNthCalledWith(2, { sessionId: pending.session_id, revision: pending.revision });
+      expect(loader).toHaveBeenNthCalledWith(2, { sessionId: pending.session_id, revision: pending.revision, previewBackingIds: [] });
       await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      // Known C/G does not make these legacy rows canonical; the whole window exceeds the hint cap.
+      expect(completed.presentation == null).toBe(true);
+      expect(completed.events.length).toBeGreaterThan(8);
       expect(loader).toHaveBeenLastCalledWith({ sessionId: pending.session_id, revision: completed.revision });
       expect(hook.result.current.error).toBeNull();
     } finally { hook.unmount(); }

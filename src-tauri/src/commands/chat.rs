@@ -42,19 +42,55 @@ mod restore_source;
 const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 const SLOW_LIFECYCLE_POLICY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Normal display reads are independent of provider capture and archive repair.
-/// Optional source revalidation is acknowledged only against the current complete index.
-#[tauri::command]
-pub async fn load_agent_chat_page(
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadAgentChatPageRequest {
     session_id: String,
     cursor: Option<String>,
     revision: Option<String>,
     detail_ref: Option<String>,
     revalidate_ids: Option<Vec<String>>,
     recent_preview: Option<bool>,
+    preview_backing_ids: Option<Vec<String>>,
+}
+
+impl TryFrom<&tauri::ipc::InvokeBody> for LoadAgentChatPageRequest {
+    type Error = String;
+
+    fn try_from(body: &tauri::ipc::InvokeBody) -> Result<Self, Self::Error> {
+        let tauri::ipc::InvokeBody::Json(body) = body else {
+            return Err("invalid chat read request".into());
+        };
+        // Borrow the body so ignored top-level payloads are never cloned.
+        <Self as serde::Deserialize>::deserialize(body)
+            .map_err(|_| "invalid chat read request".into())
+    }
+}
+
+/// Normal display reads are independent of provider capture and archive repair.
+/// Optional source revalidation is acknowledged only against the current complete index.
+#[tauri::command]
+pub async fn load_agent_chat_page(
+    request: tauri::ipc::Request<'_>,
     app: tauri::AppHandle,
 ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
+    let LoadAgentChatPageRequest {
+        session_id,
+        cursor,
+        revision,
+        detail_ref,
+        revalidate_ids,
+        recent_preview,
+        preview_backing_ids,
+    } = LoadAgentChatPageRequest::try_from(request.body())?;
     let state = app.state::<AppState>();
+    validate_preview_backing_ids(
+        preview_backing_ids.as_deref(),
+        recent_preview.unwrap_or(false),
+        cursor.as_deref(),
+        detail_ref.as_deref(),
+        revalidate_ids.is_some(),
+    )?;
     let queue_error = if recent_preview == Some(true)
         && cursor.is_none()
         && detail_ref.is_none()
@@ -66,16 +102,19 @@ pub async fn load_agent_chat_page(
     } else {
         None
     };
-    let page = load_agent_chat_page_with_recent_for_state(
+    let page = load_agent_chat_page_with_preview_for_state(
         &state,
         session_id,
         cursor,
         revision,
         detail_ref,
         revalidate_ids,
-        RecentChatRead {
-            limit: None,
-            preview: recent_preview.unwrap_or(false),
+        PreviewChatRead {
+            recent: RecentChatRead {
+                limit: None,
+                preview: recent_preview.unwrap_or(false),
+            },
+            backing_ids: preview_backing_ids,
         },
     )
     .await?;
@@ -137,15 +176,60 @@ pub(crate) struct RecentChatRead {
     pub(crate) preview: bool,
 }
 
-pub(crate) async fn load_agent_chat_page_with_recent_for_state(
+/// Optional literal preview selectors. They grant no read or renewal authority.
+#[derive(Clone, Default)]
+pub(crate) struct PreviewChatRead {
+    pub(crate) recent: RecentChatRead,
+    pub(crate) backing_ids: Option<Vec<String>>,
+}
+
+impl From<RecentChatRead> for PreviewChatRead {
+    fn from(recent: RecentChatRead) -> Self {
+        Self {
+            recent,
+            backing_ids: None,
+        }
+    }
+}
+
+pub(crate) fn validate_preview_backing_ids(
+    ids: Option<&[String]>,
+    recent: bool,
+    cursor: Option<&str>,
+    detail: Option<&str>,
+    revalidation: bool,
+) -> Result<(), String> {
+    if ids.is_some_and(|ids| {
+        !recent
+            || cursor.is_some()
+            || detail.is_some()
+            || revalidation
+            || ids.len() > 8
+            || ids.iter().any(|id| id.trim().is_empty() || id.len() > 512)
+    }) {
+        return Err("invalid chat read request".into());
+    }
+    Ok(())
+}
+
+pub(crate) async fn load_agent_chat_page_with_preview_for_state(
     state: &AppState,
     session_id: String,
     cursor: Option<String>,
     revision: Option<String>,
     detail_ref: Option<String>,
     revalidate_ids: Option<Vec<String>>,
-    recent: RecentChatRead,
+    preview: impl Into<PreviewChatRead>,
 ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
+    let preview: PreviewChatRead = preview.into();
+    let recent = preview.recent;
+    validate_preview_backing_ids(
+        preview.backing_ids.as_deref(),
+        recent.preview,
+        cursor.as_deref(),
+        detail_ref.as_deref(),
+        revalidate_ids.is_some(),
+    )?;
     let recent_limit = recent.limit;
     let revalidation_requested = revalidate_ids.is_some();
     if session_id.trim().is_empty()
@@ -190,20 +274,62 @@ pub(crate) async fn load_agent_chat_page_with_recent_for_state(
             .chat_projection
             .owns_recent_revision(revision.as_deref());
     let recent_reader = recent.preview.then(|| {
-        state.conversation_archive.chat_projection.recent_reader(
+        state
+            .conversation_archive
+            .chat_projection
+            .recent_reader_with_hints(
+                snapshot.clone(),
+                incarnation.clone(),
+                revision.clone(),
+                recent_limit.unwrap_or(80),
+                preview.backing_ids.clone(),
+            )
+    });
+    let retired_reader = state
+        .conversation_archive
+        .chat_projection
+        .retired_view_reader(
             snapshot.clone(),
             incarnation.clone(),
-            revision.clone(),
-            recent_limit.unwrap_or(80),
-        )
-    });
+            crate::state::conversation_archive::chat_read::RetiredChatRead {
+                cursor: cursor.clone(),
+                revision: revision.clone(),
+                detail_ref: detail_ref.clone(),
+                revalidate_ids: revalidate_ids.clone(),
+                limit: recent_limit,
+            },
+            recent
+                .preview
+                .then(|| preview.backing_ids.clone())
+                .flatten(),
+        );
+    let canonical_bridge = state
+        .conversation_archive
+        .chat_projection
+        .canonical_bridge_reader(
+            snapshot.clone(),
+            incarnation.clone(),
+            crate::state::conversation_archive::chat_read::RetiredChatRead {
+                cursor: cursor.clone(),
+                revision: revision.clone(),
+                detail_ref: detail_ref.clone(),
+                revalidate_ids: revalidate_ids.clone(),
+                limit: recent_limit,
+            },
+        );
     let result = tauri::async_runtime::spawn_blocking(move || {
+        if let Some(read) = retired_reader {
+            return read();
+        }
         if let Some(read) = recent_reader {
             if let Some(page) = read()? {
                 return Ok(page);
             }
         }
-        crate::state::conversation_archive::chat_read::read_with_revalidation_and_limit(
+        if let Some(read) = canonical_bridge {
+            return read();
+        }
+        let page = crate::state::conversation_archive::chat_read::read_with_revalidation_and_limit(
             &context,
             &snapshot,
             cursor.as_deref(),
@@ -211,7 +337,8 @@ pub(crate) async fn load_agent_chat_page_with_recent_for_state(
             detail_ref.as_deref(),
             revalidate_ids.as_deref(),
             recent_limit,
-        )
+        )?;
+        crate::state::conversation_archive::chat_read::finish(page)
     })
     .await
     .map_err(|_| "chat read task failed".to_string())?
@@ -242,6 +369,7 @@ pub(crate) async fn load_agent_chat_page_with_recent_for_state(
             result.aliases.clear();
             result.removed_ids.clear();
             result.detail = None;
+            result.presentation = None;
             result.next_before = None;
             result.conversation_id = None;
             result.generation = None;
@@ -264,6 +392,7 @@ pub(crate) async fn load_agent_chat_page_with_recent_for_state(
         result.aliases.clear();
         result.removed_ids.clear();
         result.revalidated_ids = None;
+        result.presentation = None;
         result.archive_read_ready = false;
         result.generation = None;
         result.source_epoch = None;
@@ -3916,6 +4045,87 @@ fn event_id(session_id: &str, sequence: u64, source: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_chat_page_request_decodes_existing_top_level_camel_case_fields() {
+        let body = tauri::ipc::InvokeBody::Json(serde_json::json!({
+            "sessionId": "synthetic-agent",
+            "cursor": "older-cursor",
+            "revision": "current-revision",
+            "detailRef": "detail-reference",
+            "revalidateIds": ["observation-one"],
+            "recentPreview": true,
+            "previewBackingIds": ["observation-two"],
+            "unknownPayload": {"nested": [1, 2, 3]}
+        }));
+        let request = LoadAgentChatPageRequest::try_from(&body).unwrap();
+        assert_eq!(request.session_id, "synthetic-agent");
+        assert_eq!(request.cursor.as_deref(), Some("older-cursor"));
+        assert_eq!(request.revision.as_deref(), Some("current-revision"));
+        assert_eq!(request.detail_ref.as_deref(), Some("detail-reference"));
+        assert_eq!(
+            request.revalidate_ids,
+            Some(vec!["observation-one".to_string()])
+        );
+        assert_eq!(request.recent_preview, Some(true));
+        assert_eq!(
+            request.preview_backing_ids,
+            Some(vec!["observation-two".to_string()])
+        );
+    }
+
+    #[test]
+    fn native_chat_page_request_keeps_missing_null_and_boolean_option_compatibility() {
+        for body in [
+            serde_json::json!({"sessionId": "synthetic-agent"}),
+            serde_json::json!({
+                "sessionId": "synthetic-agent", "cursor": null, "revision": null,
+                "detailRef": null, "revalidateIds": null, "recentPreview": null,
+                "previewBackingIds": null
+            }),
+        ] {
+            let body = tauri::ipc::InvokeBody::Json(body);
+            let request = LoadAgentChatPageRequest::try_from(&body).unwrap();
+            assert_eq!(request.session_id, "synthetic-agent");
+            assert!(request.cursor.is_none());
+            assert!(request.revision.is_none());
+            assert!(request.detail_ref.is_none());
+            assert!(request.revalidate_ids.is_none());
+            assert!(request.recent_preview.is_none());
+            assert!(request.preview_backing_ids.is_none());
+        }
+        for preview in [false, true] {
+            let body = tauri::ipc::InvokeBody::Json(serde_json::json!({
+                "sessionId": "synthetic-agent", "recentPreview": preview
+            }));
+            let request = LoadAgentChatPageRequest::try_from(&body).unwrap();
+            assert_eq!(request.recent_preview, Some(preview));
+        }
+    }
+
+    #[test]
+    fn native_chat_page_request_rejects_malformed_bodies_with_existing_error() {
+        for body in [
+            tauri::ipc::InvokeBody::Raw(Vec::new()),
+            tauri::ipc::InvokeBody::Json(serde_json::json!({})),
+            tauri::ipc::InvokeBody::Json(serde_json::json!({"session_id": "synthetic-agent"})),
+            tauri::ipc::InvokeBody::Json(serde_json::json!({
+                "request": {"sessionId": "synthetic-agent"}
+            })),
+            tauri::ipc::InvokeBody::Json(serde_json::json!({"sessionId": 17})),
+            tauri::ipc::InvokeBody::Json(serde_json::json!({
+                "sessionId": "synthetic-agent", "recentPreview": "true"
+            })),
+            tauri::ipc::InvokeBody::Json(serde_json::json!({
+                "sessionId": "synthetic-agent", "previewBackingIds": [17]
+            })),
+        ] {
+            assert!(matches!(
+                LoadAgentChatPageRequest::try_from(&body),
+                Err(error) if error == "invalid chat read request"
+            ));
+        }
+    }
+
     pub(crate) async fn load_agent_chat_page_with_revalidation_for_state(
         state: &AppState,
         session_id: String,
@@ -3945,7 +4155,7 @@ mod tests {
         revalidate_ids: Option<Vec<String>>,
         recent_limit: Option<usize>,
     ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
-        load_agent_chat_page_with_recent_for_state(
+        load_agent_chat_page_with_preview_for_state(
             state,
             session_id,
             cursor,
