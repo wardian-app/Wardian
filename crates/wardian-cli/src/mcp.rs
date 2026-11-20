@@ -38,13 +38,33 @@ const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// The explicit MCP server command shared by both CLI executables.
 #[derive(Debug, clap::Subcommand)]
 pub enum McpCommand {
-    /// Serve Wardian messaging tools on stdio. Requires a managed sender and running Wardian app.
-    Serve,
+    /// Serve Wardian messaging tools on stdio. Requires a running Wardian app.
+    Serve {
+        /// Use an explicitly owner-issued external controller credential.
+        #[arg(long)]
+        controller: bool,
+    },
 }
 
 /// Run the explicit server without passing protocol output through CLI rendering.
-pub fn run(_command: &McpCommand) -> i32 {
-    match serve_concurrent(io::stdin(), io::stdout(), || messaging::Live) {
+pub fn run(command: &McpCommand) -> i32 {
+    let McpCommand::Serve { controller } = command;
+    let result = if *controller {
+        let backend = match messaging::ControllerLive::from_env() {
+            Ok(backend) => backend,
+            Err(_) => {
+                eprintln!("Controller MCP failed; check owner-issued credentials and avoid automatic replay.");
+                return 1;
+            }
+        };
+        let catalog = backend.tool_catalog();
+        serve_concurrent_with_catalog(io::stdin(), io::stdout(), Some(catalog), move || {
+            backend.clone()
+        })
+    } else {
+        serve_concurrent(io::stdin(), io::stdout(), || messaging::Live)
+    };
+    match result {
         Ok(()) => 0,
         Err(failure) => {
             eprintln!("Wardian MCP stdio transport failed ({:?}); delivery may be uncertain. Do not replay automatically.", failure.error.kind());
@@ -155,6 +175,29 @@ where
     serve_concurrent_with_worker_start(input, output, create_backend, || {})
 }
 
+fn serve_concurrent_with_catalog<R, W, B, F>(
+    input: R,
+    output: W,
+    tool_catalog: Option<Vec<Value>>,
+    create_backend: F,
+) -> Result<(), ServeFailure>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    B: messaging::Backend,
+    F: Fn() -> B + Send + Sync + 'static,
+{
+    serve_concurrent_with_catalog_hooks(
+        input,
+        output,
+        tool_catalog,
+        create_backend,
+        || {},
+        || {},
+        || {},
+    )
+}
+
 // Tests hold workers here to exercise admission before any dequeue can occur.
 fn serve_concurrent_with_worker_start<R, W, B, F, H>(
     input: R,
@@ -175,6 +218,35 @@ where
 fn serve_concurrent_with_hooks<R, W, B, F, H, E, J>(
     input: R,
     output: W,
+    create_backend: F,
+    worker_start: H,
+    input_eof: E,
+    workers_joined: J,
+) -> Result<(), ServeFailure>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    B: messaging::Backend,
+    F: Fn() -> B + Send + Sync + 'static,
+    H: Fn() + Send + Sync + 'static,
+    E: FnOnce(),
+    J: FnOnce(),
+{
+    serve_concurrent_with_catalog_hooks(
+        input,
+        output,
+        None,
+        create_backend,
+        worker_start,
+        input_eof,
+        workers_joined,
+    )
+}
+
+fn serve_concurrent_with_catalog_hooks<R, W, B, F, H, E, J>(
+    input: R,
+    output: W,
+    tool_catalog: Option<Vec<Value>>,
     create_backend: F,
     worker_start: H,
     input_eof: E,
@@ -250,7 +322,9 @@ where
         Arc::clone(&output_failed),
     );
 
-    let mut session = Session::default();
+    let mut session = tool_catalog
+        .map(Session::with_tool_catalog)
+        .unwrap_or_default();
     let mut primary_error = None;
     let mut input_terminal = false;
     loop {
@@ -499,6 +573,8 @@ struct Session {
     ready: bool,
     admission_namespace: String,
     calls: HashSet<String>,
+    tool_catalog: Option<Vec<Value>>,
+    tool_names: Option<HashSet<String>>,
 }
 
 impl Default for Session {
@@ -511,11 +587,25 @@ impl Default for Session {
             ready: false,
             admission_namespace: format!("mcp-{:016x}{:016x}", random(), random()),
             calls: HashSet::new(),
+            tool_catalog: None,
+            tool_names: None,
         }
     }
 }
 
 impl Session {
+    fn with_tool_catalog(tools: Vec<Value>) -> Self {
+        let tool_names = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect();
+        Self {
+            tool_catalog: Some(tools),
+            tool_names: Some(tool_names),
+            ..Self::default()
+        }
+    }
+
     fn admit(&mut self, value: Value) -> Admission {
         let id = value.get("id").cloned();
         let valid_id = id
@@ -586,17 +676,21 @@ impl Session {
                         "Invalid tools/list params; no pagination",
                     )));
                 }
-                json!({"tools": definitions::definitions()})
+                json!({
+                    "tools": self.tool_catalog.clone().unwrap_or_else(definitions::definitions)
+                })
             }
             "tools/call" => {
-                if !params["name"]
-                    .as_str()
-                    .is_some_and(|name| definitions::NAMES.contains(&name))
-                    || params
-                        .as_object()
-                        .unwrap()
-                        .keys()
-                        .any(|key| !matches!(key.as_str(), "name" | "arguments" | "_meta"))
+                if !params["name"].as_str().is_some_and(|name| {
+                    self.tool_names.as_ref().map_or_else(
+                        || definitions::NAMES.contains(&name),
+                        |names| names.contains(name),
+                    )
+                }) || params
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "name" | "arguments" | "_meta"))
                     || params
                         .get("arguments")
                         .is_some_and(|value| !value.is_object())

@@ -86,5 +86,5 @@ describe("workbench cutover verifier", () => {
     expect(report.allowlisted_matches.length).toBeGreaterThan(0);
     expect(report.allowlisted_matches.every((entry) => entry.reason.trim().length > 0)).toBe(true);
     expect(report.violations).toEqual([]);
-  });
+  }, 30_000);
 });

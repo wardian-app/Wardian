@@ -12,6 +12,7 @@ pub mod chat_presentation;
 pub mod classes;
 pub mod claude_mod;
 pub mod control;
+pub mod controllers;
 pub mod conversation_lease;
 pub mod conversations;
 pub mod db;

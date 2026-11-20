@@ -49,6 +49,7 @@ fn serve<R: BufRead, W: Write, B: Backend>(
 
 struct Fake {
     managed: bool,
+    controller: bool,
     calls: Vec<AgentMessagingRequest>,
     fail: bool,
     response: Value,
@@ -58,6 +59,7 @@ impl Default for Fake {
     fn default() -> Self {
         Self {
             managed: true,
+            controller: false,
             calls: vec![],
             fail: false,
             response: json!({"operation":"send_message","interaction_id":"real-id","delivery_state":"pending","duplicate":false}),
@@ -66,6 +68,10 @@ impl Default for Fake {
 }
 
 impl Backend for Fake {
+    fn controller_mode(&self) -> bool {
+        self.controller
+    }
+
     fn require_sender(&self) -> io::Result<()> {
         if self.managed {
             Ok(())
@@ -448,6 +454,124 @@ fn lifecycle_lists_exactly_five_tools_with_honest_annotations() {
             .is_some());
         assert!(backend.calls.is_empty());
     }
+}
+
+#[test]
+fn controller_catalog_is_scoped_and_exposes_its_reply_mailbox() {
+    use wardian_core::controllers::{ControllerPrincipal, ControllerScope as Scope};
+
+    let principal = ControllerPrincipal {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+        name: "Codex controller".into(),
+        resource: "https://bridge.example/mcp".into(),
+        agent_ids: vec!["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into()],
+        scopes: vec![
+            Scope::AgentsRead,
+            Scope::MessagesSend,
+            Scope::TasksSubmit,
+            Scope::AgentsWake,
+            Scope::ControllerReceive,
+            Scope::ControllerWait,
+        ],
+        created_at: 0,
+        expires_at: None,
+        revoked_at: None,
+    };
+    let tools = definitions::controller_definitions(&principal);
+    let names: Vec<_> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "list_agents",
+            "send_message",
+            "followup_task",
+            "receive_messages",
+            "wait_agent"
+        ]
+    );
+    assert!(!names.contains(&"reply"));
+    assert_eq!(
+        tools[1]["inputSchema"]["properties"]["target"]["enum"][0],
+        principal.agent_ids[0]
+    );
+    assert!(tools[3]["inputSchema"]["properties"]
+        .get("ack_cursor")
+        .is_none());
+
+    let mut session = Session::with_tool_catalog(tools);
+    let mut backend = Fake::default();
+    session.handle(initialize(VERSION), &mut backend);
+    session.handle(
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        &mut backend,
+    );
+    let listed = session
+        .handle(
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            &mut backend,
+        )
+        .unwrap();
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 5);
+    let reply = session
+        .handle(
+            call(
+                json!(3),
+                "reply",
+                json!({"request_id":"task","status":"done","message":"x"}),
+            ),
+            &mut backend,
+        )
+        .unwrap();
+    assert_eq!(reply["error"]["code"], -32602);
+    assert!(backend.calls.is_empty());
+}
+
+#[test]
+fn controller_mailbox_tools_parse_without_reenabling_managed_receive() {
+    let mut backend = Fake {
+        controller: true,
+        response: json!({
+            "operation":"receive_messages","messages":[],"next_cursor":"next",
+            "ack_cursor":"next","has_more":false,"timed_out":false
+        }),
+        ..Default::default()
+    };
+    let received = messaging::call(
+        "receive_messages",
+        json!({"timeout_ms":0}),
+        "key",
+        &mut backend,
+    );
+    assert_eq!(received["isError"], false);
+    assert!(matches!(
+        backend.calls.as_slice(),
+        [AgentMessagingRequest::ReceiveMessages {
+            timeout_ms: Some(0),
+            ..
+        }]
+    ));
+
+    backend.response = json!({"operation":"wait_agent","timed_out":true});
+    let waited = messaging::call("wait_agent", json!({"timeout_ms":0}), "key", &mut backend);
+    assert_eq!(waited["isError"], false);
+    assert!(matches!(
+        backend.calls.last(),
+        Some(AgentMessagingRequest::WaitAgent {
+            timeout_ms: Some(0)
+        })
+    ));
+
+    let reply = messaging::call(
+        "reply",
+        json!({"request_id":"task","status":"done","message":"spoof"}),
+        "key",
+        &mut backend,
+    );
+    assert_eq!(reply["isError"], true);
+    assert_eq!(backend.calls.len(), 2);
 }
 
 #[test]

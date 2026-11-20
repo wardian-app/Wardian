@@ -1,11 +1,17 @@
 //! Commands that must work before local storage migration.
 
+#[path = "controller.rs"]
+pub(crate) mod controller;
+
 use super::*;
 
 /// Dispatches static and app-owned commands without touching local storage.
 pub(super) fn dispatch(command: &Command) -> Option<i32> {
     if let Command::Mcp { command } = command {
         return Some(wardian_cli::mcp::run(command));
+    }
+    if let Command::Controller(args) = command {
+        return Some(finish(controller::handle(args)));
     }
     // Static discovery must work without a home, migrations, or running app.
     if let Command::Schema { path } = command {

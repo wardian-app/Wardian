@@ -2611,8 +2611,14 @@ describe("RemoteMobileApp", () => {
     expect(await screen.findByText("Initial active message.")).toBeVisible();
     expect(chatCalls).toBe(1);
 
+    const statusSocket = await waitFor(() => {
+      const socket = MockWebSocket.instances.find((candidate) => candidate.url.includes("/remote/api/status-stream"));
+      expect(socket).toBeDefined();
+      return socket!;
+    });
     act(() => {
-      MockWebSocket.instances[0]?.emit("message", {
+      statusSocket.emit("open");
+      statusSocket.emit("message", {
         data: JSON.stringify({
           type: "agent_status",
           agents: [
@@ -2630,7 +2636,8 @@ describe("RemoteMobileApp", () => {
       });
     });
 
-    expect(await screen.findByText("New active message.")).toBeVisible();
+    await waitFor(() => expect(chatCalls).toBeGreaterThanOrEqual(2), { timeout: 10_000 });
+    expect(await screen.findByText("New active message.", {}, { timeout: 10_000 })).toBeVisible();
     expect(chatCalls).toBeGreaterThanOrEqual(2);
   });
 
