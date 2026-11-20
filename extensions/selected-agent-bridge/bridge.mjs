@@ -8,7 +8,7 @@ import { TextDecoder } from 'node:util';
 
 const MAX_FRAME = 1024 * 1024;
 const MAX_CALLS = 10000;
-const TOOLS = ['list_agents', 'send_message', 'followup_task', 'receive_messages', 'wait_agent', 'reply', 'interrupt_agent'];
+const TOOLS = ['list_agents', 'send_message', 'followup_task', 'reply', 'interrupt_agent'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const only = (value, keys) => object(value) && Object.keys(value).every(key => keys.includes(key));
@@ -122,8 +122,7 @@ export class StdioUpstream {
 function validArguments(name, args, config) {
   const fields = {
     list_agents: [], send_message: ['target', 'message'], followup_task: ['target', 'message'],
-    interrupt_agent: ['target'], receive_messages: ['cursor', 'ack_cursor', 'limit', 'timeout_ms'],
-    wait_agent: ['timeout_ms'], reply: ['request_id', 'status', 'message'],
+    interrupt_agent: ['target'], reply: ['request_id', 'status', 'message'],
   };
   if (!only(args, fields[name]) || Object.values(args).some(value => value === null)) return false;
   if (fields[name].includes('target') && !config.agent_uuids.includes(args.target)) return false;

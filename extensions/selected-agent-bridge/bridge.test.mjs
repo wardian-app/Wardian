@@ -12,7 +12,7 @@ import { Bridge, StdioUpstream, frames, validateConfig } from './bridge.mjs';
 const sender = '10000000-0000-4000-8000-000000000000';
 const selected = '20000000-0000-4000-8000-000000000000';
 const other = '30000000-0000-4000-8000-000000000000';
-const names = ['list_agents', 'send_message', 'followup_task', 'receive_messages', 'wait_agent', 'reply', 'interrupt_agent'];
+const names = ['list_agents', 'send_message', 'followup_task', 'reply', 'interrupt_agent'];
 const policy = { cli_path: process.execPath, wardian_home: resolve('.'), sender_uuid: sender, agent_uuids: [selected], tools: names };
 const initialize = { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '1' } } };
 const call = (id, name, args = {}) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
@@ -48,7 +48,7 @@ async function fixture(tools = names) {
 }
 
 test('policy fails closed and is an immutable snapshot', () => {
-  for (const invalid of [{ agent_uuids: [] }, { agent_uuids: ['chosen'] }, { sender_uuid: '' }, { tools: ['spawn_agent'] }, { tools: ['reply', 'reply'] }, { cli_path: 'wardian' }, { env: {} }]) {
+  for (const invalid of [{ agent_uuids: [] }, { agent_uuids: ['chosen'] }, { sender_uuid: '' }, { tools: ['spawn_agent'] }, { tools: ['receive_messages'] }, { tools: ['wait_agent'] }, { tools: ['reply', 'reply'] }, { cli_path: 'wardian' }, { env: {} }]) {
     assert.throws(() => validateConfig({ ...policy, ...invalid }));
   }
   const input = { ...policy, agent_uuids: [selected] };
@@ -71,12 +71,11 @@ test('discovery limits tools, target enum and both roster representations', asyn
 });
 
 test('invalid routes, tool grants, arguments and notifications never dispatch', async () => {
-  const { bridge, mock } = await fixture(['send_message', 'receive_messages']);
+  const { bridge, mock } = await fixture(['send_message']);
   const invalid = [call(1, 'send_message', { target: other, message: 'hello' }), call(2, 'send_message', { target: 'chosen', message: 'hello' }),
     call(3, 'interrupt_agent', { target: selected }), call(4, 'send_message', { target: selected, message: 'hello', sender }),
-    call(5, 'receive_messages', { timeout_ms: 60001 }), call(6, 'receive_messages', { limit: 0 }),
-    call(7, 'receive_messages', null), call(8, 'send_message', { target: selected, message: ' ' }),
-    call(9, 'send_message', { target: selected, message: '🙂'.repeat(17000) })];
+    call(5, 'receive_messages'), call(6, 'wait_agent'), call(7, 'send_message', { target: selected, message: ' ' }),
+    call(8, 'send_message', { target: selected, message: '🙂'.repeat(17000) })];
   for (const request of invalid) assert.equal((await bridge.handle(request)).result.isError, true);
   await bridge.handle({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'send_message', arguments: { target: selected, message: 'ignored' } } });
   assert.equal(mock.calls.length, 0);
@@ -92,13 +91,11 @@ test('external hosts cannot manufacture managed attribution from a policy', asyn
   assert.equal(mock.calls.length, 0);
 });
 
-test('information, tasks, receive, wake, reply and interrupt retain exact canonical operations and receipts', async () => {
+test('managed tools retain exact canonical operations and receipts', async () => {
   const { bridge, mock } = await fixture();
   const payloads = [
     ['send_message', { target: selected, message: 'line one\nUnicode 🙂 $literal' }],
     ['followup_task', { target: selected, message: 'work' }],
-    ['receive_messages', { cursor: 'opaque', ack_cursor: 'prior-page', limit: 5, timeout_ms: 0 }],
-    ['wait_agent', { timeout_ms: 0 }],
     ['reply', { request_id: 'ask_1', status: 'blocked', message: 'needs input' }],
     ['interrupt_agent', { target: selected }],
   ];

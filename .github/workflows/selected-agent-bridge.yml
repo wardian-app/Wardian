@@ -48,6 +48,8 @@ jobs:
         with:
           workspaces: .
       - run: cargo build -p wardian-cli
+      - name: Verify managed bridge against the native tool catalog
+        run: node extensions/selected-agent-bridge/smoke-discovery.mjs target/debug/wardian-cli.exe
       - name: Real CLI and canonical mailbox through HTTP and private-tunnel stdio
         shell: pwsh
         run: |

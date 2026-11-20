@@ -51,28 +51,30 @@ new tools; registration alone does not prove connectivity.
 
 ## Operations and scope
 
+- The managed native catalog exposes `list_agents`, `send_message`,
+  `followup_task`, `reply` and `interrupt_agent`. This adapter accepts a subset
+  of those tools. Durable controller mailbox operations are available through
+  [external controller mode](CONTROLLERS.md), which requires an owner-issued
+  scoped grant.
 - `list_agents` retains only selected UUIDs and projects name, provider, status
   and status source. Both structured and text results are replaced; private
   workspace/process fields and unselected roster entries are excluded.
-- `send_message` passes literal information without waking an agent.
+- `send_message` passes literal information and wakes an idle agent when its
+  original conversation is available. Admission does not prove provider visibility.
 - `followup_task` admits work and returns Wardian's canonical receipt. Admission
   does not prove provider visibility or completion. No names or broadcasts route.
-- `wait_agent` wakes on the sender's mailbox activity without reading it.
-- `receive_messages` reads the configured sender's mailbox, including its tasks,
-  information and replies. It passes opaque cursor/acknowledgement tokens unchanged;
-  selection limits **outgoing routing**, not mailbox contents. Use a dedicated,
-  authorized sender if sharing an existing mailbox would disclose unrelated work.
 - `reply` and `interrupt_agent` require explicit inclusion in the policy. Reply
   destination is determined by the request and checked by Wardian, not by a target
   parameter. A reply completes work as the sender's identity. Interruption requests
   affect the selected agent's current turn and are not request-specific cancellation.
 
-All mailbox scope and provider capability limits of
-[Wardian's messaging contract](../../docs/developer/agent-messaging-tools.md)
-still apply. There is no unsolicited push into the assistant; call wait, receive,
-then correlate replies using canonical IDs. A timeout does not cancel work. MCP
-cancellation notifications are advisory and never interrupt an agent. Stopping
-the bridge closes its own child server, not agents or already admitted tasks.
+There is no managed-adapter mailbox polling. Terminal task replies follow the
+existing managed provider route. Controller-mode mailbox scope and provider
+capability limits are documented in [external controller mode](CONTROLLERS.md)
+and [Wardian's messaging contract](../../docs/developer/agent-messaging-tools.md).
+Timeouts do not cancel work. MCP cancellation notifications are advisory and
+never interrupt an agent. Stopping the bridge closes its own child server, not
+agents or already admitted tasks.
 
 ## Failure and authentication boundaries
 

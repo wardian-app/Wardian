@@ -3,5 +3,5 @@
   "wardian_home": "<absolute-wardian-home-path>",
   "sender_uuid": "10000000-0000-4000-8000-000000000000",
   "agent_uuids": ["20000000-0000-4000-8000-000000000000"],
-  "tools": ["list_agents", "send_message", "followup_task", "receive_messages", "wait_agent"]
+  "tools": ["list_agents", "send_message", "followup_task"]
 }
