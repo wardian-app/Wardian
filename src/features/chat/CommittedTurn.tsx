@@ -7,6 +7,7 @@ import { ActivityEvent, MessageRow, type ChatTranscriptRowProps } from "./ChatTr
 import type { CommittedTurnRow } from "./committedChatPresentation";
 import { withTurnChangeSummaries } from "./chatTurns";
 import { TurnChangeCard } from "./TurnChangeCard";
+import { chatEventDisplayKey } from "./chatEventIdentity";
 
 const STATUS: Record<ChatTurnStatus, string> = { running: "Working", completed: "Worked", action_required: "Action required",
   failed: "Failed", cancelled: "Stopped", incomplete: "Incomplete", unknown: "Unknown" };
@@ -18,7 +19,14 @@ const ICONS = { shell: Terminal, read: FileText, browser: Globe, edit: Pencil, t
 /** Render proven canonical membership identically in desktop and Remote Chat. */
 export function CommittedTurn({ row, ...props }: Omit<ChatTranscriptRowProps, "row"> & { row: CommittedTurnRow }) {
   const { turn, items, events } = row;
-  const [open, setOpen] = useState(false);
+  const prefix = !turn.membership_complete;
+  const work = items.filter((item) => item.kind === "step" || item.kind === "narration" || (prefix && item.kind === "answer"));
+  const workRefs = new Set(work.flatMap((item) => item.event_refs));
+  const anchorKeys = events.filter((event) => workRefs.has(event.id)).map(chatEventDisplayKey);
+  const [open, setOpen] = useState(() => props.workExpansion?.isOpen(anchorKeys) ?? false);
+  const toggleWork = () => { props.workExpansion?.setOpen(anchorKeys, !open); setOpen(!open); };
+  const detailsDisabled = row.provisional || props.detailsDisabled;
+  const loadBody = detailsDisabled ? undefined : props.onLoadDetail;
   const [openedSteps, setOpenedSteps] = useState<Set<string>>(() => new Set());
   const [focusedStep, setFocusedStep] = useState<string | null>(null);
   const workId = useId();
@@ -26,14 +34,15 @@ export function CommittedTurn({ row, ...props }: Omit<ChatTranscriptRowProps, "r
   const messagesFor = (item: ChatPresentedItem) => item.event_refs.flatMap((id) => {
     const event = byId.get(id); return event?.kind === "message" ? [event] : [];
   });
-  const work = items.filter((item) => item.kind === "step" || item.kind === "narration");
   useEffect(() => {
     const keys = new Set(items.map((item) => item.item_key));
     setOpenedSteps((current) => [...current].every((key) => keys.has(key)) ? current : new Set([...current].filter((key) => keys.has(key))));
   }, [items]);
-  const answers = items.filter((item) => item.kind === "answer");
+  const answers = prefix ? [] : items.filter((item) => item.kind === "answer");
   const approvalRefs = new Set(items.flatMap((item) => item.step?.approval_ref ? [item.step.approval_ref] : []));
-  const approvals = events.filter((event) => approvalRefs.has(event.id));
+  // Preview step references carry no canonical authority. The admitted approval
+  // event still exposes the existing control, fenced by liveApprovalId below.
+  const approvals = events.filter((event) => row.provisional ? event.kind === "approval" : approvalRefs.has(event.id));
   const changeCard = turn.references_complete && turn.counts_complete && items.filter((item) => item.step).length === turn.step_count
     ? withTurnChangeSummaries(derivePresentedChatRows(events)).slice().reverse().find((value) => value.kind === "turn_change_summary") : undefined;
   const reportedFiles = turn.reported_changes?.file_count ?? (changeCard?.kind === "turn_change_summary" ? changeCard.files.length : null);
@@ -43,18 +52,20 @@ export function CommittedTurn({ row, ...props }: Omit<ChatTranscriptRowProps, "r
     const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next;
   });
   return <section className="min-w-0 space-y-3" data-testid="chat-committed-turn" data-turn-key={turn.turn_key}>
+    {row.provisional ? <p className="text-xs text-muted" role="status">Provisional · history is updating</p> : null}
     {items.filter((item) => item.kind === "prompt").map((item) => <div key={item.item_key}>
-      {messagesFor(item).map((event) => <MessageRow key={event.id} event={event} linkHandling={props.linkHandling} onLoadDetail={props.onLoadDetail} />)}
+      {messagesFor(item).map((event) => <div key={event.id} data-chat-anchor-key={chatEventDisplayKey(event)}><MessageRow event={event} linkHandling={props.linkHandling} onLoadDetail={loadBody} /></div>)}
     </div>)}
-    {work.length > 0 || turn.step_count > 0 ? <div className="min-w-0 rounded border border-wardian-light text-muted" data-testid="chat-turn-work">
-      <button className="flex min-h-11 w-full min-w-0 items-center gap-2 px-2 text-left text-xs" aria-expanded={open} aria-controls={workId} onClick={() => setOpen(!open)}>
+    {prefix || work.length > 0 || turn.step_count > 0 ? <div className="min-w-0 rounded border border-wardian-light text-muted" data-testid="chat-turn-work">
+      <button className="flex min-h-11 w-full min-w-0 items-center gap-2 px-2 text-left text-xs" data-chat-anchor-keys={JSON.stringify(anchorKeys)} aria-expanded={open} aria-controls={workId} onClick={toggleWork}>
         <ChevronRight className={`h-3.5 w-3.5 shrink-0 ${open ? "rotate-90" : ""}`} aria-hidden="true" />
         <Circle className="h-2 w-2 shrink-0 fill-current" style={{ color: TONE[turn.status] }} aria-hidden="true" />
         <span className="shrink-0">{STATUS[turn.status]}</span>
-        <span className="shrink-0">· {turn.counts_complete ? "" : "at least "}{turn.step_count} {turn.step_count === 1 ? "step" : "steps"}</span>
+        {prefix ? <span className="shrink-0">· {turn.status === "incomplete" ? "Incomplete history" : "In progress"}</span>
+          : <span className="shrink-0">· {turn.counts_complete ? "" : "at least "}{turn.step_count} {turn.step_count === 1 ? "step" : "steps"}</span>}
         <span className="truncate" title={work.slice().reverse().find((item) => item.step)?.step?.description}>{work.slice().reverse().find((item) => item.step)?.step?.description}</span>
       </button>
-      {duration || reportedFiles !== null || turn.failed_step_count > 0 ? <div className="flex flex-wrap items-center gap-x-3 px-3 pb-2 text-xs">
+      {!prefix && (duration || reportedFiles !== null || turn.failed_step_count > 0) ? <div className="flex flex-wrap items-center gap-x-3 px-3 pb-2 text-xs">
         {duration ? <span>{duration}</span> : null}
         {reportedFiles !== null ? <span>{reportedFiles} files edited (reported)</span> : null}
         {turn.failed_step_count > 0 ? <button className="min-h-11 underline" onClick={() => { setOpen(true); const failed = work.find((item) => item.step?.status === "failed");
@@ -62,11 +73,12 @@ export function CommittedTurn({ row, ...props }: Omit<ChatTranscriptRowProps, "r
       </div> : null}
       <div id={workId} hidden={!open}>
         {open ? <>
-          {!turn.references_complete || work.filter((item) => item.step).length < turn.step_count ? <p className="px-3 py-2 text-xs">Earlier steps may be outside this page. Use Load older transcript.</p> : null}
+          {prefix ? <p className="px-3 py-2 text-xs">Incomplete history. More activity may arrive.</p>
+            : !turn.references_complete || work.filter((item) => item.step).length < turn.step_count ? <p className="px-3 py-2 text-xs">Earlier steps may be outside this page. Use Load older transcript.</p> : null}
           <WorkList items={work} focusKey={focusedStep} renderItem={(item) => {
-            if (item.kind === "narration") {
+            if (item.kind === "narration" || item.kind === "answer") {
               return <div className="chat-turn-narration px-3 py-2 text-xs text-muted">
-                {messagesFor(item).map((event) => <MessageRow key={event.id} event={event} linkHandling={props.linkHandling} onLoadDetail={props.onLoadDetail} />)}
+                {messagesFor(item).map((event) => <MessageRow key={event.id} event={event} linkHandling={props.linkHandling} onLoadDetail={loadBody} />)}
               </div>;
             }
             const step = item.step;
@@ -81,8 +93,8 @@ export function CommittedTurn({ row, ...props }: Omit<ChatTranscriptRowProps, "r
                 <span className="min-w-0 flex-1 truncate" title={step.description}>{step.description}</span>
                 <span className="shrink-0" style={{ color: TONE[step.status] }}>{step.status === "completed" ? "Done" : step.status === "running" ? "Running" : STATUS[step.status]}</span>
               </div>
-              {step.detail_ref || step.detail_availability === "pending" ? <button className="min-h-11 text-xs underline" aria-expanded={expanded} aria-controls={detailId} onClick={() => toggleStep(item.item_key)}>{expanded ? "Hide output" : "Show output"}</button> : <p className="py-2 text-xs">Output unavailable</p>}
-              {expanded ? <StepOutput key={`${item.item_key}:${step.detail_ref}`} id={detailId} item={item} load={props.onLoadStepDetail} /> : null}
+              {!detailsDisabled && (step.detail_ref || step.detail_availability === "pending") ? <button className="min-h-11 text-xs underline" aria-expanded={expanded} aria-controls={detailId} onClick={() => toggleStep(item.item_key)}>{expanded ? "Hide output" : "Show output"}</button> : <p className="py-2 text-xs">{detailsDisabled ? "Output available after history is verified" : "Output unavailable"}</p>}
+              {expanded && !detailsDisabled ? <StepOutput key={`${item.item_key}:${step.detail_ref}`} id={detailId} item={item} load={props.onLoadStepDetail} /> : null}
             </div>;
           }} />
         </> : null}
@@ -91,7 +103,7 @@ export function CommittedTurn({ row, ...props }: Omit<ChatTranscriptRowProps, "r
     {approvals.map((event) => <ActivityEvent key={event.id} event={event} agentIsWorking={props.agentIsWorking} approvalIsLive={event.id === props.liveApprovalId}
       isSubmitting={props.isSubmitting} onApprovalSubmit={props.onApprovalSubmit} />)}
     {answers.map((item) => <div key={item.item_key}>
-      {messagesFor(item).map((event) => <MessageRow key={event.id} event={event} linkHandling={props.linkHandling} onLoadDetail={props.onLoadDetail} />)}
+      {messagesFor(item).map((event) => <div key={event.id} data-chat-anchor-key={chatEventDisplayKey(event)}><MessageRow event={event} linkHandling={props.linkHandling} onLoadDetail={loadBody} /></div>)}
     </div>)}
     {!answers.length && !["running", "action_required"].includes(turn.status) ? <p className="text-xs text-muted">{turn.answer_recorded ? "Answer is outside this page" : turn.status === "cancelled" ? "Stopped before an answer" : turn.status === "failed" ? "Turn failed" : "No final answer recorded"}</p> : null}
     {changeCard?.kind === "turn_change_summary" ? <TurnChangeCard row={changeCard} onOpenFile={props.onOpenFile} /> : null}

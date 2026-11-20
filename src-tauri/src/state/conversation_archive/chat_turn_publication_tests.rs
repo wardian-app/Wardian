@@ -76,8 +76,1056 @@ fn settle(owner: &ProjectionOwner) {
     panic!("synthetic turn did not settle in bounded checkpoints");
 }
 
+#[test]
+fn recent_identity_handoff_is_one_owned_revision_and_privacy_retires_its_receipt() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    let mut events = turn_events(Some("Synthetic tests passed"));
+    let mut tags = HashMap::new();
+    let headers = events
+        .iter_mut()
+        .enumerate()
+        .map(|(index, event)| {
+            let key = format!("{}:watch:{index}", receipt.0);
+            let version = format!("version-{index}");
+            event.metadata["chat_recent_key"] = json!(key);
+            event.metadata["chat_recent_version"] = json!(version);
+            tags.insert(event.id.clone(), (key, version));
+            let mut header = header(event);
+            header.id = format!("preview:{}:{index}", receipt.0);
+            header
+        })
+        .collect();
+    owner
+        .publish_recent(&source, &runtime, &receipt, headers)
+        .unwrap();
+    owner.note_recent_coverage(&receipt, &tags).unwrap();
+    let cold =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    assert!(cold.presentation.is_none());
+    assert!(cold.conversation_id.is_none());
+    let mut candidate = candidate(events);
+    candidate.context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    owner
+        .committed(candidate, "synthetic-covered".into())
+        .unwrap();
+    settle(&owner);
+    let switched = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(cold.revision),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    let presented = value(&switched);
+    assert_eq!(
+        presented.preview_bridge.as_ref().unwrap().admission_id,
+        receipt.0
+    );
+    assert_eq!(switched.aliases.len(), switched.events.len());
+    assert!(switched.recent_admission.is_none());
+    assert!(presented.turns.iter().all(|turn| turn.membership_complete));
+    let repeated = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(switched.revision),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert_eq!(presented.turns, value(&repeated).turns);
+    assert_eq!(presented.items, value(&repeated).items);
+    let boundary = owner.recent_boundary(Some("agent-1")).unwrap();
+    assert!(!owner
+        .publish_recent(&source, &runtime, &receipt, cold.events)
+        .unwrap());
+    let retired =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    assert!(retired.events.is_empty());
+    assert!(retired.presentation.is_none());
+    drop(boundary);
+    let next = owner.begin_recent(&source, &runtime).unwrap();
+    assert_ne!(next.0, receipt.0);
+    assert!(!owner
+        .publish_recent(&source, &runtime, &receipt, Vec::new())
+        .unwrap());
+}
+
 fn read_turn(detail: Option<&str>) -> AgentChatPage {
     read(&context(), &snapshot(&context()), None, None, detail).unwrap()
+}
+
+#[test]
+fn one_readers_binding_cannot_waive_another_readers_legacy_aliases() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    let mut events = turn_events(Some("Synthetic success"));
+    let key = format!("{}:watch:1", receipt.0);
+    events[3].metadata["chat_recent_key"] = json!(key);
+    events[3].metadata["chat_recent_version"] = json!("one");
+    let canonical_id = events[3].id.clone();
+    let mut preview = header(&events[3]);
+    preview.id = "legacy-reader-answer".into();
+    owner
+        .publish_recent(&source, &runtime, &receipt, vec![preview])
+        .unwrap();
+    let legacy =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    let mut candidate = candidate(events);
+    candidate.context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    owner
+        .committed(candidate, "shared-first-view".into())
+        .unwrap();
+    settle(&owner);
+    let first_view =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    assert!(value(&first_view).preview_bridge.is_some());
+    let still_legacy = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(legacy.revision.clone()),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(still_legacy.presentation.is_none());
+    assert!(still_legacy.unchanged && still_legacy.aliases.is_empty());
+    let still_bound = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(first_view.revision),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(value(&still_bound).preview_bridge.is_some());
+    owner
+        .note_recent_coverage(
+            &receipt,
+            &HashMap::from([(canonical_id.clone(), (key, "one".into()))]),
+        )
+        .unwrap();
+    let switched = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(legacy.revision.clone()),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(value(&switched).preview_bridge.is_some());
+    assert!(switched
+        .aliases
+        .iter()
+        .any(|alias| alias.observation_id == "legacy-reader-answer"
+            && alias.canonical_id == canonical_id));
+    let (head_path, objects) = locations("agent-1").unwrap();
+    let mut writer = Store::writer(&objects);
+    let mut replaced: Head = writer.read(&head("agent-1").unwrap().unwrap()).unwrap();
+    replaced.generation = "replaced-canonical-scope".into();
+    write_json_atomic(&head_path, &writer.put(&replaced).unwrap()).unwrap();
+    let retired = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(legacy.revision),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(retired.reset && retired.presentation.is_none() && retired.events.is_empty());
+    assert!(!owner
+        .publish_recent(&source, &runtime, &receipt, Vec::new())
+        .unwrap());
+}
+
+#[test]
+fn coverage_from_another_head_cannot_issue_a_handoff_even_with_identical_scope() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    let mut events = turn_events(Some("Synthetic success"));
+    let key = format!("{}:watch:1", receipt.0);
+    events[3].metadata["chat_recent_key"] = json!(key);
+    events[3].metadata["chat_recent_version"] = json!("one");
+    let canonical_id = events[3].id.clone();
+    let mut preview = header(&events[3]);
+    preview.id = "legacy-answer".into();
+    let mut candidate = candidate(events);
+    candidate.context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    owner.committed(candidate, "first-head".into()).unwrap();
+    settle(&owner);
+    let coverage = [RecentCoverage {
+        event_id: canonical_id,
+        key,
+        version: "one".into(),
+        native_key: None,
+    }];
+    let proof = recent_canonical_proof(&source, &coverage)
+        .unwrap()
+        .0
+        .unwrap();
+    let (head_path, objects) = locations("agent-1").unwrap();
+    let mut writer = Store::writer(&objects);
+    let mut next: Head = writer.read(&head("agent-1").unwrap().unwrap()).unwrap();
+    next.capture_stamp = "different-publication-same-scope".into();
+    next.recent_page = None;
+    let next_ref = writer.put(&next).unwrap();
+    write_json_atomic(&head_path, &next_ref).unwrap();
+    assert!(preview_bridge::read(
+        &source,
+        &receipt.0,
+        std::slice::from_ref(&preview),
+        None,
+        Some(&proof),
+        8,
+        preview_bridge::Selection {
+            mode: preview_bridge::Mode::Legacy,
+            hints: None
+        }
+    )
+    .unwrap()
+    .is_none());
+    let current = recent_canonical_proof(&source, &coverage)
+        .unwrap()
+        .0
+        .unwrap();
+    assert!(preview_bridge::read(
+        &source,
+        &receipt.0,
+        &[preview],
+        None,
+        Some(&current),
+        8,
+        preview_bridge::Selection {
+            mode: preview_bridge::Mode::Legacy,
+            hints: None
+        }
+    )
+    .unwrap()
+    .is_some());
+}
+
+#[test]
+fn canonical_older_pages_retain_the_owned_bridge_with_unmigrated_history() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let ctx = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    let mut recent = turn_events(Some("Synthetic success"));
+    for event in &mut recent {
+        event.sequence = event.sequence.map(|value| value + 100);
+    }
+    recent[3].metadata["chat_recent_key"] = json!(format!("{}:watch:1", receipt.0));
+    recent[3].metadata["chat_recent_version"] = json!("one");
+    let mut preview = header(&recent[3]);
+    preview.id = "preview-answer".into();
+    owner
+        .publish_recent(&source, &runtime, &receipt, vec![preview])
+        .unwrap();
+    owner
+        .note_recent_coverage(
+            &receipt,
+            &HashMap::from([(
+                recent[3].id.clone(),
+                (format!("{}:watch:1", receipt.0), "one".into()),
+            )]),
+        )
+        .unwrap();
+    let mut events: Vec<_> = (0..90)
+        .map(|index| {
+            let mut row = event(&format!("unmigrated-{index}"), "Earlier synthetic activity");
+            row.sequence = Some(index);
+            row
+        })
+        .collect();
+    events.extend(recent);
+    let mut candidate = candidate(events);
+    candidate.context = ctx.clone();
+    owner
+        .committed(candidate, "synthetic-older".into())
+        .unwrap();
+    settle(&owner);
+    let current =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 5, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    assert!(value(&current).preview_bridge.is_some());
+    let mut older = read_with_revalidation_and_limit(
+        &ctx,
+        &source,
+        current.next_before.as_deref(),
+        Some(&preview_bridge::split_revision(&current.revision).unwrap().0),
+        None,
+        None,
+        Some(5),
+    )
+    .unwrap();
+    assert!(older.older_page && older.presentation.is_none());
+    let events = older.events.clone();
+    let cursor = older.next_before.clone();
+    older = owner
+        .canonical_bridge_reader(
+            source.clone(),
+            runtime.clone(),
+            RetiredChatRead {
+                cursor: current.next_before.clone(),
+                revision: Some(current.revision.clone()),
+                detail_ref: None,
+                revalidate_ids: None,
+                limit: Some(5),
+            },
+        )
+        .unwrap()()
+    .unwrap();
+    assert!(!value(&older).legacy_turns.is_empty());
+    assert_eq!(
+        value(&older).preview_bridge.unwrap().admission_id,
+        receipt.0
+    );
+    assert_eq!(older.events, events);
+    assert_eq!(older.next_before, cursor);
+    assert!(older.recent_admission.is_none());
+}
+
+#[test]
+fn normalized_running_source_closes_in_place_and_replacement_retracts_the_bridge() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("preview-source.jsonl");
+    let mut lines = vec![
+        json!({"type":"session_meta","payload":{"id":"one"}}),
+        json!({"type":"turn_context","payload":{"turn_id":"turn-one"}}),
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-one"}}),
+        json!({"type":"response_item","payload":{"type":"message","id":"prompt-one","role":"user","content":[{"type":"input_text","text":"Run synthetic tests."}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-one","content_item_kinds":["user.text"]}}}),
+    ];
+    for index in 0..10 {
+        lines.push(json!({"type":"event_msg","payload":{"type":"agent_message","turn_id":"turn-one","message":format!("Synthetic progress {index}")}}));
+    }
+    lines.push(json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Synthetic answer waiting for closure."}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-one"}}}));
+    let contents = lines
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let (mut source, _) =
+        super::tests::owned_native_source_for_provider_session(&path, &contents, "agent-1", "one");
+    source.current_status = "Processing".into();
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    let native_legacy =
+        read_with_revalidation_and_limit(&context, &source, None, None, None, None, Some(8))
+            .unwrap();
+    assert!(native_legacy.conversation_id.is_none() && native_legacy.presentation.is_none());
+    let native_backing: Vec<_> = native_legacy
+        .events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect();
+    assert!(!native_backing.is_empty() && native_backing.len() <= 8);
+    let archive = ConversationArchiveState::default();
+    let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        context.provider_source_key.as_deref().unwrap(),
+        None,
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut batch.events, "codex", &path);
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &batch.events,
+            None,
+            &batch.next,
+            batch.source_proof(),
+        )
+        .unwrap();
+    super::tests::finish_projection(&archive);
+    let owner = &archive.chat_projection;
+    let runtime = Arc::new(Mutex::new("Processing".into()));
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    let mut preview = event(
+        "watch-only-preview",
+        "Synthetic answer waiting for closure.",
+    );
+    preview.metadata =
+        json!({"chat_recent_key":format!("{}:watch:1",receipt.0),"chat_recent_version":"one"});
+    owner
+        .publish_recent(&source, &runtime, &receipt, vec![preview])
+        .unwrap();
+    let running = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(native_legacy.revision),
+        8,
+        Some(native_backing.clone()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(native_backing.iter().all(|id| running
+        .aliases
+        .iter()
+        .any(|alias| &alias.observation_id == id)));
+    let presented = value(&running);
+    assert_eq!(presented.turns.len(), 1);
+    assert!(presented.turns[0].prefix_attributed);
+    assert!(!presented.turns[0].membership_complete);
+    assert_eq!(presented.turns[0].status, ChatTurnStatus::Running);
+    assert!(presented.turns[0].answer_item_keys.is_empty());
+    assert!(
+        running.next_before.is_none()
+            && running.detail.is_none()
+            && running.revalidated_ids.is_none()
+    );
+    assert_eq!(
+        running.recent_admission.as_deref(),
+        Some(receipt.0.as_str())
+    );
+    let answer_before = presented
+        .items
+        .iter()
+        .find(|item| {
+            item.preview
+                .as_ref()
+                .is_some_and(|preview| preview.text == "Synthetic answer waiting for closure.")
+        })
+        .unwrap();
+    assert_eq!(answer_before.kind, ChatPresentedItemKind::Narration);
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "{}",
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-one"}})
+    )
+    .unwrap();
+    let mut closed = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        context.provider_source_key.as_deref().unwrap(),
+        Some(batch.next.clone()),
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut closed.events, "codex", &path);
+    assert!(
+        closed
+            .events
+            .iter()
+            .any(|event| event.metadata["raw_type"] == "task_complete"
+                && event.metadata["chat_turn_membership_complete"] == true
+                && event.metadata["chat_turn_after_closed"] != true),
+        "exact closure must survive source normalization"
+    );
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context,
+            &closed.events,
+            Some(&batch.next),
+            &closed.next,
+            closed.source_proof(),
+        )
+        .unwrap();
+    super::tests::finish_projection(&archive);
+    source.current_status = "Idle".into();
+    let completed = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(running.revision),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert_eq!(running.conversation_id, completed.conversation_id);
+    assert_eq!(
+        running.generation, completed.generation,
+        "capture must preserve the current admission generation"
+    );
+    let final_view = value(&completed);
+    let returned_ids: BTreeSet<_> = completed
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect();
+    assert!(
+        completed
+            .aliases
+            .iter()
+            .all(|alias| returned_ids.contains(alias.canonical_id.as_str())),
+        "the atomic bridge must normalize aliases after the ordinary reader bounds its window"
+    );
+    assert_eq!(running.conversation_id, completed.conversation_id);
+    assert_eq!(running.generation, completed.generation);
+    assert_eq!(running.source_epoch, completed.source_epoch);
+    assert_ne!(
+        presented.preview_bridge.as_ref().unwrap().canonical_head,
+        final_view.preview_bridge.as_ref().unwrap().canonical_head
+    );
+    assert_eq!(final_view.turns[0].turn_key, presented.turns[0].turn_key);
+    assert_eq!(final_view.turns[0].status, ChatTurnStatus::Completed);
+    let answer = final_view
+        .items
+        .iter()
+        .find(|item| item.item_key == answer_before.item_key)
+        .unwrap();
+    assert_eq!(answer.kind, ChatPresentedItemKind::Answer);
+    assert_eq!(answer.order_key, answer_before.order_key);
+    let (closed_certification, closed_binding) = {
+        let recent = owner.recent.lock().unwrap();
+        let slot = recent
+            .slots
+            .iter()
+            .find(|slot| slot.admission == receipt.0)
+            .unwrap();
+        (
+            slot.certification,
+            serde_json::to_value(slot.binding.as_ref().unwrap()).unwrap(),
+        )
+    };
+    let closed_head = head("agent-1").unwrap();
+    writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}",
+        json!({"type":"event_msg","payload":{"type":"agent_message","turn_id":"unproven-next","message":"Synthetic later unqualified output."}}))
+        .unwrap();
+    let extended = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(completed.revision.clone()),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert_eq!(head("agent-1").unwrap(), closed_head);
+    let later = extended
+        .events
+        .iter()
+        .find(|event| event.text.as_deref() == Some("Synthetic later unqualified output."))
+        .unwrap();
+    assert!(value(&extended)
+        .legacy_turns
+        .iter()
+        .any(|turn| turn.event_refs.contains(&later.id)));
+    {
+        let recent = owner.recent.lock().unwrap();
+        let slot = recent
+            .slots
+            .iter()
+            .find(|slot| slot.admission == receipt.0)
+            .unwrap();
+        let next_binding = serde_json::to_value(slot.binding.as_ref().unwrap()).unwrap();
+        assert_eq!(next_binding["presentation"], closed_binding["presentation"]);
+        assert_eq!(next_binding["owners"], closed_binding["owners"]);
+        assert!(slot.certification > closed_certification,
+            "a newer source snapshot must fence stale publication even when only unqualified rows changed");
+        assert!(!slot.certification_matches(closed_certification, true));
+        assert_eq!(slot.issued, receipt.1);
+    }
+    fs::rename(&path, temp.path().join("replaced-source.jsonl")).unwrap();
+    fs::write(&path, contents).unwrap();
+    let retracted = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(completed.revision),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(retracted.reset && retracted.presentation.is_none());
+    assert!(retired_view::split(&retracted.revision).is_some());
+    assert!(
+        retracted
+            .events
+            .iter()
+            .any(|event| event.text.as_deref() == Some("Synthetic answer waiting for closure.")),
+        "forced retraction must immediately show the available partial source through legacy"
+    );
+    assert!(!owner
+        .publish_recent(&source, &runtime, &receipt, Vec::new())
+        .unwrap());
+}
+
+#[test]
+fn native_source_index_generation_preserves_canonical_preview_binding_and_provenance() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("native-generation-preview.jsonl");
+    let header = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-generation-session\"}}\n";
+    let mut lines = vec![
+        json!({"type":"turn_context","payload":{"turn_id":"native-generation-turn"}}),
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"native-generation-turn"}}),
+        json!({"type":"response_item","payload":{"type":"message","id":"native-generation-prompt","role":"user","content":[{"type":"input_text","text":"Run synthetic tests."}],"internal_chat_message_metadata_passthrough":{"turn_id":"native-generation-turn","content_item_kinds":["user.text"]}}}),
+    ];
+    for index in 0..12 {
+        lines.push(json!({"type":"event_msg","payload":{"type":"agent_message","turn_id":"native-generation-turn","message":format!("Synthetic commentary {index}.")}}));
+    }
+    lines.push(json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"x".repeat(950)}],"internal_chat_message_metadata_passthrough":{"turn_id":"native-generation-turn"}}}));
+    lines.push(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"native-generation-turn"}}));
+    let contents = lines
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let (mut source, _) = super::tests::owned_native_source_for_provider_session(
+        &path,
+        header,
+        "agent-1",
+        "native-generation-session",
+    );
+    source.current_status = "Idle".into();
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    let archive = ConversationArchiveState::default();
+    let mut prime = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        context.provider_source_key.as_deref().unwrap(),
+        None,
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut prime.events, "codex", &path);
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &prime.events,
+            None,
+            &prime.next,
+            prime.source_proof(),
+        )
+        .unwrap();
+    assert!(archive.active_conversation_id("agent-1").unwrap().is_none());
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(contents.as_bytes())
+        .unwrap();
+    let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        context.provider_source_key.as_deref().unwrap(),
+        Some(prime.next.clone()),
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut batch.events, "codex", &path);
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &batch.events,
+            Some(&prime.next),
+            &batch.next,
+            batch.source_proof(),
+        )
+        .unwrap();
+    super::tests::finish_projection(&archive);
+    let canonical_ref = head("agent-1").unwrap().unwrap();
+    let canonical: Head = store("agent-1").unwrap().read(&canonical_ref).unwrap();
+    let mut canonical_reader = store("agent-1").unwrap();
+    let (canonical_rows, _) =
+        page(&mut canonical_reader, &canonical_ref, &canonical, None).unwrap();
+    let captured = canonical
+        .turns
+        .page(&mut canonical_reader, &canonical_rows, false)
+        .unwrap()
+        .expect("canonical capture has prepared turn metadata");
+    assert!(!captured.items.is_empty());
+    assert_eq!(captured.turns.len(), 1);
+    assert!(captured.turns[0].membership_complete);
+    assert_eq!(captured.turns[0].status, ChatTurnStatus::Completed);
+    assert!(captured
+        .items
+        .iter()
+        .all(|item| item.provenance == ChatItemProvenance::Canonical));
+    let root = batch
+        .events
+        .iter()
+        .find(|event| {
+            event.role == Some(AgentChatRole::User) && event.metadata["input_purpose"] == "request"
+        })
+        .and_then(|event| event.metadata["request_root_id"].as_str())
+        .expect("owned appended prompt establishes its request root");
+    let closed = canonical
+        .turns
+        .closed_roots(
+            &mut canonical_reader,
+            &super::super::chat_turn_index::Scope {
+                agent_id: &canonical.agent_id,
+                conversation_id: &canonical.conversation_id,
+                source_key: canonical.source_key.as_deref(),
+                source_epoch: canonical.source_epoch.as_deref(),
+                can_activate: false,
+            },
+            &BTreeSet::from([root.to_owned()]),
+        )
+        .unwrap();
+    assert!(
+        closed.contains_key(root),
+        "captured turn is proven closed before binding"
+    );
+    let owner = &archive.chat_projection;
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    assert!(owner
+        .publish_recent(&source, &runtime, &receipt, Vec::new())
+        .unwrap());
+    let bound =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    let original = value(&bound);
+    assert_eq!(
+        original.preview_bridge.as_ref().unwrap().admission_id,
+        receipt.0
+    );
+    assert!(!original.items.is_empty());
+    assert!(original.items.iter().all(|item| captured
+        .items
+        .iter()
+        .any(|owned| owned.item_key == item.item_key)));
+    let original_turns: Vec<_> = original
+        .turns
+        .iter()
+        .map(|turn| turn.turn_key.clone())
+        .collect();
+    let original_items: Vec<_> = original
+        .items
+        .iter()
+        .map(|item| item.item_key.clone())
+        .collect();
+
+    let mut completed_native = None;
+    for _ in 0..128 {
+        advance_source_index(&source).unwrap();
+        if let Some(reference) = super::super::chat_source_index::pointer("agent-1").unwrap() {
+            let mut reader = store("agent-1").unwrap();
+            let (generation, epoch, _, complete) =
+                super::super::chat_source_index::scope_with_completion(
+                    &source,
+                    &mut reader,
+                    &reference,
+                )
+                .unwrap();
+            if complete {
+                completed_native = Some((generation, epoch));
+                break;
+            }
+        }
+    }
+    let (native_generation, native_epoch) =
+        completed_native.expect("native source index completes within bounded checkpoints");
+    assert_ne!(native_generation, canonical.generation);
+    assert_eq!(
+        canonical.source_epoch.as_deref(),
+        Some(native_epoch.as_str())
+    );
+    assert_eq!(
+        head("agent-1").unwrap().as_deref(),
+        Some(canonical_ref.as_str())
+    );
+    let staged = read_preview_source(&context, &source, PAGE_ROWS).unwrap();
+    let ordinary =
+        read_with_revalidation_and_limit(&context, &source, None, None, None, None, Some(8))
+            .unwrap();
+    assert_eq!(
+        staged.generation.as_deref(),
+        Some(native_generation.as_str())
+    );
+    assert_eq!(
+        ordinary.generation.as_deref(),
+        Some(native_generation.as_str())
+    );
+    assert!(
+        !ordinary.archive_read_ready
+            && ordinary.detail.is_none()
+            && ordinary.revalidated_ids.is_none()
+    );
+    let mut failures = Vec::new();
+    // Inspect a fresh open first: a broken bound repeat must not erase its A
+    // before the independent no-revision case can be observed.
+    for (label, revision) in [("fresh-open", None), ("bound-repeat", Some(bound.revision))] {
+        match owner.recent_reader_with_hints(
+            source.clone(),
+            runtime.clone(),
+            revision,
+            8,
+            Some(Vec::new()),
+        )() {
+            Ok(Some(page)) => {
+                let decoded = page
+                    .presentation
+                    .as_ref()
+                    .and_then(|value| value.decode_v1().unwrap());
+                if let Some(decoded) = decoded.filter(|value| value.preview_bridge.is_some()) {
+                    let bridge = decoded.preview_bridge.as_ref().unwrap();
+                    assert_eq!(bridge.admission_id, receipt.0);
+                    assert_eq!(bridge.canonical_head, canonical_ref);
+                    assert_eq!(
+                        page.conversation_id.as_deref(),
+                        Some(canonical.conversation_id.as_str())
+                    );
+                    assert_eq!(
+                        page.generation.as_deref(),
+                        Some(canonical.generation.as_str())
+                    );
+                    assert_eq!(page.source_epoch, canonical.source_epoch);
+                    assert_eq!(
+                        decoded
+                            .turns
+                            .iter()
+                            .map(|turn| turn.turn_key.clone())
+                            .collect::<Vec<_>>(),
+                        original_turns
+                    );
+                    assert_eq!(
+                        decoded
+                            .items
+                            .iter()
+                            .map(|item| item.item_key.clone())
+                            .collect::<Vec<_>>(),
+                        original_items
+                    );
+                    assert!(
+                        decoded
+                            .items
+                            .iter()
+                            .all(|item| item.provenance == ChatItemProvenance::Canonical),
+                        "canonically captured rows must not regress to provisional provenance"
+                    );
+                    assert!(!page.archive_read_ready && page.next_before.is_none() && page.detail.is_none()
+                    && page.revalidated_ids.is_none() && decoded.detail.is_none(),
+                    "native generation cannot grant canonical read, paging, detail or ACK authority");
+                } else {
+                    failures.push(format!(
+                        "{label}: no bridge; progress={} reset={} generation={:?}",
+                        page.progress, page.reset, page.generation
+                    ));
+                }
+            }
+            Ok(None) => failures.push(format!("{label}: no qualified page")),
+            Err(error) => failures.push(format!("{label}: {:?}: {error}", error.kind())),
+        }
+    }
+    assert_eq!(
+        head("agent-1").unwrap().as_deref(),
+        Some(canonical_ref.as_str())
+    );
+    assert!(
+        failures.is_empty(),
+        "native generation must preserve canonical binding: {}",
+        failures.join("; ")
+    );
+}
+
+#[test]
+fn passive_bound_recent_refresh_keeps_empty_continuity_for_unchanged_and_unqualified_tail() {
+    let mut missing = Vec::new();
+    for append_tail in [false, true] {
+        let (_guard, temp) = isolated_home();
+        let path = temp.path().join("passive-continuity.jsonl");
+        let contents = [
+        json!({"type":"session_meta","payload":{"id":"continuity-session"}}),
+        json!({"type":"turn_context","payload":{"turn_id":"closed-turn"}}),
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"closed-turn"}}),
+        json!({"type":"response_item","payload":{"type":"message","id":"continuity-prompt","role":"user","content":[{"type":"input_text","text":"Run synthetic tests."}],"internal_chat_message_metadata_passthrough":{"turn_id":"closed-turn","content_item_kinds":["user.text"]}}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Synthetic closed answer."}],"internal_chat_message_metadata_passthrough":{"turn_id":"closed-turn"}}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"closed-turn"}}),
+    ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+        let (mut source, _) = super::tests::owned_native_source_for_provider_session(
+            &path,
+            &contents,
+            "agent-1",
+            "continuity-session",
+        );
+        source.current_status = "Idle".into();
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+        let archive = ConversationArchiveState::default();
+        let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            None,
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut batch.events,
+            "codex",
+            &path,
+        );
+        archive
+            .append_verified_provider_log_batch_with_context(
+                context,
+                &batch.events,
+                None,
+                &batch.next,
+                batch.source_proof(),
+            )
+            .unwrap();
+        super::tests::finish_projection(&archive);
+        let owner = &archive.chat_projection;
+        let runtime = Arc::new(Mutex::new("Idle".into()));
+        let receipt = owner.begin_recent(&source, &runtime).unwrap();
+        assert!(owner
+            .publish_recent(&source, &runtime, &receipt, Vec::new())
+            .unwrap());
+        let bound = owner.recent_reader_with_hints(
+            source.clone(),
+            runtime.clone(),
+            None,
+            8,
+            Some(Vec::new()),
+        )()
+        .unwrap()
+        .unwrap();
+        assert_eq!(value(&bound).turns[0].status, ChatTurnStatus::Completed);
+        assert_eq!(
+            value(&bound).preview_bridge.unwrap().admission_id,
+            receipt.0
+        );
+        let request = |revision| RetiredChatRead {
+            cursor: None,
+            revision: Some(revision),
+            detail_ref: None,
+            revalidate_ids: None,
+            limit: Some(8),
+        };
+        let first = owner
+            .canonical_bridge_reader(
+                source.clone(),
+                runtime.clone(),
+                request(bound.revision.clone()),
+            )
+            .unwrap()()
+        .unwrap();
+        let current_head = head("agent-1").unwrap().unwrap();
+        if append_tail {
+            writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}",
+            json!({"type":"event_msg","payload":{"type":"agent_message","turn_id":"unproven-next","message":"Synthetic passive unqualified output."}})).unwrap();
+        }
+        let continued = owner
+            .canonical_bridge_reader(
+                source.clone(),
+                runtime.clone(),
+                request(first.revision.clone()),
+            )
+            .unwrap()()
+        .unwrap();
+        assert_eq!(
+            head("agent-1").unwrap().as_deref(),
+            Some(current_head.as_str())
+        );
+        if !append_tail {
+            assert!(continued.unchanged && continued.events.is_empty());
+        }
+        let envelope = continued
+            .presentation
+            .as_ref()
+            .and_then(|value| value.decode_v1().unwrap())
+            .filter(|value| value.preview_bridge.is_some());
+        if let Some(envelope) = envelope {
+            assert!(
+                envelope.turns.is_empty()
+                    && envelope.items.is_empty()
+                    && envelope.state_event_refs.is_empty()
+                    && envelope.legacy_turns.is_empty()
+                    && envelope.detail.is_none()
+            );
+            let bridge = envelope.preview_bridge.unwrap();
+            assert_eq!(bridge.admission_id, receipt.0);
+            assert_eq!(bridge.canonical_head, current_head);
+            assert_eq!(continued.conversation_id, bound.conversation_id);
+            assert_eq!(continued.generation, bound.generation);
+            assert_eq!(continued.source_epoch, bound.source_epoch);
+            assert!(
+                continued.events.is_empty()
+                    && continued.aliases.is_empty()
+                    && continued.removed_ids.is_empty()
+                    && continued.next_before.is_none()
+                    && continued.detail.is_none()
+                    && continued.revalidated_ids.is_none()
+                    && !continued.archive_read_ready
+                    && !continued.reset
+                    && !continued.older_page
+            );
+        } else {
+            missing.push(format!(
+                "append_tail={append_tail}: unchanged={}, events={}, bridge absent",
+                continued.unchanged,
+                continued.events.len()
+            ));
+        }
+        if append_tail {
+            let active = owner.recent_reader_with_hints(
+                source.clone(),
+                runtime.clone(),
+                Some(bound.revision),
+                8,
+                Some(Vec::new()),
+            )()
+            .unwrap()
+            .unwrap();
+            assert!(active.events.iter().any(
+                |event| event.text.as_deref() == Some("Synthetic passive unqualified output.")
+            ));
+            assert_eq!(
+                value(&active).preview_bridge.unwrap().admission_id,
+                receipt.0
+            );
+        }
+        let pending = owner
+            .canonical_bridge_reader(source.clone(), runtime.clone(), request(continued.revision))
+            .unwrap();
+        let _fence = owner.recent_boundary(Some("agent-1")).unwrap();
+        let retired = pending().unwrap();
+        if retired.presentation.is_some()
+            || !retired.events.is_empty()
+            || retired_view::split(&retired.revision).is_none()
+        {
+            missing.push(format!(
+                "append_tail={append_tail}: privacy did not retire continuity"
+            ));
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("; "));
 }
 
 fn value(page: &AgentChatPage) -> ChatPresentationV1 {
@@ -89,6 +1137,382 @@ fn value(page: &AgentChatPage) -> ChatPresentationV1 {
         .decode_v1()
         .unwrap()
         .unwrap()
+}
+
+#[test]
+fn literal_preview_hints_are_per_reader_and_unknown_selectors_keep_omitted_behavior() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let mut candidate = candidate(turn_events(Some("Synthetic success")));
+    candidate.context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    owner.committed(candidate, "hint-source".into()).unwrap();
+    settle(&owner);
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(
+            &source,
+            &runtime,
+            &receipt,
+            vec![event("watch-unproven", "Recent activity")],
+        )
+        .unwrap();
+    let omitted = owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, None)()
+        .unwrap()
+        .unwrap();
+    for hint in [
+        "unknown",
+        "source:foreign-agent:foreign-scope:1",
+        "stale-preview-token",
+    ] {
+        let page = owner.recent_reader_with_hints(
+            source.clone(),
+            runtime.clone(),
+            None,
+            8,
+            Some(vec![hint.into()]),
+        )()
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(page).unwrap(),
+            serde_json::to_value(&omitted).unwrap(),
+            "unresolved hints must expose the omitted response"
+        );
+    }
+    let desktop = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some("legacy-desktop".into()),
+        8,
+        Some(vec!["synthetic-prompt".into()]),
+    )()
+    .unwrap()
+    .unwrap();
+    let remote = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some("legacy-remote".into()),
+        8,
+        Some(vec!["synthetic-answer".into()]),
+    )()
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        value(&desktop).preview_bridge.unwrap().admission_id,
+        receipt.0
+    );
+    assert_eq!(
+        value(&remote).preview_bridge.unwrap().admission_id,
+        receipt.0
+    );
+    assert!(desktop
+        .aliases
+        .iter()
+        .any(|alias| alias.observation_id == "synthetic-prompt"));
+    assert!(remote
+        .aliases
+        .iter()
+        .any(|alias| alias.observation_id == "synthetic-answer"));
+    assert!(!remote
+        .aliases
+        .iter()
+        .any(|alias| alias.observation_id == "watch-unproven"));
+    let live = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(desktop.revision.clone()),
+        8,
+        Some(vec!["uncaptured-live-item".into()]),
+    )()
+    .unwrap()
+    .unwrap();
+    assert_eq!(value(&live).preview_bridge.unwrap().admission_id, receipt.0);
+    // Older clients still receive their exact existing preview after another
+    // reader has acquired the producer binding.
+    let after = owner.recent_reader_with_hints(source.clone(), runtime, None, 8, None)()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(after).unwrap(),
+        serde_json::to_value(omitted).unwrap()
+    );
+}
+
+#[test]
+fn a_full_recent_window_of_canonical_turns_fits_the_existing_reader_budget() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let events: Vec<_> = (0..40)
+        .flat_map(|turn| {
+            turn_events(Some("Synthetic output"))
+                .into_iter()
+                .map(move |mut event| {
+                    event.id = format!("turn-{turn}-{}", event.id);
+                    event.sequence = event.sequence.map(|sequence| turn * 10 + sequence);
+                    event.metadata["request_root_id"] = json!(format!("request-{turn}"));
+                    if event.turn_id.is_some() {
+                        event.turn_id = Some(format!("call-{turn}"));
+                    }
+                    event
+                })
+        })
+        .collect();
+    let mut candidate = candidate(events);
+    candidate.context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    owner.committed(candidate, "full-window".into()).unwrap();
+    settle(&owner);
+    // The ordinary canonical page may win the race before Watch publishes an
+    // admission. An aware reader already using this renderer can join later.
+    let initial = read_with_revalidation_and_limit(
+        &crate::commands::chat::conversation_archive_context_from_snapshot(&source),
+        &source,
+        None,
+        None,
+        None,
+        None,
+        Some(PAGE_ROWS),
+    )
+    .unwrap();
+    assert!(value(&initial).preview_bridge.is_none());
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(&source, &runtime, &receipt, vec![])
+        .unwrap();
+    let page = owner.recent_reader_with_hints(
+        source,
+        runtime,
+        Some(initial.revision),
+        PAGE_ROWS,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .expect("a proven full window must stay inside the read budget");
+    assert!(value(&page).turns.len() >= 8);
+    assert!(page.events.len() <= PAGE_ROWS);
+    assert!(page.records_decoded <= super::super::chat_read_store::READ_OBJECTS);
+    assert!(page.bytes_read < 2 * super::super::chat_read_store::READ_BYTES);
+}
+
+#[test]
+fn preview_hint_validation_is_whole_request_and_uses_utf8_bytes() {
+    use crate::commands::chat::validate_preview_backing_ids as validate;
+    assert!(validate(Some(&[]), true, None, None, false).is_ok());
+    assert!(validate(Some(&vec!["x".repeat(512); 8]), true, None, None, false).is_ok());
+    for ids in [
+        vec!["x".into(); 9],
+        vec!["x".repeat(513)],
+        vec!["é".repeat(257)],
+        vec![" ".into()],
+    ] {
+        assert_eq!(
+            validate(Some(&ids), true, None, None, false).unwrap_err(),
+            "invalid chat read request"
+        );
+    }
+    for (recent, cursor, detail, ack) in [
+        (false, None, None, false),
+        (true, Some("older"), None, false),
+        (true, None, Some("detail"), false),
+        (true, None, None, true),
+    ] {
+        assert!(validate(Some(&[]), recent, cursor, detail, ack).is_err());
+    }
+}
+
+#[test]
+fn retired_admission_can_requalify_under_new_a_with_exact_returned_hint_aliases() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let mut candidate = candidate(turn_events(Some("Synthetic output")));
+    candidate.context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    owner
+        .committed(candidate, "sticky-retraction".into())
+        .unwrap();
+    settle(&owner);
+    let first = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(&source, &runtime, &first, vec![])
+        .unwrap();
+    let bound =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    assert!(value(&bound).preview_bridge.is_some());
+    let fence = owner.recent_boundary(Some("agent-1")).unwrap();
+    let retired = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(bound.revision),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(retired.presentation.is_none() && retired.reset);
+    assert_eq!(retired_view::split(&retired.revision).unwrap().1, first.0);
+    drop(fence);
+    let second = owner.begin_recent(&source, &runtime).unwrap();
+    assert_ne!(first.0, second.0);
+    let request = RetiredChatRead {
+        cursor: None,
+        revision: Some(retired.revision),
+        detail_ref: None,
+        revalidate_ids: None,
+        limit: Some(8),
+    };
+    let unpublished = owner
+        .retired_view_reader(
+            source.clone(),
+            runtime.clone(),
+            request.clone(),
+            Some(Vec::new()),
+        )
+        .unwrap()()
+    .unwrap();
+    assert!(unpublished.presentation.is_none());
+    assert_eq!(
+        retired_view::split(&unpublished.revision).unwrap().1,
+        first.0
+    );
+    owner
+        .publish_recent(&source, &runtime, &second, vec![])
+        .unwrap();
+    // Omitted hints preserve the ordinary legacy path even with new A ready.
+    let legacy = owner
+        .retired_view_reader(source.clone(), runtime.clone(), request.clone(), None)
+        .unwrap()()
+    .unwrap();
+    assert!(legacy.presentation.is_none() && !legacy.events.is_empty());
+    assert_eq!(retired_view::split(&legacy.revision).unwrap().1, first.0);
+    let hints: Vec<_> = legacy.events.iter().map(|event| event.id.clone()).collect();
+    assert!(hints.len() <= 8);
+    let unknown = owner
+        .retired_view_reader(
+            source.clone(),
+            runtime.clone(),
+            request.clone(),
+            Some(vec!["unknown-literal-selector".into()]),
+        )
+        .unwrap()()
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&unknown).unwrap(),
+        serde_json::to_value(&legacy).unwrap()
+    );
+    let wrong_runtime = owner
+        .retired_view_reader(
+            source.clone(),
+            Arc::new(Mutex::new("Idle".into())),
+            request.clone(),
+            Some(hints.clone()),
+        )
+        .unwrap()()
+    .unwrap();
+    assert!(wrong_runtime.presentation.is_none());
+    assert_eq!(
+        retired_view::split(&wrong_runtime.revision).unwrap().1,
+        first.0
+    );
+    let rebound = owner
+        .retired_view_reader(
+            source.clone(),
+            runtime.clone(),
+            request.clone(),
+            Some(hints.clone()),
+        )
+        .unwrap()()
+    .unwrap();
+    assert_eq!(
+        value(&rebound).preview_bridge.unwrap().admission_id,
+        second.0
+    );
+    assert_eq!(
+        preview_bridge::split_revision(&rebound.revision).unwrap().1,
+        second.0
+    );
+    assert!(retired_view::split(&rebound.revision).is_none());
+    assert!(hints.iter().all(|id| rebound
+        .aliases
+        .iter()
+        .any(|alias| &alias.observation_id == id)));
+    assert!(!owner
+        .publish_recent(&source, &runtime, &first, vec![])
+        .unwrap());
+
+    // Work captured before a new privacy fence cannot consume the new A.
+    let pending = owner
+        .retired_view_reader(source.clone(), runtime.clone(), request, Some(hints))
+        .unwrap();
+    let _fence = owner.recent_boundary(Some("agent-1")).unwrap();
+    let blocked = pending().unwrap();
+    assert!(blocked.presentation.is_none() && blocked.events.is_empty() && blocked.reset);
+    assert_eq!(retired_view::split(&blocked.revision).unwrap().1, first.0);
+    assert!(!owner
+        .publish_recent(&source, &runtime, &second, vec![])
+        .unwrap());
+}
+
+#[test]
+fn retired_admission_stays_legacy_while_same_a_is_still_live() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let mut candidate = candidate(turn_events(Some("Synthetic output")));
+    candidate.context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    owner
+        .committed(candidate, "same-admission-retraction".into())
+        .unwrap();
+    settle(&owner);
+    let admission = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(&source, &runtime, &admission, vec![])
+        .unwrap();
+    let bound =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        value(&bound).preview_bridge.unwrap().admission_id,
+        admission.0
+    );
+    let request = RetiredChatRead {
+        cursor: None,
+        revision: Some(format!("recent:{}:retired", admission.0)),
+        detail_ref: None,
+        revalidate_ids: None,
+        limit: Some(8),
+    };
+    let legacy = owner
+        .retired_view_reader(source.clone(), runtime.clone(), request.clone(), None)
+        .unwrap()()
+    .unwrap();
+    assert!(!legacy.events.is_empty());
+    let hints = legacy.events.iter().map(|event| event.id.clone()).collect();
+    for hints in [Some(Vec::new()), Some(hints)] {
+        let same = owner
+            .retired_view_reader(source.clone(), runtime.clone(), request.clone(), hints)
+            .unwrap()()
+        .unwrap();
+        assert!(same.presentation.is_none());
+        assert!(same.recent_admission.is_none());
+        assert_eq!(retired_view::split(&same.revision).unwrap().1, admission.0);
+    }
+    assert!(owner
+        .recent
+        .lock()
+        .unwrap()
+        .slots
+        .iter()
+        .any(|slot| { slot.admission == admission.0 && slot.published && slot.binding.is_some() }));
 }
 
 // The public response omits the owner's staging certificate. These negative

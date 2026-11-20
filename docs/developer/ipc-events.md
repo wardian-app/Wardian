@@ -310,6 +310,32 @@ arguments, patches and artifact output are published through scoped lazy detail
 references, with each detail response limited to 16 KiB. Structured edit totals
 describe the original input; clipped patch totals remain explicitly partial.
 
+#### Recent preview identity hints
+
+Ordinary initial/latest reads may pass optional `preview_backing_ids` alongside
+`recent_preview=true`. Desktop IPC accepts a string array; both authenticated
+Remote Chat routes accept one URL-encoded JSON array query value. The cap is
+eight IDs, each at most 512 UTF-8 bytes and containing non-whitespace text. An
+initial empty array is valid. The parameter cannot accompany an Older cursor,
+detail reference or revalidation request, even an empty revalidation array.
+Malformed arrays or any invalid member reject the whole request through the
+existing bad-request path. Omission retains the previous behavior.
+
+Clients forward the literal backing IDs from the selected agent's preview.
+The producer owns resolution within the authenticated agent, current source,
+admission and publication scope. Hints grant no new read authority and carry no
+Older cursor, detail capability or row-revalidation ACK. Valid unknown,
+out-of-scope or stale hints reveal no lookup or differentiated error oracle.
+Only exact aliases issued with the current returned revision establish a
+preview-to-canonical correspondence; hints, text equality and aliases from an
+earlier revision cannot establish or renew that correspondence. See the
+[Remote reader contract](./remote-gateway.md#recent-header-windows).
+
+The recent admission owns one shared certification state. Desktop, Remote and
+fresh opens under that admission retain the same unresolved extension gaps and
+sticky overflow state. Re-evaluation requires admission turnover. Display
+limits and backing hints remain reader-specific and grant no extra authority.
+
 #### Versioned canonical turn presentation
 
 `AgentChatPage.presentation` is an optional version envelope for producer-owned
@@ -375,13 +401,21 @@ versions, malformed capabilities and combined responses exceeding the existing
 legacy event view and its existing budget enforcement. No representation is
 partially trimmed into another one.
 
-This producer stage does not enable the shared renderer or provisional transcript
-publication. Exact pending-prompt bridges and the preview-identity bridge remain
-follow-up work under the spec's identity amendment. Renderer activation must keep
-other submissions pending in the composer. Source and submission identities are distinct;
-neither text equality nor admission alone establishes canonical correspondence.
-Public Chat behavior and screenshots remain unchanged at this stage. Native and
-PWA open-to-usable timing remains separate acceptance evidence for activation.
+The shared renderer consumes producer-owned turn presentation and bounded recent
+previews. Preview identity uses the scoped producer proof and exact current-revision
+aliases described above. Exact pending-prompt bridges remain separate work under
+the spec's identity amendment; other submissions stay pending in the composer.
+Source and submission identities are distinct; neither text equality nor
+admission alone establishes canonical correspondence. Native and PWA
+open-to-usable timing remains separate acceptance evidence for activation.
+
+Readers of a qualified preview bridge forward its current opaque `revision`
+on Older and detail requests to retain that admission's representation.
+They omit `preview_backing_ids` on those requests. The cursor or detail
+reference remains the read authority; the revision alone grants none.
+An empty continuity envelope on a passive latest read preserves the validated
+admission while carrying no rows, cursor, detail or ACK. Readers keep their
+loaded window and apply the existing revalidation rules when its Head changes.
 
 Archive replay retains canonical IDs and can enrich provenance from a current,
 source-bound native observation. Capture-enabled repair persists verified

@@ -1,4 +1,6 @@
 import type { AgentChatEvent, AgentChatPage } from "../../types";
+import { canonicalPresentationBridgeKeepsScope, qualifiedChatPreviewBridge, sourceLegacyBridgeCoversWindow } from "./chatPreviewIdentity";
+import { isUnscopedSourceLegacy } from "./chatPreviewBacking";
 import {
   MAX_LOADED_CHAT_HEADERS,
   boundChatEvents,
@@ -30,7 +32,7 @@ export class ChatRevalidationError extends Error {
   }
 }
 
-export type ChatScopeRelation = "same" | "canonical" | "bootstrap" | "preview" | "changed" | "unknown";
+export type ChatScopeRelation = "same" | "canonical" | "bootstrap" | "preview" | "bridge" | "changed" | "unknown";
 
 const sourceId = (value: unknown): value is string =>
   typeof value === "string" && value.startsWith("source:") && value.length > 7;
@@ -230,6 +232,22 @@ export function chatPageScopeRelation(
     return previousArchive ? "changed" : "unknown";
   }
 
+  const previousBridge = qualifiedChatPreviewBridge(previous);
+  const nextBridge = qualifiedChatPreviewBridge(next);
+  if ((previousBridge || nextBridge) && !requireAdmissionProof) {
+    // Continuity is a producer capability, never a source-renewal proof.
+    if (!nextBridge) return "changed";
+    if (previousBridge) return previousBridge.admission_id === nextBridge.admission_id
+      && (["conversation_id", "generation", "source_epoch"] as const).every((field) => previous[field] === next[field])
+      ? "bridge" : "changed";
+    if (isUnscopedSourceLegacy(previous)) {
+      return !hasOlderFrontier && sourceLegacyBridgeCoversWindow(previous, next, previousEvents) ? "bridge" : "changed";
+    }
+    if (!hasOlderFrontier && canonicalPresentationBridgeKeepsScope(previous, next)) return "bridge";
+    return !hasOlderFrontier && validRecentPreview(previous) && previous.recent_admission === nextBridge.admission_id
+      ? "bridge" : "changed";
+  }
+
   if (next.archive_read_ready === true && !nextArchive) return previousArchive ? "changed" : "unknown";
   if (previousArchive || nextArchive) {
     if (requireAdmissionProof) return "unknown";
@@ -306,7 +324,7 @@ export function chatPageScopeRelation(
 }
 
 export function chatPageScopeAllowsOrdinaryRead(relation: ChatScopeRelation): boolean {
-  return relation === "same" || relation === "canonical" || relation === "bootstrap" || relation === "preview";
+  return relation === "same" || relation === "canonical" || relation === "bootstrap" || relation === "preview" || relation === "bridge";
 }
 
 export function chatNeedsRevalidation(

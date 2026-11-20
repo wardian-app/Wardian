@@ -293,7 +293,9 @@ Architect decision, 2026-11-19:
   fast display and the one-second opening target. Once canonical data is
   admitted, switch the view once while retaining the scroll anchor. Never mix
   preview and canonical representations in one render. The preview-identity
-  bridge remains a named follow-up PR.
+  bridge uses exact published-head source-scope proof. It never reserves a
+  canonical conversation before capture or derives its UUID from provider IDs.
+  Cold or unproven sources retain the current fast preview path.
 - Propose a separate issue to route Claude Chat-composer submissions through
   the Wardian mod with `asUser: true`, providing the same exact identity bridge.
 
@@ -311,6 +313,56 @@ Canonical membership adapter decision, 2026-11-19:
   complete membership. Unrooted work remains Earlier activity or legacy.
 - Pi, OpenCode, Antigravity and other providers retain the legacy view until
   they have an independently proven source adapter.
+
+Preview identity decision, 2026-11-20:
+
+- The recent owner publishes backing aliases and final turn/item keys in one
+  revision. One admission retains the view's anchor and expansion state across
+  the switch. Subsequent attributed source items keep those keys while capture
+  replaces their provisional backing. Clients never union independent sources.
+- A separate `prefix_attributed` certificate admits running turns only when
+  the opening and every admitted member are proven. It does not change the
+  canonical index's closure semantics or set `membership_complete`. A missing,
+  broken or unattributable member keeps the turn legacy.
+- Running prefixes have incomplete counts and references, no answer emphasis,
+  and no Older, detail or ACK authority. Proven termination closes the same
+  keys in place; interruption without terminal evidence shows Incomplete.
+- Admission retirement, privacy boundaries and failed source-scope proof
+  retract the view and fence late publication. Existing ownership, lifetime
+  and byte limits apply to the binding as well as its preview headers.
+- Once per view governs the source switch. A bound producer snapshot may
+  contain qualified turns and legacy unqualified turns from that same source.
+  A later unqualified turn does not retire the view. It can qualify once in
+  place, preserving source order and the reading anchor. Qualified turns never
+  regress while their admission remains valid.
+- A turn owns lifecycle records with its exact provider turn ID, including a
+  Codex `task_started` before its prompt. An unlinked lifecycle record remains
+  Earlier activity. An unproven middle member cannot be skipped to qualify the
+  turn. Early or unpaired results, parallel calls and replays remain honest
+  work steps. A closed turn is immutable; later records belong to later turns.
+- A contradiction of a running turn's certified chain is source-proof loss.
+  Retract the admission, log only its turn key and contradiction kind, and
+  show available partial output through legacy. The same admission cannot bind
+  again; a new admission may qualify normally. Missing context alone is not a
+  contradiction, and withholding an unproven extension is not a fallback.
+- Missing context after an already-certified prefix preserves that prefix and
+  displays every uncertified extension row as Earlier activity from the same
+  snapshot. Totals remain in progress and no answer is designated. Terminal
+  evidence inside that gap stops Working and shows Incomplete. Once every
+  member is proven, one atomic revision absorbs the extension in place while
+  retaining the reading anchor and work expansion state.
+- An unresolved extension gap survives moving outside the recent header window.
+  Retain its physical IDs as bounded admission metadata and resolve them only
+  through the same published Head or a current source snapshot with exact
+  membership proof. Overflow replaces the IDs with a sticky per-turn
+  `gap_unresolvable` marker. It keeps later rows in Earlier activity for the
+  admission's lifetime without retracting the source view.
+- Certification is shared by all readers of the existing admission, including
+  fresh opens and desktop/Remote readers with different display windows. Its
+  unresolved IDs, sticky overflow and retraction state clear only when the
+  admission is retired or replaced. A new admission evaluates the source
+  again. This supersedes the earlier fresh-open re-evaluation clause; there is
+  no per-reader certificate namespace or additional admission lifetime.
 
 ## Mockups
 

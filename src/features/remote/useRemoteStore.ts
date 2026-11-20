@@ -11,6 +11,8 @@ import type {
   RemoteAutomationSummary,
 } from "../../types";
 import { chatPresentationV1 } from "../chat/committedChatPresentation";
+import { isUnscopedSourceLegacy, previewBackingIdsForWindow } from "../chat/chatPreviewBacking";
+import { qualifiedChatPreviewBridge } from "../chat/chatPreviewIdentity";
 import {
   addChatSubmission,
   applyChatPage,
@@ -140,6 +142,7 @@ async function loadActiveRemoteChatDetailPage(get: RemoteGet, reference: string,
   const serial = chatRefreshRequestSerial;
   const requestedWindow = chatWindowRequestSerial;
   const previous = get().chatPage;
+  if (previous?.recent_admission != null) throw new Error("Recent preview has no detail authority");
   const revision = (get().chatPresentationPage ?? previous)?.revision;
   if (!agentId) throw new Error("Conversation is closed");
   const currentScope = () => {
@@ -165,7 +168,9 @@ async function loadActiveRemoteChatDetailPage(get: RemoteGet, reference: string,
   const done = new Promise<void>((resolve) => { releaseRead = resolve; });
   chatDetailReadsInFlight.set(agentId, done);
   try {
-    const page = await remoteClient.loadAgentChatPage(agentId, undefined, undefined, reference);
+    const continuationPage = get().chatPage;
+    const continuationRevision = qualifiedChatPreviewBridge(continuationPage) ? continuationPage?.revision : undefined;
+    const page = await remoteClient.loadAgentChatPage(agentId, undefined, continuationRevision, reference);
     if (!currentScope() || page.generation !== previous?.generation
       || page.conversation_id !== previous?.conversation_id || page.source_epoch !== previous?.source_epoch
       || page.recent_admission !== previous?.recent_admission || page.session_id !== agentId
@@ -1222,12 +1227,13 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       const previous = before.chatPage;
       const startingEvents = before.chatEvents;
       const canReuseRevision = previous?.session_id === activeAgentId
-        && chatPageScopeAllowsOrdinaryRead(chatPageScopeRelation(previous, previous, startingEvents));
+        && (chatPageScopeAllowsOrdinaryRead(chatPageScopeRelation(previous, previous, startingEvents)) || isUnscopedSourceLegacy(previous));
       const startingFingerprint = JSON.stringify(startingEvents);
       const browsingOlder = before.chatBrowsingOlder || interleavedRecent;
       const page = await remoteClient.loadAgentChatPage(activeAgentId, undefined,
         !chatForceRecentRead && canReuseRevision ? previous.revision : undefined,
-        undefined, controller.signal, undefined, !browsingOlder);
+        undefined, controller.signal, undefined, !browsingOlder,
+        browsingOlder ? undefined : previewBackingIdsForWindow(previous, startingEvents));
       if (requestSerial !== chatRefreshRequestSerial || requestedWindow !== chatWindowRequestSerial
         || get().activeAgentId !== activeAgentId || page.session_id !== activeAgentId) return;
       const scopeRelation = chatPageScopeRelation(previous, page, startingEvents,
@@ -1236,7 +1242,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       if (page.archive_read_ready === true && !isArchiveReadPage(page)) {
         throw new ChatRevalidationError("Invalid archive read qualification.", scopeRelation === "changed");
       }
-      if (page.recent_admission != null && chatPageScopeRelation(page, page, [], false) !== "preview") {
+      if (page.recent_admission != null && !["preview", "bridge"].includes(chatPageScopeRelation(page, page, [], false))) {
         throw new ChatRevalidationError("Invalid recent preview capability.", scopeRelation === "changed");
       }
       const agentStatus = get().agents.find((agent) => agent.session_id === activeAgentId)?.status;
@@ -1264,10 +1270,11 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         return;
       }
       let patchedEvents: AgentChatEvent[] | null = null;
-      if (previous && (scopeRelation === "same" || scopeRelation === "canonical") && browsingOlder) {
+      if (previous && (scopeRelation === "same" || scopeRelation === "canonical"
+        || (scopeRelation === "bridge" && previous.recent_admission == null && page.recent_admission == null)) && browsingOlder) {
         if (page.reset && page.events.length > 80) throw new Error("Recent snapshot exceeds the metadata page limit");
         patchedEvents = patchLoadedRemoteChatMembers(startingEvents, page, scopeRelation === "canonical");
-        if (scopeRelation === "same" && chatNeedsRevalidation(previous, page, true)) {
+        if (chatNeedsRevalidation(previous, page, true)) {
           patchedEvents = await renewRemoteChatWindow(patchedEvents, page, controller.signal,
             () => requestSerial === chatRefreshRequestSerial && requestedWindow === chatWindowRequestSerial
               && get().activeAgentId === activeAgentId && get().activeAgentViewMode === "chat"
@@ -1390,6 +1397,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     return promise;
   },
   async loadOlderActiveAgentChat() {
+    if (get().chatPage?.recent_admission != null) return;
     const agentId = get().activeAgentId;
     const detailRead = agentId ? chatDetailReadsInFlight.get(agentId) : null;
     if (detailRead) {
@@ -1453,7 +1461,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       lastBackgroundChatRefreshStartedAt = Date.now();
       read.physical = (async () => {
         try {
-          const page = await remoteClient.loadAgentChatPage(activeAgentId, chatNextBefore, undefined, undefined, read.controller.signal);
+          const continuationPage = get().chatPage;
+          const continuationRevision = qualifiedChatPreviewBridge(continuationPage) ? continuationPage?.revision : undefined;
+          const page = await remoteClient.loadAgentChatPage(activeAgentId, chatNextBefore, continuationRevision, undefined, read.controller.signal);
           if (!ownsDemand() || page.session_id !== activeAgentId) {
             read.settle(); return;
           }
@@ -1465,7 +1475,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
           if (page.archive_read_ready === true && !isArchiveReadPage(page)) {
             throw new ChatRevalidationError("Invalid archive read qualification.", scopeRelation === "changed");
           }
-          if (page.recent_admission != null && chatPageScopeRelation(page, page, [], false) !== "preview") {
+          if (page.recent_admission != null && !["preview", "bridge"].includes(chatPageScopeRelation(page, page, [], false))) {
             throw new ChatRevalidationError("Invalid recent preview capability.", scopeRelation === "changed");
           }
           if (previous && scopeRelation === "unknown") {

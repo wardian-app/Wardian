@@ -322,7 +322,7 @@ async fn queued_live_recent(
             .finish_recent_request(&nonce);
         result.unwrap().unwrap();
     }
-    crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         state,
         session.into(),
         None,
@@ -353,7 +353,7 @@ async fn assert_live_cohort_handoff(state: &Arc<AppState>, session: &str) {
         1,
         "ordinary LIVE observation must admit a worker"
     );
-    let ordinary = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let ordinary = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         state,
         session.into(),
         None,
@@ -412,7 +412,7 @@ async fn assert_live_cohort_handoff(state: &Arc<AppState>, session: &str) {
         let Some(before) = cursor.take() else {
             break;
         };
-        let older = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        let older = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
             state,
             session.into(),
             Some(before),
@@ -497,7 +497,7 @@ async fn quiet_replaced_source_finishes_owned_projection_work_without_another_ap
         .conversation_archive
         .chat_projection
         .has_pending_capture_work(&session));
-    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.clone(),
         None,
@@ -824,7 +824,7 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
     let mut cursor = None;
     let mut rows = Vec::new();
     for page_index in 0..8 {
-        let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
             &state,
             session.clone(),
             cursor.take(),
@@ -869,7 +869,7 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
                 page.next_before.is_some(),
                 "the full cohort requires real Older pages"
             );
-            let unchanged = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            let unchanged = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
                 &state,
                 session.clone(),
                 None,
@@ -888,7 +888,7 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
             assert!(unchanged.source_epoch.is_none());
             assert!(unchanged.recent_admission.is_none());
             assert!(unchanged.revalidated_ids.is_none());
-            let stale = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            let stale = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
                 &state,
                 session.clone(),
                 Some("source:stale".into()),
@@ -949,7 +949,7 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
     let detail_ref = owned.metadata["chat_detail_ref"]
         .as_str()
         .expect("the owned body exceeds the header preview");
-    let body = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let body = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.clone(),
         None,
@@ -1062,7 +1062,7 @@ async fn canonical_mock_headers_wait_for_source_renewal_qualification() {
             break;
         }
     }
-    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.clone(),
         None,
@@ -1082,7 +1082,7 @@ async fn canonical_mock_headers_wait_for_source_renewal_qualification() {
         page.progress, "indexing",
         "readable canonical headers do not complete source renewal"
     );
-    let unchanged = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let unchanged = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.clone(),
         None,
@@ -1096,7 +1096,7 @@ async fn canonical_mock_headers_wait_for_source_renewal_qualification() {
     assert_eq!(unchanged.progress, "indexing");
     assert!(unchanged.unchanged);
     assert_eq!(dispatch_live_capture(&state, &session).await, 1);
-    let ready = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let ready = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.clone(),
         None,
@@ -1109,7 +1109,7 @@ async fn canonical_mock_headers_wait_for_source_renewal_qualification() {
     .unwrap();
     assert_eq!(ready.progress, "ready");
     assert!(ready.next_before.is_some());
-    let polled = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let polled = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.clone(),
         None,
@@ -1130,7 +1130,7 @@ async fn canonical_mock_headers_wait_for_source_renewal_qualification() {
         "the ready transition supplies a complete recent window"
     );
     assert!(polled.next_before.is_some());
-    let acknowledged = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let acknowledged = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.clone(),
         None,
@@ -1143,7 +1143,7 @@ async fn canonical_mock_headers_wait_for_source_renewal_qualification() {
     .unwrap();
     assert_eq!(acknowledged.progress, "ready");
     assert!(acknowledged.unchanged);
-    let repeated = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let repeated = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.clone(),
         None,
@@ -1193,7 +1193,7 @@ async fn canonical_mock_headers_wait_for_source_renewal_qualification() {
             &Some(reference),
         )
         .unwrap();
-        let withheld = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        let withheld = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
             &state,
             session.clone(),
             None,
@@ -1230,7 +1230,7 @@ async fn canonical_mock_headers_wait_for_source_renewal_qualification() {
         crate::state::conversation_archive::chat_read::head(&session).unwrap(),
         old_head
     );
-    let stale_canonical = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let stale_canonical = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session,
         None,
@@ -1385,7 +1385,7 @@ async fn ordinary_live_history_progresses_beside_saved_off_capture() {
     let mut cursor = canonical.next_before;
     for _ in 0..8 {
         let Some(before) = cursor.take() else { break };
-        let older = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        let older = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
             &state,
             session.clone(),
             Some(before),
@@ -1813,7 +1813,7 @@ async fn watch_publisher_recent_headers_precede_older_archive_gate() {
         while Arc::strong_count(&gate) <= holders_before_capture {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        crate::commands::chat::load_agent_chat_page_with_preview_for_state(
             &state,
             session_id.into(),
             None,
@@ -1921,7 +1921,7 @@ async fn recent_antigravity_observed_database_prelude_and_normal_canonical_hando
         .await
         .unwrap();
     crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
-    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -1960,7 +1960,7 @@ async fn recent_antigravity_observed_database_prelude_and_normal_canonical_hando
         .await
         .unwrap();
     crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
-    let canonical = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let canonical = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -2063,7 +2063,7 @@ async fn recent_opencode_normal_selection_publishes_native_parts_before_archive_
     crate::commands::chat::queue_recent_capture_for_app(&state, app.handle(), session).unwrap();
     let selected = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
                 &state,
                 session.into(),
                 None,
@@ -2134,7 +2134,7 @@ async fn recent_opencode_normal_selection_publishes_native_parts_before_archive_
     })
     .await
     .unwrap();
-    let canonical = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let canonical = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -2179,7 +2179,7 @@ async fn recent_opencode_normal_selection_publishes_native_parts_before_archive_
         .all(|event| !event.id.starts_with("preview:")));
     connection.execute("UPDATE part SET data='{\"type\":\"text\",\"text\":\"edited native-body-2\"}' WHERE id='part-2'", []).unwrap();
     crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
-    let edited = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let edited = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -2211,7 +2211,7 @@ async fn recent_opencode_normal_selection_publishes_native_parts_before_archive_
     crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
     // A source-proved edit must reach real canonical publication while
     // retaining the original observation and narrative identity.
-    let after_capture = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let after_capture = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -2421,7 +2421,7 @@ async fn recent_live_watch_survives_disabled_durable_capture_without_history() {
         .await
         .unwrap();
     crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
-    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -2456,7 +2456,7 @@ async fn recent_live_watch_survives_disabled_durable_capture_without_history() {
         .retire_live_conversation(session)
         .unwrap();
     assert!(crate::commands::chat::publish_recent_for_state(&state, session, None).is_err());
-    let retired = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let retired = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -2544,7 +2544,7 @@ async fn fresh_bound_codex_live_page(discover_log: bool) {
         .await
         .unwrap();
     crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
-    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -2676,7 +2676,7 @@ async fn recent_all_provider_watch_extractors_precede_first_archive_io() {
             while Arc::strong_count(&gate) <= references {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            crate::commands::chat::load_agent_chat_page_with_preview_for_state(
                 &state,
                 session_id.clone(),
                 None,
@@ -2764,7 +2764,7 @@ async fn recent_watch_prelude_does_not_wait_for_older_global_capture_work() {
         })
         .await;
         loop {
-            let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
                 &state,
                 session.into(),
                 None,

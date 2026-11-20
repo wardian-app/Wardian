@@ -26,6 +26,8 @@ import {
 } from "../chat/chatPresentation";
 import { chatTranscriptRowKey } from "../chat/chatTurns";
 import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
+import { useChatPresentationScope } from "../chat/chatPreviewIdentity";
+import { useChatHandoffAnchor } from "../chat/chatScrollAnchor";
 import { RemoteAttachmentComposer } from "./RemoteAttachmentComposer";
 import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
@@ -460,8 +462,8 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const jumpToLatestChat = useRemoteStore((state) => state.jumpToLatestActiveAgentChat);
   const chatError = useRemoteStore((state) => state.chatError);
   const chatProgress = useRemoteStore((state) => state.chatPage?.progress ?? "indexing");
-  const chatPresentationScope = useRemoteStore((state) => JSON.stringify([agent.session_id, agent.provider,
-    state.chatPage?.conversation_id, state.chatPage?.generation, state.chatPage?.source_epoch]));
+  const scopePage = useRemoteStore((state) => state.chatPage);
+  const presentationScope = useChatPresentationScope(scopePage, agent.session_id, agent.provider, chatEvents);
   const chatScopeReady = useRemoteStore((state) => state.chatPage !== null);
   const loadChatDetail = useRemoteStore((state) => state.loadActiveAgentChatDetail);
   const loadChatStepDetail = useRemoteStore((state) => state.loadActiveAgentChatStepDetail);
@@ -563,7 +565,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
 
       {activeAgentViewMode === "chat" ? (
         <ChatPane
-          presentationScope={chatPresentationScope}
+          presentationScope={presentationScope}
           scopeReady={chatScopeReady}
           key={agent.session_id}
           agent={agent}
@@ -1064,6 +1066,7 @@ function ChatPane({
         readingPresentation.boundaries, hasOlder),
     [hasOlder, visibleEvents, committedPresentation, readingPresentation.boundaries],
   );
+  useChatHandoffAnchor(scrollRef, presentationScope, JSON.stringify(rows.map((row) => [row.kind, chatTranscriptRowKey(row)])));
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
   return (
     <section className="chat-transcript-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`} ref={scrollRef} onScroll={() => {
@@ -1121,6 +1124,8 @@ function ChatPane({
               onApprovalSubmit={onApprovalSubmit}
               onLoadDetail={onLoadDetail}
               onLoadStepDetail={onLoadStepDetail}
+              workExpansion={readingPresentation.workExpansion}
+              detailsDisabled={presentationPage?.recent_admission != null}
               row={row}
             />
           </div>

@@ -417,7 +417,8 @@ fn phase_ambiguity_and_idle_never_promote_narration_or_complete_a_turn() {
     let mut idle = event("idle", AgentChatEventKind::Status, Some("root"));
     idle.status = Some(AgentChatStatus::Idle);
     let mut events = vec![request, ambiguous, idle];
-    for (i, event) in events.iter().enumerate() {
+    for (i, event) in events.iter_mut().enumerate() {
+        event.metadata["chat_turn_membership_complete"] = json!(false);
         observe(&mut index, temp.path(), event, &format!("{i:03}"));
     }
     let initial = page(&index, temp.path(), &events, true);
@@ -434,21 +435,27 @@ fn phase_ambiguity_and_idle_never_promote_narration_or_complete_a_turn() {
             Some("root"),
         );
         answer.metadata["provider_phase"] = json!(phase);
+        answer.metadata["chat_turn_membership_complete"] = json!(false);
         answer.status = Some(AgentChatStatus::Succeeded);
         observe(&mut index, temp.path(), &answer, &format!("1{i:02}"));
         events.push(answer);
     }
+    let mut stale = events.last().unwrap().clone();
+    assert!(!page(&index, temp.path(), &events, true).turns[0].membership_complete);
+    let mut closure = event("closure", AgentChatEventKind::Status, Some("root"));
+    closure.status = Some(AgentChatStatus::Succeeded);
+    observe(&mut index, temp.path(), &closure, "200");
+    events.push(closure);
     let final_page = page(&index, temp.path(), &events, true);
     assert_eq!(final_page.turns[0].answer_item_keys.len(), 2);
     assert_eq!(final_page.turns[0].status, ChatTurnStatus::Completed);
+    assert!(final_page.turns[0].membership_complete);
     assert_eq!(final_page.turns[0].step_count, 0);
-    let mut stale = events.last().unwrap().clone();
+    let snapshot = serde_json::to_vec(&index).unwrap();
     stale.status = Some(AgentChatStatus::Processing);
     observe(&mut index, temp.path(), &stale, "999");
-    assert_eq!(
-        page(&index, temp.path(), &events, true).turns[0].status,
-        ChatTurnStatus::Completed
-    );
+    assert_eq!(page(&index, temp.path(), &events, true), final_page);
+    assert_eq!(serde_json::to_vec(&index).unwrap(), snapshot);
 }
 
 #[test]
@@ -1225,12 +1232,20 @@ fn changed_legacy_rows_and_late_prompt_mirrors_cannot_activate_partial_totals() 
 fn unreliable_phase_replay_preserves_answer_and_prompt_kind_changes_are_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let mut index = Index::default();
-    let request = prompt("request", "root");
+    let mut request = prompt("request", "root");
+    request.metadata["chat_turn_membership_complete"] = json!(false);
     observe(&mut index, temp.path(), &request, "000");
+    let mut narration = event("narration", AgentChatEventKind::Message, Some("root"));
+    narration.metadata["chat_turn_membership_complete"] = json!(false);
+    observe(&mut index, temp.path(), &narration, "001");
     let mut answer = event("answer", AgentChatEventKind::Message, Some("root"));
     answer.metadata["provider_phase"] = json!("final_answer");
+    answer.metadata["chat_turn_membership_complete"] = json!(false);
     answer.status = Some(AgentChatStatus::Succeeded);
-    observe(&mut index, temp.path(), &answer, "001");
+    observe(&mut index, temp.path(), &answer, "002");
+    let mut closure = event("closure", AgentChatEventKind::Status, Some("root"));
+    closure.status = Some(AgentChatStatus::Succeeded);
+    observe(&mut index, temp.path(), &closure, "003");
     let before = page(
         &index,
         temp.path(),
@@ -1253,13 +1268,11 @@ fn unreliable_phase_replay_preserves_answer_and_prompt_kind_changes_are_rejected
             &mut Store::writer(temp.path()),
             &scope(),
             &demoted,
-            "002",
+            "004",
             None
         )
         .is_err());
     assert_eq!(serde_json::to_vec(&index).unwrap(), snapshot);
-    let narration = event("narration", AgentChatEventKind::Message, Some("root"));
-    observe(&mut index, temp.path(), &narration, "003");
     let promoted = prompt("narration", "root");
     let snapshot = serde_json::to_vec(&index).unwrap();
     assert!(index
@@ -1267,18 +1280,17 @@ fn unreliable_phase_replay_preserves_answer_and_prompt_kind_changes_are_rejected
             &mut Store::writer(temp.path()),
             &scope(),
             &promoted,
-            "004",
+            "005",
             None
         )
         .is_err());
     assert_eq!(serde_json::to_vec(&index).unwrap(), snapshot);
     let mut commentary = answer;
     commentary.metadata["provider_phase"] = json!("commentary");
-    observe(&mut index, temp.path(), &commentary, "005");
+    observe(&mut index, temp.path(), &commentary, "006");
     let value = page(&index, temp.path(), &[request, commentary], true);
-    assert!(value.turns[0].answer_item_keys.is_empty());
-    assert!(!value.turns[0].answer_recorded);
-    assert_eq!(value.items[1].kind, ChatPresentedItemKind::Narration);
+    assert_eq!(value, before);
+    assert_eq!(serde_json::to_vec(&index).unwrap(), snapshot);
 }
 
 #[test]
@@ -1904,7 +1916,7 @@ fn activation_requires_the_matching_codex_or_claude_source_adapter() {
 }
 
 #[test]
-fn closure_and_broken_proof_determine_completeness_independently_of_publication() {
+fn closure_ignores_late_broken_rows_without_changing_completed_membership() {
     let temp = tempfile::tempdir().unwrap();
     let mut index = Index::default();
     let mut request = prompt("request", "root");
@@ -1927,11 +1939,57 @@ fn closure_and_broken_proof_determine_completeness_independently_of_publication(
     let mut broken = event("broken-proof", AgentChatEventKind::Status, Some("root"));
     broken.metadata["chat_turn_membership_complete"] = json!(false);
     broken.metadata["chat_turn_membership_partial"] = json!(true);
-    observe(&mut index, temp.path(), &broken, "003");
+    let snapshot = serde_json::to_vec(&index).unwrap();
+    assert!(observe(&mut index, temp.path(), &broken, "003").is_none());
     observe(&mut index, temp.path(), &closure, "999");
+    assert_eq!(serde_json::to_vec(&index).unwrap(), snapshot);
+    assert!(index
+        .event_keys(&mut Store::new(temp.path()), &broken.id)
+        .unwrap()
+        .is_none());
     let restored: Index = serde_json::from_slice(&serde_json::to_vec(&index).unwrap()).unwrap();
     let unlinked = tool("unlinked", "", Some("other-call"), false);
-    let partial = page(&restored, temp.path(), &[request, call, unlinked], true);
+    let value = page(
+        &restored,
+        temp.path(),
+        &[request, call, broken, unlinked],
+        true,
+    );
+    assert!(value.turns[0].membership_complete);
+    assert!(value.turns[0].counts_complete);
+    assert_eq!(value.turns[0].status, ChatTurnStatus::Completed);
+    assert_eq!(value.turns[0].step_count, 1);
+    assert_eq!(
+        value.legacy_turns[0].event_refs,
+        ["broken-proof", "unlinked"]
+    );
+}
+
+#[test]
+fn broken_proof_before_closure_remains_incomplete_after_terminal_and_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut index = Index::default();
+    let mut request = prompt("request", "root");
+    request.metadata["chat_turn_membership_complete"] = json!(false);
+    let mut call = tool("rooted-call", "root", Some("call"), false);
+    call.metadata["chat_turn_membership_complete"] = json!(false);
+    observe(&mut index, temp.path(), &request, "000");
+    observe(&mut index, temp.path(), &call, "001");
+    let mut broken = event("broken-proof", AgentChatEventKind::Status, Some("root"));
+    broken.metadata["chat_turn_membership_complete"] = json!(false);
+    broken.metadata["chat_turn_membership_partial"] = json!(true);
+    observe(&mut index, temp.path(), &broken, "002");
+    let mut closure = event("closure", AgentChatEventKind::Status, Some("root"));
+    closure.status = Some(AgentChatStatus::Succeeded);
+    observe(&mut index, temp.path(), &closure, "003");
+    let restored: Index = serde_json::from_slice(&serde_json::to_vec(&index).unwrap()).unwrap();
+    let unlinked = tool("unlinked", "", Some("other-call"), false);
+    let partial = page(
+        &restored,
+        temp.path(),
+        &[request, call, broken, closure, unlinked],
+        true,
+    );
     assert!(!partial.turns[0].membership_complete);
     assert!(!partial.turns[0].counts_complete);
     assert_eq!(partial.turns[0].step_count, 1);

@@ -15,6 +15,10 @@ const ID_BYTES: usize = 512;
 struct Link {
     root: String,
     sidechain_linked: bool,
+    #[serde(default)]
+    parent_uuid: Option<String>,
+    #[serde(default)]
+    parent_observed: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26,6 +30,9 @@ pub(crate) struct ClaudeState {
     roots: BTreeSet<String>,
     partial: BTreeSet<String>,
     saturated: bool,
+    // A terminal row retires this chain's authority to retract membership.
+    closed: bool,
+    contradicted_root: Option<String>,
 }
 
 fn id(value: &Value) -> Option<&str> {
@@ -43,7 +50,25 @@ impl ClaudeState {
 
     /// Consume each native row once, including rows with no visible event.
     /// An exhausted continuation is deliberately incapable of granting proof.
-    pub(crate) fn observe(&mut self, raw: &Value, event: Option<&mut AgentChatEvent>) {
+    pub(crate) fn observe(&mut self, raw: &Value, mut event: Option<&mut AgentChatEvent>) {
+        if let Some(event) = event.as_deref_mut() {
+            super::clear_contradiction(event);
+            if let Some(metadata) = event.metadata.as_object_mut() {
+                metadata.remove("chat_turn_after_closed");
+            }
+        }
+        let was_closed = self.closed;
+        self.observe_record(raw, event.as_deref_mut());
+        if let Some((event, root)) = event.zip(self.contradicted_root.as_deref()) {
+            if !was_closed {
+                super::stamp_contradiction(event, "claude_uuid_ancestry_conflict", root, None);
+                event.metadata["chat_turn_membership_complete"] = json!(false);
+                event.metadata["chat_turn_membership_partial"] = json!(true);
+            }
+        }
+    }
+
+    fn observe_record(&mut self, raw: &Value, event: Option<&mut AgentChatEvent>) {
         if let Some(session) = id(&raw["sessionId"]) {
             if self
                 .session
@@ -55,6 +80,10 @@ impl ClaudeState {
             self.session = Some(session.into());
         }
         let uuid = id(&raw["uuid"]);
+        let parent_id = id(&raw["parentUuid"]);
+        let parent_observed = raw
+            .get("parentUuid")
+            .is_some_and(|value| value.is_null() || id(value).is_some());
         let is_sidechain = raw["isSidechain"] == true;
         let request_root = event
             .as_ref()
@@ -73,6 +102,53 @@ impl ClaudeState {
             })
             .and_then(|event| uuid.and_then(|_| id(&event.metadata["request_root_id"])))
             .map(str::to_owned);
+        if self.closed
+            && request_root
+                .as_ref()
+                .is_none_or(|root| self.roots.contains(root))
+            && (event.as_ref().is_some_and(|event| {
+                ["request_root_id", "provider_turn_id"]
+                    .into_iter()
+                    .any(|key| {
+                        id(&event.metadata[key]).is_some_and(|root| self.roots.contains(root))
+                    })
+            }) || [uuid, parent_id].into_iter().flatten().any(|uuid| {
+                self.links
+                    .get(uuid)
+                    .is_some_and(|link| self.roots.contains(&link.root))
+            }) || id(&raw["parent_tool_use_id"])
+                .and_then(|tool| self.tools.get(tool))
+                .is_some_and(|root| self.roots.contains(root)))
+        {
+            if let Some(event) = event {
+                if let Some(metadata) = event.metadata.as_object_mut() {
+                    metadata.remove("chat_turn_adapter");
+                }
+                event.metadata["chat_turn_after_closed"] = json!(true);
+                event.metadata["chat_turn_membership_complete"] = json!(false);
+                event.metadata["chat_turn_membership_partial"] = json!(false);
+            }
+            return;
+        }
+        if !self.closed {
+            if let Some(known) = uuid.and_then(|uuid| self.links.get(uuid)) {
+                // Absence of a parent field is a truncated observation. A new
+                // explicit edge for this already proven UUID is a rewrite,
+                // even when both parents resolve to the same request root.
+                if (known.parent_observed
+                    && parent_observed
+                    && known.parent_uuid.as_deref() != parent_id)
+                    || request_root
+                        .as_deref()
+                        .is_some_and(|root| root != known.root)
+                {
+                    self.contradicted_root
+                        .get_or_insert_with(|| known.root.clone());
+                    self.uncertain();
+                    return;
+                }
+            }
+        }
         if request_root
             .as_ref()
             .is_some_and(|root| !self.roots.contains(root))
@@ -85,11 +161,12 @@ impl ClaudeState {
             self.roots.clear();
             self.partial.clear();
             self.saturated = false;
+            self.closed = false;
+            self.contradicted_root = None;
         }
         if self.saturated {
             return;
         }
-        let parent_id = id(&raw["parentUuid"]);
         let parent = parent_id.and_then(|parent| self.links.get(parent)).cloned();
         let tool_root = id(&raw["parent_tool_use_id"])
             .and_then(|tool| self.tools.get(tool))
@@ -98,6 +175,8 @@ impl ClaudeState {
             Some(Link {
                 root,
                 sidechain_linked: false,
+                parent_uuid: None,
+                parent_observed: false,
             })
         } else if is_sidechain {
             match (tool_root, parent) {
@@ -105,6 +184,8 @@ impl ClaudeState {
                 (Some(root), _) => Some(Link {
                     root,
                     sidechain_linked: true,
+                    parent_uuid: None,
+                    parent_observed: false,
                 }),
                 (None, Some(parent)) if parent.sidechain_linked => Some(parent),
                 _ => None,
@@ -120,9 +201,12 @@ impl ClaudeState {
             }
             return;
         };
-        if self.links.len() >= MAX_LINKS
-            || self.tools.len() >= MAX_LINKS
-            || self.roots.len() >= MAX_LINKS
+        let mut link = link;
+        link.parent_uuid = parent_id.map(str::to_owned);
+        link.parent_observed = parent_observed;
+        if (self.links.len() >= MAX_LINKS
+            && uuid.is_some_and(|uuid| !self.links.contains_key(uuid)))
+            || (self.roots.len() >= MAX_LINKS && !self.roots.contains(&link.root))
         {
             self.uncertain();
             self.saturated = true;
@@ -131,9 +215,20 @@ impl ClaudeState {
             return;
         }
         if let Some(uuid) = uuid {
-            if self.links.get(uuid).is_some_and(|known| known != &link) {
-                self.uncertain();
-                return;
+            if let Some(known) = self.links.get(uuid) {
+                if known.root != link.root || known.sidechain_linked != link.sidechain_linked {
+                    if !self.closed {
+                        self.contradicted_root
+                            .get_or_insert_with(|| known.root.clone());
+                    }
+                    self.uncertain();
+                    return;
+                }
+                // A replay without its edge cannot erase earlier evidence.
+                if !link.parent_observed {
+                    link.parent_uuid.clone_from(&known.parent_uuid);
+                    link.parent_observed = known.parent_observed;
+                }
             }
             self.links.insert(uuid.into(), link.clone());
         }
@@ -146,16 +241,13 @@ impl ClaudeState {
                 }
                 if block["type"] == "tool_use" {
                     if let Some(tool) = id(&block["id"]) {
-                        if self
-                            .tools
-                            .get(tool)
-                            .is_some_and(|known| known != &link.root)
-                        {
-                            self.uncertain();
-                        } else if self.tools.len() < MAX_LINKS {
-                            self.tools.insert(tool.into(), link.root.clone());
-                        } else {
-                            self.uncertain();
+                        match self.tools.get(tool) {
+                            Some(known) if known != &link.root => self.uncertain(),
+                            Some(_) => {}
+                            None if self.tools.len() < MAX_LINKS => {
+                                self.tools.insert(tool.into(), link.root.clone());
+                            }
+                            None => self.uncertain(),
                         }
                     }
                 }
@@ -182,6 +274,9 @@ impl ClaudeState {
         let partial = self.partial.contains(&link.root);
         event.metadata["chat_turn_membership_complete"] = json!(terminal && !partial);
         event.metadata["chat_turn_membership_partial"] = json!(partial);
+        if terminal {
+            self.closed = true;
+        }
         if terminal
             && event.kind == AgentChatEventKind::Message
             && event.role == Some(AgentChatRole::Assistant)

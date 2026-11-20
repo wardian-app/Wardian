@@ -31,6 +31,8 @@ import {
 } from "../chat/chatPresentation";
 import { chatTranscriptRowKey, type ChatTranscriptRowModel } from "../chat/chatTurns";
 import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
+import { useChatPresentationScope } from "../chat/chatPreviewIdentity";
+import { useChatHandoffAnchor } from "../chat/chatScrollAnchor";
 import { useAppShellWorkbenchNavigation } from "../../layout/AppShell";
 import { openFileWithSettings } from "../files/fileOpenRouting";
 import { type ChatMarkdownLinkHandling } from "./markdown/ChatMarkdown";
@@ -177,7 +179,7 @@ export function AgentChatView({
       ),
     [agent?.provider, mergedEvents, provider, sessionId, showThinking],
   );
-  const presentationScope = JSON.stringify([sessionId, provider ?? agent?.provider, page?.conversation_id, page?.generation, page?.source_epoch]);
+  const presentationScope = useChatPresentationScope(page, sessionId, provider ?? agent?.provider, events);
   const readingPresentation = useChatReadingPresentation(presentationScope, displayEvents, page !== null);
   const committedPresentation = useCommittedChatPresentation(page, events);
   const chatRows = useMemo<ChatTranscriptRowModel[]>(
@@ -185,6 +187,7 @@ export function AgentChatView({
     [displayEvents, committedPresentation, readingPresentation.boundaries],
   );
   const visibleChatRows = chatRows;
+  useChatHandoffAnchor(transcriptScrollRef, presentationScope, JSON.stringify(chatRows.map((row) => [row.kind, chatTranscriptRowKey(row)])));
   const progressText = page ? chatReadProgress(page.progress, visibleChatRows.length > 0) : null;
   const scrollScope = JSON.stringify([sessionId, provider ?? agent?.provider, page?.conversation_id, page?.source_epoch]);
   const eventKeys = useMemo(() => events.filter(shouldShowChatEvent).map(chatEventDisplayKey), [events]);
@@ -441,6 +444,8 @@ export function AgentChatView({
                   onOpenFile={openChangedFile}
                   onLoadDetail={loadDetail}
                   onLoadStepDetail={loadStepDetail}
+                  workExpansion={readingPresentation.workExpansion}
+                  detailsDisabled={page?.recent_admission != null}
                   row={row}
                 />
               </li>
