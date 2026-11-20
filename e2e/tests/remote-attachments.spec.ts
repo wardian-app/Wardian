@@ -20,9 +20,12 @@ async function capture(page: Page, name: string) {
   await page.screenshot({ path: path.join(directory, `${name}.png`), animations: "disabled" });
 }
 
-async function install(page: Page, options: { holdPhoto?: boolean; failText?: boolean; uncertain?: boolean; lostSubmission?: "missing" | "expired" } = {}) {
+async function install(page: Page, options: { theme?: "light" | "dark"; holdPhoto?: boolean; failText?: boolean; uncertain?: boolean; lostSubmission?: "missing" | "expired" } = {}) {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => localStorage.setItem("wardian.remote.agentDefaultViewMode", "chat"));
+  if (options.theme) await page.addInitScript((theme) => localStorage.setItem("wardian-settings", JSON.stringify({
+    state: { theme }, version: 2,
+  })), options.theme);
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
   const uploads: Array<{ id: string; name: string; bytes: Buffer; csrf?: string; media_type?: string }> = [];
@@ -116,6 +119,79 @@ async function install(page: Page, options: { holdPhoto?: boolean; failText?: bo
 
 test.describe("mobile remote attachments", () => {
   test.setTimeout(45_000);
+  for (const theme of ["light", "dark"] as const) {
+    test(`${theme} unified composer grows with equal controls and internal attachments`, async ({ page }) => {
+      const traffic = await install(page, { theme });
+      const field = page.getByTestId("remote-composer-field");
+      const input = page.getByRole("textbox", { name: "Prompt Attachment Fixture" });
+      const attach = field.getByRole("button", { name: "Attach file", exact: true });
+      const send = field.getByRole("button", { name: "Send prompt", exact: true });
+      await expect(field).toBeVisible();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const geometry = async () => {
+        const [container, leading, trailing, text] = await Promise.all([
+          field.boundingBox(), attach.boundingBox(), send.boundingBox(), input.boundingBox(),
+        ]);
+        expect(leading!.width).toBeGreaterThanOrEqual(44);
+        expect(leading!.height).toBeGreaterThanOrEqual(44);
+        expect(trailing!.width).toBe(leading!.width);
+        expect(trailing!.height).toBe(leading!.height);
+        expect(Math.abs(leading!.y - trailing!.y)).toBeLessThanOrEqual(1);
+        expect(Math.abs(text!.y + text!.height - trailing!.y - trailing!.height)).toBeLessThanOrEqual(1);
+        expect(container!.x).toBeLessThan(leading!.x);
+        expect(container!.x + container!.width).toBeGreaterThan(trailing!.x + trailing!.width);
+        await expect(attach).toHaveCSS("border-left-width", "0px");
+        await expect(input).toHaveCSS("border-left-width", "0px");
+        const radius = await send.evaluate((element) => parseFloat(getComputedStyle(element).borderRadius));
+        expect(radius).toBeGreaterThanOrEqual(trailing!.width / 2);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+        return text!;
+      };
+      await expect(send).toBeDisabled();
+      const empty = await geometry();
+      expect(empty.height).toBe(44);
+      const muted = await send.evaluate((element) => getComputedStyle(element).backgroundColor);
+      const mutedForeground = await send.evaluate((element) => getComputedStyle(element).color);
+      await capture(page, `${theme}-composer-empty`);
+      await input.fill("Please inspect the sample data.");
+      await expect(send).toBeEnabled();
+      const colors = await page.evaluate(() => {
+        const probe = document.createElement("span");
+        probe.style.backgroundColor = "var(--color-wardian-accent)";
+        probe.style.color = "var(--color-wardian-text-muted)";
+        document.body.append(probe);
+        const style = getComputedStyle(probe);
+        const colors = { accent: style.backgroundColor, muted: style.color };
+        probe.remove(); return colors;
+      });
+      await expect(send).toHaveCSS("background-color", colors.accent);
+      expect(muted).not.toBe(colors.accent);
+      expect(mutedForeground).toBe(colors.muted);
+      await geometry();
+      await capture(page, `${theme}-composer-typed`);
+      await input.fill("Review sample rows.\nSummarize the totals.\nKeep the reply brief.");
+      expect((await geometry()).height).toBeGreaterThan(empty.height);
+      await capture(page, `${theme}-composer-multiline`);
+      await input.fill("Sample line.\n".repeat(20));
+      expect((await geometry()).height).toBeLessThanOrEqual(160);
+      expect(await input.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+      await input.fill("Please inspect the attached sample.");
+      await attach.click();
+      await page.getByRole("button", { name: "Files", exact: true }).click();
+      await page.getByLabel("Choose files").setInputFiles(photo);
+      await expect(field.getByText("Temporary · ready")).toBeVisible();
+      const chips = await field.getByLabel("Temporary attachments").boundingBox();
+      expect(chips!.y + chips!.height).toBeLessThanOrEqual((await geometry()).y);
+      await capture(page, `${theme}-composer-attachment`);
+      await send.click();
+      await expect(input).toHaveValue("");
+      await expect(field.getByLabel("Temporary attachments")).toHaveCount(0);
+      await expect(send).toBeDisabled();
+      expect((await geometry()).height).toBe(empty.height);
+      expect(traffic.submissions).toHaveLength(1);
+      expect(traffic.submissions[0]).toMatchObject({ prompt: "Please inspect the attached sample.", attachment_ids: [traffic.uploads[0].id] });
+    });
+  }
   test("Markdown reported as plain text uploads with canonical Content-Type", async ({ page }) => {
     const traffic = await install(page);
     const buffer = Buffer.from("# UTF-8 Markdown\n");

@@ -14,10 +14,14 @@ automations, filesystem access, provider CLIs, PTYs, and telemetry.
 
 ## Attach Files from Chat
 
-In an agent's Chat tab, select **Attach file**, then **Files** or **Camera**.
+In an agent's Chat tab, the rounded message field contains **+** (**Attach file**)
+on the left and a circular **Send** button on the right. Both controls stay
+bottom-aligned as the message field grows with your prompt. Select **+**, then
+**Files** or **Camera**.
 Camera opens the phone's capture picker when supported. Each selected file
-appears in a compact chip with upload progress, a thumbnail or file icon, and
-a remove button. Send becomes available when every attachment is ready.
+appears above the prompt inside the same field, in a compact chip with upload
+progress, a thumbnail or file icon, and a remove button. Send becomes available
+when every attachment is ready.
 You can send attachments without entering a prompt.
 
 ![Mobile Chat composer with a ready photo attachment and a compact remove control](../assets/screenshots/remote-attachments/mobile-chat-attachment.png)
