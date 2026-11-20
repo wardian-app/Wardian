@@ -171,7 +171,7 @@ mod tests {
     }
     #[test]
     fn verify_reads_environment_and_never_returns_bearer() {
-        let _guard = crate::test_env_lock();
+        let _guard = crate::test_support::test_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let store = ControllerStore::at(temp.path());
         let issued = store

@@ -1,7 +1,9 @@
 import type { AgentChatEvent } from "../../types";
 import { changedPathsFromEvents, type PresentedChatRow } from "../grid/workLogPresentation";
 import { toolPatchText } from "./chatPresentation";
+import { chatEventDisplayKey } from "./chatEventIdentity";
 import { structuredEditFromEvent } from "./structuredEdit";
+import type { CommittedTurnRow } from "./committedChatPresentation";
 
 /**
  * Turn segmentation for the chat transcript.
@@ -51,13 +53,13 @@ export interface TurnChangeSummaryRow {
   scope: "turn" | "whole_history";
 }
 
-export type ChatTranscriptRowModel = PresentedChatRow | TurnChangeSummaryRow;
+export type ChatTranscriptRowModel = PresentedChatRow | TurnChangeSummaryRow | CommittedTurnRow;
 
 /** One tool action: the call plus whatever results were merged into it. */
 type ChatAction = AgentChatEvent[];
 
 function actionsOfRow(row: PresentedChatRow): ChatAction[] {
-  if (row.kind === "event") return [[row.event]];
+  if (row.kind === "event") return [[row.event, ...(row.entry?.merged_result_events ?? [])]];
   return row.entries.map((entry) => [entry.primary_event, ...entry.merged_result_events]);
 }
 
@@ -169,7 +171,8 @@ function patchChanges(patch: string): TurnChangeFile[] {
 function changesFromEvent(event: AgentChatEvent): TurnChangeFile[] {
   const patch = toolPatchText(event) ?? (isDiffEvent(event) ? (event.text ?? "") : "");
   const patched = patch ? patchChanges(patch) : [];
-  if (patched.length > 0) return patched;
+  if (patched.length > 0) return event.metadata.chat_tool_input_truncated === true
+    ? patched.map((file) => ({ ...file, counts_unknown: true })) : patched;
 
   const edit = structuredEditFromEvent(event);
   if (edit?.file_path) {
@@ -329,6 +332,6 @@ export function withTurnChangeSummaries(
 }
 
 export function chatTranscriptRowKey(row: ChatTranscriptRowModel): string {
-  if (row.kind === "event") return row.event.id;
+  if (row.kind === "event") return chatEventDisplayKey(row.event);
   return row.id;
 }

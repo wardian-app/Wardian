@@ -2699,6 +2699,13 @@ export const AgentTerminal = memo(function AgentTerminal({
   const rendererReadyRef = useRef(false);
   const autoFocusAttemptedRef = useRef(false);
   const revealGenerationRef = useRef(0);
+  const recoveryRevealHoldRef = useRef<{
+    entry: TerminalSessionEntry;
+    runtimeGeneration: number;
+    resume: (() => Promise<void>) | null;
+    inFlight: Promise<void> | null;
+    waitingForMetrics: boolean;
+  } | null>(null);
   const rendererRevealRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const physicalIntersectionRef = useRef(typeof IntersectionObserver === "undefined");
   const rendererLifecycleActiveRef = useRef(
@@ -2774,6 +2781,19 @@ export const AgentTerminal = memo(function AgentTerminal({
     container: HTMLDivElement,
     options?: { allowDuringRestore?: boolean },
   ): Promise<boolean> {
+    const recovery = recoveryRevealHoldRef.current;
+    if (recovery?.entry === entry) {
+      markRendererReady(false);
+      const lifecycle = presentationLifecycleRef.current;
+      if (recovery.waitingForMetrics && recovery.resume &&
+          presentationObserverMountedRef.current && terminalSessionMap.get(terminalKey) === entry &&
+          lifecycle.visibility === "visible" && lifecycle.renderState === "mounted" &&
+          physicalIntersectionRef.current && container.isConnected &&
+          (!rendererRestoreInFlightRef.current || options?.allowDuringRestore)) {
+        void recovery.resume().catch(error => console.warn("Failed to activate restored terminal", error));
+      }
+      return false;
+    }
     clearRendererRevealRetry();
     const generation = revealGenerationRef.current + 1;
     revealGenerationRef.current = generation;
@@ -2800,6 +2820,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     const remainsCurrent = () => {
       const latestLifecycle = presentationLifecycleRef.current;
       return presentationObserverMountedRef.current &&
+        recoveryRevealHoldRef.current?.entry !== entry &&
         revealGenerationRef.current === generation &&
         terminalSessionMap.get(terminalKey) === entry &&
         rendererRemainsCurrent(entry, renderer) &&
@@ -3033,6 +3054,13 @@ export const AgentTerminal = memo(function AgentTerminal({
 
       if (!restoringRendererRemainsCurrent()) {
         return;
+      }
+      // Recovery may have arrived while the old renderer had no usable metrics.
+      // This continuation runs outside the client's serialized IPC callback.
+      const recovery = recoveryRevealHoldRef.current;
+      if (recovery?.entry === entry && recovery.resume) {
+        await recovery.resume();
+        if (!restoringRendererRemainsCurrent()) return;
       }
       const fitted = await prepareRendererForReveal(entry, container, {
         allowDuringRestore: true,
@@ -3328,6 +3356,49 @@ export const AgentTerminal = memo(function AgentTerminal({
     let visibilityDemoteTimer: ReturnType<typeof setTimeout> | null = null;
     let entry: TerminalSessionEntry | null = null;
 
+    const shouldAutoActivate = () => {
+      const lifecycle = presentationLifecycleRef.current;
+      return autoActivateWhenUnowned && lifecycle.visibility === "visible" &&
+        lifecycle.renderState === "mounted" && lifecycle.requestedInteraction === "interactive";
+    };
+    const holdRecoveryReveal = (session: TerminalSessionEntry, runtimeGeneration: number) => {
+      const hold: NonNullable<typeof recoveryRevealHoldRef.current> = {
+        entry: session, runtimeGeneration, resume: null, inFlight: null, waitingForMetrics: false,
+      };
+      recoveryRevealHoldRef.current = hold;
+      invalidateRendererReveal();
+      return hold;
+    };
+    const completeRecoveryReveal = (
+      hold: NonNullable<typeof recoveryRevealHoldRef.current>,
+      activation: Awaited<ReturnType<TerminalSessionClient["activateWhenUnowned"]>>,
+    ) => {
+      if (!isMounted || hold.entry.disposed ||
+          recoveryRevealHoldRef.current !== hold ||
+          terminalSessionMap.get(terminalKey) !== hold.entry ||
+          hold.entry.generation !== hold.runtimeGeneration ||
+          hold.entry.brokerState?.runtime_generation !== hold.runtimeGeneration) return false;
+      // Null means no local handoff was needed when the serialized work ran.
+      // A started handoff releases only from its current accepted ACK.
+      if (activation !== null && (activation.ack?.decision.status !== "accepted" ||
+          activation.ack.decision.runtime_generation !== hold.runtimeGeneration)) return false;
+      recoveryRevealHoldRef.current = null;
+      return true;
+    };
+    const reconcileRecoveryMirror = (session: TerminalSessionEntry, state: TerminalBrokerState) => {
+      const hold = recoveryRevealHoldRef.current;
+      if (!isMounted || session.disposed || !hold || hold.entry !== session ||
+          terminalSessionMap.get(terminalKey) !== session ||
+          hold.runtimeGeneration !== session.generation ||
+          hold.runtimeGeneration !== state.runtime_generation ||
+          state.owner_presentation_id === null || state.owner_presentation_id === presentationId) return;
+      // Current ownership contention makes this a passive mirror. It still
+      // passes the ordinary renderer write/layout barrier before becoming visible.
+      recoveryRevealHoldRef.current = null;
+      invalidateRendererReveal();
+      if (terminalRef.current) void prepareRendererForReveal(session, terminalRef.current);
+    };
+
     const attach = async () => {
       try {
         const session = await getOrCreateTerminalSession(
@@ -3483,6 +3554,7 @@ export const AgentTerminal = memo(function AgentTerminal({
               return;
             }
             setEntryBrokerState(session, state);
+            reconcileRecoveryMirror(session, state);
             if (presentationObserverMountedRef.current) {
               onPresentationStateChangeRef.current?.(state, session.presentationState);
             }
@@ -3494,8 +3566,17 @@ export const AgentTerminal = memo(function AgentTerminal({
             // broker snapshot/state -> forced unchanged fit -> resize.
           },
           onRegistrationRecovered: (result) => {
-            if (!isMounted || session.disposed) {
+            if (!isMounted || session.disposed ||
+                result.broker_state.runtime_generation !== session.generation) {
               return;
+            }
+            // Invalidate older attempts before geometry can queue a fresh reveal.
+            // The token is presentation-local; an old ACK cannot release a newer one.
+            const hold = shouldAutoActivate() && result.broker_state.owner_presentation_id === null
+              ? holdRecoveryReveal(session, result.broker_state.runtime_generation)
+              : null;
+            if (!hold && recoveryRevealHoldRef.current?.entry === session) {
+              recoveryRevealHoldRef.current = null;
             }
             session.presentationState = result.presentation;
             setEntryBrokerState(session, result.broker_state);
@@ -3504,28 +3585,58 @@ export const AgentTerminal = memo(function AgentTerminal({
             }
             synchronizeReplacementGeometry();
             const lifecycle = presentationLifecycleRef.current;
-            if (autoActivateWhenUnowned && result.broker_state.owner_presentation_id === null &&
-                lifecycle.visibility === "visible" && lifecycle.renderState === "mounted" &&
-                lifecycle.requestedInteraction === "interactive") {
+            if (hold) {
               // A startup placeholder may register before its PTY exists. The
               // registration retry must finish the same viewport/ownership
               // handshake as an immediately available runtime.
-              invalidateRendererReveal();
-              void (async () => {
-                if (!terminalRef.current) return;
-                const dimensions = proposeTerminalDimensions(renderer, {
-                  container: terminalRef.current, useRenderedRowGeometry: false,
-                });
-                if (!dimensions) return;
-                await session.terminalClient.reportViewport(presentationId,
-                  Math.max(MIN_TERMINAL_COLS, dimensions.cols),
-                  Math.max(MIN_TERMINAL_ROWS, dimensions.rows));
-                if (!isMounted || session.disposed) return;
-                await session.terminalClient.activateWhenUnowned(presentationId);
-                if (isMounted && terminalRef.current) {
-                  await prepareRendererForReveal(session, terminalRef.current);
-                }
-              })().catch(error => console.warn("Failed to activate restored terminal", error));
+              hold.resume = () => {
+                if (hold.inFlight) return hold.inFlight;
+                clearRendererRevealRetry();
+                const resume = async () => {
+                  const activeRenderer = session.renderer;
+                  if (!isMounted || session.disposed || recoveryRevealHoldRef.current !== hold ||
+                      terminalSessionMap.get(terminalKey) !== session ||
+                      session.generation !== hold.runtimeGeneration || !shouldAutoActivate() ||
+                      !terminalRef.current || !activeRenderer) return;
+                  const dimensions = proposeTerminalDimensions(activeRenderer, {
+                    container: terminalRef.current, useRenderedRowGeometry: false,
+                  });
+                  hold.waitingForMetrics = !dimensions;
+                  if (!dimensions) return;
+                  await session.terminalClient.reportViewport(presentationId,
+                    Math.max(MIN_TERMINAL_COLS, dimensions.cols),
+                    Math.max(MIN_TERMINAL_ROWS, dimensions.rows));
+                  if (!isMounted || session.disposed || recoveryRevealHoldRef.current !== hold ||
+                      terminalSessionMap.get(terminalKey) !== session ||
+                      session.generation !== hold.runtimeGeneration || !shouldAutoActivate()) return;
+                  const activation = await session.terminalClient.activateWhenUnowned(presentationId);
+                  if (completeRecoveryReveal(hold, activation) && terminalRef.current) {
+                    await prepareRendererForReveal(session, terminalRef.current);
+                  }
+                };
+                const operation = resume();
+                hold.inFlight = operation;
+                const settled = () => {
+                  if (hold.inFlight !== operation) return;
+                  hold.inFlight = null;
+                  if (!hold.waitingForMetrics || recoveryRevealHoldRef.current !== hold ||
+                      !isMounted || session.disposed || !shouldAutoActivate()) return;
+                  // Font/cell metrics can settle without a ResizeObserver event.
+                  // Reuse the reveal retry and never retry a failed handoff here.
+                  clearRendererRevealRetry();
+                  const retryTimer = setTimeout(() => {
+                    if (rendererRevealRetryTimerRef.current !== retryTimer) return;
+                    rendererRevealRetryTimerRef.current = null;
+                    if (recoveryRevealHoldRef.current === hold && terminalRef.current) {
+                      void prepareRendererForReveal(session, terminalRef.current);
+                    }
+                  }, RENDERER_REVEAL_RETRY_MS);
+                  rendererRevealRetryTimerRef.current = retryTimer;
+                };
+                void operation.then(settled, settled);
+                return operation;
+              };
+              void hold.resume().catch(error => console.warn("Failed to activate restored terminal", error));
             }
             if (
               lifecycle.renderState === "mounted" &&
@@ -3544,6 +3655,9 @@ export const AgentTerminal = memo(function AgentTerminal({
             ) {
               return;
             }
+            if (shouldAutoActivate()) {
+              holdRecoveryReveal(session, notification.runtime_generation);
+            }
             // Runtime replacement preserves the presentation, but native
             // viewport acknowledgements belong to the previous PTY generation.
             session.lastReportedSize = null;
@@ -3559,6 +3673,7 @@ export const AgentTerminal = memo(function AgentTerminal({
                 lease_epoch: decision.lease_epoch,
                 owner_presentation_id: decision.owner_presentation_id,
               });
+              reconcileRecoveryMirror(session, session.brokerState!);
               if (presentationObserverMountedRef.current) {
                 onPresentationStateChangeRef.current?.(
                   session.brokerState,
@@ -3683,11 +3798,18 @@ export const AgentTerminal = memo(function AgentTerminal({
         } catch (error) {
           const message = String(error);
           if (message.includes("TerminalSessionProtocolUnavailable")) {
+            if (recoveryRevealHoldRef.current?.entry === session) {
+              recoveryRevealHoldRef.current = null;
+            }
             session.legacyMode = true;
             await session.terminalClient.destroy();
             installLegacyTerminalListeners(terminalKey, session);
             void drainPty(terminalKey);
-          } else if (!message.includes("SessionNotFound")) {
+          } else if (message.includes("SessionNotFound")) {
+            if (isMounted && shouldAutoActivate()) {
+              holdRecoveryReveal(session, session.generation);
+            }
+          } else {
             throw error;
           }
         }
@@ -3724,6 +3846,10 @@ export const AgentTerminal = memo(function AgentTerminal({
     return () => {
       clearRendererRevealRetry();
       isMounted = false;
+      if (recoveryRevealHoldRef.current?.entry === entry) {
+        recoveryRevealHoldRef.current = null;
+        invalidateRendererReveal();
+      }
       resizeObserver?.disconnect();
       visibilityObserver?.disconnect();
       if (visibilityDemoteTimer) {
@@ -3797,6 +3923,13 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (!entry || entry.legacyMode) {
       return;
     }
+    if (requestedInteraction === "read_only" && recoveryRevealHoldRef.current?.entry === entry) {
+      // The native update may be queued behind a pending activation ACK. A
+      // read-only presentation can reveal immediately through the normal fence.
+      recoveryRevealHoldRef.current = null;
+      invalidateRendererReveal();
+      if (terminalRef.current) void prepareRendererForReveal(entry, terminalRef.current);
+    }
     let cancelled = false;
     void entry.terminalClient.updatePresentation(presentationId, {
       desired_geometry:
@@ -3822,12 +3955,20 @@ export const AgentTerminal = memo(function AgentTerminal({
         requestedInteraction === "interactive" &&
         entry.brokerState?.owner_presentation_id === null
       ) {
-        const activation = await entry.terminalClient.activateWhenUnowned(presentationId);
-        if (cancelled) {
-          return;
-        }
-        if (activation?.ack) {
-          setEntryBrokerState(entry, activation.ack.broker_state);
+        const recovery = recoveryRevealHoldRef.current;
+        if (recovery?.entry === entry && recovery.resume) {
+          // A hidden presentation can defer its viewport/activation work. Resume
+          // that same hold on visibility re-entry, outside the client's queue.
+          await recovery.resume();
+          if (cancelled) return;
+        } else {
+          const activation = await entry.terminalClient.activateWhenUnowned(presentationId);
+          if (cancelled) {
+            return;
+          }
+          if (activation?.ack) {
+            setEntryBrokerState(entry, activation.ack.broker_state);
+          }
         }
       }
       if (
@@ -3852,6 +3993,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     };
   }, [
     autoActivateWhenUnowned,
+    invalidateRendererReveal,
     presentationId,
     prepareRendererForReveal,
     renderState,

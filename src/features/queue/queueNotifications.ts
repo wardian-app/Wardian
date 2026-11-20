@@ -18,6 +18,7 @@ const QUEUE_NOTIFICATION_PEAK_GAIN = 0.36;
 
 function notificationTitle(item: QueueItem): string {
   const source = item.agent_name ?? item.automation_name ?? "Wardian";
+  if (item.type === "agent_turn_ended") return `Claude turn ended: ${source}`;
   const eventType = queueEventTypeForItem(item);
   if (eventType === "action_needed") return `Action required: ${source}`;
   if (eventType === "automation_failed") return `Automation failed: ${source}`;

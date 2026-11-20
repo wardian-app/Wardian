@@ -37,6 +37,17 @@ pub(crate) async fn admit_background_capture(
             Err(_) => request.source = None,
         }
     }
+    // Projection checkpoints can hold their mutex over bounded archive I/O.
+    // Observe scheduling demand before taking the live roster/config locks.
+    let projection_pending = request.logging_enabled
+        && state
+            .conversation_archive
+            .chat_projection
+            .has_pending_capture_work(&request.session_id);
+    let adoption_pending = state
+        .conversation_archive
+        .has_pending_adoption(&request.session_id)
+        .unwrap_or(false);
     let agents = state.agents.lock().await;
     let agent = agents.get(&request.session_id)?;
     if !std::sync::Arc::ptr_eq(&agent.current_status, &request.incarnation) {
@@ -55,6 +66,11 @@ pub(crate) async fn admit_background_capture(
     }
     // The live roster cannot replace this witness between validation and
     // admission. The coordinator never acquires the roster in reverse order.
+    let force = force
+        || state
+            .conversation_archive
+            .has_deferred_chat_summaries(&request.session_id);
+    let force = force || projection_pending || adoption_pending;
     state.background_capture.admit(request, force)
 }
 

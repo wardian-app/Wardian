@@ -1371,7 +1371,7 @@ fn gemini_assistant_text_records_watch_transcript() {
         "\n"
     );
 
-    super::record_latest_gemini_assistant_text(&snap, content);
+    super::record_latest_gemini_assistant_text(&snap, content, None);
 
     let snapshot = snap
         .watch_state
@@ -1385,6 +1385,216 @@ fn gemini_assistant_text_records_watch_transcript() {
         snapshot.transcript.messages[0].turn_id.as_deref(),
         Some("m2")
     );
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let state = AppState::new();
+    let session = "recent-gemini-file";
+    let path = home.path().join("gemini.json");
+    let content = r#"{"sessionId":"native-gemini","messages":[{"id":"m2","type":"model","content":"Gemini current answer","tokens":{"input":10,"output":2,"total":12}}]}"#;
+    std::fs::write(&path, content).unwrap();
+    let agent = test_active_agent(session, "gemini", "Off", None);
+    *agent.log_path.lock().unwrap() = Some(path.clone());
+    let config = {
+        let mut config = agent.config.lock().unwrap();
+        config.is_off = true;
+        config.resume_session = Some("native-gemini".into());
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Enabled;
+        config.clone()
+    };
+    let mut snap = test_snapshot_from_agent(&agent, 0, &state);
+    snap.resume_session = config.resume_session.clone();
+    let (parsed, source) = super::read_log_with_watch_source(&path, "gemini").unwrap();
+    assert_eq!(parsed, content);
+    super::record_latest_gemini_with_source(&snap, &parsed, source);
+    assert!(
+        snap.watch_state
+            .lock()
+            .unwrap()
+            .recent_file_source()
+            .is_some(),
+        "the actual completed normal message is bound"
+    );
+    crate::commands::agent::provider_log_tests::register_capture_test_agent(&state, &config, agent)
+        .await
+        .unwrap();
+    let gate = state
+        .conversation_archive
+        .test_agent_archive_gate(session)
+        .unwrap();
+    let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let holder = std::thread::spawn(move || {
+        let _guard = gate.lock().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+    });
+    locked_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
+    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        None,
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(8),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(
+        page.events[0].text.as_deref(),
+        Some("Gemini current answer")
+    );
+    assert!(
+        page.recent_admission.is_some()
+            && page.revalidated_ids.is_none()
+            && page.next_before.is_none()
+    );
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert!(state
+        .conversation_archive
+        .chat_events_for_agent(session)
+        .unwrap()
+        .is_empty());
+    // Same-inode truncate/regrow cannot keep the old admitted Watch body.
+    std::fs::write(&path, content.replace("current", "changed")).unwrap();
+    let retired = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        Some(page.revision),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(8),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
+    // A different inode with identical source bytes also cannot reuse it.
+    let (parsed, source) = super::read_log_with_watch_source(&path, "gemini").unwrap();
+    super::record_latest_gemini_with_source(&snap, &parsed, source);
+    crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
+    let rebound = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        None,
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(8),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rebound.events[0].text.as_deref(),
+        Some("Gemini changed answer")
+    );
+    std::fs::rename(&path, path.with_extension("retained")).unwrap();
+    std::fs::write(&path, content).unwrap();
+    let replaced = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        Some(rebound.revision),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(8),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(replaced.reset && replaced.events.is_empty() && replaced.recent_admission.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recent_file_watch_cannot_borrow_live_ownership_or_a_foreign_stale_receipt() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    for case in ["missing", "foreign", "stale"] {
+        let state = AppState::new();
+        let session = format!("recent-file-negative-{case}");
+        let path = home.path().join(format!("{case}.json"));
+        let content = r#"{"sessionId":"native-gemini","messages":[{"id":"m2","type":"model","content":"file-only answer"}]}"#;
+        std::fs::write(&path, content).unwrap();
+        let agent = test_active_agent(&session, "gemini", "Off", None);
+        *agent.log_path.lock().unwrap() = Some(path.clone());
+        let config = {
+            let mut config = agent.config.lock().unwrap();
+            config.is_off = true;
+            config.resume_session = Some("native-gemini".into());
+            config.folder = home.path().to_string_lossy().into_owned();
+            config.conversation_logging =
+                wardian_core::conversations::AgentConversationLoggingSetting::Enabled;
+            config.clone()
+        };
+        let mut snap = test_snapshot_from_agent(&agent, 0, &state);
+        snap.resume_session = config.resume_session.clone();
+        let source = match case {
+            "missing" => None,
+            "foreign" => {
+                let foreign = home.path().join("foreign.json");
+                std::fs::write(&foreign, content).unwrap();
+                super::read_log_with_watch_source(&foreign, "gemini")
+                    .unwrap()
+                    .1
+            }
+            _ => {
+                super::read_log_with_watch_source(&path, "gemini")
+                    .unwrap()
+                    .1
+            }
+        };
+        super::record_latest_gemini_with_source(&snap, content, source);
+        if case == "stale" {
+            std::fs::write(&path, content.replace("answer", "edited")).unwrap();
+        }
+        crate::commands::agent::provider_log_tests::register_capture_test_agent(
+            &state, &config, agent,
+        )
+        .await
+        .unwrap();
+        crate::commands::chat::publish_recent_for_state(&state, &session, None).unwrap();
+        let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            &state,
+            session,
+            None,
+            None,
+            None,
+            None,
+            crate::commands::chat::RecentChatRead {
+                limit: Some(8),
+                preview: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            page.events.is_empty(),
+            "{case} file receipt must not authorize a file-derived Watch body"
+        );
+    }
 }
 
 #[test]

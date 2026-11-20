@@ -27,6 +27,25 @@ and examples. Documentation tests run separately because `--all-targets` does
 not include them. The command-contract tests in `src/verify-ci.test.ts` pin
 this coverage and exercise invalid arguments and workflow declarations.
 
+## Frontend test phases
+
+The normal `npm run test` entry first runs the existing cache and turn-ended
+Node contracts, the bounded-runner contracts, and the app-free Chat Saved-fixture
+and harness-observer contracts. It then runs the complete
+`scripts/compiler-input-guard.test.mjs` suite in a dedicated Node child before
+starting Vitest and its jsdom workers. The child retains its existing Node
+executable, unfiltered arguments, cwd, inherited environment, UTF-8 capture,
+and 30-second deadline.
+
+The runner emits the full captured stdout and stderr, including partial output
+on a timeout, followed by structured spawn context. An execution error, signal,
+missing status, or nonzero status fails `npm run test` before Vitest and later
+verification commands. The other verification argument and workflow contracts
+remain in Vitest. No separate manual guard command is required.
+
+Earlier timeouts remain historical failures. Moving the required suite out of
+the DOM worker pool does not identify their original active case or cause.
+
 ## Protected compiler inputs
 
 Schedulers can supply `WARDIAN_PROTECTED_INPUT_MANIFESTS` as a JSON array of
@@ -125,6 +144,18 @@ its executable check and states the limits of the evidence.
 The local sequence covers the frontend, backend, and documentation quality
 steps. PR screenshot/code-claim checks, dependency audits, coverage uploads,
 and browser/native suites remain CI- or environment-specific.
+
+## Dependency audits
+
+CI runs `cargo audit` with only the two documented RustSec ignores in the
+workflow, plus `npm audit --audit-level=high`. The Windows updater dependency
+uses an immutable official plugins-workspace revision because the latest
+published updater still selects vulnerable `zip` 4; this revision selects
+`zip` 9 and requires Tauri 2.12. Replace the Git pin with a registry release
+when a published updater selects `zip` 9 or newer and its Tauri requirement is
+met by Wardian's pin. The updater's default archive feature remains enabled.
+Keep the npm API on Tauri's matching minor and the updater npm binding at the
+same exact version as its Rust crate so the native CLI mismatch guard passes.
 
 The hosted `Backend (macOS - Codex Home ACL)` job runs the focused Codex home
 platform tests on `macos-latest`. Its native fixtures check that a private

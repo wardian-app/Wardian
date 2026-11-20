@@ -32,6 +32,28 @@ contract, Codex configuration, and current limitations.
 4. Run `wardian agent list` to confirm the CLI sees your neighbors, or `wardian agent list --scope all` to see all agents.
 5. Use live-control commands only while the desktop app is running for that same home.
 
+## Paired Client Offers
+
+Create an origin-bound pairing offer for an independently hosted HUD:
+
+```bash
+wardian remote client-pairing-offer --client-origin 'https://hud.example:9443'
+```
+
+The same command works in PowerShell. `--client-origin` is required and is the
+exact client origin (scheme, host, and optional port), not a page URL or wildcard.
+The running app for the same `WARDIAN_HOME` must have remote access enabled and
+the origin in its `client_origin_allowlist`. The app validates the origin and
+allowlist, applies offer expiry and rate limits, and owns the pairing state.
+This command does not modify configuration or approve a device.
+
+Stdout is the app's opaque pairing payload as compact JSON, including the
+offer ID, nonce, expiry, gateway identity, client origin, and read grants.
+Pass the complete payload to the HUD's pairing flow. Treat it as a short-lived
+secret. Backend rejection remains a structured CLI error; an unavailable app
+returns `app_not_running` without an offline fallback. See
+[Remote Control](./remote-control.md) for gateway setup and pairing.
+
 ## Agent Discovery And Efficient Output
 
 Discover one command at a time:
@@ -365,6 +387,7 @@ wardian agent list
 wardian agent list --scope all
 wardian agent restart <name-or-uuid>
 wardian agent new-session <name-or-uuid>
+wardian agent release-hold <name-or-uuid> --acquisition-id <exact-acquisition-id> --operator-verified-exit
 wardian agent rename <name-or-uuid> <new-name>
 wardian agent delete <name-or-uuid> --confirm <current-agent-name>
 wardian agent delete <name-or-uuid> --confirm <current-agent-name> --force
@@ -373,6 +396,10 @@ wardian agent resume <name-or-uuid>
 wardian agent models --provider codex --refresh
 wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path>
 wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path> --model <model-id> --reasoning-effort <effort>
+wardian agent spawn --provider codex --class Reviewer --workspace <absolute-workspace-path> --async
+wardian agent spawn --provider codex --class Reviewer --workspace <absolute-workspace-path> --wait-timeout 30s
+wardian agent spawn-status <operation-id>
+wardian agent spawn-wait <operation-id> --timeout 30s
 wardian agent update <name-or-uuid> --class Reviewer
 wardian agent update <name-or-uuid> --workspace <absolute-workspace-path>
 wardian agent update <name-or-uuid> --description "Owns frontend release follow-up"
@@ -447,7 +474,6 @@ wardian message list
 wardian message followup reviewer-a1 --stdin
 wardian message reply req_0123456789abcdef --status done --stdin
 wardian message send coder-a1 "The review evidence is available"
-wardian message receive --limit 20 --timeout-ms 60000
 wardian notify update "The migration is ready for review" --title "Inbox refactor"
 wardian notify approval "Production deployment is prepared" --title "Deploy production" --action "Run the production deployment" --risk "This changes live traffic" --choice "Deploy" --choice "Do not deploy" --wait
 ```
@@ -465,6 +491,59 @@ only letters, numbers, underscores, or hyphens. `all`, leading-hyphen names,
 and UUID-shaped names are reserved. Omit `--name` to receive a class-based
 phonetic name such as `Coder-alpha`.
 
+Every CLI spawn uses a durable operation key. The default command waits up to
+60 seconds for registration and preserves the normal agent JSON output. Use
+`--wait-timeout <duration>` to choose a shorter observation window. If the wait
+ends first, the error includes the operation key and a `spawn-status` command.
+`spawn-status` reads the current operation; `spawn-wait` observes it for up to
+60 seconds. `--async` returns the operation receipt immediately.
+
+Reuse `--operation-id <uuid>` with the same provider, class, name, workspace,
+model, and reasoning effort when retrying an uncertain submission. The key is
+bound to that typed request; changing the request with the same key is an
+error. Generated keys are written to a minimal private receipt under
+`<wardian-home>/spawn-submissions/` before Wardian sends the request. If the
+CLI exits before showing its key, recover it from that receipt and query the
+operation before submitting again. Wardian never retries an older app's
+rejection through the legacy spawn request; update the desktop app, then retry
+with the same key.
+
+Operation states are `queued`, `preparing`, `launching`, `registered`,
+`failed`, and `outcome_unknown`. `registered` records completed roster publication
+and required Codex attachment. Status and wait also report current roster
+`availability`: `current`, `missing`, `incompatible`, `unavailable`, or
+`not_registered`. Normal spawn success requires a compatible saved and live
+identity in `current_agent`. Historical registration survives removal or a
+roster discrepancy; it does not promise provider input readiness.
+`outcome_unknown` means Wardian could not prove whether launch completed. Check
+the roster and operation status before taking further action; a new key would
+create a separate spawn.
+
+Legacy spawn, clone, or rename can report `[agent-name-ownership-pending]`
+after publication. The error includes the stable agent and attempt IDs. Keep
+those IDs for metadata repair. The published agent and its reserved name stay
+bound. At startup, Wardian repairs ownership when the saved roster, database,
+and completion evidence agree. Incomplete evidence keeps automatic restore
+excluded. A bound removal first records its intent. If it reports that roster
+removal committed with durable ownership pending, the saved entry is absent and
+the database records and profile remain for repair. Retry the existing
+`wardian agent delete <agent-uuid> --confirm <exact-name>` using the same
+UUID and name. Once process closure is durably proved, this finishes metadata
+without launching a provider. Startup applies the same repair. Unproved closure,
+a republished roster entry, or changed ownership requires reconciliation and
+remains pending. An ordinary removal whose SQL write fails keeps a stopped agent
+available for retry and restores its saved entry from current live state.
+
+Executable Codex session bootstrap currently requires retained Windows process
+containment. On other platforms, the local Codex rollout path remains available;
+an unavailable executable fallback fails before starting a provider process.
+
+Do not downgrade the desktop app while durable spawn operations remain
+unresolved. Older app versions do not honor operation-owned name claims or
+restore exclusions, so an unresolved launch could be restored or duplicated.
+Resolve or manually reconcile queued, preparing, launching, and outcome-unknown
+operations with a version that supports durable spawn before downgrading.
+
 Model IDs and reasoning efforts are provider-discovered; use
 `wardian agent models --provider <provider>` to inspect the currently exposed
 catalog rather than relying on a fixed CLI list. Provider-specific live
@@ -479,6 +558,82 @@ a desktop app that supports this control command. An older app's rejection or an
 unavailable endpoint remains an error; Wardian does not retry with `resume` or
 silently replace another operation with a fresh session.
 
+If closing archive staging fails after Codex shutdown, the previous session and
+its history remain configured. For new Windows Codex runtimes with prelaunch
+containment, verified tree exit releases only the hold acquired for that stop.
+Retry `agent resume` to retain that session, or `agent new-session` to finish the
+fresh-session transition after the archive error is resolved. These commands
+also retry a retained exact stop or a failed hold-release write online.
+
+On Unix and for uncontained runtimes, successful shutdown still lets an
+in-progress fresh-session rotation finish. The exact old-session hold remains
+in place and blocks resuming that old session until verified recovery. Failed
+shutdown retains the stop fence and blocks rotation.
+
+Legacy stranded holds without retained launch/exit evidence remain blocked by
+default. Off status, an absent PID, restart, and an empty provider-candidate scan
+do not prove old-provider exit. Once an operator has independently verified
+that the selected hold's exact old provider and every descendant writer exited,
+`agent release-hold` provides an explicit online fallback:
+
+```bash
+wardian agent release-hold <name-or-uuid> --acquisition-id <exact-acquisition-id> --operator-verified-exit
+```
+
+The same command works in PowerShell. The exact acquisition ID and the
+attestation flag are mandatory. Select an inspected `prior_provider_hold` /
+`uncertain_previous_provider` record from
+`<wardian-home>/runtime/conversation-leases.json`, or the startup diagnostic.
+Selection uses the target agent ID and acquisition ID. It supports historical
+holds whose provider/session differ from the agent's current configuration;
+the stored hold determines the provider/session being released. A foreign
+agent's hold cannot be selected. No other hold, conversation, workspace, or
+current configuration changes, and release does not finish a pending close.
+
+The desktop must support this command and be running. An older app rejection,
+unavailable endpoint, or timeout never triggers disk fallback or automatic
+replay. The command serializes with the agent's lifecycle and refuses an owned
+runtime, a retained stop entry, an active conversation owner, or any tied
+provider candidate for the held or current provider/session. The scan only
+vetoes release; **the operator's explicit attestation is the authority**.
+
+Before exact lease release, the desktop appends and syncs an authorization to
+`<wardian-home>/agents/<agent-id>/lifecycle-history.jsonl`. It records the OS
+principal (Windows domain/account or Unix effective UID), optional managed actor, UTC time, exact
+hold, and authorization ID. Audit failure prevents release. Before appending,
+the desktop checks at most 64 KiB plus one boundary byte to validate the final
+JSON record and terminating newline. Each new record is limited to 64 KiB.
+Accumulated history has no size ceiling; prior bytes are preserved without a
+full-history scan. A malformed, partial, or oversized final record requires
+inspection and is never repaired or truncated by this command.
+Its `authorization_only` records do not claim successful release if the
+subsequent lease write fails. A successful response identifies the released
+acquisition and authorization ID. After an error or timeout, inspect the exact
+lease and audit before deciding whether to retry. See
+[PTY lifecycle recovery](../developer/pty-lifecycle.md) for the conservative
+verification boundary.
+
+For an explicitly approved interval of a replaced Codex log, `agent adopt-archive`
+records an operator authorization and schedules a fixed archive import. It
+requires the target agent, authorization UUID, saved conversation, provider
+session, source locator, numeric start/end, native identity, and user approval
+reference and wording. `wardian agent adopt-archive --help` lists the required
+flags. Reuse the same authorization UUID when retrying the same request.
+
+The start must match the old committed boundary and continuity anchor. Logging
+and the destination must be enabled and open. Ambiguous time/identity exclusions
+and restrictions after the start refuse adoption. The importer excludes a partial
+final record, ignores later appends, and retires pending work if source or policy
+changes. Re-enabling logging does not revive a retired grant. The command requires
+a supporting desktop app and has no offline fallback.
+
+The synced authorization lives in the agent's `archive-adoption-history.jsonl`;
+the independent job and completion/retirement result live under
+`archive-adoptions/`. Authorization is distinct from completion. Imported bodies
+belong to the saved archive and support ordinary history/detail reads. Native
+capture retains its replacement reason, original cursor and privacy boundaries.
+Other sources and future native history require their own authority.
+
 `agent restart` restarts the provider while preserving the Wardian agent, its
 habitat, and saved session history. Use it after `agent update` when the update
 reports `restart_required`, including class changes. `agent delete` is
@@ -490,28 +645,31 @@ explicitly terminates that provider first. Rename is live and does not restart
 the provider. Agent-owned Wardian history is cascaded with deletion; project
 workspace files are never removed.
 
-`wardian message send <target> <message>` admits information without waking or
-interrupting the recipient. `wardian message followup <target> <message>`
-admits a task and returns its canonical request ID without waiting for a reply;
-use `--idempotency-key` to preserve one logical admission across a caller
-retry. `wardian message receive` reads bounded inbox pages, `message reply`
-settles a request by its exact request ID, and `message interrupt` requests
-interruption only where the provider bridge supports it.
+`wardian message send <target> <message>` admits and automatically delivers an
+informational message, waking an idle recipient when its original provider
+conversation is available. It does not create a task or reply obligation.
+Messages admitted before wake eligibility was recorded remain context-only and
+are not replayed as startup wakeups. `wardian message followup <target> <message>`
+admits a task and returns its canonical request ID without waiting
+for completion; use `--idempotency-key` to preserve one logical admission across
+a caller retry. When the recipient replies, Wardian resumes the requester's
+original provider conversation when a safe route is available. `message reply`
+completes a request by its exact request ID, and
+`message interrupt` requests interruption only where the provider bridge
+supports it. Agent-facing `message receive` and `message wait` commands are
+retired; backend mailbox records remain available for diagnostics.
 
 For tasks dispatched through Wardian's native Codex owner, the bound provider
-turn's final answer automatically completes the request and returns to its
-requester. An explicit `message reply` that completed the request takes
-precedence. Multiple tasks admitted into the same turn receive that turn's
-shared final answer. Manual inbox delivery, composer delivery, and other
-providers still require an explicit reply.
-
-`message wait --timeout-ms 60000` waits for mailbox activity, including
-completion results, without returning or acknowledging inbox records. Follow it
-with `message receive` to inspect the page. `message receive --timeout-ms 60000`
-also waits for activity and returns the resulting page. Completion wakes an
-active wait; information and completion notifications do not start an idle
-agent's turn. Active task steering requires stable Codex 0.159.2 or newer.
-Older supported versions retain idle task delivery and information delivery.
+turn's final answer automatically completes the request. An explicit `message
+reply` that completed the request takes precedence. Multiple tasks admitted
+into the same turn receive that turn's shared final answer. The resulting
+canonical reply resumes the requester's original provider conversation when a
+safe route is available; an uncertain submission is never replayed. New
+informational messages wake an idle recipient when a safe provider route is
+available, while remaining distinct from task work and reply obligations.
+Active task steering requires stable Codex 0.159.2 or
+newer. Older supported versions retain idle task delivery and information
+delivery.
 
 When a task is queued because the target is busy or an eligible native owner is
 still handshaking, Wardian retains the canonical task for a later authoritative
@@ -542,13 +700,9 @@ Admit a bounded review task to a peer and retain the returned request ID:
 wardian message followup reviewer-a1 --file review-prompt.md
 ```
 
-Read replies from the managed sender's inbox. Match the reply's
-`parent_interaction_id` to the original request ID. An empty wait does not
-cancel the task or authorize resending it:
-
-```bash
-wardian message receive --limit 20 --timeout-ms 60000
-```
+The original requester conversation resumes automatically when a correlated
+reply commits. Use the returned request ID for diagnostics and explicit replies;
+do not poll or replay an admitted task when its result is not immediately visible.
 
 Answer a task from inside its authorized recipient session:
 
@@ -558,7 +712,7 @@ Reviewed the patch. No blocking findings.
 EOF
 ```
 
-Send information without starting or interrupting a turn:
+Send an informational message:
 
 ```bash
 wardian message send coder-a1 --file status-note.md
@@ -768,26 +922,24 @@ Add `--until` to block until `status:<status>`, `output:<substring>`, `event:<ki
 a managed sender and the matching running application; it does not let a caller
 impersonate another agent. Targets are one exact agent name or UUID.
 
-- `message send` admits information without waking or interrupting the recipient.
+- `message send` admits information and wakes an idle recipient when its original conversation is available; it creates no task or reply obligation.
 - `message followup` admits a task and returns its canonical `request_id` without
   waiting for completion. Use `--idempotency-key` to identify one logical admission.
-- `message receive` reads a bounded inbox page. Reuse `next_cursor` to continue;
-  pass `ack_cursor` only for a page already consumed. An empty wait does not cancel
-  a task, consume a reply, or authorize a resend.
 - `message reply <request-id> --status done|blocked|failed` completes that request
   as its authorized recipient. Native Codex task turns also publish their bound
-  final result automatically. Other delivery paths require an explicit reply;
-  echoed IDs and Idle status alone never complete a request.
+  final result automatically; Wardian resumes the requester's original provider
+  conversation when a safe route is available.
 - `message interrupt <target>` explicitly requests interruption when supported.
 
 Send, follow-up and reply bodies accept literal text, `--stdin`, or `--file`.
-`receive` accepts `--limit` from 1 to 100 and `--timeout-ms` from 0 to 60000.
-Replies are information records whose `parent_interaction_id` identifies the task.
+Replies retain their canonical `parent_interaction_id` task correlation.
 
-Automatic dispatch and manual receive use the same durable task claim. Codex
-delivery uses the negotiated native connection; it never pastes a peer message
-into the terminal composer. Information push does not start a turn. Provider
-acceptance and task completion remain separate recorded outcomes.
+Automatic dispatch uses durable task claims. Codex delivery prefers the
+negotiated native connection. An idle surface fallback is used only when no
+native owner is selected and the runtime can confirm a provider turn receipt;
+an uncertain native submission never falls back to the terminal composer.
+Information context delivery and task completion remain separate recorded
+outcomes.
 
 The old top-level send/ask/reply commands, terminal queue policies, broadcast
 selectors, output-marker asks and messaging slash-command injection are removed.

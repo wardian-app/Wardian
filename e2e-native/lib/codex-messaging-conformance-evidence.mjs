@@ -22,12 +22,18 @@ const context = delivery => {
 };
 
 export const CODEX_MESSAGING_FUNCTIONS = Object.freeze([
-  { id: "messaging_background_exchange", mode: "background", acceptance: "One model-authored peer task, correlated reply, sender consumption and completed initial background turn." },
+  { id: "messaging_background_exchange", mode: "background", acceptance: "One model-authored peer task and correlated reply automatically continue the sender's original provider conversation to a visible terminal answer." },
   { id: "messaging_background_continuity", mode: "background", acceptance: "A second distinct peer task recalls the omitted marker on the retained thread in a newer native generation; separate from the legacy secret-recall oracle." },
   { id: "messaging_tui_exchange", mode: "attached_tui", acceptance: "Correlated peer exchange remains visible in both original attached terminals on unchanged bindings." },
-  { id: "messaging_non_waking_info", mode: "attached_tui", acceptance: "One canonical information append on the same thread with unchanged turn IDs during the observed interval." },
+  { id: "messaging_idle_information_wake", mode: "attached_tui", acceptance: "One newly admitted peer information message starts exactly one same-thread provider turn as message context, with no task or reply obligation." },
   { id: "messaging_active_interrupt", mode: "attached_tui", acceptance: "One explicit interrupt matches the observed active task turn and its interrupted completion; no subsequent-turn recovery claim." },
 ].map(Object.freeze));
+
+const LEGACY_INFORMATION_OBSERVATION = Object.freeze({
+  id: "messaging_non_waking_info",
+  mode: "attached_tui",
+  acceptance: "Historical notification-only information append without a provider turn; this does not establish current wake-on-admission behavior.",
+});
 
 function parseBytes(bytes, digest) {
   need(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 32 * 1024 * 1024, "invalid_bytes");
@@ -78,19 +84,16 @@ function exchange(report, expected, sender, receiver) {
   const reply = replyProof(received, proof, report.marker, expected);
   need(taskFrame(received, proof.request_id, sender.session_id, receiver.session_id).turn_id === reply.turn_id, "task_turn");
   traceIdentity(sent, expected, task.turn_id);
-  const consumed = calls(sent, "receive_messages").flatMap(row => row.receipt?.messages ?? [])
-    .filter(row => row.interaction_id === proof.reply_id);
-  for (const row of list(sent.host_deliveries)) {
-    if (row.name === "wardian_inbox_delivery" && row.message_id === proof.reply_id) {
-      const ctx = context(row);
-      need(ctx?.schema_version === 1 && ctx.recipient === sender.session_id && ctx.request_id === proof.request_id, "push_recipient");
-      consumed.push(ctx);
-    }
-  }
-  need(consumed.length > 0 && consumed.every(row => row.kind === "reply" && row.sender === receiver.session_id
-    && row.parent_interaction_id === proof.request_id
-    && row.reply_status === "done" && body(row) === report.marker), "sender_consumption");
-  need(sent.items.some(row => row.type === "agentMessage" && row.turn_id === task.turn_id && row.text?.includes(report.marker)), "sender_answer");
+  const continuation = one(list(sent.host_deliveries).filter(row =>
+    row.name === "wardian_reply_continuation" && row.message_id === proof.reply_id));
+  const delivered = context(continuation);
+  need(delivered?.schema_version === 1 && delivered.kind === "reply"
+    && delivered.sender === receiver.session_id && delivered.recipient === sender.session_id
+    && delivered.request_id === proof.request_id && delivered.parent_interaction_id === proof.request_id
+    && delivered.reply_status === "done" && body(delivered) === report.marker, "automatic_reply_continuation");
+  traceIdentity(sent, expected, continuation.turn_id);
+  need(sent.items.some(row => row.type === "agentMessage" && row.turn_id === continuation.turn_id
+    && row.text?.includes(report.marker)), "sender_answer");
   need(report.initial_submission_attempts === 1 && report.initial_delivery?.phase === "completed"
     && report.initial_delivery.provider === "codex" && report.initial_delivery.target_agent_id === sender.session_id
     && report.initial_delivery.provider_turn_id === task.turn_id, "initial_completion");
@@ -132,21 +135,47 @@ function sameTrace(before, after, thread) {
     && before.generation === after.generation, "lifecycle_identity");
 }
 
-function information(report, sender, receiver) {
-  const c = report.optional_cases?.idle_information;
+function informationReceipt(c, sender, receiver) {
   need(c?.status === "pass" && c.scope === "observed_interval" && text(c.interaction_id)
     && c.receipt?.operation === "send_message" && c.receipt.interaction_id === c.interaction_id
     && c.receipt.duplicate === false, "information_receipt");
-  sameTrace(c.before, c.after, report.receiver_trace.provider_thread_id);
-  const ids = trace => list(trace.turns).map(row => row.turn_id).sort();
-  need(JSON.stringify(ids(c.before)) === JSON.stringify(ids(c.after))
-    && c.before.turns.every(row => row.status !== "inProgress"), "information_woke_turn");
   need(!list(c.before.host_deliveries).some(row => row.message_id === c.interaction_id), "information_replayed");
   const row = one(list(c.after.host_deliveries).filter(row => row.message_id === c.interaction_id && row.name === "wardian_inbox_delivery"));
   const ctx = context(row);
   need(ctx?.schema_version === 1 && ctx.kind === "message" && ctx.interaction_id === c.interaction_id
     && ctx.sender === sender.session_id && ctx.recipient === receiver.session_id
     && ctx.request_id === null && text(ctx.body), "information_context");
+  return row;
+}
+
+function legacyInformation(report, sender, receiver) {
+  const c = report.optional_cases?.idle_information;
+  informationReceipt(c, sender, receiver);
+  sameTrace(c.before, c.after, report.receiver_trace.provider_thread_id);
+  const before = list(c.before.turns);
+  const after = list(c.after.turns);
+  const afterById = new Map(after.map(turn => [turn.turn_id, turn]));
+  need(after.length === before.length && before.every(turn => afterById.get(turn.turn_id)?.status === turn.status)
+    && before.every(turn => turn.status !== "inProgress"), "legacy_information_woke_turn");
+}
+
+function informationWake(report, expected, sender, receiver) {
+  const c = report.optional_cases?.idle_information_wake;
+  need(c?.delivery_policy === "new_admission_wakes_idle", "information_wake_policy");
+  sameTrace(c.before, c.after, report.receiver_trace.provider_thread_id);
+  const before = list(c.before.turns);
+  const after = list(c.after.turns);
+  const beforeById = new Map(before.map(turn => [turn.turn_id, turn]));
+  const afterById = new Map(after.map(turn => [turn.turn_id, turn]));
+  const started = after.filter(turn => !beforeById.has(turn.turn_id));
+  need(before.every(turn => turn.status !== "inProgress") && after.length === before.length + 1
+    && started.length === 1 && before.every(turn => afterById.get(turn.turn_id)?.status === turn.status),
+  "information_wake_turn_count");
+  const turn = one(started);
+  need(["inProgress", "completed"].includes(turn.status), "information_wake_turn_status");
+  const row = informationReceipt(c, sender, receiver);
+  need(row.turn_id === turn.turn_id, "information_wake_turn_binding");
+  traceIdentity(c.after, expected, turn.turn_id, turn.status);
 }
 
 function interrupt(report, expected, sender, receiver) {
@@ -206,15 +235,26 @@ export function codexMessagingObservations({ reportBytes, manifestBytes, expecte
       && agent.observed_identity.generation === trace.generation, "agent_trace_identity");
   }
   exchange(report, expected, sender, receiver);
+  let informationDefinition;
   if (report.mode === "background") continuity(report, expected, sender, receiver);
   else {
     need(report.attached_tui === "pass_same_owner_thread_and_original_terminals", "attached_status");
     attached(sender, report.sender_trace.provider_thread_id);
     attached(receiver, report.receiver_trace.provider_thread_id);
-    information(report, sender, receiver);
+    if (Object.hasOwn(report.optional_cases ?? {}, "idle_information_wake")) {
+      informationWake(report, expected, sender, receiver);
+      informationDefinition = CODEX_MESSAGING_FUNCTIONS.find(row => row.id === "messaging_idle_information_wake");
+    } else {
+      legacyInformation(report, sender, receiver);
+      informationDefinition = LEGACY_INFORMATION_OBSERVATION;
+    }
     interrupt(report, expected, sender, receiver);
   }
-  const definitions = CODEX_MESSAGING_FUNCTIONS.filter(row => row.mode === report.mode);
+  const definitions = CODEX_MESSAGING_FUNCTIONS
+    .filter(row => row.mode === report.mode)
+    .map(row => row.id === "messaging_idle_information_wake" && informationDefinition
+      ? informationDefinition
+      : row);
   need(report.actual_cases_passed === definitions.length, "case_count");
   need(typeof report.finished_at === "string" && /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(report.finished_at)
     && Number.isFinite(Date.parse(report.finished_at)), "date");

@@ -34,6 +34,15 @@ pub async fn run_headless_process_prompt(
     state: &crate::state::AppState,
     request: HeadlessProcessPromptRequest,
 ) -> Result<HeadlessProcessPromptResult, crate::manager::HeadlessRunError> {
+    run_headless_process_prompt_with_authority(state, request, None).await
+}
+
+pub(crate) async fn run_headless_process_prompt_with_authority(
+    state: &crate::state::AppState,
+    request: HeadlessProcessPromptRequest,
+    client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
+) -> Result<HeadlessProcessPromptResult, crate::manager::HeadlessRunError> {
+    let has_client_send_authority = client_send_authority.is_some();
     let interaction = match request.interaction_id.clone() {
         Some(id) => state
             .interactions
@@ -53,19 +62,22 @@ pub async fn run_headless_process_prompt(
             .map_err(|error| error.to_string())?,
     };
 
-    let value = crate::manager::run_headless_with_options(crate::manager::HeadlessRunOptions {
-        cwd: &request.cwd,
-        prompt: &request.prompt,
-        wardian_session_id: &request.session_id,
-        memory_agent_id: request.memory_agent_id.as_deref(),
-        resume_session: request.resume_session.as_deref(),
-        output_format: "json",
-        provider_name: &request.provider,
-        config_override: request.config_override.as_ref(),
-        timeout: request.timeout,
-        lease_owner: request.lease_owner.clone(),
-        cancellation_marker: request.cancellation_marker.as_deref(),
-    })
+    let value = crate::manager::run_headless_with_client_authority(
+        crate::manager::HeadlessRunOptions {
+            cwd: &request.cwd,
+            prompt: &request.prompt,
+            wardian_session_id: &request.session_id,
+            memory_agent_id: request.memory_agent_id.as_deref(),
+            resume_session: request.resume_session.as_deref(),
+            output_format: "json",
+            provider_name: &request.provider,
+            config_override: request.config_override.as_ref(),
+            timeout: request.timeout,
+            lease_owner: request.lease_owner.clone(),
+            cancellation_marker: request.cancellation_marker.as_deref(),
+        },
+        client_send_authority,
+    )
     .await;
 
     match value {
@@ -104,6 +116,9 @@ pub async fn run_headless_process_prompt(
             })
         }
         Err(error) => {
+            let authority_error_code = (has_client_send_authority
+                && crate::remote::client_messages::is_authority_failure_code(error.message()))
+            .then(|| error.message().to_string());
             let (delivery_state, process_state) = match error.kind() {
                 crate::manager::HeadlessRunErrorKind::DefiniteFailure => {
                     ("failed", "process_failed")
@@ -128,7 +143,8 @@ pub async fn run_headless_process_prompt(
                     Some(process_state.to_string()),
                     Some(format!("headless run {}", request.node)),
                     Some(DeliveryErrorDetail {
-                        code: "headless_process_failed".to_string(),
+                        code: authority_error_code
+                            .unwrap_or_else(|| "headless_process_failed".to_string()),
                         message: sanitize_headless_error(error.message(), &request.prompt),
                     }),
                 )

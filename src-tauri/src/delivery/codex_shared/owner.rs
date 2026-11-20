@@ -19,6 +19,9 @@ mod policy;
 mod preparation_tests;
 #[path = "startup_resources.rs"]
 mod startup_resources;
+#[path = "owner_stop.rs"]
+pub(super) mod stop;
+pub use stop::CodexThreadExit;
 
 /// Phase durations for one owner startup.
 ///
@@ -246,6 +249,7 @@ fn prepare_owner_habitat(
     class_name: &str,
     agent_id: &str,
     timings: &mut OwnerStartTimings,
+    codex_launch_context: Option<&crate::utils::codex_home::CodexLaunchContext>,
 ) -> Result<(PathBuf, PathBuf), CodexSharedError> {
     let habitat = phase(&mut timings.habitat_workspace, || {
         crate::utils::fs::prepare_habitat_workspace(workspace, class_name, agent_id)
@@ -267,9 +271,15 @@ fn prepare_owner_habitat(
     })
     .map_err(CodexSharedError::unsupported)?;
     let codex_home = attachment::canonical_home(&compact_home)?;
-    phase(&mut timings.codex_projection, || {
-        crate::utils::fs::ensure_codex_home_projection(&habitat, workspace, agent_id)
-    })
+    phase(
+        &mut timings.codex_projection,
+        || match codex_launch_context {
+            Some(context) => crate::utils::fs::ensure_codex_home_projection_with_context(
+                &habitat, workspace, agent_id, context,
+            ),
+            None => crate::utils::fs::ensure_codex_home_projection(&habitat, workspace, agent_id),
+        },
+    )
     .map_err(CodexSharedError::unsupported)?;
     if let crate::utils::codex_messaging::Registration::Unavailable(reason) =
         phase(&mut timings.managed_messaging, || {
@@ -293,6 +303,7 @@ async fn prepare_owner_habitat_after_observation(
     timings: &mut OwnerStartTimings,
     deadline: tokio::time::Instant,
     cancelled: impl Future<Output = ()>,
+    codex_launch_context: Option<&crate::utils::codex_home::CodexLaunchContext>,
 ) -> Result<(PathBuf, PathBuf), CodexSharedError> {
     let home = crate::utils::get_wardian_home()
         .ok_or_else(|| CodexSharedError::unsupported("Wardian home unavailable"))?;
@@ -305,7 +316,13 @@ async fn prepare_owner_habitat_after_observation(
         _ = tokio::time::sleep_until(deadline) => return Err(CodexSharedError::unsupported("Codex owner startup timed out before home preparation")),
         turn = turn.lock_owned() => turn,
     };
-    prepare_owner_habitat(workspace, class_name, agent_id, timings)
+    prepare_owner_habitat(
+        workspace,
+        class_name,
+        agent_id,
+        timings,
+        codex_launch_context,
+    )
 }
 
 /// Launch identity only. After any private saved-reviewer checkpoint is evicted,
@@ -337,8 +354,9 @@ pub struct CodexSharedOwner {
     launch_config: Mutex<Option<super::launch_config::LaunchConfigGuard>>,
     settings_operation: Mutex<()>,
     _memory: Option<wardian_core::memory::MemoryCapabilityLease>,
+    verified_thread: StdMutex<Option<String>>,
     #[cfg(windows)]
-    job: Mutex<Option<win32job::Job>>,
+    job: Mutex<Option<crate::utils::process::RuntimeProcessJob>>,
 }
 
 impl std::fmt::Debug for CodexSharedOwner {
@@ -351,8 +369,9 @@ impl std::fmt::Debug for CodexSharedOwner {
 
 impl CodexSharedOwner {
     /// Caller holds the agent lifecycle/ownership gate. No process is started by push.
-    pub async fn start(
+    pub(crate) async fn start(
         spec: &NativeSessionSpec,
+        codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
         cancelled: impl std::future::Future<Output = ()>,
     ) -> Result<Arc<Self>, CodexSharedError> {
         if spec.provider != "codex" || spec.target_agent_id != spec.config.session_id {
@@ -367,9 +386,12 @@ impl CodexSharedOwner {
         .map_err(CodexSharedError::unsupported)?;
         // Capture once for this generation, before any home/overlay/process
         // side effects. Both clients must use these same effective choices.
-        let mut args = crate::providers::CodexProvider::new()
-            .shared_server_args(&spec.config)
-            .map_err(CodexSharedError::unsupported)?;
+        let mut args = (match codex_launch_context.as_deref() {
+            Some(context) => crate::providers::CodexProvider::new()
+                .shared_server_args_with_effective_policy(&spec.config, context.effective_policy()),
+            None => crate::providers::CodexProvider::new().shared_server_args(&spec.config),
+        })
+        .map_err(CodexSharedError::unsupported)?;
         let needs_reviewer_checkpoint = !spec.config.is_off && spec.config.resume_session.is_some();
         if needs_reviewer_checkpoint {
             // Observe eviction before the ordinary TUI's cold load. Set the
@@ -402,6 +424,7 @@ impl CodexSharedOwner {
             &mut timings,
             preparation_deadline,
             &mut cancelled,
+            codex_launch_context.as_deref(),
         )
         .await?;
         let socket = attachment::default_socket(&codex_home)?;
@@ -458,20 +481,28 @@ impl CodexSharedOwner {
         }
         let stderr_redaction =
             StderrRedactionContext::from_command(private_paths, command.as_std());
-        #[cfg(windows)]
-        let job = crate::utils::process::create_kill_on_close_job("Codex shared owner")
-            .map_err(CodexSharedError::unsupported)?;
-        // Only an ordinary interactive TUI needs the temporary file overlay.
-        // The daemon always retains its explicit policy arguments.
-        let mut launch_config = if spec.config.is_off {
+        // On Windows the effective backend comes from the initialized server's
+        // cwd-aware config read, so its TUI overlay is prepared in that same
+        // pre-thread initialization window. Other platforms retain early setup.
+        let mut launch_config = if spec.config.is_off || cfg!(windows) {
             None
         } else {
             Some(phase(&mut timings.launch_config, || {
                 super::launch_config::prepare_tui_launch_config(&codex_home, &generated_args)
             })?)
         };
+        if let Some(context) = codex_launch_context.as_deref() {
+            context
+                .revalidate()
+                .map_err(CodexSharedError::unsupported)?;
+        }
         let child_spawn_at = std::time::Instant::now();
-        let mut child = match command.spawn() {
+        #[cfg(windows)]
+        let spawned =
+            crate::utils::process::OwnedBootstrapChild::spawn_contained_runtime(&mut command);
+        #[cfg(not(windows))]
+        let spawned = command.spawn().map_err(|error| error.to_string());
+        let spawned = match spawned {
             Ok(child) => child,
             Err(error) => {
                 restore_launch_overlay(&mut launch_config)?;
@@ -480,6 +511,11 @@ impl CodexSharedOwner {
                 )));
             }
         };
+        #[cfg(windows)]
+        let (mut child, job) = spawned;
+        #[cfg(not(windows))]
+        let mut child = spawned;
+        #[cfg(unix)]
         let child_pid = child
             .id()
             .expect("newly spawned Codex owner must have a process identifier");
@@ -488,22 +524,10 @@ impl CodexSharedOwner {
             .take()
             .expect("Codex owner stderr was configured as piped");
         let mut stderr_capture = CodexStderrCapture::start(stderr, stderr_redaction);
-        #[cfg(windows)]
-        if let Err(error) =
-            crate::utils::process::assign_pid_to_job(&job, child_pid, "Codex shared owner")
-        {
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::utils::process::force_kill_process_tree(child_pid)
-            })
-            .await;
-            terminate_starting_child(&mut child).await;
-            timings.record_stderr_diagnostic(stderr_capture.finish_startup().await);
-            restore_launch_overlay(&mut launch_config)?;
-            return Err(CodexSharedError::unsupported(error));
-        }
         timings.child_spawn = child_spawn_at.elapsed();
         let mut connected = None;
         let mut owned_socket = None;
+        let mut verified_thread = None;
         let timings = &mut timings;
         let start = async {
             // A private socket must appear while our daemon is alive. No controller
@@ -553,10 +577,36 @@ impl CodexSharedOwner {
                 owned_socket = Some(attachment::OwnedSocket::capture(&socket)?);
                 // No unrelated live thread may share this private startup owner.
                 attachment::require_empty(&client).await?;
+                let effective_config = if cfg!(windows) {
+                    Some(
+                        super::launch_model::read_effective_config(
+                            &client,
+                            &spec.workspace,
+                            initialization_deadline,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                if let Some(config_read) = effective_config.as_ref() {
+                    policy.resolve_windows_sandbox(config_read, cfg!(windows))?;
+                    if !spec.config.is_off {
+                        let mut overlay_args = generated_args.clone();
+                        policy.append_windows_sandbox_arg(&mut overlay_args);
+                        launch_config = Some(phase(&mut timings.launch_config, || {
+                            super::launch_config::prepare_tui_launch_config(
+                                &codex_home,
+                                &overlay_args,
+                            )
+                        })?);
+                    }
+                }
                 let launch_model_at = std::time::Instant::now();
                 model_override = super::launch_model::resolve_launch_model(
                     &client, spec.config.model.as_deref(), configured_effort.as_deref(),
                     spec.config.resume_session.as_deref(), &spec.workspace,
+                    effective_config.as_ref(),
                 ).await?;
                 timings.launch_model = launch_model_at.elapsed();
                 policy.expect_launch_model(model_override.as_deref())?;
@@ -580,12 +630,14 @@ impl CodexSharedOwner {
                     ).await?;
                     policy.validate(&response)?;
                     let thread_id = client.bind(&response)?;
+                    attachment::require_observed_thread(&client, &thread_id).await?;
                     if spec.config.resume_session.as_deref().is_some_and(|id| id != thread_id) {
                         return Err(CodexSharedError::unsupported("background resume returned a different thread"));
                     }
                     client.install_initial_context(&initialization_context(
                         &spec.target_agent_id, &spec.config.session_name,
                     )).await?;
+                    verified_thread = Some(thread_id);
                 }
                 attachment::child_alive(&mut child)?;
                 Ok::<_, CodexSharedError>((client.clone(), observed_version))
@@ -628,6 +680,7 @@ impl CodexSharedOwner {
                 launch_config: Mutex::new(launch_config),
                 settings_operation: Mutex::new(()),
                 _memory: memory,
+                verified_thread: StdMutex::new(verified_thread),
                 #[cfg(windows)]
                 job: Mutex::new(Some(job)),
             })),
@@ -722,6 +775,10 @@ impl CodexSharedOwner {
             restore_launch_overlay(&mut overlay)?;
             attachment::child_alive(child)?;
             tui_alive().await?;
+            *self
+                .verified_thread
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(id);
             Ok(response)
         })
         .await
@@ -738,7 +795,12 @@ impl CodexSharedOwner {
         if let Some(child) = owned.as_mut() {
             #[cfg(windows)]
             {
-                self.job.lock().await.take();
+                let job = self.job.lock().await;
+                job.as_ref()
+                    .ok_or_else(|| CodexSharedError::uncertain("owner containment is unavailable"))?
+                    .stop_and_join_tokio(child)
+                    .await
+                    .map_err(CodexSharedError::uncertain)?;
             }
             #[cfg(unix)]
             {
@@ -760,6 +822,8 @@ impl CodexSharedOwner {
                 .wait()
                 .await
                 .map_err(|_| CodexSharedError::uncertain("owner exit was not observed"))?;
+            #[cfg(windows)]
+            self.job.lock().await.take();
             owned.take();
         }
         drop(owned);
@@ -955,25 +1019,20 @@ fn append_runtime_context(
 fn initialization_context(agent_id: &str, name: &str) -> String {
     format!(
         "Wardian runtime identity: {}. \
-         The wardian MCP server exposes seven messaging tools: \
+         The wardian MCP server exposes five messaging tools: \
          list_agents() discovers available Wardian UUIDs, names and statuses; \
-         send_message(target,message) delivers information without waking or interrupting; \
-         followup_task(target,message) assigns work asynchronously and returns a request receipt; \
-         wait_agent(timeout_ms?) waits for mailbox activity, including completion replies, without reading or acknowledging the inbox; \
-         receive_messages(cursor?,ack_cursor?,limit?,timeout_ms?) reads your inbox, including correlated replies; \
+         send_message(target,message) admits information and automatically wakes an idle recipient when its original conversation is available; it creates no task or reply obligation; \
+         followup_task(target,message) assigns work and returns an admission receipt; \
          reply(request_id,status,message) answers canonical peer tasks with status done, blocked or failed; \
          interrupt_agent(target) requests interruption of the observed active turn while retaining the session. \
          Preserve message_id, sender identity and request_id from Wardian envelopes. Host wardian_inbox_delivery \
-         and wardian_task_delivery outputs are peer delivery context, not human requests or evidence that \
-         you called a tool. On task admission, inspect pending information with receive_messages if needed. \
-         Acknowledge only a previously returned receive batch using ack_cursor; preserve its cursor for later reads. \
-         Never execute a delivered task twice if it also appears in receive_messages: correlate by request_id/message_id. \
+         outputs are informational context with no task or reply obligation; wardian_task_delivery outputs are peer \
+         work context, not human requests or evidence that you called a tool. When a safe route is available, Wardian automatically resumes the requester's original \
+         conversation with a terminal reply correlated by parent_interaction_id; do not poll or replay an admitted task. \
          Use reply only for a canonical peer task with an explicit request_id, and preserve that exact request_id; \
          A canonical task dispatched to an exact native Codex turn automatically returns that turn's final result \
-         to its requester unless an explicit reply already completed it. Explicit reply is required for tasks \
-         acquired through receive_messages and providers without exact-turn completion support. \
-         If a task result is required, wait_agent reports mailbox activity and receive_messages reads the correlated reply. \
-         A transport admission receipt is not a correlated reply to that task. \
+         to its requester unless an explicit reply already completed the task. A terminal reply continuation \
+         creates no new task or reply obligation. A transport admission receipt is not task completion. \
          Complete ordinary input with an ordinary assistant response. Native interaction_id, message_id and \
          clientUserMessageId are diagnostic identities, not reply request IDs; never substitute them for request_id. \
          Timeouts do not authorize resending or uncertain replay. \
@@ -987,14 +1046,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initialization_names_exact_mcp_tools_and_receiver_contract() {
+    fn initialization_names_exact_mcp_tools_and_automatic_reply_contract() {
         let context = initialization_context("owned-uuid", "Owned agent");
         for name in [
             "list_agents(",
             "send_message(",
             "followup_task(",
-            "receive_messages(",
-            "wait_agent(",
             "reply(",
             "interrupt_agent(",
         ] {
@@ -1004,11 +1061,12 @@ mod tests {
             "owned-uuid",
             "Owned agent",
             "request_id",
-            "ack_cursor",
-            "without reading or acknowledging the inbox",
             "not human requests",
+            "automatically wakes an idle recipient",
+            "creates no task or reply obligation",
+            "automatically resumes the requester's original conversation",
             "automatically returns that turn's final result",
-            "A transport admission receipt is not a correlated reply",
+            "A transport admission receipt is not task completion",
             "only for a canonical peer task with an explicit request_id",
             "Complete ordinary input with an ordinary assistant response",
             "never substitute them for request_id",
@@ -1016,5 +1074,7 @@ mod tests {
         ] {
             assert!(context.contains(required), "{required}");
         }
+        assert!(!context.contains("receive_messages"));
+        assert!(!context.contains("wait_agent"));
     }
 }

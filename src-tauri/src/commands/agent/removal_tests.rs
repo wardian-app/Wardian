@@ -6,6 +6,104 @@ use crate::utils::fs::create_directory_link;
 use tauri::Manager;
 use wardian_core::models::AgentConfig;
 
+#[tokio::test]
+async fn removal_of_pending_name_is_atomic_and_sql_failure_keeps_removed_roster_absent() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    for fail_sql in [true, false] {
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let id = uuid::Uuid::new_v4().to_string();
+        let attempt = uuid::Uuid::new_v4().to_string();
+        let foreign = uuid::Uuid::new_v4().to_string();
+        let foreign_name = format!("Foreign-{id}");
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.session_id = id.clone();
+            config.session_name = id.clone();
+        }
+        let config = agent.config.lock().unwrap().clone();
+        wardian_core::agent_spawn::reserve_legacy_name(
+            &foreign,
+            &foreign,
+            wardian_core::agent_spawn::LegacyNamePurpose::Spawn,
+            None,
+            &foreign_name,
+        )
+        .unwrap();
+        wardian_core::agent_spawn::reserve_legacy_name(
+            &attempt,
+            &id,
+            wardian_core::agent_spawn::LegacyNamePurpose::Spawn,
+            None,
+            &id,
+        )
+        .unwrap();
+        wardian_core::agent_spawn::begin_legacy_name_effects(&attempt, &id).unwrap();
+        persist_agent_config(&config, None).unwrap();
+        state.agents.lock().await.insert(id.clone(), agent);
+        state.agent_order.lock().await.push(id.clone());
+        crate::manager::try_save_state_snapshot_unlocked(std::slice::from_ref(&config)).unwrap();
+        wardian_core::agent_spawn::complete_legacy_name(
+            &attempt,
+            &id,
+            std::slice::from_ref(&config),
+        )
+        .unwrap();
+        let profile = home.path().join("agents").join(&id);
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("retain.txt"), "owned metadata").unwrap();
+        if fail_sql {
+            wardian_core::db::get_db_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER cut_owned_removal BEFORE DELETE ON agents
+                    BEGIN SELECT RAISE(ABORT, 'deletion unavailable'); END;",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        let result = remove_agent(id.clone(), Some(&id), state, app.handle().clone(), false).await;
+        if fail_sql {
+            let error = result.unwrap_err();
+            assert!(error.contains("removal committed with durable ownership pending"));
+            assert!(error.contains(&id));
+            assert!(profile.join("retain.txt").exists());
+        } else {
+            result.unwrap();
+        }
+        assert!(!app
+            .state::<AppState>()
+            .agents
+            .lock()
+            .await
+            .contains_key(&id));
+        assert!(crate::spawn_operations::persisted_roster()
+            .unwrap()
+            .is_empty());
+        wardian_core::db::get_db_conn(|conn| {
+            let retained: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM agent_name_claims WHERE owner_kind = 'legacy' AND owner_id = ?1",
+                rusqlite::params![attempt], |row| row.get(0),
+            )?;
+            assert_eq!(retained, i64::from(fail_sql));
+            let foreign_owner: String = conn.query_row(
+                "SELECT owner_id FROM agent_name_claims WHERE session_name = ?1",
+                rusqlite::params![foreign_name], |row| row.get(0),
+            )?;
+            assert_eq!(foreign_owner, foreign);
+            let row_exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE session_id = ?1)",
+                rusqlite::params![id], |row| row.get(0),
+            )?;
+            assert_eq!(row_exists, fail_sql);
+            conn.execute_batch("DROP TRIGGER IF EXISTS cut_owned_removal")?;
+            Ok(())
+        }).unwrap();
+    }
+}
+
 #[test]
 fn failed_clone_cleanup_retains_compact_mapping_and_backup_without_join_proof() {
     let temp = tempfile::tempdir().expect("temp dir");

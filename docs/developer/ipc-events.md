@@ -241,11 +241,147 @@ classify provenance before emitting chat events:
 Some providers, including Claude, encode all three cases in native `user`
 records. Consumers must use the normalized role and provenance metadata rather
 than the raw provider role or text to identify prompts and turn boundaries.
-Desktop and remote chat both use the shared backend transcript loader and
-archive replay path, so provider provenance must be corrected there once. The
+Desktop and remote Chat use the shared bounded `load_agent_chat_page` reader;
+full archive replay remains an explicit inspection operation. Provider
+provenance is corrected by the backend owner before display publication. The
 replay boundary also canonicalizes legacy archived roles from their persisted
 `input_origin` metadata; historical archive files do not need a destructive
 rewrite to display the corrected classification.
+
+### Chat row revalidation
+
+`load_agent_chat_page` also supports bounded source-row renewal through its
+existing IPC and HTTP surfaces. The request selects only backend-issued source
+observation IDs already present in the loaded window. It carries the current
+opaque revision and omits cursor and detail arguments. A successful page
+explicitly acknowledges the complete request in `revalidated_ids`; a missing
+acknowledgement leaves the existing window and older frontier unconfirmed.
+
+`reset` means the page was invalidated; it does not identify direction. The
+optional `older_page` response field defaults to false. The backend sets it
+true only when an admitted source, canonical, or bounded fallback read honored
+the requested older frontier. Recent fallback rows, rejected or unknown
+frontiers, detail reads, and renewal responses leave it false. A client may
+admit an older-demand reset as history only with `older_page=true` and after
+the ordinary scope, size, alias, removal, and full renewal checks pass. Missing
+or false preserves the loaded rows and saved older cursor.
+
+#### Ordinary canonical reads and first-page bootstrap
+
+Canonical archive pages may have `source_epoch: null`. Keep them on the
+ordinary paging and refresh path only when session, conversation, and generation
+identity matches and neither the incoming page nor loaded rows contain native
+source IDs, admission evidence, aliases, removals, or renewal acknowledgements.
+No native renewal is inferred from a canonical page.
+
+The first complete page has a separate initialization path. It may replace an
+empty `indexing` or `projection_pending` state only when the previous page and
+actual loaded window have no committed or source-backed rows and no older
+cursor/frontier. The first page must have complete canonical identity or a
+complete native scope. Canonical generated archive rows may coexist when their
+generated ID matches the page conversation and they carry no native source
+evidence. Each native row still needs matching source IDs, admission, epoch, and
+session. This cannot discard a loaded native cohort or older position. If
+native evidence exists but its incoming scope is incomplete, preserve the
+current coherent window and frontier and use the existing Retry path.
+
+The frontend stages every required loaded member under one coherent scope and
+head before committing a compatible reset or revision change. Renewal pages
+are metadata-only and do not advance pagination. A pair retraction restores
+each physical observation with its own source reference and body binding while
+keeping the loaded public display slot. See the [command reference](./tauri-command-reference.md),
+the [remote gateway contract](./remote-gateway.md#chat-row-revalidation), and
+the [internal design specification](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-26-chat-row-revalidation.md).
+
+Normal Chat publications and cold archive checkpoints stage intermediate AVL
+nodes in a bounded, private checkpoint buffer. Only nodes reachable from the
+final schema-defined roots
+are persisted; user text and metadata never determine object reachability.
+Every final node completes the existing write, sync, and rename sequence before
+the head pointer is published. Rows and body payloads retain immediate durable
+writes. Cold selection checkpoints flush their seen tree before publishing a
+selection pointer, and queued body jobs retain explicit chunk-root dependencies.
+A failed flush or pointer write preserves the previous published and in-memory
+heads so the
+owner can retry the unpublished work.
+
+Page headers retain bounded semantic tool inputs and write evidence. Large
+arguments, patches and artifact output are published through scoped lazy detail
+references, with each detail response limited to 16 KiB. Structured edit totals
+describe the original input; clipped patch totals remain explicitly partial.
+
+#### Versioned canonical turn presentation
+
+`AgentChatPage.presentation` is an optional version envelope for producer-owned
+turns. Version 1 defines bounded turn, item, step, admitted preview and output-tail
+records in `wardian-core` and matching snake_case TypeScript DTOs. Scope,
+revision, aliases, removals and cursors remain on the existing page. The payload
+stays opaque until its version is recognized, so a future payload shape cannot
+break legacy event decoding.
+
+The existing archive capture owner derives canonical metadata in its bounded
+checkpoints. Source-scoped accepted request roots establish membership; owned
+call identities pair invocation and result records. Stable keys and incremental
+turn counters live in additive AVL roots in the same immutable Store and Head.
+An empty index is omitted when serialized, preserving legacy packed-head
+bindings. An edited legacy prompt cannot activate incomplete turn metadata.
+Source adapters currently cover Codex's explicit matching turn brackets and
+Claude's UUID ancestry to an actual request. Claude sidechains need an explicit
+parent tool link. Adapter state persists with the existing source cursor; it
+retains bounded identities rather than transcript text. Open or broken proof
+keeps membership and counts partial, even after a projection checkpoint settles.
+Only a complete closing proof can publish full totals. Other providers retain
+the legacy view until they have a proven adapter.
+The accepted native capture owner retains a typed closure receipt on the
+existing canonical request when the closing provider record is status-only.
+The receipt binds the exact source, epoch, request, provider turn and closing
+source coordinates. It does not create a narrative row or change prompt order.
+Only an opaque, continuity-verified native acquisition can issue it; ordinary
+provider or Watch metadata cannot. Status-only capture may enrich an existing
+owned request after restart, but cannot create a conversation. Privacy gaps
+withhold the receipt. Initial history without a verified capture receipt stays
+partial until closing evidence is admitted.
+Claude rows containing several invocations or results remain partial while the
+legacy normalizer emits one event per native row.
+Unqualified or unmigrated turns retain the corrected Work log through
+producer-owned legacy groups in the same canonical view. A turn selects one
+representation; unsupported history does not disable other proven turns.
+
+Settled recent metadata is packed with canonical headers and bound to the same
+Head. Reads select one committed representation; recent previews keep their
+existing fast path. The canonical Row owner certifies every member of an admitted
+archive window; raw-source headers cannot issue that certificate. An unavailable
+live source does not demote committed archive rows. A window containing provisional
+or uncertified source rows retains the whole legacy view until canonical admission.
+Optional metadata seeks share the existing read allowance,
+including failed attempts. They never scan a turn, enter the archive gate or
+open raw logs. Provider state evidence updates turn status through
+`state_event_refs`; it does not become assistant narration. Unknown assistant
+phase stays narration, and agent idle state does not imply completion.
+
+Step-tail references retain the existing generation, current-row and body-binding
+checks, then resolve the latest backing through the committed step owner. Reads
+fetch at most the final two existing body chunks and return a UTF-8-aligned
+16 KiB output tail. Input is separate, bounded to 1 KiB and marked when clipped.
+There is no continuation to concatenate. Earlier output remains in the archive.
+
+The final page publication guard validates a supplied version 1 payload before
+returning it. Duplicate keys, dangling ownership/references, invalid provenance,
+more than 80 items/turns, and malformed output-tail metadata reject the entire
+capability. Detail text is limited to 16 KiB; JSON requires a complete, valid,
+untruncated value. Detail revision must match the enclosing page. Unknown
+versions, malformed capabilities and combined responses exceeding the existing
+256 KiB IPC budget drop the entire capability with a diagnostic, retaining the
+legacy event view and its existing budget enforcement. No representation is
+partially trimmed into another one.
+
+This producer stage does not enable the shared renderer or provisional transcript
+publication. Exact pending-prompt bridges and the preview-identity bridge remain
+follow-up work under the spec's identity amendment. Renderer activation must keep
+other submissions pending in the composer. Source and submission identities are distinct;
+neither text equality nor admission alone establishes canonical correspondence.
+Public Chat behavior and screenshots remain unchanged at this stage. Native and
+PWA open-to-usable timing remains separate acceptance evidence for activation.
 
 Archive replay retains canonical IDs and can enrich provenance from a current,
 source-bound native observation. Capture-enabled repair persists verified
@@ -280,6 +416,22 @@ Valid states are `unknown`, `booting`, `ready`, `busy`, `action_required`, and `
 
 ### Inbox Evidence
 
+`agent-turn-ended` is a separate native Claude observation. Its payload always
+contains a backend-persisted `agent_turn_ended` Inbox item and never a bare
+successful-completion boundary. The item carries `turn_outcome` (`unknown` or
+`aborted`), the exact captured `response_text`, provider session/turn identity,
+and `timestamp_source: claude_mod_turn_complete`. Desktop and remote clients
+present **Claude turn ended** with neutral or interruption styling. It does not
+advance completion watches, change snapshots, or successful automation triggers.
+
+The session-scoped passive mod observes Claude's documented `turn.complete`
+event after a uniquely matched composer/bridge submission and main-loop
+`turn.start`. It does not infer success from `reason=answer`, Stop hooks,
+`turn_duration`, or missing errors. A per-launch handshake reports bridge
+availability; unsupported or disabled mods remain unavailable. Only receipts
+durably admitted by the current backend runtime can replay after restart.
+See [native Claude turn observations](https://github.com/wardian-app/Wardian/blob/main/docs/specs/claude-native-turn-ended-inbox.md).
+
 Inbox items project canonical live evidence instead of replayed terminal text. The backend owns every agent completion card: it writes the card to the queue before any client sees it, so a card does not depend on a mounted desktop window. `agent-turn-completed` has two forms:
 
 - Without `inbox_item`, it marks a provider turn boundary. The frontend refreshes turn-scoped views such as change review and never builds a card from it.
@@ -295,7 +447,7 @@ A card is keyed by provider evidence for its turn, `agent-completed:<agent-sessi
 
 Two observers of the same turn converge on one card, and a dismissed card stays dismissed. A turn without non-empty final answer text produces no card: interrupted and failed turns, Claude `StopFailure`, provider control commands such as `/login`, and turns whose transcript does not end in an assistant answer to a user request. Rollout records written before the current runtime launched are history and are ignored. A failed queue write is retried while the same agent runtime remains current. Antigravity's transcript marks intermediate planner and script steps as `DONE`, so Wardian reports its turn boundary only when that provider returns to its visible ready prompt, once per active turn.
 
-Interactive Claude turns create no completion card. Claude Code's Stop hook and its `hook_execution_complete` telemetry both precede the turn-end decision, and no supported event reports that decision, so the outcome is unknown ([Claude Inbox Turn Completions](https://github.com/wardian-app/Wardian/blob/main/docs/specs/claude-inbox-turn-completions.md)). Committed prompts are recorded per launch, so startup replay is idempotent. Dismissal marks a durable tombstone; whole-queue snapshots cannot delete or revive backend-owned completion records.
+Interactive Claude turns create no successful-completion card. Claude Code's Stop hook and its `hook_execution_complete` telemetry both precede the turn-end decision. Native mod observations use the separate turn-ended notice described above and retain an unknown or interrupted outcome ([Claude Inbox Turn Completions](https://github.com/wardian-app/Wardian/blob/main/docs/specs/claude-inbox-turn-completions.md)). Committed prompts are recorded per launch, so startup replay is idempotent. Dismissal marks a durable tombstone; whole-queue snapshots cannot delete or revive backend-owned completion records.
 
 Other queue records, such as action-needed cards, have this shape:
 

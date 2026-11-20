@@ -9,6 +9,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
+use tauri::Manager;
 use wardian_core::models::{AgentConfig, ProviderConfig};
 
 fn roster_without_session(configs: &[AgentConfig], session_id: &str) -> Vec<AgentConfig> {
@@ -17,6 +18,68 @@ fn roster_without_session(configs: &[AgentConfig], session_id: &str) -> Vec<Agen
         .filter(|config| config.session_id != session_id)
         .cloned()
         .collect()
+}
+
+#[tokio::test]
+async fn unrelated_publication_keeps_actual_quarantine_config_after_startup_recovery() {
+    let home = TestWardianHome::new_async().await;
+    let id = uuid::Uuid::new_v4().to_string();
+    let attempt = uuid::Uuid::new_v4().to_string();
+    let quarantine = test_active_agent(&id).config.lock().unwrap().clone();
+    wardian_core::agent_spawn::reserve_legacy_name(
+        &attempt,
+        &id,
+        wardian_core::agent_spawn::LegacyNamePurpose::Spawn,
+        None,
+        &quarantine.session_name,
+    )
+    .unwrap();
+    wardian_core::agent_spawn::begin_legacy_name_effects(&attempt, &id).unwrap();
+    crate::manager::try_save_state_snapshot_unlocked(std::slice::from_ref(&quarantine)).unwrap();
+    crate::spawn_operations::recover_after_owner_acquired().unwrap();
+    assert!(wardian_core::agent_spawn::restore_is_excluded(&id).unwrap());
+    let state = AppState::new();
+    assert_eq!(state.spawn_operation_slots.available_permits(), 0);
+    assert!(state.agents.lock().await.is_empty());
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let registered_id = uuid::Uuid::new_v4().to_string();
+    let request = wardian_core::agent_spawn::AgentSpawnRequest {
+        provider: "codex".into(),
+        class: "Coder".into(),
+        name: Some("unrelated".into()),
+        workspace: Some("workspace".into()),
+        model: None,
+        reasoning_effort: None,
+    };
+    wardian_core::agent_spawn::admit(&operation_id, &request, &registered_id, None).unwrap();
+    assert_eq!(
+        wardian_core::agent_spawn::queued_operation_ids().unwrap(),
+        vec![operation_id]
+    );
+    let active = test_active_agent(&registered_id);
+    let config = active.config.lock().unwrap().clone();
+    state.agents.lock().await.insert(registered_id, active);
+    let barrier = crate::manager::roster_io::acquire_roster_barrier()
+        .await
+        .unwrap();
+    crate::manager::roster_io::write_snapshot_strict(
+        &barrier,
+        home.path().to_path_buf(),
+        vec![config],
+    )
+    .await
+    .unwrap();
+    let saved = crate::spawn_operations::persisted_roster().unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_eq!(
+        serde_json::to_value(saved.iter().find(|saved| saved.session_id == id).unwrap()).unwrap(),
+        serde_json::to_value(quarantine).unwrap()
+    );
+    assert!(!state.agents.lock().await.contains_key(&id));
+    let state_path = home.path().join("settings/state.json");
+    std::fs::write(&state_path, b"malformed").unwrap();
+    assert!(crate::manager::try_save_state_snapshot_unlocked(&[]).is_err());
+    assert_eq!(std::fs::read(&state_path).unwrap(), b"malformed");
 }
 
 #[test]
@@ -29,6 +92,206 @@ fn cancelled_registration_marks_publication_failed_without_overriding_commit() {
     committed.commit();
     drop(super::RegistrationPublicationAttempt(committed.clone()));
     assert!(!committed.is_failed());
+}
+
+#[test]
+fn operation_completion_uses_the_original_registration_incarnation() {
+    let mut original = test_active_agent("planned-agent");
+    original.runtime_generation = Some(7);
+    let registered = super::RegisteredAgentSpawn {
+        config: original.config.lock().unwrap().clone(),
+        config_handle: original.config.clone(),
+        runtime_generation: original.runtime_generation,
+    };
+    assert!(registered.matches(&original));
+    let mut replacement = test_active_agent("planned-agent");
+    replacement.runtime_generation = Some(7);
+    assert!(!registered.matches(&replacement));
+    original.runtime_generation = Some(8);
+    assert!(!registered.matches(&original));
+    original.runtime_generation = Some(7);
+    original.config.lock().unwrap().resume_session = Some("different-session".into());
+    assert!(!registered.matches(&original));
+}
+
+#[tokio::test]
+async fn published_spawn_and_clone_keep_incarnation_when_name_promotion_fails() {
+    let _home = TestWardianHome::new_async().await;
+    for purpose in [
+        wardian_core::agent_spawn::LegacyNamePurpose::Spawn,
+        wardian_core::agent_spawn::LegacyNamePurpose::Clone,
+    ] {
+        let state = AppState::new();
+        let id = uuid::Uuid::new_v4().to_string();
+        let attempt = uuid::Uuid::new_v4().to_string();
+        let mut active = test_active_agent(&id);
+        let child_exited = Arc::new(AtomicBool::new(false));
+        active.child_process = Some(Box::new(FakeChild {
+            exited: child_exited.clone(),
+        }));
+        let expected = active.config.clone();
+        let config = expected.lock().unwrap().clone();
+        wardian_core::agent_spawn::reserve_legacy_name(&attempt, &id, purpose, None, &id).unwrap();
+        wardian_core::agent_spawn::begin_legacy_name_effects(&attempt, &id).unwrap();
+        super::super::persist_agent_config(&config, None).unwrap();
+        state.agents.lock().await.insert(id.clone(), active);
+        state.agent_order.lock().await.push(id.clone());
+        crate::manager::try_save_state_snapshot_unlocked(std::slice::from_ref(&config)).unwrap();
+        wardian_core::db::get_db_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER cut_legacy_promotion BEFORE UPDATE ON agent_name_claims
+                BEGIN SELECT RAISE(ABORT, 'promotion failure'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let publication = Arc::new(crate::manager::RegistrationPublicationState::default());
+        let disposition = super::RegistrationPublicationAttempt(publication.clone());
+        publication.commit();
+        let error = super::finish_name_ownership(&state, &config, &attempt, &expected, None)
+            .await
+            .unwrap_err();
+        let error = super::ownership_pending(&id, &attempt, &error);
+        drop(disposition);
+        assert!(super::is_ownership_pending(&error));
+        assert!(error.contains(&id) && error.contains(&attempt));
+        assert!(!publication.is_failed());
+        assert!(!child_exited.load(Ordering::SeqCst));
+        assert!(Arc::ptr_eq(
+            &state.agents.lock().await[&id].config,
+            &expected
+        ));
+        let roster = crate::spawn_operations::persisted_roster().unwrap();
+        assert_eq!(roster[0].session_id, id);
+        assert!(wardian_core::agent_spawn::restore_is_excluded(&id).unwrap());
+        wardian_core::db::get_db_conn(|conn| {
+            conn.execute_batch("DROP TRIGGER cut_legacy_promotion")?;
+            Ok(())
+        })
+        .unwrap();
+        wardian_core::agent_spawn::recover_legacy_names(&roster).unwrap();
+        assert!(!wardian_core::agent_spawn::restore_is_excluded(&id).unwrap());
+        assert!(!child_exited.load(Ordering::SeqCst));
+    }
+}
+
+#[tokio::test]
+async fn ownership_completion_rejects_a_replaced_live_incarnation() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    let id = uuid::Uuid::new_v4().to_string();
+    let attempt = uuid::Uuid::new_v4().to_string();
+    let original = test_active_agent(&id);
+    let expected = original.config.clone();
+    let config = expected.lock().unwrap().clone();
+    wardian_core::agent_spawn::reserve_legacy_name(
+        &attempt,
+        &id,
+        wardian_core::agent_spawn::LegacyNamePurpose::Spawn,
+        None,
+        &id,
+    )
+    .unwrap();
+    wardian_core::agent_spawn::begin_legacy_name_effects(&attempt, &id).unwrap();
+    super::super::persist_agent_config(&config, None).unwrap();
+    crate::manager::try_save_state_snapshot_unlocked(std::slice::from_ref(&config)).unwrap();
+    state
+        .agents
+        .lock()
+        .await
+        .insert(id.clone(), test_active_agent(&id));
+    let error = super::finish_name_ownership(&state, &config, &attempt, &expected, None)
+        .await
+        .unwrap_err();
+    assert!(error.contains("incarnation changed"));
+    wardian_core::db::get_db_conn(|conn| {
+        let phase: String = conn.query_row(
+            "SELECT phase FROM legacy_name_attempts WHERE attempt_id = ?1",
+            rusqlite::params![attempt],
+            |row| row.get(0),
+        )?;
+        assert_eq!(phase, "effects_possible");
+        Ok(())
+    })
+    .unwrap();
+    assert!(wardian_core::agent_spawn::restore_is_excluded(&id).unwrap());
+}
+
+#[tokio::test]
+async fn rename_json_failure_and_failed_sql_rollback_retain_bound_disposition() {
+    let _home = TestWardianHome::new_async().await;
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let id = uuid::Uuid::new_v4().to_string();
+    let active = test_active_agent(&id);
+    active.config.lock().unwrap().session_name = "before".into();
+    let config = active.config.lock().unwrap().clone();
+    super::super::persist_agent_config(&config, None).unwrap();
+    state.agents.lock().await.insert(id.clone(), active);
+    state.agent_order.lock().await.push(id.clone());
+    crate::manager::try_save_state_snapshot_unlocked(std::slice::from_ref(&config)).unwrap();
+    wardian_core::db::get_db_conn(|conn| {
+        conn.execute_batch(
+            "CREATE TRIGGER cut_rename_rollback BEFORE UPDATE ON agents
+            WHEN OLD.session_name = 'after' AND NEW.session_name = 'before'
+            BEGIN SELECT RAISE(ABORT, 'rollback failure'); END;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (entered, _entered_rx) = tokio::sync::oneshot::channel();
+    let (started, _started_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    drop(release); // Existing roster seam fails before touching the old JSON.
+    let probe = crate::manager::RosterIoProbe {
+        entered,
+        started,
+        release: release_rx,
+    };
+    let error = crate::manager::ROSTER_IO_PROBE
+        .scope(
+            std::cell::RefCell::new(Some(probe)),
+            super::super::rename_agent(id.clone(), "after".into(), state, app.handle().clone()),
+        )
+        .await
+        .unwrap_err();
+    assert!(super::is_ownership_pending(&error));
+    assert!(error.contains(&id));
+    assert_eq!(
+        crate::spawn_operations::persisted_roster().unwrap()[0].session_name,
+        "before"
+    );
+    assert_eq!(
+        app.state::<AppState>().agents.lock().await[&id]
+            .config
+            .lock()
+            .unwrap()
+            .session_name,
+        "before"
+    );
+    wardian_core::db::get_db_conn(|conn| {
+        let row: (String, String) = conn.query_row(
+            "SELECT a.session_name, n.phase FROM agents a JOIN legacy_name_attempts n
+             ON a.session_id = n.agent_id WHERE a.session_id = ?1",
+            rusqlite::params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(row, ("after".into(), "effects_possible".into()));
+        let owner: String = conn.query_row(
+            "SELECT owner_id FROM agent_name_claims WHERE session_name = 'after'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(error.contains(&owner));
+        Ok(())
+    })
+    .unwrap();
+    wardian_core::agent_spawn::recover_legacy_names(
+        &crate::spawn_operations::persisted_roster().unwrap(),
+    )
+    .unwrap();
+    assert!(wardian_core::agent_spawn::restore_is_excluded(&id).unwrap());
 }
 
 #[derive(Debug, Clone)]

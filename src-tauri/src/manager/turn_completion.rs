@@ -91,8 +91,10 @@ pub(crate) fn active_completion(
         .iter()
         .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(item_id))
         .filter(|item| {
-            item.get("type").and_then(serde_json::Value::as_str) == Some("agent_completed")
-                && item.get("dismissed").and_then(serde_json::Value::as_bool) != Some(true)
+            matches!(
+                item.get("type").and_then(serde_json::Value::as_str),
+                Some("agent_completed" | "agent_turn_ended")
+            ) && item.get("dismissed").and_then(serde_json::Value::as_bool) != Some(true)
         })
         .cloned()
 }
@@ -120,7 +122,42 @@ pub(crate) async fn persist_turn_completion(
     runtime_generation: Option<u64>,
     completion: &TurnCompletion,
 ) -> PersistedCompletion {
-    let item_id = completion_item_id(session_id, &completion.evidence_id);
+    persist_turn_notice(
+        state,
+        session_id,
+        provider,
+        runtime_generation,
+        completion_inbox_item(session_id, "", completion),
+    )
+    .await
+}
+
+/// Persists a backend-owned turn notice without assigning success semantics.
+/// The caller supplies immutable evidence; this function fences the runtime and
+/// preserves any existing record, including its read/dismissed tombstone.
+pub(crate) async fn persist_turn_notice(
+    state: &AppState,
+    session_id: &str,
+    provider: &str,
+    runtime_generation: Option<u64>,
+    item: serde_json::Value,
+) -> PersistedCompletion {
+    persist_turn_notice_with_status(state, session_id, provider, runtime_generation, None, item)
+        .await
+}
+
+async fn persist_turn_notice_with_status(
+    state: &AppState,
+    session_id: &str,
+    provider: &str,
+    runtime_generation: Option<u64>,
+    reporting_status: Option<&std::sync::Arc<std::sync::Mutex<String>>>,
+    mut item: serde_json::Value,
+) -> PersistedCompletion {
+    let item_id = item["id"]
+        .as_str()
+        .expect("backend turn notice identity")
+        .to_string();
     let mut persistence_failures = 0u64;
     loop {
         // Per-agent lifecycle is always acquired before the global queue
@@ -130,6 +167,11 @@ pub(crate) async fn persist_turn_completion(
         let agent_name = {
             let agents = state.agents.lock().await;
             agents.get(session_id).and_then(|agent| {
+                if reporting_status
+                    .is_some_and(|status| !std::sync::Arc::ptr_eq(status, &agent.current_status))
+                {
+                    return None;
+                }
                 if runtime_generation
                     .is_some_and(|generation| agent.runtime_generation != Some(generation))
                 {
@@ -144,12 +186,10 @@ pub(crate) async fn persist_turn_completion(
         let Some(agent_name) = agent_name else {
             return PersistedCompletion::Stale;
         };
+        item["agent_name"] = serde_json::Value::String(agent_name.clone());
         let mut items = crate::utils::queue::load_items();
         if !items.iter().any(|item| item["id"] == item_id) {
-            items.insert(
-                0,
-                completion_inbox_item(session_id, &agent_name, completion),
-            );
+            items.insert(0, item.clone());
             if let Err(error) = crate::utils::queue::save_items(&items) {
                 persistence_failures += 1;
                 if persistence_failures == 1 || persistence_failures.is_multiple_of(60) {
@@ -187,8 +227,13 @@ pub(crate) async fn emit_active_completion<R: tauri::Runtime>(
             .and_then(serde_json::Value::as_str)
             .unwrap_or(agent_name)
             .to_string();
+        let event_name = if item["type"] == "agent_turn_ended" {
+            "agent-turn-ended"
+        } else {
+            "agent-turn-completed"
+        };
         let _ = app.emit(
-            "agent-turn-completed",
+            event_name,
             serde_json::json!({
                 "session_id": session_id,
                 "agent_name": agent_name,
@@ -385,6 +430,7 @@ pub(crate) async fn publish_transcript_turn_completion(
     app: AppHandle,
     session_id: String,
     reporting_status: std::sync::Arc<std::sync::Mutex<String>>,
+    claim: crate::state::transcript_completion::CompletionClaim,
 ) {
     let state = app.state::<AppState>();
     let Some((provider, runtime_generation)) =
@@ -396,25 +442,56 @@ pub(crate) async fn publish_transcript_turn_completion(
     if matches!(provider.as_str(), "claude" | "codex") {
         return;
     }
+    claim
+        .run(|| {
+            poll_transcript_turn_completion(
+                &app,
+                &state,
+                &session_id,
+                &reporting_status,
+                &provider,
+                runtime_generation,
+            )
+        })
+        .await;
+}
+
+// Each bounded round observes only the latest completed answer. Intermediate
+// boundaries in a burst are notifications, not a durable completion event log.
+async fn poll_transcript_turn_completion(
+    app: &AppHandle,
+    state: &AppState,
+    session_id: &str,
+    reporting_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    provider: &str,
+    runtime_generation: Option<u64>,
+) {
     for attempt in 0..6 {
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-        if reporting_runtime(&state, &session_id, &reporting_status).await
-            != Some((provider.clone(), runtime_generation))
+        if reporting_runtime(state, session_id, reporting_status).await
+            != Some((provider.to_owned(), runtime_generation))
         {
             return;
         }
-        let Ok(events) =
-            crate::commands::chat::load_agent_chat_transcript_for_state(&state, session_id.clone())
-                .await
+        let Ok(events) = crate::commands::chat::load_agent_chat_transcript_for_state(
+            state,
+            session_id.to_owned(),
+        )
+        .await
         else {
             continue;
         };
-        let Some(completion) = transcript_turn_completion(&session_id, &events) else {
+        if reporting_runtime(state, session_id, reporting_status).await
+            != Some((provider.to_owned(), runtime_generation))
+        {
+            return;
+        }
+        let Some(completion) = transcript_turn_completion(session_id, &events) else {
             continue;
         };
-        let item_id = completion_item_id(&session_id, &completion.evidence_id);
+        let item_id = completion_item_id(session_id, &completion.evidence_id);
         let already_recorded = {
             let _queue_guard = state.queue_io_lock.lock().await;
             crate::utils::queue::load_items()
@@ -427,16 +504,17 @@ pub(crate) async fn publish_transcript_turn_completion(
         if let PersistedCompletion::Committed {
             agent_name,
             item_id,
-        } = persist_turn_completion(
-            &state,
-            &session_id,
-            &provider,
+        } = persist_turn_notice_with_status(
+            state,
+            session_id,
+            provider,
             runtime_generation,
-            &completion,
+            Some(reporting_status),
+            completion_inbox_item(session_id, "", &completion),
         )
         .await
         {
-            emit_active_completion(&app, &state, &session_id, &agent_name, &item_id).await;
+            emit_active_completion(app, state, session_id, &agent_name, &item_id).await;
         }
         return;
     }
@@ -738,13 +816,62 @@ mod tests {
             reporting_runtime(&state, "agent-1", &reporting_status).await,
             Some(("gemini".to_string(), Some(2)))
         );
+        let replacement_status = Arc::new(Mutex::new("Idle".into()));
+        let late_completion =
+            TurnCompletion::new("answer:late", "Late answer.", 2, "provider_event_observed")
+                .unwrap();
+        let lifecycle_guard = state.lock_agent_lifecycle("agent-1").await;
+        let mut pending = std::pin::pin!(persist_turn_notice_with_status(
+            &state,
+            "agent-1",
+            "gemini",
+            None,
+            Some(&reporting_status),
+            completion_inbox_item("agent-1", "", &late_completion),
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, &mut pending)
+                .await
+                .is_err()
+        );
         if let Some(agent) = state.agents.lock().await.get_mut("agent-1") {
-            agent.current_status = Arc::new(Mutex::new("Idle".into()));
+            agent.current_status = replacement_status.clone();
+            agent.runtime_generation = None;
         }
+        drop(lifecycle_guard);
+        assert!(matches!(pending.await, PersistedCompletion::Stale));
+        assert_eq!(crate::utils::queue::load_items().len(), 1);
         assert_eq!(
             reporting_runtime(&state, "agent-1", &reporting_status).await,
             None
         );
+        assert!(matches!(
+            persist_turn_notice_with_status(
+                &state,
+                "agent-1",
+                "gemini",
+                None,
+                Some(&replacement_status),
+                completion_inbox_item("agent-1", "", &late_completion),
+            )
+            .await,
+            PersistedCompletion::Committed { .. }
+        ));
+        let mut items = crate::utils::queue::load_items();
+        items[0]["dismissed"] = serde_json::json!(true);
+        crate::utils::queue::save_items(&items).unwrap();
+        persist_turn_notice_with_status(
+            &state,
+            "agent-1",
+            "gemini",
+            None,
+            Some(&replacement_status),
+            completion_inbox_item("agent-1", "", &late_completion),
+        )
+        .await;
+        let items = crate::utils::queue::load_items();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["dismissed"], true);
     }
 
     #[test]

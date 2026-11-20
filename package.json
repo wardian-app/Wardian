@@ -51,7 +51,7 @@
     "docs:demo-gif:real": "node scripts/capture-readme-demo-real.mjs",
     "perf:workbench": "node scripts/measure-workbench-performance.mjs",
     "perf:workbench:check": "node scripts/measure-workbench-performance.mjs --check",
-    "test": "node --test scripts/rust-build-cache.test.mjs && vitest run",
+    "test": "node --test scripts/windows-zip.test.mjs scripts/rust-build-cache.test.mjs scripts/claude-turn-ended-mod.test.mjs scripts/claude-delivery-mod.test.mjs scripts/run-compiler-input-guard-tests.test.mjs scripts/mock-agent.test.mjs e2e-native/tests/chat-saved-fixture.test.mjs e2e-native/tests/harness-invoke.test.mjs && node scripts/run-compiler-input-guard-tests.mjs && vitest run",
     "test:coverage": "vitest run --coverage",
     "test:coverage:rust": "cd src-tauri && cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info",
     "test:watch": "vitest",
@@ -68,12 +68,12 @@
     "setup:e2e:native:windows": "npm run setup:e2e:native"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.11.0",
+    "@tauri-apps/api": "2.12.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "^2",
-    "@tauri-apps/plugin-updater": "^2.10.1",
+    "@tauri-apps/plugin-updater": "2.14.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/addon-unicode11": "^0.9.0",
@@ -111,7 +111,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.12",
     "autoprefixer": "^10.4.24",
     "eslint": "^10.9.1",
     "eslint-plugin-react-hooks": "^7.1.1",
@@ -125,18 +125,18 @@
     "terser": "^5.46.1",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.68.0",
-    "vite": "6.4.3",
+    "vite": "6.4.5",
     "vitepress": "^1.6.4",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   },
   "overrides": {
-    "dompurify": "3.4.16",
+    "dompurify": "3.4.17",
     "esbuild": "0.28.1",
     "minimatch@10.2.5": {
       "brace-expansion": "5.0.12"
     },
-    "undici": "7.29.1",
-    "vite": "6.4.3",
+    "undici": "7.30.1",
+    "vite": "6.4.5",
     "ws": "8.21.0"
   }
 }

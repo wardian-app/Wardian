@@ -3,6 +3,10 @@ use super::*;
 use wardian_core::control::ControllerSecret;
 use wardian_core::controllers::{ControllerPrincipal, ControllerScope as Scope, ControllerStore};
 
+const MAX_RECEIVE_ITEMS: u32 = wardian_core::agent_messaging::MAX_RECEIVE_ITEMS;
+const MAX_RECEIVE_TIMEOUT_MS: u64 = 60_000;
+const MAX_WAIT_AGENT_TIMEOUT_MS: u64 = 60_000;
+
 fn authenticate_controller(
     token: &ControllerSecret,
     resource: &str,
@@ -180,7 +184,7 @@ async fn handle_in_state(
                     .map_err(control_error)?;
                 let mut page = state
                     .interactions
-                    .receive_agent_messages(
+                    .receive_controller_messages(
                         &sender,
                         cursor.as_deref(),
                         ack_cursor.as_deref(),
@@ -220,7 +224,7 @@ async fn handle_in_state(
                     .map_err(control_error)?;
                 let unread = state
                     .interactions
-                    .has_unacknowledged_agent_messages(&sender)
+                    .has_unacknowledged_controller_messages(&sender)
                     .await
                     .map_err(control_error)?;
                 if unread || mailbox.borrow().revision != observed {
@@ -378,7 +382,7 @@ mod tests {
         drop(_home);
         // Qualification explicitly opts into HTTP/real CLI; baseline remains canonical DB coverage.
         if std::env::var_os("WARDIAN_BRIDGE_E2E_DRIVER").is_some() {
-            super::e2e::run_http_real_cli_canonical_task_reply().await;
+            super::e2e::run_controller_real_cli_acceptance().await;
         }
     }
     #[tokio::test]

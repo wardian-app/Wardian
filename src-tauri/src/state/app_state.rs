@@ -76,8 +76,12 @@ pub struct AppState {
     // then `agents` holds only part of the roster; see `commands::agent_roster`.
     pub agent_roster_restored: std::sync::atomic::AtomicBool,
     pub agent_name_reservations: Mutex<HashSet<String>>,
+    /// Durable spawn workers run independently of control-client lifetimes.
+    pub spawn_operation_slots: Arc<tokio::sync::Semaphore>,
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One durable attachment index per desktop runtime; opened lazily off-thread.
+    pub remote_attachments: Mutex<Option<Arc<crate::remote::attachments::AttachmentStore>>>,
     pub status_observation_sequences: std::sync::Mutex<HashMap<String, u64>>,
     status_revisions: std::sync::Mutex<HashMap<String, StatusRevisionSession>>,
     pub automation_scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -109,6 +113,8 @@ pub struct AppState {
     pub conversation_capture_policy_lock: crate::state::capture_policy_gate::CapturePolicyGate,
     pub conversation_archive: ConversationArchiveState,
     pub(crate) background_capture: crate::state::background_capture::BackgroundCaptureCoordinator,
+    pub(crate) transcript_completion:
+        crate::state::transcript_completion::TranscriptCompletionCoordinator,
     /// Agents whose New Session is running, so a repeated request is refused
     /// instead of queueing behind the first one. A std mutex because the
     /// claim's `Drop` cannot await; it is never held across an await.
@@ -117,10 +123,13 @@ pub struct AppState {
     pub change_snapshots: ChangeSnapshotRuntime,
     // Live-only remote-control authentication and ticket records.
     pub remote_runtime: Mutex<crate::remote::models::RemoteRuntimeState>,
+    // Serializes remote-device store publication with auth-session issuance
+    // and revocation's in-memory session invalidation.
+    pub remote_device_store_lock: Arc<Mutex<()>>,
     pub remote_listener: crate::remote::listener::RemoteListener,
     /// Orders persisted settings and startup so an older startup snapshot
     /// cannot reopen a listener after remote access was disabled.
-    pub remote_gateway_config_lock: Mutex<()>,
+    pub remote_gateway_config_lock: Arc<Mutex<()>>,
     // Last complete remote roster. The gateway uses this while a provider or
     // telemetry task temporarily owns a live agent snapshot lock.
     pub remote_agent_roster_cache: RwLock<Option<Vec<RemoteAgentSummary>>>,
@@ -519,8 +528,10 @@ impl Default for AppState {
             agent_order: Mutex::new(Vec::new()),
             agent_roster_restored: std::sync::atomic::AtomicBool::new(false),
             agent_name_reservations: Mutex::new(HashSet::new()),
+            spawn_operation_slots: Arc::new(tokio::sync::Semaphore::new(0)),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
+            remote_attachments: Mutex::new(None),
             status_observation_sequences: std::sync::Mutex::new(HashMap::new()),
             status_revisions: std::sync::Mutex::new(HashMap::new()),
             automation_scheduler_handle: Mutex::new(None),
@@ -536,11 +547,13 @@ impl Default for AppState {
             conversation_capture_policy_lock: Default::default(),
             conversation_archive: ConversationArchiveState::default(),
             background_capture: Default::default(),
+            transcript_completion: Default::default(),
             clears_in_flight: Default::default(),
             change_snapshots: ChangeSnapshotRuntime::new(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
+            remote_device_store_lock: Arc::new(Mutex::new(())),
             remote_listener: crate::remote::listener::RemoteListener::default(),
-            remote_gateway_config_lock: Mutex::new(()),
+            remote_gateway_config_lock: Arc::new(Mutex::new(())),
             remote_agent_roster_cache: RwLock::new(None),
             remote_agent_status_cache: RwLock::new(HashMap::new()),
             remote_inbox_runtime_cache: RwLock::new(None),

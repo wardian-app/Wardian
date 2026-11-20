@@ -101,6 +101,14 @@ Monitor shows a unified activity feed for automation schedules and runs. Use the
 tabs to switch between all activity, items needing attention, running work,
 scheduled work, and history.
 
+When Wardian starts, recurring occurrences that passed while it was closed are
+skipped and the next future occurrence stays scheduled. A missed one-time
+occurrence, or a missed final specific date with no later eligible date, remains
+in Monitor as **Missed**. A specific-date schedule with a later eligible date
+advances to that date and keeps its last run status. Skipped occurrences do not
+count as runs or change the saved run time; use **Run now** to launch a retained
+schedule with its saved input and assignments.
+
 Agent selection also scopes this view. With no agents selected, Monitor and the
 left automation rail show all automation activity. With one or more agents
 selected in the roster or an agent surface, they show schedules, listeners, and

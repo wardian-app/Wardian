@@ -22,15 +22,20 @@ pub async fn submit_inbox_provider_choice(
             prompt: Some(prompt),
             input_mode: Some(wardian_core::control::MessageInputMode::Message),
             inbox_item_id: Some(inbox_item_id),
+            attachment_ids: Vec::new(),
+            submission_id: None,
         },
     )
     .await
+    .map(|_| ())
 }
 
 fn canonicalized_remote_gateway_config(
     config: &RemoteGatewayConfig,
 ) -> Result<RemoteGatewayConfig, String> {
     let mut normalized = config.clone();
+    normalized.client_origin_allowlist =
+        crate::remote::policy::canonicalized_client_origins(&config.client_origin_allowlist)?;
     if !config.enabled {
         return Ok(normalized);
     }
@@ -79,7 +84,16 @@ pub async fn save_remote_gateway_config(
 ) -> Result<RemoteGatewayConfig, String> {
     let state = app.state::<crate::state::AppState>();
     let _config_guard = state.remote_gateway_config_lock.lock().await;
+    let previous_config = crate::remote::storage::load_remote_config().ok().flatten();
     let saved = save_remote_gateway_config_with_starter(config, |_| {})?;
+    {
+        let mut runtime = state.remote_runtime.lock().await;
+        crate::remote::auth::invalidate_client_authority_for_config_change(
+            &mut runtime,
+            previous_config.as_ref(),
+            &saved,
+        );
+    }
     crate::remote::gateway::configure_remote_gateway(app.clone(), saved.clone()).await?;
     Ok(saved)
 }
@@ -105,6 +119,11 @@ fn pending_pairing_to_dto(request: &PendingPairingRequestRecord) -> RemotePendin
         device_label: request.device_label.clone(),
         public_key_fingerprint: request.public_key_fingerprint.clone(),
         canonical_origin: request.canonical_origin.clone(),
+        credential_kind: request.credential_kind,
+        audience: request.audience,
+        client_origin: request.client_origin.clone(),
+        read_grants: request.read_grants.clone(),
+        send_grants: request.send_grants.clone(),
         submitted_at: millis_to_rfc3339(request.submitted_at_ms),
         expires_at: millis_to_rfc3339(request.expires_at_ms),
     }
@@ -136,20 +155,6 @@ pub async fn list_pending_remote_pairing_requests(
     Ok(active_pending_pairing_requests(&mut runtime, now_ms))
 }
 
-fn revoke_device_in_store(
-    mut store: RemoteDeviceStore,
-    device_id: &str,
-    revoked_at: &str,
-) -> Result<RemoteDeviceStore, String> {
-    let device = store
-        .devices
-        .iter_mut()
-        .find(|device| device.device_id == device_id)
-        .ok_or_else(|| "remote_device_not_found".to_string())?;
-    device.revoked_at = Some(revoked_at.to_string());
-    Ok(store)
-}
-
 fn device_record_from_pending_pairing(
     request: &PendingPairingRequestRecord,
     paired_at: &str,
@@ -159,10 +164,39 @@ fn device_record_from_pending_pairing(
         label: request.device_label.clone(),
         public_key_spki_der_base64: request.public_key_spki_der_base64.clone(),
         public_key_fingerprint: request.public_key_fingerprint.clone(),
+        credential_kind: request.credential_kind,
+        audience: request.audience,
+        client_origin: request.client_origin.clone(),
+        read_grants: request.read_grants.clone(),
+        send_grants: request.send_grants.clone(),
         created_at: paired_at.to_string(),
         last_used_at: None,
         revoked_at: None,
     }
+}
+
+fn approve_device_in_store(
+    store: &mut RemoteDeviceStore,
+    request: &PendingPairingRequestRecord,
+    paired_at: &str,
+) -> Result<(), String> {
+    if store.devices.iter().any(|device| {
+        device.revoked_at.is_none()
+            && device.public_key_fingerprint == request.public_key_fingerprint
+    }) {
+        return Err("device_already_paired".to_string());
+    }
+    if store
+        .devices
+        .iter()
+        .any(|device| device.device_id == request.device_id)
+    {
+        return Err("remote_device_id_already_exists".to_string());
+    }
+    store
+        .devices
+        .push(device_record_from_pending_pairing(request, paired_at));
+    Ok(())
 }
 
 fn remote_audit_origin() -> Option<String> {
@@ -212,51 +246,92 @@ pub async fn approve_remote_pairing_request(
     app: tauri::AppHandle,
     request_id: String,
 ) -> Result<Vec<DeviceRecord>, String> {
+    tokio::spawn(approve_remote_pairing_request_inner(app, request_id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+async fn approve_remote_pairing_request_inner(
+    app: tauri::AppHandle,
+    request_id: String,
+) -> Result<Vec<DeviceRecord>, String> {
+    let request_id = request_id.trim().to_string();
+    let state = app.state::<crate::state::AppState>();
+    let _device_store_guard = state.remote_device_store_lock.clone().lock_owned().await;
     let now_ms = chrono::Utc::now().timestamp_millis();
     let paired_at = millis_to_rfc3339(now_ms);
-    let state = app.state::<crate::state::AppState>();
-    let mut runtime = state.remote_runtime.lock().await;
     let request = {
-        crate::remote::auth::prune_expired_runtime_state(&mut runtime, now_ms);
-        let request = runtime
-            .pending_pairing_requests
-            .get(request_id.trim())
-            .cloned()
-            .ok_or_else(|| "pending_pairing_not_found".to_string())?;
-        if !crate::remote::auth::pending_pairing_request_is_active(&request, now_ms) {
-            return Err("pending_pairing_not_active".to_string());
-        }
-        request
+        let mut runtime = state.remote_runtime.lock().await;
+        crate::remote::auth::begin_pending_pairing_approval(&mut runtime, &request_id, now_ms)?
     };
 
-    let mut store = crate::remote::storage::load_device_store()?;
-    if store.devices.iter().any(|device| {
-        device.revoked_at.is_none()
-            && device.public_key_fingerprint == request.public_key_fingerprint
-    }) {
-        append_desktop_remote_audit(DesktopRemoteAuditEvent {
-            origin: Some(&request.canonical_origin),
-            device_id: Some(&request.device_id),
-            event_type: "pairing",
-            action: "approve",
-            target_type: Some("device"),
-            target_id: Some(&request.device_id),
-            outcome: "rejected",
-            error_code: Some("device_already_paired"),
-        });
-        return Err("device_already_paired".to_string());
-    }
+    let request_for_store = request.clone();
+    let paired_at_for_store = paired_at.clone();
+    let mutation = crate::remote::storage::update_device_store(move |store| {
+        approve_device_in_store(store, &request_for_store, &paired_at_for_store)
+    })
+    .await;
 
-    store
-        .devices
-        .push(device_record_from_pending_pairing(&request, &paired_at));
-    let saved = crate::remote::storage::save_device_store(&store)?;
-    crate::remote::auth::mark_pending_pairing_approved(
-        &mut runtime,
-        request_id.trim(),
-        &paired_at,
-        now_ms,
-    )?;
+    let saved = match mutation {
+        Ok((saved, ())) => saved,
+        Err(error) => {
+            let reconciled = if error.publish_state
+                != crate::remote::storage::DeviceStorePublishState::NotPublished
+            {
+                crate::remote::storage::load_device_store()
+                    .ok()
+                    .filter(|store| {
+                        let expected = device_record_from_pending_pairing(&request, &paired_at);
+                        store.devices.iter().any(|device| device == &expected)
+                    })
+            } else {
+                None
+            };
+            let mut runtime = state.remote_runtime.lock().await;
+            if let Some(saved) = reconciled {
+                crate::remote::auth::mark_pending_pairing_approved(
+                    &mut runtime,
+                    &request_id,
+                    &paired_at,
+                )?;
+                drop(runtime);
+                append_desktop_remote_audit(DesktopRemoteAuditEvent {
+                    origin: Some(&request.canonical_origin),
+                    device_id: Some(&request.device_id),
+                    event_type: "pairing",
+                    action: "approve",
+                    target_type: Some("device"),
+                    target_id: Some(&request.device_id),
+                    outcome: "accepted",
+                    error_code: None,
+                });
+                return Ok(saved.devices);
+            }
+            crate::remote::auth::mark_pending_pairing_approval_failed(
+                &mut runtime,
+                &request_id,
+                chrono::Utc::now().timestamp_millis(),
+            );
+            drop(runtime);
+            if error.message == "device_already_paired" {
+                append_desktop_remote_audit(DesktopRemoteAuditEvent {
+                    origin: Some(&request.canonical_origin),
+                    device_id: Some(&request.device_id),
+                    event_type: "pairing",
+                    action: "approve",
+                    target_type: Some("device"),
+                    target_id: Some(&request.device_id),
+                    outcome: "rejected",
+                    error_code: Some("device_already_paired"),
+                });
+            }
+            return Err(error.message);
+        }
+    };
+
+    let mut runtime = state.remote_runtime.lock().await;
+    crate::remote::auth::mark_pending_pairing_approved(&mut runtime, &request_id, &paired_at)?;
+    drop(runtime);
     append_desktop_remote_audit(DesktopRemoteAuditEvent {
         origin: Some(&request.canonical_origin),
         device_id: Some(&request.device_id),
@@ -303,13 +378,37 @@ pub async fn revoke_remote_device(
     app: tauri::AppHandle,
     device_id: String,
 ) -> Result<Vec<DeviceRecord>, String> {
-    let store = crate::remote::storage::load_device_store()?;
-    let revoked_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let store = revoke_device_in_store(store, &device_id, &revoked_at)?;
-    let saved = crate::remote::storage::save_device_store(&store)?;
+    tokio::spawn(revoke_remote_device_inner(app, device_id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+async fn revoke_remote_device_inner(
+    app: tauri::AppHandle,
+    device_id: String,
+) -> Result<Vec<DeviceRecord>, String> {
     let state = app.state::<crate::state::AppState>();
-    let mut runtime = state.remote_runtime.lock().await;
-    crate::remote::auth::revoke_sessions_for_device(&mut runtime, &device_id);
+    let revoked_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let saved = crate::remote::auth::revoke_device_and_sessions(
+        state.remote_device_store_lock.clone(),
+        &state.remote_runtime,
+        device_id.clone(),
+        revoked_at,
+    )
+    .await
+    .map_err(|error| error.message)?;
+    let attachment_store = state.remote_attachments.lock().await.clone();
+    if let Some(store) = attachment_store {
+        let revoked_device = device_id.clone();
+        if !matches!(
+            tokio::task::spawn_blocking(move || store.revoke_device(&revoked_device)).await,
+            Ok(Ok(()))
+        ) {
+            crate::utils::logging::log_debug(
+                "[Wardian] revoked attachment cleanup deferred to retention sweep",
+            );
+        }
+    }
     let origin = remote_audit_origin();
     append_desktop_remote_audit(DesktopRemoteAuditEvent {
         origin: origin.as_deref(),
@@ -378,6 +477,71 @@ pub async fn create_remote_pairing_offer(
     Ok(offer)
 }
 
+/// Creates a single-use companion offer for an already allowlisted origin.
+/// UI and CLI callers share configuration, expiry, rate limits, and audit policy.
+#[tauri::command]
+pub async fn create_remote_client_pairing_offer(
+    app: tauri::AppHandle,
+    client_origin: String,
+) -> Result<crate::remote::models::RemoteClientPairingQrPayload, String> {
+    let state = app.state::<crate::state::AppState>();
+    let _config_guard = state.remote_gateway_config_lock.lock().await;
+    let config =
+        crate::remote::storage::load_remote_config()?.ok_or("Remote access is not configured")?;
+    if !config.enabled {
+        return Err("Remote access is disabled".to_string());
+    }
+    validate_remote_gateway_config(&config)?;
+    if !crate::remote::policy::is_approved_client_origin(
+        &config.client_origin_allowlist,
+        &client_origin,
+    ) {
+        return Err("client_origin_not_allowlisted".to_string());
+    }
+    let gateway_origin = crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut runtime = state.remote_runtime.lock().await;
+    if crate::remote::auth::check_rate_limit(
+        &mut runtime,
+        "client_pairing_offer:desktop",
+        now_ms,
+        3,
+        10 * 60_000,
+    )
+    .is_err()
+    {
+        append_desktop_remote_audit(DesktopRemoteAuditEvent {
+            origin: Some(gateway_origin.raw()),
+            device_id: None,
+            event_type: "pairing",
+            action: "create_client_offer",
+            target_type: None,
+            target_id: None,
+            outcome: "rejected",
+            error_code: Some("rate_limited"),
+        });
+        return Err("rate_limited".to_string());
+    }
+    let offer = crate::remote::auth::create_client_pairing_offer(
+        &mut runtime,
+        gateway_origin.raw(),
+        &client_origin,
+        &config.gateway_identity_fingerprint,
+        now_ms,
+    )?;
+    append_desktop_remote_audit(DesktopRemoteAuditEvent {
+        origin: Some(gateway_origin.raw()),
+        device_id: None,
+        event_type: "pairing",
+        action: "create_client_offer",
+        target_type: Some("pairing_offer"),
+        target_id: Some(&offer.pairing_offer_id),
+        outcome: "accepted",
+        error_code: None,
+    });
+    Ok(offer)
+}
+
 fn millis_to_rfc3339(ms: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
         .unwrap_or_else(chrono::Utc::now)
@@ -387,13 +551,17 @@ fn millis_to_rfc3339(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::models::REMOTE_SETTINGS_SCHEMA_VERSION;
+    use crate::remote::models::{
+        DeviceCredentialKind, RemoteCredentialAudience, REMOTE_DEVICE_STORE_SCHEMA_VERSION,
+        REMOTE_SETTINGS_SCHEMA_VERSION,
+    };
 
     fn enabled_config(origin: &str, host: &str) -> RemoteGatewayConfig {
         RemoteGatewayConfig {
             schema_version: REMOTE_SETTINGS_SCHEMA_VERSION,
             enabled: true,
             canonical_origin: origin.to_string(),
+            client_origin_allowlist: Vec::new(),
             loopback_host: host.to_string(),
             loopback_port: 41241,
             gateway_identity_public_key: "pub".to_string(),
@@ -472,6 +640,28 @@ mod tests {
     }
 
     #[test]
+    fn saving_config_normalizes_client_origins_and_rejects_ambiguous_entries() {
+        let mut config = enabled_config("https://wardian.tailnet.ts.net", "127.0.0.1");
+        config.client_origin_allowlist = vec![
+            "https://Client.Example:443/".to_string(),
+            "http://localhost:80".to_string(),
+        ];
+        let normalized = canonicalized_remote_gateway_config(&config).expect("valid origins");
+        assert_eq!(
+            normalized.client_origin_allowlist,
+            ["https://client.example", "http://localhost"]
+        );
+
+        config.client_origin_allowlist = vec![
+            "https://client.example".to_string(),
+            "https://CLIENT.example:443".to_string(),
+        ];
+        assert!(canonicalized_remote_gateway_config(&config).is_err());
+        config.client_origin_allowlist = vec!["http://client.example".to_string()];
+        assert!(canonicalized_remote_gateway_config(&config).is_err());
+    }
+
+    #[test]
     fn saving_enabled_config_requests_gateway_start_after_persisting_config() {
         with_temp_wardian_home(|| {
             let mut started = Vec::new();
@@ -502,30 +692,67 @@ mod tests {
     }
 
     #[test]
-    fn revoke_device_in_store_marks_device_and_rejects_unknown_device() {
-        let store = RemoteDeviceStore {
-            schema_version: crate::remote::models::REMOTE_DEVICE_STORE_SCHEMA_VERSION,
-            devices: vec![DeviceRecord {
-                device_id: "dev-1".to_string(),
-                label: "Phone".to_string(),
-                public_key_spki_der_base64: "key".to_string(),
-                public_key_fingerprint: "fp".to_string(),
-                created_at: "2026-05-21T00:00:00Z".to_string(),
-                last_used_at: None,
-                revoked_at: None,
-            }],
+    fn pairing_approval_appends_without_replacing_revoked_or_unrelated_devices() {
+        let old_revocation = "2026-05-21T00:05:00.000Z".to_string();
+        let unrelated = DeviceRecord {
+            device_id: "dev-other".to_string(),
+            label: "Tablet".to_string(),
+            public_key_spki_der_base64: "other-key".to_string(),
+            public_key_fingerprint: "other-fp".to_string(),
+            credential_kind: DeviceCredentialKind::Pwa,
+            audience: RemoteCredentialAudience::Pwa,
+            client_origin: None,
+            read_grants: Vec::new(),
+            send_grants: Vec::new(),
+            created_at: "2026-05-20T00:00:00Z".to_string(),
+            last_used_at: Some("2026-05-21T00:04:00Z".to_string()),
+            revoked_at: None,
+        };
+        let mut store = RemoteDeviceStore {
+            schema_version: REMOTE_DEVICE_STORE_SCHEMA_VERSION,
+            devices: vec![
+                DeviceRecord {
+                    device_id: "dev-revoked".to_string(),
+                    label: "Old phone".to_string(),
+                    public_key_spki_der_base64: "old-key".to_string(),
+                    public_key_fingerprint: "same-fp".to_string(),
+                    credential_kind: DeviceCredentialKind::Pwa,
+                    audience: RemoteCredentialAudience::Pwa,
+                    client_origin: None,
+                    read_grants: Vec::new(),
+                    send_grants: Vec::new(),
+                    created_at: "2026-05-19T00:00:00Z".to_string(),
+                    last_used_at: Some("2026-05-21T00:04:00Z".to_string()),
+                    revoked_at: Some(old_revocation.clone()),
+                },
+                unrelated.clone(),
+            ],
+        };
+        let request = PendingPairingRequestRecord {
+            request_id: "pair-1".to_string(),
+            pairing_offer_id: "offer-1".to_string(),
+            device_id: "dev-new".to_string(),
+            device_label: "Phone".to_string(),
+            public_key_spki_der_base64: "new-key".to_string(),
+            public_key_fingerprint: "same-fp".to_string(),
+            canonical_origin: "https://wardian.tailnet.ts.net".to_string(),
+            credential_kind: DeviceCredentialKind::Pwa,
+            audience: RemoteCredentialAudience::Pwa,
+            client_origin: None,
+            read_grants: Vec::new(),
+            send_grants: Vec::new(),
+            submitted_at_ms: 1,
+            expires_at_ms: 2,
+            decision: PendingPairingDecision::Approving,
+            paired_at: None,
         };
 
-        let revoked = revoke_device_in_store(store.clone(), "dev-1", "2026-05-21T00:05:00.000Z")
-            .expect("known device revoked");
+        approve_device_in_store(&mut store, &request, "2026-05-22T00:00:00Z")
+            .expect("explicit re-pair after revocation");
 
-        assert_eq!(
-            revoked.devices[0].revoked_at.as_deref(),
-            Some("2026-05-21T00:05:00.000Z")
-        );
-        assert_eq!(
-            revoke_device_in_store(store, "missing", "2026-05-21T00:05:00.000Z"),
-            Err("remote_device_not_found".to_string())
-        );
+        assert_eq!(store.devices.len(), 3);
+        assert_eq!(store.devices[0].revoked_at.as_ref(), Some(&old_revocation));
+        assert_eq!(store.devices[1], unrelated);
+        assert_eq!(store.devices[2].device_id, "dev-new");
     }
 }

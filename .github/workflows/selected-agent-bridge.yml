@@ -40,7 +40,10 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.100.0
+      - name: Report Rust compiler
+        run: rustc --version
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .

@@ -163,10 +163,12 @@ jobs:
           cache: "npm"
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: ${{ matrix.platform.rust-target || '' }}
 
+      - name: Report Rust compiler
+        run: rustc --version
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:

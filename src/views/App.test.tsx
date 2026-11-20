@@ -25,6 +25,7 @@ import { makeSingleGroupDocument, makeSurface } from "../features/workbench/work
 import type { WorkbenchSaveRequest, WorkbenchSaveResult } from "../features/workbench/workbenchPersistence";
 import { createCoreWorkbenchSurfaceRegistry } from "../features/workbench/coreSurfaceRegistry";
 import type { TelemetryFleet } from "../features/telemetry/telemetryTypes";
+import { chatPageInvokeFixture } from "../test/chatPageTestFixture";
 
 // Mock window.matchMedia globally for tests
 Object.defineProperty(window, 'matchMedia', {
@@ -361,42 +362,100 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
 }
 
 describe("Agents overview scroll ownership", () => {
-  it("centers a card by scrolling only the overview viewport", () => {
-    const pane = document.createElement("div");
-    const overview = document.createElement("div");
-    const card = document.createElement("div");
+  const bounds = (top: number, height: number): DOMRect => ({
+    x: 0, y: top, top, left: 0, right: 600, bottom: top + height,
+    width: 600, height, toJSON: () => ({}),
+  });
+  const fixture = ({ scrollTop, cardTop, scrollHeight, cardHeight = 80 }: {
+    scrollTop: number; cardTop: number; scrollHeight: number; cardHeight?: number;
+  }, ownerDocument = document) => {
+    const pane = ownerDocument.createElement("div");
+    const otherOverview = ownerDocument.createElement("div");
+    const overview = ownerDocument.createElement("div");
+    const card = ownerDocument.createElement("div");
+    otherOverview.dataset.testid = "agents-overview-container";
     overview.dataset.testid = "agents-overview-container";
     card.id = "agent-card-agent-far";
-    pane.append(overview);
+    pane.append(otherOverview, overview);
     overview.append(card);
-    document.body.append(pane);
-
+    ownerDocument.body.append(pane);
     pane.scrollTop = 37;
-    overview.scrollTop = 400;
+    pane.scrollTo = vi.fn();
+    pane.scrollIntoView = vi.fn();
+    card.scrollIntoView = vi.fn();
+    otherOverview.scrollTo = vi.fn();
+    overview.scrollTop = scrollTop;
+    overview.style.scrollBehavior = "smooth";
     Object.defineProperties(overview, {
       clientHeight: { value: 300, configurable: true },
-      scrollHeight: { value: 1_200, configurable: true },
+      scrollHeight: { value: scrollHeight, configurable: true },
     });
-    overview.getBoundingClientRect = () => ({
-      x: 0, y: 100, top: 100, left: 0, right: 600, bottom: 400,
-      width: 600, height: 300, toJSON: () => ({}),
-    });
-    card.getBoundingClientRect = () => ({
-      x: 0, y: 650, top: 650, left: 0, right: 600, bottom: 730,
-      width: 600, height: 80, toJSON: () => ({}),
-    });
-    const scrollTo = vi.fn();
-    overview.scrollTo = scrollTo;
+    overview.getBoundingClientRect = () => bounds(100, 300);
+    card.getBoundingClientRect = () => bounds(cardTop, cardHeight);
+    overview.scrollTo = vi.fn();
+    return { pane, otherOverview, overview, card };
+  };
 
-    expect(scrollAgentCardWithinOverview("agent-far")).toBe(true);
-    expect(scrollTo).toHaveBeenCalledWith({ top: 840, behavior: "smooth" });
-    expect(pane.scrollTop).toBe(37);
-
-    pane.remove();
+  it.each([
+    { selection: "a nearby visible card", scrollTop: 400, cardTop: 240, scrollHeight: 1_200, top: 430 },
+    { selection: "an offscreen card", scrollTop: 400, cardTop: 650, scrollHeight: 1_200, top: 840 },
+    { selection: "a distant card below", scrollTop: 0, cardTop: 5_000, scrollHeight: 8_000, top: 4_790 },
+    { selection: "a distant card above", scrollTop: 5_000, cardTop: -4_300, scrollHeight: 8_000, top: 490 },
+    { selection: "a card at the top edge", scrollTop: 0, cardTop: 100, scrollHeight: 1_200, top: 0 },
+    { selection: "a card at the bottom edge", scrollTop: 400, cardTop: 800, scrollHeight: 1_200, top: 900 },
+    { selection: "a card in a non-overflowing view", scrollTop: 0, cardTop: 150, scrollHeight: 200, top: 0 },
+    { selection: "a card taller than the viewport", scrollTop: 400, cardTop: 650, scrollHeight: 1_600, cardHeight: 600, top: 1_100 },
+  ])("immediately centers $selection using only its overview viewport", (scenario) => {
+    const { pane, otherOverview, overview, card } = fixture(scenario);
+    const pageScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    try {
+      expect(scrollAgentCardWithinOverview("agent-far")).toBe(true);
+      expect(overview.scrollTo).toHaveBeenCalledExactlyOnceWith({ top: scenario.top, behavior: "instant" });
+      expect(overview.style.scrollBehavior).toBe("smooth");
+      expect(pane.scrollTop).toBe(37);
+      expect(pane.scrollTo).not.toHaveBeenCalled();
+      expect(pane.scrollIntoView).not.toHaveBeenCalled();
+      expect(card.scrollIntoView).not.toHaveBeenCalled();
+      expect(otherOverview.scrollTo).not.toHaveBeenCalled();
+      expect(pageScroll).not.toHaveBeenCalled();
+    } finally {
+      pane.remove();
+      pageScroll.mockRestore();
+    }
   });
 
-  it("does nothing when the card is not owned by an Agents overview", () => {
-    expect(scrollAgentCardWithinOverview("missing-agent")).toBe(false);
+  it("clamps the scrollTop fallback within the supplied owner document", () => {
+    const ownerDocument = document.implementation.createHTMLDocument();
+    const { pane, otherOverview, overview, card } = fixture({
+      scrollTop: 400, cardTop: 800, scrollHeight: 1_200,
+    }, ownerDocument);
+    Object.defineProperty(overview, "scrollTo", { configurable: true, value: undefined });
+    try {
+      expect(scrollAgentCardWithinOverview("agent-far", ownerDocument)).toBe(true);
+      expect(overview.scrollTop).toBe(900);
+      expect(pane.scrollTop).toBe(37);
+      expect(pane.scrollTo).not.toHaveBeenCalled();
+      expect(card.scrollIntoView).not.toHaveBeenCalled();
+      expect(otherOverview.scrollTo).not.toHaveBeenCalled();
+    } finally { pane.remove(); }
+  });
+
+  it("does nothing for missing cards or cards outside any Agents overview", () => {
+    const { pane, overview, card } = fixture({ scrollTop: 400, cardTop: 650, scrollHeight: 1_200 });
+    pane.append(card);
+    const pageScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    try {
+      expect(scrollAgentCardWithinOverview("missing-agent")).toBe(false);
+      expect(scrollAgentCardWithinOverview("agent-far")).toBe(false);
+      expect(overview.scrollTo).not.toHaveBeenCalled();
+      expect(pane.scrollTo).not.toHaveBeenCalled();
+      expect(card.scrollIntoView).not.toHaveBeenCalled();
+      expect(pageScroll).not.toHaveBeenCalled();
+      expect(pane.scrollTop).toBe(37);
+    } finally {
+      pane.remove();
+      pageScroll.mockRestore();
+    }
   });
 });
 
@@ -1638,6 +1697,49 @@ describe("Workbench persistence boot integration", () => {
 
     await waitFor(() => expect(screen.getAllByTestId("workbench-group")).toHaveLength(1));
     expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
+  });
+
+  it("opens an Off agent's history through the normal roster Open action without starting it", async () => {
+    setupDefaultMocks([{ ...sampleAgents[0], is_off: true }], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    chatPageInvokeFixture(mockInvoke).mockImplementation((command, args) => {
+      if (command === "load_agent_chat_page") {
+        return Promise.resolve([{
+          id: "saved-message", session_id: "agent-1", provider: "codex",
+          kind: "message", role: "assistant", text: "Saved Off history",
+          title: null, status: null, turn_id: null, source: null, command: null,
+          exit_code: null, path: null, language: null, created_at: null,
+          sequence: 1, metadata: {},
+        }]);
+      }
+      if (command === "list_provider_model_catalog") {
+        return Promise.resolve({ provider: "codex", models: [], refresh_error: null });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+    const agentEvents = captureQueueAgentListeners();
+
+    render(<App />);
+    const rosterRow = await screen.findByLabelText("Agent Alpha");
+    // Let the existing configuration sidebar finish its own initial discovery;
+    // the history entry must add no discovery or lifecycle request.
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("list_provider_model_catalog", expect.anything()));
+    const openingCallIndex = mockInvoke.mock.calls.length;
+    fireEvent.contextMenu(rosterRow);
+    fireEvent.click(within(screen.getByTestId("agent-context-menu")).getByRole("button", { name: "Open" }));
+
+    const sessionSurface = await screen.findByTestId("agent-session-surface");
+    expect(await within(sessionSurface).findByText("Saved Off history")).toBeInTheDocument();
+    expect(within(sessionSurface).queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
+    expect(mockInvoke.mock.calls.slice(openingCallIndex).filter(([command]) =>
+      /^(spawn_agent|resume_agent|send_input_to_agent|submit_prompt_to_agent|update_agent_model_selection|activate_terminal_presentation|list_provider_model_catalog)$/.test(command),
+    )).toEqual([]);
+    expect(currentAgents[0].is_off).toBe(true);
+    expect(within(sessionSurface).getByText("Off", { exact: true })).toBeInTheDocument();
+    act(() => agentEvents.emitStatus({ session_id: "agent-1", current_status: "Headless" }));
+    expect(await within(sessionSurface).findByText("Headless", { exact: true })).toBeInTheDocument();
+    act(() => agentEvents.emitStatus({ session_id: "agent-1", current_status: "Idle" }));
+    expect(await within(sessionSurface).findByText("Off", { exact: true })).toBeInTheDocument();
   });
 
   it("routes Inbox agent actions to an Agent Session surface", async () => {
@@ -2921,6 +3023,25 @@ describe("Agent Watchlist Sidebar", () => {
 
     await screen.findByTestId("agents-overview-surface");
 
+    const overview = screen.getByTestId("agents-overview-container");
+    const targetCard = document.getElementById("agent-card-agent-2");
+    if (!targetCard) throw new Error("Beta card not found");
+    Object.defineProperties(overview, {
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 8_000 },
+    });
+    overview.scrollTop = 0;
+    vi.spyOn(overview, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 100, top: 100, left: 0, right: 600, bottom: 400,
+      width: 600, height: 300, toJSON: () => ({}),
+    });
+    vi.spyOn(targetCard, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 5_000, top: 5_000, left: 0, right: 600, bottom: 5_080,
+      width: 600, height: 80, toJSON: () => ({}),
+    });
+    const revealScroll = vi.fn();
+    overview.scrollTo = revealScroll;
+
     const betaWatchlistRow = screen
       .getAllByText("Beta")
       .map((node) => node.closest("div.watchlist-row"))
@@ -2935,6 +3056,7 @@ describe("Agent Watchlist Sidebar", () => {
     });
     expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
     expect(document.getElementById("agent-card-agent-2")).toBeVisible();
+    await waitFor(() => expect(revealScroll).toHaveBeenCalledWith({ top: 4_790, behavior: "instant" }));
   });
 
   it("keeps command targets unchanged when a terminal receives focus", async () => {
@@ -3465,7 +3587,7 @@ describe("Sidebar Navigation", () => {
 // ── Agent Off State Tests ──────────────────────────────────────────────
 
 describe("Agent Off State Operations", () => {
-  it("hides a paused agent from the main grid and requires Start from context menu", async () => {
+  it("keeps a focused paused agent readable, hides it when unfocused, and requires Start to resume", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     await act(async () => {
       render(<App />);
@@ -3479,6 +3601,7 @@ describe("Agent Off State Operations", () => {
     const alphaWatchlistText = screen.getByText("Alpha", { selector: "p" });
     const alphaWatchlistRow = alphaWatchlistText.closest("div.watchlist-row");
     expect(alphaWatchlistRow).not.toBeNull();
+    fireEvent.click(alphaWatchlistRow!);
     
     await act(async () => {
       fireEvent.contextMenu(alphaWatchlistRow!);
@@ -3489,7 +3612,15 @@ describe("Agent Off State Operations", () => {
       pauseButton.click();
     });
 
-    // Paused agents stay available in the watchlist but leave the main grid.
+    // Pausing preserves the focused card without restarting its runtime.
+    await waitFor(() => {
+      expect(currentAgents.find((agent) => agent.session_id === "agent-1")?.is_off).toBe(true);
+      expect(screen.getByTestId("terminal-agent-1")).toBeVisible();
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", expect.anything());
+
+    // An unfocused Off card is still excluded from the overview.
+    fireEvent.click(screen.getByLabelText("Agent Beta"));
     await waitFor(() => {
       expect(screen.queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
       expect(screen.getAllByText("Alpha").length).toBe(1);
@@ -3510,6 +3641,7 @@ describe("Agent Off State Operations", () => {
     });
 
     // Click Start Session
+    expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", expect.anything());
     const startButtons = screen.getAllByText("Start Session");
     await act(async () => {
       startButtons[0].click();
@@ -3518,6 +3650,8 @@ describe("Agent Off State Operations", () => {
     // The agent should reappear in the grid (2 occurrences again)
     await waitFor(() => {
       expect(screen.getAllByText("Alpha").length).toBe(2);
+      expect(currentAgents.find((agent) => agent.session_id === "agent-1")?.is_off).toBe(false);
+      expect(mockInvoke).toHaveBeenCalledWith("resume_agent", expect.objectContaining({ sessionId: "agent-1" }));
     });
   });
 

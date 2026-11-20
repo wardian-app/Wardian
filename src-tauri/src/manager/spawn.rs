@@ -8,7 +8,8 @@ use crate::providers::claude::{
 };
 use crate::providers::codex::CodexProvider;
 use crate::providers::transcript::{
-    bind_pi_watch_message, extract_transcript_message, CodexWatchBindingState,
+    bind_mock_watch_message, bind_pi_watch_message, extract_transcript_message,
+    CodexWatchBindingState,
 };
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
@@ -67,6 +68,47 @@ const CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL: std::time::Duration =
 const CLAUDE_TRUST_SELECTION_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(50);
 const CLAUDE_TRUST_SELECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Debug)]
+pub(crate) enum StartupRestoreSpawnError {
+    ConversationConflict {
+        lease: Box<wardian_core::conversation_lease::ConversationLease>,
+        message: String,
+    },
+    Other(String),
+}
+
+impl StartupRestoreSpawnError {
+    pub(crate) fn conflict_lease(
+        &self,
+    ) -> Option<&wardian_core::conversation_lease::ConversationLease> {
+        match self {
+            Self::ConversationConflict { lease, .. } => Some(lease.as_ref()),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for StartupRestoreSpawnError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConversationConflict { message, .. } => formatter.write_str(message),
+            Self::Other(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl From<String> for StartupRestoreSpawnError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<&str> for StartupRestoreSpawnError {
+    fn from(error: &str) -> Self {
+        Self::Other(error.to_string())
+    }
+}
 
 fn complete_jsonl_record(pending: &mut String, fragment: &str) -> Option<String> {
     pending.push_str(fragment);
@@ -201,6 +243,7 @@ struct SpawnPublicationGate {
     unpublished_failure: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     registration: Option<std::sync::Arc<RegistrationPublicationState>>,
     pi_bridge: Option<std::sync::Arc<crate::delivery::pi_bridge::PiBridgeOwner>>,
+    codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
 }
 
 /// Registration may put a runtime in the map before its roster and provider
@@ -1630,21 +1673,27 @@ fn provider_spawn_session_identity(config: &AgentConfig) -> &str {
         .trim()
 }
 
-fn acquire_provider_spawn_lease(
+fn acquire_provider_spawn_lease_for_startup(
     config: &AgentConfig,
-) -> Result<wardian_core::conversation_lease::PersistedConversationLeaseGuard, String> {
-    acquire_provider_spawn_lease_with_candidate_check_at(
+) -> Result<
+    wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+    StartupRestoreSpawnError,
+> {
+    acquire_provider_spawn_lease_with_candidate_check_at_typed(
         config,
         chrono::Utc::now(),
         check_provider_spawn_candidates,
     )
 }
 
-fn acquire_provider_spawn_lease_with_candidate_check_at(
+fn acquire_provider_spawn_lease_with_candidate_check_at_typed(
     config: &AgentConfig,
     now: chrono::DateTime<chrono::Utc>,
     check_candidates: impl FnOnce(&AgentConfig) -> Result<(), String>,
-) -> Result<wardian_core::conversation_lease::PersistedConversationLeaseGuard, String> {
+) -> Result<
+    wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+    StartupRestoreSpawnError,
+> {
     let now_rfc3339 = now.to_rfc3339();
     let lease = wardian_core::conversation_lease::ConversationLease {
         agent_id: config.session_id.clone(),
@@ -1660,22 +1709,28 @@ fn acquire_provider_spawn_lease_with_candidate_check_at(
         expires_at: (now + PROVIDER_SPAWN_LEASE_DURATION).to_rfc3339(),
     };
 
-    match wardian_core::conversation_lease::try_acquire_lease(lease.clone(), &now_rfc3339) {
-        Ok(wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Acquired) => {
+    match wardian_core::conversation_lease::try_acquire_lease(lease.clone(), &now_rfc3339)
+        .map_err(|error| {
+            StartupRestoreSpawnError::Other(format!(
+                "provider startup was withheld because conversation ownership could not be verified: {error}"
+            ))
+        })?
+    {
+        wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Acquired => {
             let guard =
                 wardian_core::conversation_lease::PersistedConversationLeaseGuard::new(&lease);
-            check_candidates(config)?;
+            check_candidates(config).map_err(StartupRestoreSpawnError::Other)?;
             Ok(guard)
         }
-        Ok(wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Conflict(
-            conflict,
-        )) => Err(format!(
-            "provider startup was withheld because conversation {} is leased by {} {} ({})",
-            config.session_id, conflict.owner_kind, conflict.owner_id, conflict.mode
-        )),
-        Err(error) => Err(format!(
-            "provider startup was withheld because conversation ownership could not be verified: {error}"
-        )),
+        wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Conflict(lease) => {
+            Err(StartupRestoreSpawnError::ConversationConflict {
+                message: format!(
+                    "provider startup was withheld because conversation {} is leased by {} {} ({})",
+                    config.session_id, lease.owner_kind, lease.owner_id, lease.mode
+                ),
+                lease,
+            })
+        }
     }
 }
 
@@ -1693,10 +1748,10 @@ fn check_provider_spawn_candidates(config: &AgentConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_inherited_provider_spawn_lease(
+fn validate_inherited_provider_spawn_lease_for_startup(
     config: &AgentConfig,
     guard: &wardian_core::conversation_lease::PersistedConversationLeaseGuard,
-) -> Result<(), String> {
+) -> Result<(), StartupRestoreSpawnError> {
     let now = chrono::Utc::now();
     let now_rfc3339 = now.to_rfc3339();
     if guard.owner().owner_kind == "provider_spawn" {
@@ -1706,18 +1761,19 @@ fn validate_inherited_provider_spawn_lease(
             &config.provider,
             provider_spawn_session_identity(config),
             &now_rfc3339,
-        )? {
+        )
+        .map_err(StartupRestoreSpawnError::Other)?
+        {
             wardian_core::conversation_lease::ProviderSpawnLeaseValidationOutcome::Valid => {}
-            wardian_core::conversation_lease::ProviderSpawnLeaseValidationOutcome::Conflict(
-                conflict,
-            ) => {
-                return Err(format!(
+            wardian_core::conversation_lease::ProviderSpawnLeaseValidationOutcome::Conflict(lease) => return Err(StartupRestoreSpawnError::ConversationConflict {
+                message: format!(
                     "provider startup was withheld because saved conversation is leased by {} {} ({})",
-                    conflict.owner_kind, conflict.owner_id, conflict.mode
-                ));
-            }
+                    lease.owner_kind, lease.owner_id, lease.mode
+                ),
+                lease,
+            }),
             wardian_core::conversation_lease::ProviderSpawnLeaseValidationOutcome::NotActive => {
-                return Err("provider startup was withheld because its exact provider-spawn lease is no longer active for this agent and provider".to_string());
+                return Err(StartupRestoreSpawnError::Other("provider startup was withheld because its exact provider-spawn lease is no longer active for this agent and provider".to_string()));
             }
         }
     } else {
@@ -1728,53 +1784,61 @@ fn validate_inherited_provider_spawn_lease(
             provider_spawn_session_identity(config),
             &now_rfc3339,
             &(now + PROVIDER_SPAWN_LEASE_DURATION).to_rfc3339(),
-        )? {
+        )
+        .map_err(StartupRestoreSpawnError::Other)?
+        {
             wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Retargeted => {}
-            wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Conflict(
-                conflict,
-            ) => {
-                return Err(format!(
+            wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Conflict(lease) => return Err(StartupRestoreSpawnError::ConversationConflict {
+                message: format!(
                     "provider startup was withheld because saved conversation is leased by {} {} ({})",
-                    conflict.owner_kind, conflict.owner_id, conflict.mode
-                ));
-            }
+                    lease.owner_kind, lease.owner_id, lease.mode
+                ),
+                lease,
+            }),
             wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::NotActive => {
-                return Err("provider startup was withheld because its exact lifecycle lease is no longer active for this agent and provider".to_string());
+                return Err(StartupRestoreSpawnError::Other("provider startup was withheld because its exact lifecycle lease is no longer active for this agent and provider".to_string()));
             }
         }
     }
-    check_provider_spawn_candidates(config)
+    check_provider_spawn_candidates(config).map_err(StartupRestoreSpawnError::Other)
 }
 
-pub(crate) fn provider_spawn_lease_for_launch(
+pub(crate) fn provider_spawn_lease_for_startup(
     config: &AgentConfig,
     inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
-) -> Result<wardian_core::conversation_lease::PersistedConversationLeaseGuard, String> {
+) -> Result<
+    wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+    StartupRestoreSpawnError,
+> {
     match inherited_lease {
         Some(lease) => {
-            validate_inherited_provider_spawn_lease(config, &lease)?;
+            validate_inherited_provider_spawn_lease_for_startup(config, &lease)?;
             Ok(lease)
         }
-        None => acquire_provider_spawn_lease(config),
+        None => acquire_provider_spawn_lease_for_startup(config),
     }
 }
 
-/// Revalidate the saved roster entry and acquire the ordinary provider lease
-/// while the cross-process roster barrier prevents remove, pause, or config
-/// persistence from interleaving between those operations.
-pub(crate) fn acquire_restore_retry_spawn_lease(
+pub(crate) fn acquire_restore_retry_spawn_lease_for_startup(
     expected_saved_configs: &[AgentConfig],
     launch_config: &AgentConfig,
-) -> Result<Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>, String> {
+) -> Result<
+    Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
+    StartupRestoreSpawnError,
+> {
     let _roster = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "Agent roster barrier is unavailable".to_string())?;
-    let home =
-        super::get_wardian_home().ok_or_else(|| "Could not locate Wardian home".to_string())?;
+        .map_err(|error| StartupRestoreSpawnError::Other(error.to_string()))?
+        .ok_or_else(|| {
+            StartupRestoreSpawnError::Other("Agent roster barrier is unavailable".to_string())
+        })?;
+    let home = super::get_wardian_home().ok_or_else(|| {
+        StartupRestoreSpawnError::Other("Could not locate Wardian home".to_string())
+    })?;
     let state_path = home.join("settings").join("state.json");
-    let state_json = std::fs::read_to_string(state_path).map_err(|error| error.to_string())?;
-    let saved_configs =
-        serde_json::from_str::<Vec<AgentConfig>>(&state_json).map_err(|error| error.to_string())?;
+    let state_json = std::fs::read_to_string(state_path)
+        .map_err(|error| StartupRestoreSpawnError::Other(error.to_string()))?;
+    let saved_configs = serde_json::from_str::<Vec<AgentConfig>>(&state_json)
+        .map_err(|error| StartupRestoreSpawnError::Other(error.to_string()))?;
     let Some(current_saved_config) = saved_configs
         .iter()
         .find(|config| config.session_id == launch_config.session_id)
@@ -1797,7 +1861,7 @@ pub(crate) fn acquire_restore_retry_spawn_lease(
         return Ok(None);
     }
 
-    provider_spawn_lease_for_launch(launch_config, None).map(Some)
+    provider_spawn_lease_for_startup(launch_config, None).map(Some)
 }
 
 /// Persist a successful delayed restore only while its saved configuration is
@@ -1861,7 +1925,7 @@ async fn prepare_codex_owner_after_reservation<T, F, Fut>(
         wardian_core::conversation_lease::PersistedConversationLeaseGuard,
         T,
     ),
-    String,
+    StartupRestoreSpawnError,
 >
 where
     F: FnOnce() -> Fut,
@@ -1870,9 +1934,9 @@ where
     // Native owner preparation can start a provider writer before the PTY
     // exists. Reserve and scan first, then retain exclusion through any
     // cancellation or uncertain failure during owner preparation.
-    let mut lease = provider_spawn_lease_for_launch(config, inherited_lease)?;
+    let mut lease = provider_spawn_lease_for_startup(config, inherited_lease)?;
     lease.retain_on_drop();
-    let owner = prepare().await?;
+    let owner = prepare().await.map_err(StartupRestoreSpawnError::Other)?;
     Ok((lease, owner))
 }
 
@@ -2011,6 +2075,105 @@ fn line_event_status_for_pty_provider(
     )
 }
 
+/// Publish first native discovery only for the current runtime, before saving
+/// it. Lifecycle and roster exclusion bind the receipt to this exact config Arc.
+fn bind_first_runtime_identity<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    expected_config: &std::sync::Arc<std::sync::Mutex<AgentConfig>>,
+    generation: u64,
+    native_id: &str,
+    folder: Option<&str>,
+) -> Option<AgentConfig> {
+    let result: Result<Option<AgentConfig>, String> = tauri::async_runtime::block_on(async {
+        let state = app.state::<AppState>();
+        let agent_id = expected_config
+            .lock()
+            .map_err(|error| error.to_string())?
+            .session_id
+            .clone();
+        let lifecycle = state.lock_agent_lifecycle(&agent_id).await;
+        let barrier = super::roster_io::acquire_roster_barrier().await?;
+        let current = {
+            let agents = state.agents.lock().await;
+            agents.get(&agent_id).is_some_and(|active| {
+                std::sync::Arc::ptr_eq(&active.config, expected_config)
+                    && active.runtime_generation == Some(generation)
+            })
+        };
+        if !current {
+            return Ok(None);
+        }
+        let mut config = expected_config
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone();
+        if config
+            .resume_session
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            return Ok(None);
+        }
+        let provider = config.provider.clone();
+        apply_provider_identity(&provider, &mut config, native_id)?;
+        config.fresh_provider_session_id = None;
+        if let Some(folder) = folder {
+            config.folder = folder.to_string();
+        }
+        let native_id = native_id.to_string();
+        let receipt_agent = agent_id.clone();
+        let receipt_native = native_id.clone();
+        let correlated = tokio::task::spawn_blocking(move || {
+            wardian_core::agent_spawn::record_first_native_binding(
+                &receipt_agent,
+                &provider,
+                &receipt_native,
+                generation,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        let mut configs = {
+            let agents = state.agents.lock().await;
+            let order = state.agent_order.lock().await;
+            super::state_configs_snapshot(&agents, &order)
+        };
+        let proposed = configs
+            .iter_mut()
+            .find(|saved| saved.session_id == agent_id)
+            .ok_or("Current first-native target is missing")?;
+        *proposed = config.clone();
+        let expected_config = expected_config.clone();
+        let home = crate::utils::get_wardian_home().ok_or("Wardian home is unavailable")?;
+        let published = super::roster_io::run_roster_io(barrier, move || {
+            let _lifecycle = lifecycle;
+            // Keep the live binding unassigned until the strict write and
+            // receipt finalize. A failed write leaves the same watcher retryable.
+            super::try_save_state_snapshot_for_home(&home, &configs)?;
+            if correlated
+                && !wardian_core::agent_spawn::mark_first_native_published(
+                    &agent_id, &native_id, generation,
+                )?
+            {
+                return Err("First-native receipt lost its publication fence".into());
+            }
+            *expected_config.lock().map_err(|error| error.to_string())? = config.clone();
+            Ok(config)
+        })
+        .await?;
+        Ok(Some(published))
+    });
+    match result {
+        Ok(config) => config,
+        Err(error) => {
+            log_debug(&format!(
+                "[WARDIAN] First provider identity publication retained: {error}"
+            ));
+            None
+        }
+    }
+}
+
 /// Persists the admitted live roster after an identity watcher releases its config lock.
 pub(crate) fn persist_runtime_agent_configs<R: tauri::Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
@@ -2025,13 +2188,13 @@ pub(crate) fn persist_runtime_agent_configs<R: tauri::Runtime>(app: &AppHandle<R
     }
 }
 
-pub async fn spawn_agent(
+pub(crate) async fn spawn_agent_for_startup_restore(
     app: AppHandle,
     config: AgentConfig,
     is_restored: bool,
     initial_timestamp: Option<String>,
     unpublished_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Result<ActiveAgent, String> {
+) -> Result<ActiveAgent, StartupRestoreSpawnError> {
     Ok(spawn_agent_inner(
         app,
         config,
@@ -2059,6 +2222,26 @@ pub async fn spawn_agent_with_lease(
     lease: wardian_core::conversation_lease::PersistedConversationLeaseGuard,
     unpublished_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ActiveAgent, String> {
+    spawn_agent_with_lease_for_startup_restore(
+        app,
+        config,
+        is_restored,
+        initial_timestamp,
+        lease,
+        unpublished_failure,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) async fn spawn_agent_with_lease_for_startup_restore(
+    app: AppHandle,
+    config: AgentConfig,
+    is_restored: bool,
+    initial_timestamp: Option<String>,
+    lease: wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+    unpublished_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<ActiveAgent, StartupRestoreSpawnError> {
     Ok(spawn_agent_inner(
         app,
         config,
@@ -2076,12 +2259,13 @@ pub async fn spawn_agent_with_lease(
     .active)
 }
 
-pub(crate) async fn spawn_agent_provisionally(
+pub(crate) async fn spawn_agent_provisionally_with_codex_context(
     app: AppHandle,
     config: AgentConfig,
     is_restored: bool,
     initial_timestamp: Option<String>,
     registration: std::sync::Arc<RegistrationPublicationState>,
+    codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
 ) -> Result<SpawnedAgent, String> {
     spawn_agent_inner(
         app,
@@ -2093,16 +2277,19 @@ pub(crate) async fn spawn_agent_provisionally(
         SpawnPublicationGate {
             unpublished_failure: None,
             registration: Some(registration),
+            codex_launch_context,
             ..Default::default()
         },
     )
     .await
+    .map_err(|error| error.to_string())
 }
 
-pub(crate) async fn spawn_agent_for_registration(
+pub(crate) async fn spawn_agent_for_registration_with_codex_context(
     app: AppHandle,
     config: AgentConfig,
     registration: std::sync::Arc<RegistrationPublicationState>,
+    codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
 ) -> Result<ActiveAgent, String> {
     Ok(spawn_agent_inner(
         app,
@@ -2114,10 +2301,12 @@ pub(crate) async fn spawn_agent_for_registration(
         SpawnPublicationGate {
             unpublished_failure: None,
             registration: Some(registration),
+            codex_launch_context,
             ..Default::default()
         },
     )
-    .await?
+    .await
+    .map_err(|error| error.to_string())?
     .active)
 }
 
@@ -2129,7 +2318,33 @@ async fn spawn_agent_inner(
     publication: SpawnPublication,
     inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
     mut gate: SpawnPublicationGate,
-) -> Result<SpawnedAgent, String> {
+) -> Result<SpawnedAgent, StartupRestoreSpawnError> {
+    let codex_launch_context = gate.codex_launch_context.take();
+    if is_restored {
+        let restore_session_id = config.session_id.clone();
+        let excluded = tokio::task::spawn_blocking(move || {
+            wardian_core::agent_spawn::restore_is_excluded(&restore_session_id)
+        })
+        .await
+        .map_err(|error| {
+            StartupRestoreSpawnError::Other(format!(
+                "automatic restore is quarantined because durable spawn lookup failed: {error}"
+            ))
+        })?
+        .map_err(|_| {
+            StartupRestoreSpawnError::Other(
+                "automatic restore is quarantined because durable spawn state is unavailable"
+                    .to_string(),
+            )
+        })?;
+        if excluded {
+            return Err(format!(
+                "automatic restore is quarantined by durable spawn operation for agent {}",
+                config.session_id
+            )
+            .into());
+        }
+    }
     let spawn_started_at = std::time::Instant::now();
     super::validate_session_values_for_launch(
         &config.session_id,
@@ -2183,7 +2398,8 @@ async fn spawn_agent_inner(
             return Err(format!(
                 "An agent with the name '{}' already exists; choose a different name.",
                 config.session_name
-            ));
+            )
+            .into());
         }
         super::log_debug(&format!(
             "[WARDIAN] Failed to persist agent metadata during spawn: {detail}"
@@ -2422,6 +2638,23 @@ async fn spawn_agent_inner(
     // A Claude launch records Stop rounds only when Claude supplies a
     // supported turn verdict and Wardian may own its telemetry export. Claude
     // Code currently supplies none, so the launch only prunes old records.
+    let claude_turn_ended = if config.provider == "claude" {
+        match super::claude_turn_ended::TurnEndedLaunch::prepare(&config) {
+            Ok(launch) => {
+                provider_args.push("--plugin-dir".to_string());
+                provider_args.push(launch.plugin_dir().to_string_lossy().to_string());
+                Some(launch)
+            }
+            Err(error) => {
+                log_debug(&format!(
+                    "[Wardian] Native Claude turn-ended observation unavailable: {error}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
     let mut claude_verdict_launch = if config.provider == "claude" {
         Some(super::claude_verdict::launch::VerdictLaunch::prepare(
             &config.session_id,
@@ -2448,7 +2681,19 @@ async fn spawn_agent_inner(
         .resume_session
         .as_deref()
         .is_some_and(|s| !s.is_empty());
-    let mut spawn_args = provider.get_spawn_args(&config, is_resume);
+    let mut spawn_args = if config.provider == "codex" {
+        if let Some(context) = codex_launch_context.as_deref() {
+            CodexProvider::new().get_spawn_args_with_effective_policy(
+                &config,
+                is_resume,
+                context.effective_policy(),
+            )
+        } else {
+            provider.get_spawn_args(&config, is_resume)
+        }
+    } else {
+        provider.get_spawn_args(&config, is_resume)
+    };
     if let Some(plan) = &pi_launch_plan {
         plan.apply_args(&mut spawn_args)?;
     }
@@ -2507,13 +2752,16 @@ async fn spawn_agent_inner(
             prepare_codex_owner_after_reservation(&config, inherited_lease, || async {
                 app_state
                     .native_delivery
-                    .prepare_codex_tui(crate::delivery::native_broker::NativeSessionSpec {
-                        target_agent_id: config.session_id.clone(),
-                        provider: "codex".into(),
-                        generation: provider_generation,
-                        workspace: provider_cwd.clone(),
-                        config: config.clone(),
-                    })
+                    .prepare_codex_tui(
+                        crate::delivery::native_broker::NativeSessionSpec {
+                            target_agent_id: config.session_id.clone(),
+                            provider: "codex".into(),
+                            generation: provider_generation,
+                            workspace: provider_cwd.clone(),
+                            config: config.clone(),
+                        },
+                        codex_launch_context.clone(),
+                    )
                     .await
                     .map_err(|error| error.to_string())
             })
@@ -2521,7 +2769,7 @@ async fn spawn_agent_inner(
         (lease, Some(attachment))
     } else {
         (
-            provider_spawn_lease_for_launch(&config, inherited_lease)?,
+            provider_spawn_lease_for_startup(&config, inherited_lease)?,
             None,
         )
     };
@@ -2553,9 +2801,9 @@ async fn spawn_agent_inner(
                 ) {
                     Ok(path) => Some(path),
                     Err(error) => {
-                        return Err(format!(
-                            "Pi bridge preparation failed before launch: {error}"
-                        ));
+                        return Err(
+                            format!("Pi bridge preparation failed before launch: {error}").into(),
+                        );
                     }
                 };
             if let Some(extension_path) = extension_path {
@@ -2576,9 +2824,9 @@ async fn spawn_agent_inner(
                 {
                     Ok(plan) => Some(plan),
                     Err(error) => {
-                        return Err(format!(
-                            "Pi bridge preparation failed before launch: {error}"
-                        ));
+                        return Err(
+                            format!("Pi bridge preparation failed before launch: {error}").into(),
+                        );
                     }
                 }
             } else {
@@ -2727,14 +2975,44 @@ async fn spawn_agent_inner(
         return Err("Pi restored history baseline unavailable".into());
     }
 
+    // The lifecycle lease keeps this prediction stable until broker registration.
+    // Provider-input generations are independent and must not name mod assets.
+    let claude_mod_generation = if config.provider == "claude" {
+        let runtime_generation = app_state
+            .terminal_sessions
+            .next_runtime_generation(&config.session_id)
+            .await
+            .map_err(|error| format!("Failed to determine Claude runtime generation: {error}"))?;
+        match crate::delivery::claude_mod::materialize_launch(&config, runtime_generation).and_then(
+            |path| super::append_claude_plugin_dirs(cmd.get_env("CLAUDE_CODE_PLUGIN_DIRS"), &path),
+        ) {
+            Ok(plugin_dirs) => {
+                cmd.env("CLAUDE_CODE_PLUGIN_DIRS", plugin_dirs);
+                Some(runtime_generation)
+            }
+            Err(error) => {
+                log_debug(&format!(
+                    "[Wardian] Claude delivery mod unavailable for session {} runtime {}: {}; using terminal fallback",
+                    config.session_id, runtime_generation, error
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // The transition lease acquired before native owner preparation remains
     // held through PTY creation and publication.
     #[cfg(windows)]
-    let contained_job = if config.provider == "claude" {
+    let contained_job = if matches!(config.provider.as_str(), "claude" | "codex") {
         Some(crate::utils::process::RuntimeProcessJob::prepare(&mut cmd)?)
     } else {
         None
     };
+    if let Some(context) = codex_launch_context.as_deref() {
+        context.revalidate()?;
+    }
     // Provider records written after this instant belong to this runtime.
     let provider_launched_at_ms = chrono::Utc::now().timestamp_millis();
     let child_result = pair.slave.spawn_command(cmd);
@@ -2750,7 +3028,7 @@ async fn spawn_agent_inner(
             if let Some(attachment) = pi_attachment.as_ref() {
                 attachment.owner().close();
             }
-            return Err(format!("Failed to spawn command: {}", error));
+            return Err(format!("Failed to spawn command: {}", error).into());
         }
     };
     // After spawn_command succeeds, later setup errors and async cancellation
@@ -2866,6 +3144,32 @@ async fn spawn_agent_inner(
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
     child.runtime(app_state.terminal_sessions.clone(), runtime_generation);
 
+    if config.provider == "claude" {
+        crate::delivery::claude_mod::resume_observers(&app, &config, provider_generation);
+    }
+
+    if claude_mod_generation.is_some_and(|expected| expected != runtime_generation) {
+        log_debug("[Wardian] Claude delivery mod runtime generation mismatch; refusing session publication");
+        return Err("Claude delivery mod runtime generation changed during launch".into());
+    }
+
+    if matches!(config.provider.as_str(), "opencode" | "antigravity") {
+        let native_config = config.clone();
+        if !matches!(
+            tokio::task::spawn_blocking(move || {
+                wardian_core::agent_spawn::record_first_native_runtime(
+                    &native_config,
+                    runtime_generation,
+                    is_restored,
+                )
+            })
+            .await,
+            Ok(Ok(()))
+        ) {
+            log_debug("[WARDIAN] First provider runtime evidence unavailable");
+        }
+    }
+
     if config.resume_session.is_some() {
         if let (Some(plan), Some(process_id), Some(provider_session_id), Some(config_fingerprint)) = (
             opencode_http_plan.take(),
@@ -2954,6 +3258,10 @@ async fn spawn_agent_inner(
         4096,
         262_144,
     )));
+    watch_state
+        .lock()
+        .map_err(|_| "Failed to bind live Chat Watch")?
+        .bind_live_chat(&live_conversation_started_at);
     // Keep the attachment gate on the runtime's existing ActiveAgent-owned
     // watch-state Arc so every status/readiness/admission path sees it.
     let codex_attachment_ready = {
@@ -3002,6 +3310,7 @@ async fn spawn_agent_inner(
         )
     });
     let pty_config = config_lock.clone();
+    let mock_log_path_for_pty = log_path.clone();
     let auto_confirm_antigravity_workspace_trust = config.provider == "antigravity"
         && config
             .antigravity_config()
@@ -3074,6 +3383,14 @@ async fn spawn_agent_inner(
                         }
                     }
                     log_terminal_trace_note(&sid_for_pty, &provider_name_for_pty, "pty EOF");
+                    #[cfg(windows)]
+                    if provider_name_for_pty == "claude" {
+                        tauri::async_runtime::spawn(crate::delivery::claude_mod::finish_after_eof(
+                            pty_app.clone(),
+                            sid_for_pty.clone(),
+                            reader_runtime_generation,
+                        ));
+                    }
                     if provider_name_for_pty == "opencode" {
                         log_debug(&format!(
                             "[Wardian] OpenCode PTY EOF for session {} (had_output={})",
@@ -3728,10 +4045,26 @@ async fn spawn_agent_inner(
                                 Some(Ok(parsed)) => {
                                     // Use provider to classify the raw JSON into an AgentEvent
                                     let raw_line = parsed.to_string();
-                                    if let Some(message) = extract_transcript_message(
+                                    if let Some(mut message) = extract_transcript_message(
                                         &provider_name_for_pty,
                                         &raw_line,
                                     ) {
+                                        if provider_name_for_pty == "mock" {
+                                            if let (Ok(config), Ok(path)) =
+                                                (pty_config.lock(), mock_log_path_for_pty.lock())
+                                            {
+                                                if let (Some(expected), Some(path)) = (
+                                                    config.fresh_provider_session_id.as_deref(),
+                                                    path.as_ref(),
+                                                ) {
+                                                    bind_mock_watch_message(
+                                                        &mut message,
+                                                        expected,
+                                                        &path.to_string_lossy(),
+                                                    );
+                                                }
+                                            }
+                                        }
                                         if let Ok(mut watch_state) = watch_state_clone.lock() {
                                             watch_state.push_transcript(message);
                                         }
@@ -3988,7 +4321,7 @@ async fn spawn_agent_inner(
                                         codex_watch_binding.extract_message(&raw_line)
                                     {
                                         if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                            watch_state.push_transcript(message);
+                                            watch_state.push_file_transcript(message);
                                         }
                                     }
                                     if let Some(event) = event {
@@ -4119,7 +4452,7 @@ async fn spawn_agent_inner(
                                     );
                                 }
                                 if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                    watch_state.push_transcript(message);
+                                    watch_state.push_file_transcript(message);
                                 }
                             }
                             if let Some(event) = watcher_provider.parse_output(&raw_line) {
@@ -4307,7 +4640,7 @@ async fn spawn_agent_inner(
                                 let message = extract_transcript_message("claude", raw_line);
                                 if let Some(message) = message {
                                     if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                        watch_state.push_transcript(message.clone());
+                                        watch_state.push_file_transcript(message.clone());
                                     }
                                 }
                                 if let Some(event) = watcher_provider.parse_output(raw_line) {
@@ -4508,6 +4841,7 @@ async fn spawn_agent_inner(
         let watcher_current_status = current_status.clone();
         let watcher_log_path = log_path.clone();
         let watcher_config = config_lock.clone();
+        let watcher_generation = runtime_generation;
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
         let watcher_workspace = provider_cwd.clone();
@@ -4535,7 +4869,7 @@ async fn spawn_agent_inner(
 
                 let home = AntigravityProvider::antigravity_home();
                 let (conversation_id, captured_identity) = {
-                    let mut cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
+                    let cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
                     let existing = cfg
                         .resume_session
                         .as_ref()
@@ -4563,24 +4897,23 @@ async fn spawn_agent_inner(
                             })
                         },
                     );
-                    if capture_identity {
-                        if let Some(conversation_id) = conversation_id.as_deref() {
-                            if apply_provider_identity("antigravity", &mut cfg, conversation_id)
-                                .is_ok()
-                            {
-                                (Some(conversation_id.to_string()), true)
-                            } else {
-                                (Some(conversation_id.to_string()), false)
-                            }
-                        } else {
-                            (None, false)
-                        }
-                    } else {
-                        (conversation_id, false)
-                    }
+                    (conversation_id, capture_identity)
                 };
                 if captured_identity {
-                    persist_runtime_agent_configs(&watcher_app);
+                    if let Some(id) = conversation_id.as_deref() {
+                        if bind_first_runtime_identity(
+                            &watcher_app,
+                            &watcher_config,
+                            watcher_generation,
+                            id,
+                            None,
+                        )
+                        .is_none()
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                            continue;
+                        }
+                    }
                 }
 
                 let path = conversation_id.as_deref().and_then(|conversation_id| {
@@ -4662,7 +4995,7 @@ async fn spawn_agent_inner(
                             if !projected.is_empty() {
                                 if let Ok(mut watch_state) = watcher_watch_state.lock() {
                                     for message in projected {
-                                        watch_state.push_transcript(message);
+                                        watch_state.push_file_transcript(message);
                                     }
                                 }
                             }
@@ -4719,7 +5052,7 @@ async fn spawn_agent_inner(
                                         extract_transcript_message("antigravity", &raw_line)
                                     {
                                         if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                            watch_state.push_transcript(message);
+                                            watch_state.push_file_transcript(message);
                                         }
                                     }
                                     if let Some(event) = watcher_provider.parse_output(&raw_line) {
@@ -4768,6 +5101,7 @@ async fn spawn_agent_inner(
         let watcher_session = config.session_id.clone();
         let started_after_ms = chrono::Utc::now().timestamp_millis();
         let mut discovery = OpenCodeSessionDiscovery::default();
+        let mut pending_native_id = None;
         std::thread::spawn(move || loop {
             let current = watcher_current_status
                 .lock()
@@ -4776,27 +5110,25 @@ async fn spawn_agent_inner(
             if current == "Off" {
                 break;
             }
-            if let Some(provider_session_id) = discovery.poll(
-                &current,
-                &watcher_workspace,
-                started_after_ms,
-                &watcher_session,
-            ) {
-                let binding_config = if let Ok(mut cfg) = watcher_config.lock() {
-                    cfg.resume_session = Some(provider_session_id);
-                    cfg.fresh_provider_session_id = None;
-                    cfg.folder = fresh_expected_folder.clone();
-                    Some(cfg.clone())
-                } else {
-                    None
-                };
-                persist_runtime_agent_configs(&watcher_app);
+            pending_native_id = pending_native_id.take().or_else(|| {
+                discovery.poll(
+                    &current,
+                    &watcher_workspace,
+                    started_after_ms,
+                    &watcher_session,
+                )
+            });
+            if let Some(provider_session_id) = pending_native_id.as_deref() {
+                let binding_config = bind_first_runtime_identity(
+                    &watcher_app,
+                    &watcher_config,
+                    fresh_runtime_generation,
+                    provider_session_id,
+                    Some(&fresh_expected_folder),
+                );
                 let Some(mut binding_config) = binding_config else {
-                    tauri::async_runtime::block_on(
-                        fresh_broker
-                            .fail_opencode_http(&watcher_session, fresh_provider_generation),
-                    );
-                    break;
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    continue;
                 };
                 let Some(plan) = fresh_opencode_http_plan.take() else {
                     break;
@@ -4866,6 +5198,9 @@ async fn spawn_agent_inner(
         if let Some(guard) = codex_attach_guard.as_mut() {
             guard.attached();
         }
+    }
+    if let Some(launch) = claude_turn_ended {
+        launch.observe(app.clone(), runtime_generation, current_status.clone());
     }
     let active = ActiveAgent {
         config: config_lock.clone(),
@@ -5145,7 +5480,8 @@ mod tests {
             ..Default::default()
         };
 
-        let spawn_lease = acquire_provider_spawn_lease(&config).expect("spawn reservation");
+        let spawn_lease =
+            acquire_provider_spawn_lease_for_startup(&config).expect("spawn reservation");
         let background_lease = wardian_core::conversation_lease::ConversationLease {
             agent_id: config.session_id.clone(),
             provider: config.provider.clone(),
@@ -5172,7 +5508,7 @@ mod tests {
         drop(spawn_lease);
         wardian_core::conversation_lease::try_acquire_lease(background_lease.clone(), &now_rfc3339)
             .expect("background lease after launch reservation release");
-        assert!(acquire_provider_spawn_lease(&config).is_err());
+        assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
     }
 
     #[test]
@@ -5186,7 +5522,7 @@ mod tests {
         };
         let candidate_check_ran = std::sync::atomic::AtomicBool::new(false);
 
-        let error = acquire_provider_spawn_lease_with_candidate_check_at(
+        let error = acquire_provider_spawn_lease_with_candidate_check_at_typed(
             &config,
             chrono::Utc::now(),
             |checked_config| {
@@ -5197,7 +5533,9 @@ mod tests {
         )
         .expect_err("a process candidate must still block launch");
 
-        assert!(error.contains("process candidate already exists"));
+        assert!(error
+            .to_string()
+            .contains("process candidate already exists"));
         assert!(candidate_check_ran.load(std::sync::atomic::Ordering::Acquire));
         assert!(
             wardian_core::conversation_lease::load_leases_checked()
@@ -5270,18 +5608,18 @@ mod tests {
             &now.to_rfc3339(),
         )
         .expect("persist initial lifecycle lease");
-        let spawn_error = acquire_provider_spawn_lease_with_candidate_check_at(
+        let conflict = acquire_provider_spawn_lease_with_candidate_check_at_typed(
             &config,
             now,
             check_provider_spawn_candidates,
         )
         .expect_err("the active lifecycle lease must block the first restore attempt");
-        let retry_lease = crate::startup_restore::retryable_lifecycle_restore_lease(
-            &config,
-            &spawn_error,
-            &[initial_lease],
-        )
-        .expect("active lifecycle lease schedules the retry");
+        let conflict_lease = conflict
+            .conflict_lease()
+            .expect("provider admission returns the exact conflicting lease");
+        let retry_lease =
+            crate::startup_restore::retryable_lifecycle_restore_lease(&config, conflict_lease)
+                .expect("active lifecycle lease schedules the retry");
         let state = std::sync::Arc::new(crate::state::AppState::new());
         let expected_status = failed_restore_placeholder(&state, &config).await;
         assert_eq!(*expected_status.lock().unwrap(), "Error");
@@ -5307,13 +5645,13 @@ mod tests {
                 || async { Some(()) },
                 move |publication, ()| async move {
                     attempts_for_task.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                    let acquired = acquire_provider_spawn_lease_with_candidate_check_at(
+                    let acquired = acquire_provider_spawn_lease_with_candidate_check_at_typed(
                         &task_config,
                         retry_now,
                         check_provider_spawn_candidates,
                     );
                     drop(publication);
-                    acquired.map(drop)
+                    acquired.map(drop).map_err(|error| error.to_string())
                 },
             )
             .await
@@ -5351,16 +5689,9 @@ mod tests {
             &now.to_rfc3339(),
         )
         .expect("persist initial lifecycle lease");
-        let spawn_error = format!(
-            "provider startup was withheld because conversation {} is leased by {} {} ({})",
-            config.session_id, initial_lease.owner_kind, initial_lease.owner_id, initial_lease.mode
-        );
-        let retry_lease = crate::startup_restore::retryable_lifecycle_restore_lease(
-            &config,
-            &spawn_error,
-            &[initial_lease],
-        )
-        .expect("active lifecycle lease schedules the retry");
+        let retry_lease =
+            crate::startup_restore::retryable_lifecycle_restore_lease(&config, &initial_lease)
+                .expect("active lifecycle lease schedules the retry");
         let state = std::sync::Arc::new(crate::state::AppState::new());
         let expected_status = failed_restore_placeholder(&state, &config).await;
         let expected_config = config.clone();
@@ -5385,14 +5716,15 @@ mod tests {
                 || async { Some(()) },
                 move |publication, ()| async move {
                     attempts_for_task.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                    let error = acquire_provider_spawn_lease_with_candidate_check_at(
+                    let error = acquire_provider_spawn_lease_with_candidate_check_at_typed(
                         &task_config,
                         retry_now,
                         |_| {
                             Err("provider startup was withheld because a matching provider process candidate already exists (PID 42)".into())
                         },
                     )
-                    .expect_err("the candidate check must still block launch");
+                    .expect_err("the candidate check must still block launch")
+                    .to_string();
                     drop(publication);
                     error
                 },
@@ -5543,7 +5875,7 @@ mod tests {
             .expect("reconciled agent exists");
         assert_eq!(persisted.last_status.as_deref(), Some("Headless"));
         assert_eq!(persisted.last_pid, None);
-        assert!(acquire_provider_spawn_lease(&config).is_err());
+        assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
     }
 
     #[test]
@@ -5619,7 +5951,8 @@ mod tests {
             resume_session: Some("mock-provider-session".into()),
             ..Default::default()
         };
-        let spawn_lease = acquire_provider_spawn_lease(&config).expect("spawn reservation");
+        let spawn_lease =
+            acquire_provider_spawn_lease_for_startup(&config).expect("spawn reservation");
         let app = tauri::test::mock_app();
         app.manage(AppState::new());
         let current_status = std::sync::Arc::new(std::sync::Mutex::new("Starting".to_string()));
@@ -5649,7 +5982,7 @@ mod tests {
         )
         .is_err());
         assert!(!bootstrap_complete.load(std::sync::atomic::Ordering::Acquire));
-        assert!(acquire_provider_spawn_lease(&config).is_err());
+        assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
 
         let accepted = provider
             .parse_output(r#"{"type":"init","session_id":"mock-provider-session"}"#)
@@ -5674,19 +6007,19 @@ mod tests {
         assert!(!provider_spawn_lease_should_release("Starting"));
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
         assert!(
-            acquire_provider_spawn_lease(&config).is_err(),
+            acquire_provider_spawn_lease_for_startup(&config).is_err(),
             "Init before publication must keep the lease"
         );
         *current_status.lock().unwrap() = "Idle".to_string();
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
         assert!(
-            acquire_provider_spawn_lease(&config).is_err(),
+            acquire_provider_spawn_lease_for_startup(&config).is_err(),
             "Idle before publication must keep the lease"
         );
         *current_status.lock().unwrap() = "Error".to_string();
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
         assert!(
-            acquire_provider_spawn_lease(&config).is_err(),
+            acquire_provider_spawn_lease_for_startup(&config).is_err(),
             "a failed replacement before publication retains uncertain ownership"
         );
         *current_status.lock().unwrap() = "Starting".to_string();
@@ -5702,7 +6035,7 @@ mod tests {
             .insert(config.session_id.clone(), published);
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
         assert!(
-            acquire_provider_spawn_lease(&config).is_err(),
+            acquire_provider_spawn_lease_for_startup(&config).is_err(),
             "another runtime generation must not release the lease"
         );
         app.state::<AppState>()
@@ -5726,7 +6059,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
 
-        let _replacement = acquire_provider_spawn_lease(&config)
+        let _replacement = acquire_provider_spawn_lease_for_startup(&config)
             .expect("validated and published mock runtime releases its reservation");
     }
 
@@ -5739,7 +6072,7 @@ mod tests {
             resume_session: Some("failed-provider-session".into()),
             ..Default::default()
         };
-        let lease = acquire_provider_spawn_lease(&config).expect("spawn reservation");
+        let lease = acquire_provider_spawn_lease_for_startup(&config).expect("spawn reservation");
         let owner = lease.owner().clone();
         let app = tauri::test::mock_app();
         app.manage(AppState::new());
@@ -5757,7 +6090,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(acquire_provider_spawn_lease(&config).is_err());
+        assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
         failed.store(true, std::sync::atomic::Ordering::Release);
         tokio::time::timeout(std::time::Duration::from_secs(2), watcher)
             .await
@@ -5768,7 +6101,7 @@ mod tests {
             .into_iter()
             .find(|lease| lease.owner() == owner)
             .expect("uncertain lease remains persisted");
-        assert!(acquire_provider_spawn_lease(&config).is_err());
+        assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
 
         let retry_at = chrono::DateTime::parse_from_rfc3339(&retained.expires_at)
             .unwrap()
@@ -5796,7 +6129,7 @@ mod tests {
             resume_session: Some("cancelled-publication".into()),
             ..Default::default()
         };
-        let lease = acquire_provider_spawn_lease(&config).expect("spawn reservation");
+        let lease = acquire_provider_spawn_lease_for_startup(&config).expect("spawn reservation");
         let owner = lease.owner().clone();
         let original_expiry = wardian_core::conversation_lease::load_leases_checked()
             .unwrap()
@@ -5858,7 +6191,8 @@ mod tests {
                 resume_session: Some(format!("{kind}-{fail}-registration")),
                 ..Default::default()
             };
-            let lease = acquire_provider_spawn_lease(&config).expect("registration lease");
+            let lease =
+                acquire_provider_spawn_lease_for_startup(&config).expect("registration lease");
             let owner = lease.owner().clone();
             let publication = std::sync::Arc::new(RegistrationPublicationState::default());
             let status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
@@ -5886,7 +6220,7 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(350)).await;
             assert!(
-                acquire_provider_spawn_lease(&config).is_err(),
+                acquire_provider_spawn_lease_for_startup(&config).is_err(),
                 "{kind} Idle before registration commit must retain exclusion"
             );
             if fail {
@@ -5904,7 +6238,7 @@ mod tests {
                 .find(|lease| lease.owner() == owner);
             assert_eq!(persisted.is_some(), fail, "{kind} publication disposition");
             if fail {
-                assert!(acquire_provider_spawn_lease(&config).is_err());
+                assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
             }
         }
     }
@@ -6037,7 +6371,7 @@ mod tests {
         // This is the production pre-spawn gate. The fixture does not launch a
         // Tauri PTY or real Codex provider; it proves recovery reaches that
         // boundary while the unrelated marked server remains alive and serving.
-        let spawn_lease = acquire_provider_spawn_lease(&config)
+        let spawn_lease = acquire_provider_spawn_lease_for_startup(&config)
             .expect("provider spawn gate should admit restore");
         drop(spawn_lease);
         assert!(server
@@ -6181,6 +6515,129 @@ mod tests {
         assert!(!assistant_messages
             .iter()
             .any(|message| message.text == "old"));
+    }
+
+    #[test]
+    fn first_native_discovery_rejects_stale_config_and_generation_before_publication() {
+        let _home = crate::control::test_support::TestWardianHome::new();
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let mut active = agent_without_pty();
+        active.runtime_generation = Some(7);
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        *active.config.lock().unwrap() = AgentConfig {
+            session_id: agent_id.clone(),
+            session_name: "native-owned".into(),
+            provider: "opencode".into(),
+            agent_class: "Coder".into(),
+            folder: "workspace".into(),
+            ..Default::default()
+        };
+        let expected = active.config.clone();
+        let foreign = std::sync::Arc::new(std::sync::Mutex::new(expected.lock().unwrap().clone()));
+        let original = expected.lock().unwrap().clone();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let request = wardian_core::agent_spawn::AgentSpawnRequest {
+            provider: "opencode".into(),
+            class: "Coder".into(),
+            name: Some(original.session_name.clone()),
+            workspace: Some(original.folder.clone()),
+            model: None,
+            reasoning_effort: None,
+        };
+        wardian_core::agent_spawn::admit(&operation_id, &request, &agent_id, None).unwrap();
+        let attempt = wardian_core::agent_spawn::claim_queued(&operation_id)
+            .unwrap()
+            .unwrap()
+            .attempt_id
+            .unwrap();
+        wardian_core::agent_spawn::set_prepared_identity(
+            &operation_id,
+            &attempt,
+            "Coder",
+            "workspace",
+        )
+        .unwrap();
+        wardian_core::agent_spawn::mark_launching(&operation_id, &attempt).unwrap();
+        wardian_core::agent_spawn::record_first_native_runtime(&original, 7, false).unwrap();
+        wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+            session_id: &agent_id,
+            session_name: &original.session_name,
+            description: "",
+            agent_class: "Coder",
+            provider: "opencode",
+            workspace: Some("workspace"),
+            project: None,
+            is_off: false,
+            created_at: None,
+        })
+        .unwrap();
+        assert!(wardian_core::agent_spawn::mark_registered(&operation_id, &attempt, None).unwrap());
+        super::super::try_save_state_snapshot_unlocked(std::slice::from_ref(&original)).unwrap();
+        tauri::async_runtime::block_on(state.agents.lock()).insert(agent_id.clone(), active);
+        assert!(
+            bind_first_runtime_identity(app.handle(), &foreign, 7, "ses_owned", None).is_none()
+        );
+        assert!(
+            bind_first_runtime_identity(app.handle(), &expected, 8, "ses_owned", None).is_none()
+        );
+        assert!(expected.lock().unwrap().resume_session.is_none());
+        let (entered, _entered_rx) = tokio::sync::oneshot::channel();
+        let (started, _started_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        drop(release);
+        let failed = super::super::ROSTER_IO_PROBE.sync_scope(
+            std::cell::RefCell::new(Some(super::super::RosterIoProbe {
+                entered,
+                started,
+                release: release_rx,
+            })),
+            || bind_first_runtime_identity(app.handle(), &expected, 7, "ses_owned", None),
+        );
+        assert!(failed.is_none());
+        let pending = wardian_core::agent_spawn::plan(&operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pending.first_native_session_id.as_deref(),
+            Some("ses_owned")
+        );
+        assert!(!pending.first_native_published);
+        assert!(wardian_core::agent_spawn::restore_is_excluded(&agent_id).unwrap());
+        assert!(expected.lock().unwrap().resume_session.is_none());
+        let saved = crate::spawn_operations::persisted_roster().unwrap();
+        assert!(saved[0].resume_session.is_none());
+        wardian_core::agent_spawn::recover_first_native_bindings(&saved).unwrap();
+        assert!(
+            !wardian_core::agent_spawn::plan(&operation_id)
+                .unwrap()
+                .unwrap()
+                .first_native_published
+        );
+        let bound =
+            bind_first_runtime_identity(app.handle(), &expected, 7, "ses_owned", None).unwrap();
+        assert!(
+            wardian_core::agent_spawn::plan(&operation_id)
+                .unwrap()
+                .unwrap()
+                .first_native_published
+        );
+        assert!(!wardian_core::agent_spawn::restore_is_excluded(&agent_id).unwrap());
+        assert_eq!(bound.resume_session.as_deref(), Some("ses_owned"));
+        assert_eq!(
+            crate::spawn_operations::persisted_roster().unwrap()[0]
+                .resume_session
+                .as_deref(),
+            Some("ses_owned")
+        );
+        let mut replacement = agent_without_pty();
+        replacement.runtime_generation = Some(8);
+        *replacement.config.lock().unwrap() = bound;
+        tauri::async_runtime::block_on(state.agents.lock()).insert(agent_id, replacement);
+        assert!(
+            bind_first_runtime_identity(app.handle(), &expected, 7, "ses_other", None).is_none()
+        );
     }
 
     pub(super) fn agent_without_pty() -> crate::state::ActiveAgent {

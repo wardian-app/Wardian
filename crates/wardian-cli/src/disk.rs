@@ -283,7 +283,7 @@ mod tests {
     impl WardianHomeGuard {
         fn set(path: &std::path::Path) -> Self {
             let guard = Self {
-                _lock: crate::test_env_lock(),
+                _lock: crate::test_support::test_env_lock(),
                 previous_home: std::env::var_os("WARDIAN_HOME"),
                 previous_session_id: std::env::var_os("WARDIAN_SESSION_ID"),
             };

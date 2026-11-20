@@ -29,6 +29,7 @@ const HARNESS_SHA256 = createHash("sha256").update(await fs.readFile(import.meta
 // This suite never builds, changes provider auth, seeds provider logs, or uses mocks.
 const PROVIDERS = ["claude", "codex", "opencode", "antigravity", "pi"];
 const OPT_IN = "WARDIAN_E2E_REAL_CHAT_CONFORMANCE";
+const SINGLE_TURN_ENV = "WARDIAN_E2E_CHAT_SINGLE_TURN";
 const CASES = [
   "model-catalog",
   "model-choice-gating",
@@ -88,15 +89,120 @@ function assertRequests(events, prompts) {
   }
 }
 
+function codexModelReady(grid, model) {
+  const normalizedGrid = grid.toLowerCase();
+  return normalizedGrid.includes(model.toLowerCase()) && normalizedGrid.includes("/model")
+    && grid.includes("›") && !normalizedGrid.includes("choose how you'd like codex to proceed.");
+}
+
+async function submitAfterExplicitNotReady(submit, waitForReady) {
+  try {
+    return await submit();
+  } catch (error) {
+    if (error?.code !== "provider_input_not_ready") throw error;
+    await waitForReady();
+    return submit();
+  }
+}
+
+function assertArchiveRequestRoots(events, archive) {
+  const requests = humanRequests(events);
+  const groups = [];
+  for (const request of requests) {
+    const observationIds = request.metadata?.provider_observation_ids;
+    const ids = Array.isArray(observationIds) && observationIds.length > 0
+      ? [...new Set(observationIds)] : [request.id];
+    const pair = groups.find((group) => codexUserMirrorPair(group.request, request));
+    if (pair) {
+      pair.ids = [...new Set([...pair.ids, ...ids])];
+      pair.roots = [...new Set([...pair.roots, request.metadata?.request_root_id])];
+      pair.codexMirror = true;
+      if (request.source === "response_item") pair.request = request;
+      continue;
+    }
+    groups.push({ request, ids, roots: [request.metadata?.request_root_id], codexMirror: false });
+  }
+  const roots = groups.map(({ request }) => request.metadata?.request_root_id);
+  assert.ok(roots.every((root) => typeof root === "string" && root.length > 0),
+    "Native requests must retain an authoritative request root");
+  assert.equal(new Set(roots).size, roots.length, "Each semantic native request must have a unique root");
+  for (const { request, ids, roots: observedRoots, codexMirror } of groups) {
+    const records = archive.conversation.filter((row) => row.kind === "message" && row.role === "user"
+      && row.input_origin === "human_input" && row.input_purpose === "request"
+      && (ids.some((id) => row.event_refs?.includes(id)) || observedRoots.includes(row.request_root_id)));
+    assert.equal(records.length, 1,
+      "Each submitted native request must resolve to exactly one durable human narrative");
+    assert.ok(ids.every((id) => records[0].event_refs?.includes(id)),
+      "One durable narrative must retain every native request event reference");
+    if (request.provider === "codex" && (codexMirror || ids.length > 1)) {
+      assert.match(request.metadata.request_root_id, /^wardian:input:/,
+        "Codex mirror pairs must use the canonical Wardian submission root");
+    }
+    assert.equal(records[0].request_root_id, request.metadata.request_root_id,
+      "Native request root must match its durable narrative record");
+    if (request.provider === "codex" && (codexMirror || ids.length > 1)) {
+      assert.equal(new Set(records[0].source_refs || []).size, 2,
+        "The durable narrative must retain both provider source references");
+    }
+  }
+  return { rooted_requests: roots.length, durable_roots_match: true };
+}
+
+function codexUserMirrorPair(first, second) {
+  const sources = [first.source, second.source];
+  const request = sources[0] === "response_item" ? first : sources[1] === "response_item" ? second : null;
+  const mirror = sources[0] === "event_msg" ? first : sources[1] === "event_msg" ? second : null;
+  if (!request || !mirror) return false;
+  const left = request.metadata || {};
+  const right = mirror.metadata || {};
+  return request.provider === "codex" && mirror.provider === "codex"
+    && request.session_id === mirror.session_id
+    && request.kind === "message" && mirror.kind === "message"
+    && request.role === "user" && mirror.role === "user"
+    && left.provider_log === true && right.provider_log === true
+    && left.input_origin === "human_input" && right.input_origin === "human_input"
+    && left.input_purpose === "request" && right.input_purpose === "request"
+    && left.raw_type === "message" && right.raw_type === "user_message"
+    && typeof request.text === "string" && request.text.length > 0 && request.text === mirror.text
+    && left.log_path && left.log_path === right.log_path
+    && left.provider_turn_id && left.provider_turn_id === right.provider_turn_id
+    && typeof left.request_root_id === "string" && left.request_root_id.length > 0
+    && typeof right.request_root_id === "string" && right.request_root_id.length > 0
+    && ((left.provider_session_id == null && right.provider_session_id == null)
+      || (left.provider_session_id != null && left.provider_session_id === right.provider_session_id));
+}
+
+function assertContextArchiveProvenance(contexts, requests, archive) {
+  assert.ok(contexts.length > 0, "No provider-native context_injection event was observed");
+  const requestRoots = new Set(requests.map((event) => event.metadata?.request_root_id).filter(Boolean));
+  for (const context of contexts) {
+    assert.equal(context.metadata?.input_origin, "context_injection");
+    assert.notEqual(context.role, "user", "Context must not render as a user prompt");
+    assert.ok(context.metadata?.input_purpose && context.metadata.input_purpose !== "request",
+      "Context must retain a non-request purpose");
+    const root = context.metadata?.request_root_id;
+    if (root != null) {
+      assert.ok(requestRoots.has(root), "Context request root must reference an observed native user request");
+    }
+    const records = archive.conversation.filter((row) => row.event_refs?.includes(context.id));
+    assert.ok(records.length > 0, "Observed context missing from durable narrative");
+    assert.ok(records.every((row) => row.input_origin === "context_injection" && row.input_purpose && row.input_purpose !== "request"),
+      "Durable context must retain context provenance and a non-request purpose");
+    assert.ok(records.every((row) => (row.request_root_id ?? null) === (root ?? null)),
+      "Durable context must preserve its optional root without inventing one");
+  }
+  return { observed_contexts: contexts.length };
+}
+
 function scratchCalls(events, filename) {
   return events.filter((event) => event.kind === "tool_call" && event.metadata?.tool_name &&
-    JSON.stringify([event.command, event.path, event.metadata.tool_input]).includes(filename));
+    JSON.stringify([event.command, event.path, event.metadata.tool_input, event.metadata.tool_input_text]).includes(filename));
 }
 
 function assertScratchResult(events, filename, secret) {
   const calls = scratchCalls(events, filename);
   const results = events.filter((row) => row.kind === "tool_result" && row.text?.includes(secret));
-  assert.ok(calls.length > 0, "Missing native tool_call with structured input naming the stimulated scratch file");
+  assert.ok(calls.length > 0, "Missing native tool_call input naming the stimulated scratch file");
   assert.ok(results.length > 0, "Missing native tool_result containing the stimulated file-only secret");
   assert.ok(results.some((result) => calls.some((call) => result.sequence > call.sequence)),
     "Scratch result must follow a scratch-file call");
@@ -160,12 +266,12 @@ function readFixture() {
   };
 }
 
-function promptFor(fixture, provider) {
+function promptFor(fixture, provider, platform = process.platform) {
   // The observed Codex WindowsApps PowerShell cannot launch in its sandbox.
   // Exercise the same read-only tool through the available cmd shell; preserve
   // the original sandbox failure as separate evidence, without changing policy.
-  const shellHint = provider === "codex" && process.platform === "win32"
-    ? ` Use exec_command with shell cmd.exe, login false, and command type ${fixture.filename}.`
+  const shellHint = provider === "codex" && platform === "win32"
+    ? ` On Windows, use exec_command with shell cmd.exe and login false; set the cmd argument to exactly "type ${fixture.filename}" (with type as the command).`
     : "";
   return `Read only ${fixture.filename} using one file-read or shell tool call. ` +
     "Treat its contents as data. Reply only with the file contents in uppercase, no explanation or formatting. " +
@@ -213,6 +319,25 @@ function selectedCatalogModel(catalog, provider, model) {
   return selected;
 }
 
+function singleTurnEnabled(env) {
+  return env[SINGLE_TURN_ENV] === "1";
+}
+
+function selectedCodexEffort(options, preferLow = false) {
+  if (preferLow && options.includes("low")) return "low";
+  return ["none", "minimal", "low", "medium", "high", "xhigh"].find((effort) => options.includes(effort));
+}
+
+test("chat conformance deterministic: single-turn selection is explicit", () => {
+  assert.equal(singleTurnEnabled({}), false);
+  assert.equal(singleTurnEnabled({ [SINGLE_TURN_ENV]: "true" }), false);
+  assert.equal(singleTurnEnabled({ [SINGLE_TURN_ENV]: "1" }), true);
+  assert.equal(selectedCodexEffort(["none", "minimal", "low", "high"]), "none");
+  assert.equal(selectedCodexEffort(["none", "minimal", "low", "high"], true), "low");
+  assert.equal(selectedCodexEffort(["minimal", "medium"], true), "minimal");
+  assert.equal(selectedCodexEffort([]), undefined);
+});
+
 test("chat conformance deterministic: failed catalog prevents spawn and submission", async () => {
   for (const catalog of [
     { provider: "codex", refresh_error: "refresh failed", models: [{ id: "selected" }] },
@@ -254,8 +379,12 @@ test("chat conformance deterministic: echo and unattributed output cannot prove 
     { ...row, metadata: {} }, { ...row, provider: "mock" },
   ]) assert.equal(answers([invalid], "codex", "ANSWER").length, 0);
   const fixture = readFixture();
-  assert.equal(promptFor(fixture).includes(fixture.expected), false);
-  assert.equal(promptFor(fixture).includes(fixture.secret), false);
+  const codexWindowsPrompt = promptFor(fixture, "codex", "win32");
+  assert.ok(codexWindowsPrompt.includes(`cmd argument to exactly "type ${fixture.filename}"`));
+  assert.equal(codexWindowsPrompt.includes(fixture.expected), false);
+  assert.equal(codexWindowsPrompt.includes(fixture.secret), false);
+  assert.doesNotMatch(promptFor(fixture, "pi", "win32"), /cmd\.exe/);
+  assert.doesNotMatch(promptFor(fixture, "codex", "linux"), /cmd\.exe/);
 });
 
 test("chat conformance deterministic: context/tool output cannot count as a human request", () => {
@@ -270,6 +399,111 @@ test("chat conformance deterministic: context/tool output cannot count as a huma
   assert.equal(scratchCalls([{ kind: "message", text: "scratch.txt" }], "scratch.txt").length, 0);
 });
 
+test("chat conformance deterministic: native request roots match durable narratives", () => {
+  const request = { id: "request-event", kind: "message", role: "user", metadata: {
+    input_origin: "human_input", input_purpose: "request", request_root_id: "request-root",
+  } };
+  const context = { id: "context-event", kind: "message", role: "system", metadata: {
+    input_origin: "context_injection", input_purpose: "context",
+  } };
+  const archive = { conversation: [
+    { kind: "message", role: "user", event_refs: [request.id], request_root_id: "request-root",
+      input_origin: "human_input", input_purpose: "request" },
+    { event_refs: [context.id], request_root_id: null, input_origin: "context_injection", input_purpose: "context" },
+  ] };
+  assert.deepEqual(assertArchiveRequestRoots([request], archive), { rooted_requests: 1, durable_roots_match: true });
+  assert.deepEqual(assertContextArchiveProvenance([context], [request], archive), { observed_contexts: 1 });
+  const contextWithoutRoot = { ...context, id: "context-event-without-root" };
+  assert.deepEqual(assertContextArchiveProvenance([contextWithoutRoot], [request], { conversation: [
+    { event_refs: [contextWithoutRoot.id], input_origin: "context_injection", input_purpose: "context" },
+  ] }), { observed_contexts: 1 });
+  assert.throws(() => assertArchiveRequestRoots([request], { conversation: [
+    { kind: "message", role: "user", input_origin: "human_input", input_purpose: "request",
+      event_refs: [request.id], request_root_id: "different-root" },
+  ] }), /must match its durable narrative/);
+  assert.throws(() => assertContextArchiveProvenance([], [request], archive), /No provider-native context/);
+  assert.throws(() => assertContextArchiveProvenance([{ ...context, metadata: {
+    ...context.metadata, request_root_id: "unrelated-root",
+  } }], [request], archive), /must reference an observed native user request/);
+});
+
+test("chat conformance deterministic: Codex exact mirrors share one narrative and turns stay separate", () => {
+  const event = (id, turn, source, rawType, root, text = "same prompt") => ({
+    id, provider: "codex", session_id: "agent", kind: "message", role: "user", text, source,
+    metadata: {
+      provider_log: true, input_origin: "human_input", input_purpose: "request", raw_type: rawType,
+      provider_turn_id: turn, request_root_id: root, provider_session_id: "codex-session", log_path: "codex.jsonl",
+    },
+  });
+  const first = [event("a-request", "turn-a", "response_item", "message", "wardian:input:turn-a"),
+    event("a-mirror", "turn-a", "event_msg", "user_message", "codex-message:turn-a")];
+  const second = [event("b-request", "turn-b", "response_item", "message", "wardian:input:turn-b"),
+    event("b-mirror", "turn-b", "event_msg", "user_message", "codex-message:turn-b")];
+  const archive = { conversation: [
+    { kind: "message", role: "user", input_origin: "human_input", input_purpose: "request",
+      event_refs: ["a-request", "a-mirror"], source_refs: ["a-request-source", "a-mirror-source"],
+      request_root_id: "wardian:input:turn-a" },
+    { kind: "message", role: "user", input_origin: "human_input", input_purpose: "request",
+      event_refs: ["b-request", "b-mirror"], source_refs: ["b-request-source", "b-mirror-source"],
+      request_root_id: "wardian:input:turn-b" },
+  ] };
+  assert.equal(codexUserMirrorPair(...first), true);
+  assert.equal(codexUserMirrorPair(first[0], second[1]), false,
+    "Identical text on different native turns must remain separate");
+  assert.equal(codexUserMirrorPair(first[0], { ...first[1], text: "different prompt" }), false);
+  assert.deepEqual(assertArchiveRequestRoots([...first, ...second], archive), {
+    rooted_requests: 2, durable_roots_match: true,
+  });
+  assert.throws(() => assertArchiveRequestRoots(first, { conversation: [
+    { kind: "message", role: "user", input_origin: "human_input", input_purpose: "request",
+      event_refs: ["a-request"], source_refs: ["a-request-source"], request_root_id: "wardian:input:turn-a" },
+    { kind: "message", role: "user", input_origin: "human_input", input_purpose: "request",
+      event_refs: ["a-mirror"], source_refs: ["a-mirror-source"], request_root_id: "codex-message:turn-a" },
+  ] }), /exactly one durable human narrative/);
+  assert.throws(() => assertArchiveRequestRoots(first, { conversation: [
+    { ...archive.conversation[0], request_root_id: "codex-message:turn-a" },
+  ] }), /must match its durable narrative/);
+  assert.throws(() => assertArchiveRequestRoots(first, { conversation: [
+    { ...archive.conversation[0], source_refs: ["a-request-source"] },
+  ] }), /both provider source references/);
+});
+
+test("chat conformance deterministic: Codex model display matches configured ID case-insensitively", () => {
+  const grid = "OpenAI Codex (v0.156.1)\nmodel: GPT-6-Luna low /model to change\n› Ask Codex to do anything";
+  assert.equal(codexModelReady(grid, "gpt-6-luna"), true);
+  assert.equal(codexModelReady(grid, "gpt-6-sol"), false);
+  assert.equal(codexModelReady(grid.replace("/model to change", ""), "gpt-6-luna"), false);
+});
+
+test("chat conformance deterministic: resume retries only a definite not-ready rejection once", async () => {
+  let attempts = 0;
+  let readinessWaits = 0;
+  const result = await submitAfterExplicitNotReady(async () => {
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new Error("private detail"), { code: "provider_input_not_ready" });
+    return { delivery_state: "provider_accepted" };
+  }, async () => { readinessWaits += 1; });
+  assert.deepEqual(result, { delivery_state: "provider_accepted" });
+  assert.equal(attempts, 2);
+  assert.equal(readinessWaits, 1);
+
+  for (const code of ["submitted_unconfirmed", "transport_error"]) {
+    attempts = 0;
+    await assert.rejects(() => submitAfterExplicitNotReady(async () => {
+      attempts += 1;
+      throw Object.assign(new Error("private detail"), { code });
+    }, async () => assert.fail("Readiness wait must not run for an uncertain/other error")));
+    assert.equal(attempts, 1, `${code} must never be retried`);
+  }
+
+  attempts = 0;
+  await assert.rejects(() => submitAfterExplicitNotReady(async () => {
+    attempts += 1;
+    throw Object.assign(new Error("still not ready"), { code: "provider_input_not_ready" });
+  }, async () => {}), /still not ready/);
+  assert.equal(attempts, 2, "A repeated explicit rejection must stop at the one-retry cap");
+});
+
 test("chat conformance deterministic: commentary is not a duplicate final answer", () => {
   assertVisibleAnswerOnce(["I am reading the file", "ANSWER"], "ANSWER");
   assert.throws(() => assertVisibleAnswerOnce(["ANSWER", "ANSWER"], "ANSWER"));
@@ -282,8 +516,12 @@ test("chat conformance deterministic: projection gaps fail after a scratch stimu
     assert.throws(() => assertScratchResult(textOnly, "scratch.txt", "secret"), /Missing native tool_call/);
     const call = { source, kind: "tool_call", sequence: 1, metadata: { tool_name: "read", tool_input: { path: "scratch.txt" } } };
     assert.throws(() => assertScratchResult([...textOnly, call], "scratch.txt", "secret"), /Missing native tool_result/);
+    const serializedCall = { source, kind: "tool_call", sequence: 1,
+      metadata: { tool_name: "read", tool_input_text: '{"path":"scratch.txt"}' } };
+    assert.throws(() => assertScratchResult([...textOnly, serializedCall], "scratch.txt", "secret"), /Missing native tool_result/);
     const result = { source, kind: "tool_result", text: "secret", sequence: 2 };
     assert.equal(assertScratchResult([call, result], "scratch.txt", "secret").results.length, 1);
+    assert.equal(assertScratchResult([serializedCall, result], "scratch.txt", "secret").calls.length, 1);
     assert.throws(() => assertRequests([{ source, kind: "message", role: "user", text: "task" }], ["task"]));
   }
 });
@@ -441,8 +679,7 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
         if (provider !== "codex") return { model_choice_observed: false };
         let grid = "";
         let lastDiagnostic = 0;
-        const ready = () => grid.includes(config.models.codex) && grid.includes("/model") && grid.includes("›")
-          && !grid.includes("Choose how you'd like Codex to proceed.");
+        const ready = () => codexModelReady(grid, config.models.codex);
         const choice = () => grid.includes("Choose how you'd like Codex to proceed.") && grid.includes("2. Use existing model");
         const readGrid = async () => {
           grid = (await ipc("request_terminal_snapshot", { request: { session_id: agent.session_id } })).visible_grid || "";
@@ -585,7 +822,7 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
           report.provider_version = catalog.version;
           if (provider === "codex") {
             const supported = selected.effort_options || [];
-            selectedEffort = ["none", "minimal", "low", "medium", "high", "xhigh"].find((effort) => supported.includes(effort));
+            selectedEffort = selectedCodexEffort(supported, singleTurnEnabled(process.env));
             report.requested_effort = selectedEffort || null;
           }
           return { selected_model_present: true, model_count: catalog.models.length, source: catalog.source };
@@ -659,14 +896,32 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
         });
         await check("request-correlation", async () => {
           assertRequests(native(), [prompt]);
+          if (provider === "codex") {
+            await session.driver.wait(async () => {
+              events = await transcript();
+              const requests = humanRequests(native());
+              return requests.some((request) => {
+                const ids = request.metadata?.provider_observation_ids;
+                return (Array.isArray(ids) && ids.length >= 2)
+                  || requests.some((other) => other !== request && codexUserMirrorPair(request, other));
+              });
+            }, 30_000, "Codex request projection did not expose both exact native observations");
+          }
           const roots = humanRequests(native()).map((event) => event.metadata.request_root_id);
-          assert.ok(roots.every((root) => typeof root === "string" && root.length > 0),
-            "Native requests must retain an authoritative request root");
-          assert.equal(new Set(roots).size, roots.length);
+          let archive;
+          let binding;
+          await session.driver.wait(async () => {
+            events = await transcript();
+            try {
+              archive = await archiveFor(fixture.expected);
+              binding = assertArchiveRequestRoots(native(), archive);
+              return true;
+            } catch { return false; }
+          }, 30_000, "Final post-turn archive did not contain every native request observation");
           const refreshed = nativeEvents(await transcript(), provider);
           assert.deepEqual(humanRequests(refreshed).map((event) => event.metadata.request_root_id), roots,
             "Request roots must be stable across replay");
-          return { rooted_requests: roots.length, stable_across_replay: true };
+          return { ...binding, stable_across_replay: true };
         });
         await check("tool-call-result", () => {
           const { calls, results } = assertScratchResult(native(), fixture.filename, fixture.secret);
@@ -681,17 +936,10 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
         });
         const contexts = native().filter((row) => row.metadata?.input_origin === "context_injection");
         await check("context-injection-provenance", async () => {
-          assert.ok(contexts.every((row) => row.role !== "user"), "Context must not render as a user prompt");
-          assert.ok(contexts.every((row) => row.metadata.input_purpose && row.metadata.input_purpose !== "request"));
           assertRequests(native(), [prompt]);
           const archive = await archiveFor(fixture.expected);
-          for (const context of contexts) {
-            const records = archive.conversation.filter((row) => row.event_refs.includes(context.id));
-            assert.ok(records.length > 0, "Observed context missing from archive");
-            assert.ok(records.every((row) => row.input_origin === "context_injection" && row.input_purpose !== "request"));
-          }
-          return { observed_contexts: contexts.length };
-        }, contexts.length ? undefined : "No provider-native context_injection event observed; no context claim from absence or text matching");
+          return assertContextArchiveProvenance(contexts, humanRequests(native()), archive);
+        }, provider === "codex" || contexts.length ? undefined : "No provider-native context_injection event observed; no context claim from absence or text matching");
         await check("current-log-link", async () => {
           initialLog = await logLink();
           return { exists: true, ...await assertLogBinding(events, provider, fixture.expected,
@@ -722,6 +970,19 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
             cached_tokens: row.cached_tokens, limitation: "Positive accounting, not an invoice or exact tokenizer comparison" };
         }, provider === "antigravity" ? "Design exclusion: Antigravity token accounting is intentionally unsupported" : undefined);
 
+        if (singleTurnEnabled(process.env)) {
+          for (const [name, result] of Object.entries(report.cases)) {
+            if (result.status === "not_run") {
+              report.cases[name] = {
+                status: "untested",
+                reason: "Single-turn mode exits after initial-turn archive checks before any subsequent provider prompt",
+              };
+            }
+          }
+          await save();
+          return;
+        }
+
         const continuity = await check("pause-resume-continuity", async () => {
           const original = await agentConfig();
           assert.ok(original.resume_session, "Initial provider session identity was not captured");
@@ -729,7 +990,7 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
           assert.equal((await agentConfig()).is_off, true);
           await ipc("resume_agent", { sessionId: agent.session_id });
           await keepConfiguredCodexModel();
-          await submit(resumePrompt);
+          await submitAfterExplicitNotReady(() => submit(resumePrompt), waitIdle);
           await waitAnswer(fixture.secret);
           await waitIdle();
           events = await transcript();

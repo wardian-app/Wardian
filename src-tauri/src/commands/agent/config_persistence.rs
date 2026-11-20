@@ -48,11 +48,26 @@ pub(super) async fn persist_agent_config_with_roster_barrier(
         effective_conversation_logging(global_logging, previous_config.conversation_logging);
     let next_logging =
         effective_conversation_logging(global_logging, new_config.conversation_logging);
-    let _policy_guard = if previous_logging != next_logging {
+    let adoption_scope_changed = previous_config.provider != new_config.provider
+        || previous_config.resume_session != new_config.resume_session
+        || previous_config.fresh_provider_session_id != new_config.fresh_provider_session_id
+        || previous_config.conversation_logging != new_config.conversation_logging
+        || previous_config.codex_config().cleared_provider_sessions
+            != new_config.codex_config().cleared_provider_sessions;
+    let _policy_guard = if previous_logging != next_logging || adoption_scope_changed {
         Some(state.conversation_capture_policy_lock.lock().await)
     } else {
         None
     };
+    if adoption_scope_changed {
+        state
+            .conversation_archive
+            .retire_pending_adoption(
+                &previous_config.session_id,
+                "archive adoption configuration changed",
+            )
+            .map_err(|error| format!("archive adoption retirement failed: {error}"))?;
+    }
     if previous_logging != ConversationLoggingSetting::Disabled
         && next_logging == ConversationLoggingSetting::Disabled
     {

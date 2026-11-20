@@ -1,0 +1,28 @@
+{"type":"custom-title","sessionId":"fixture-session","customTitle":"Fixture conversation"}
+{"type":"agent-name","sessionId":"fixture-session","agentName":"Fixture"}
+{"type":"mode","sessionId":"fixture-session","mode":"default"}
+{"type":"permission-mode","sessionId":"fixture-session","permissionMode":"bypassPermissions"}
+{"type":"atis-latch","sessionId":"fixture-session","value":false}
+{"type":"file-history-snapshot","sessionId":"fixture-session","snapshot":{"trackedFileBackups":{},"isSnapshotUpdate":false}}
+{"type":"user","sessionId":"fixture-session","uuid":"fixture-prompt","origin":{"kind":"human"},"promptSource":"typed","turnOrigin":"human","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"Check the sections against last year."}}
+{"type":"attachment","sessionId":"fixture-session","uuid":"attachment","attachment":{"type":"deferred_tools_record","entries":[{"name":"mcp__browser__get_tabs","description":"List browser tabs","input_schema":{"type":"object"}}]}}
+{"type":"last-prompt","sessionId":"fixture-session","lastPrompt":"Check the sections against last year.","leafUuid":"fixture-prompt"}
+{"type":"last-prompt","sessionId":"fixture-session","lastPrompt":"Check the sections against last year.","leafUuid":"fixture-prompt"}
+{"type":"last-prompt","sessionId":"fixture-session","lastPrompt":"Check the sections against last year.","leafUuid":"fixture-prompt"}
+{"type":"last-prompt","sessionId":"fixture-session","lastPrompt":"Check the sections against last year.","leafUuid":"fixture-prompt"}
+{"type":"tools-used","sessionId":"fixture-session","tools":["mcp__browser__get_tabs"]}
+{"type":"session-owner","sessionId":"fixture-session","owner":"fixture"}
+{"type":"api-request-shape","sessionId":"fixture-session","messages":[{"role":"user","content":"Check the sections against last year."}]}
+{"type":"api-request-blob","sessionId":"fixture-session","body":{"messages":[{"role":"user","content":"Check the sections against last year."}]}}
+{"type":"api-request","sessionId":"fixture-session","messages":[{"role":"user","content":"Check the sections against last year."}]}
+{"type":"file-history-delta","sessionId":"fixture-session","snapshot":{"trackedFileBackups":{}}}
+{"type":"system","sessionId":"fixture-session","subtype":"turn_duration","durationMs":100}
+{"type":"assistant","sessionId":"fixture-session","uuid":"assistant-0","message":{"id":"message-0","role":"assistant","content":[{"type":"tool_use","id":"tool-0","name":"mcp__browser__get_tabs","input":{"description":"Inspecting browser tabs"}}]}}
+{"type":"user","sessionId":"fixture-session","uuid":"result-0","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-0","content":"{\"availableTabs\":[{\"tabId\":\"example\",\"title\":\"Reference table\"}]}"}]}}
+{"type":"assistant","sessionId":"fixture-session","uuid":"assistant-1","message":{"id":"message-1","role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"mcp__browser__get_tabs","input":{"description":"Inspecting browser tabs"}}]}}
+{"type":"user","sessionId":"fixture-session","uuid":"result-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"{\"availableTabs\":[{\"tabId\":\"example\",\"title\":\"Reference table\"}]}"}]}}
+{"type":"assistant","sessionId":"fixture-session","uuid":"assistant-2","message":{"id":"message-2","role":"assistant","content":[{"type":"tool_use","id":"tool-2","name":"mcp__browser__get_tabs","input":{"description":"Inspecting browser tabs"}}]}}
+{"type":"user","sessionId":"fixture-session","uuid":"result-2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-2","content":"{\"availableTabs\":[{\"tabId\":\"example\",\"title\":\"Reference table\"}]}"}]}}
+{"type":"assistant","sessionId":"fixture-session","uuid":"assistant-3","message":{"id":"message-3","role":"assistant","content":[{"type":"tool_use","id":"tool-3","name":"mcp__browser__get_tabs","input":{"description":"Inspecting browser tabs"}}]}}
+{"type":"user","sessionId":"fixture-session","uuid":"result-3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-3","content":"{\"availableTabs\":[{\"tabId\":\"example\",\"title\":\"Reference table\"}]}"}]}}
+{"type":"assistant","sessionId":"fixture-session","uuid":"fixture-answer","message":{"id":"answer","role":"assistant","content":[{"type":"text","text":"The comparison is complete."}]}}

@@ -1,3 +1,4 @@
+pub use crate::claude_mod::NonSubmissionProof;
 use serde::{Deserialize, Serialize};
 
 /// Provider-neutral identity and policy attached to one native provider turn.
@@ -112,6 +113,12 @@ pub enum NativeDeliveryPhase {
 }
 
 impl NativeDeliveryPhase {
+    /// Narrow proof-bearing recovery; ordinary transition rules remain unchanged.
+    /// The caller must apply this to the interaction and generation named by the proof.
+    pub fn resolve_proven_non_submission(self, _proof: &NonSubmissionProof) -> Option<Self> {
+        (self == Self::SubmittedUnconfirmed).then_some(Self::FailedBeforeSubmit)
+    }
+
     pub fn is_terminal(self) -> bool {
         matches!(
             self,

@@ -45,6 +45,30 @@ function summaries(events: AgentChatEvent[]): TurnChangeSummaryRow[] {
 }
 
 describe("withTurnChangeSummaries", () => {
+  it.each([
+    { label: "diff", result: { text: "diff --git a/example.txt b/example.txt\n-old\n+new", language: "diff" },
+      file: { path: "example.txt", added: 1, removed: 1, kind: "edited", counts_unknown: false } },
+    { label: "written file", result: { text: "File saved", metadata: { files_written: ["example.txt"] } },
+      file: { path: "example.txt", added: 0, removed: 0, kind: "edited", counts_unknown: true } },
+  ])("keeps $label evidence from a merged result below and above the grouping threshold", ({ result, file }) => {
+    const events = [userMessage("user", 1),
+      event({ id: "call", title: "apply_patch", turn_id: "call-1", sequence: 2 }),
+      event({ id: "result", kind: "tool_result", status: "succeeded", turn_id: "call-1", sequence: 3, ...result }),
+    ];
+    const rows = derivePresentedChatRows(events);
+    expect(rows[1].kind).toBe("event");
+    if (rows[1].kind !== "event") throw new Error("Expected a standalone work item");
+    expect(rows[1].entry?.merged_result_events).toHaveLength(1);
+    const standalone = summaries(events);
+    expect(standalone).toHaveLength(1);
+    expect(standalone[0].files).toEqual([file]);
+    const grouped = summaries([...events,
+      event({ id: "other-1", title: "Search", sequence: 4 }),
+      event({ id: "other-2", title: "Search", sequence: 5 }),
+    ]);
+    expect(grouped[0].files).toEqual(standalone[0].files);
+  });
+
   it("summarizes the files a turn changed with exact line counts", () => {
     const rows = summaries([
       userMessage("user-1", 1),

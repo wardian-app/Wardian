@@ -12,7 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.100.0
+      - name: Report Rust compiler
+        run: rustc --version
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
         with:
@@ -96,13 +98,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy
+      - name: Report Rust compiler
+        run: rustc --version
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
+      - name: Verify Rust toolchain pin
+        # local-verify: backend
+        run: node --test scripts/rust-toolchain.test.mjs
       - name: Clippy
         # local-verify: backend
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -138,6 +145,8 @@ jobs:
       - name: Test Windows native supervisor contract
         # local-verify: backend
         run: node --test scripts/native-e2e-windows-supervisor.test.mjs
+      - name: Test Windows installer ZIP extraction
+        run: node --test scripts/windows-zip.test.mjs
       - name: Install dependencies
         run: npm ci
       # Runs after `cargo check --workspace` so every dependency is already
@@ -153,7 +162,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.100.0
+      - name: Report Rust compiler
+        run: rustc --version
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -192,7 +203,9 @@ jobs:
           node-version: 20
           cache: "npm"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.100.0
+      - name: Report Rust compiler
+        run: rustc --version
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -227,7 +240,9 @@ jobs:
           node-version: 20
           cache: "npm"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.100.0
+      - name: Report Rust compiler
+        run: rustc --version
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -236,6 +251,35 @@ jobs:
         run: npm ci
       - name: Setup native E2E drivers
         run: npm run setup:e2e:native
+      - name: Build roster barrier holder utility
+        shell: pwsh
+        run: |
+          $holderBuildOutput = npm run rust:cache -- cargo test -p wardian-core --test replacement_roster_barrier_holder --no-run --message-format=json 2>&1
+          $holderBuildExitCode = $LASTEXITCODE
+          $holderBuildOutput | ForEach-Object { Write-Host $_ }
+          if ($holderBuildExitCode -ne 0) {
+            throw "Roster barrier holder build failed with exit code $holderBuildExitCode"
+          }
+          $holderRecords = @(
+            foreach ($line in $holderBuildOutput) {
+              if ($line -is [string] -and $line.TrimStart().StartsWith("{")) {
+                try { $line | ConvertFrom-Json -AsHashtable -ErrorAction Stop } catch {}
+              }
+            }
+          )
+          $holderArtifacts = @(
+            $holderRecords | Where-Object {
+              $_.reason -eq "compiler-artifact" -and $_.target.name -eq "replacement_roster_barrier_holder" -and $_.executable
+            }
+          )
+          if ($holderArtifacts.Count -ne 1) {
+            throw "Expected one compiler-artifact executable for the roster barrier holder; found $($holderArtifacts.Count)"
+          }
+          $holderExecutable = [string]$holderArtifacts[0].executable
+          if (-not (Test-Path -LiteralPath $holderExecutable -PathType Leaf)) {
+            throw "Compiler-reported roster barrier holder is missing: $holderExecutable"
+          }
+          "WARDIAN_NATIVE_ROSTER_BARRIER_HOLDER=$holderExecutable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build native debug app
         run: npm run tauri -- build --debug --no-bundle
         env:
@@ -288,15 +332,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential curl wget file pkg-config \
-            libglib2.0-dev libgtk-3-dev libgdk-pixbuf2.0-dev \
+            libglib2.0-dev libgtk-3-dev libgdk-pixbuf-2.0-dev \
             libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
             libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libssl-dev libxkbcommon-dev
           echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: llvm-tools-preview
+      - name: Report Rust compiler
+        run: rustc --version
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:

@@ -34,6 +34,7 @@ async fn startup_observation_initialized_home_waits_before_owner_preparation() {
         &mut timings,
         tokio::time::Instant::now() + super::STARTUP_TIMEOUT,
         std::future::pending(),
+        None,
     );
     tokio::pin!(startup);
     let first = std::future::poll_fn(|cx| Poll::Ready(startup.as_mut().poll(cx))).await;
@@ -60,6 +61,7 @@ async fn startup_observation_genuine_competing_owner_still_fails_closed() {
         &mut timings,
         tokio::time::Instant::now() + super::STARTUP_TIMEOUT,
         std::future::pending(),
+        None,
     )
     .await
     .unwrap_err();
@@ -88,6 +90,7 @@ async fn startup_observation_deadline_and_cancellation_do_not_prepare_or_reserve
             &mut timings,
             tokio::time::Instant::now() + super::STARTUP_TIMEOUT,
             std::future::pending(),
+            None,
         );
         tokio::pin!(startup);
         assert!(
@@ -110,6 +113,7 @@ async fn startup_observation_deadline_and_cancellation_do_not_prepare_or_reserve
             async {
                 let _ = cancel_rx.await;
             },
+            None,
         );
         tokio::pin!(startup);
         assert!(
@@ -156,7 +160,7 @@ async fn unsupported_reviewer_is_rejected_before_owner_home_preparation() {
         workspace: fixture.workspace.clone(),
         config,
     };
-    let error = super::CodexSharedOwner::start(&spec, std::future::pending())
+    let error = super::CodexSharedOwner::start(&spec, None, std::future::pending())
         .await
         .unwrap_err();
     assert_eq!(error.code, "unsupported");
@@ -298,6 +302,7 @@ fn owner_recovers_crashed_overlay_before_first_config_and_mcp_projection() {
         "",
         "agent",
         &mut OwnerStartTimings::default(),
+        None,
     )
     .unwrap();
     let restored = Fixture::config(&prepared_home);
@@ -331,6 +336,7 @@ fn generic_refresh_does_not_recover_a_pending_live_overlay() {
         "",
         "agent",
         &mut OwnerStartTimings::default(),
+        None,
     )
     .unwrap();
     let mut overlay = prepare_launch_config(&home, &overlay_args()).unwrap();
@@ -358,6 +364,7 @@ fn owner_prepares_a_new_home_without_config_or_journal() {
         "",
         "agent",
         &mut OwnerStartTimings::default(),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -404,6 +411,7 @@ fn issue1214_normal_owner_preparation_preserves_private_state_without_shared_cac
             "",
             "agent",
             &mut OwnerStartTimings::default(),
+            None,
         )
         .unwrap();
         if retained {
@@ -462,7 +470,8 @@ fn invalid_recovery_input_blocks_config_and_mcp_projection_without_mutation() {
             &fixture.workspace,
             "",
             "agent",
-            &mut OwnerStartTimings::default()
+            &mut OwnerStartTimings::default(),
+            None,
         )
         .is_err());
         assert_eq!(
@@ -514,6 +523,7 @@ fn owner_managed_instructions_reach_tui_overlay_independently_of_memory() {
                 "Builder",
                 "agent",
                 &mut OwnerStartTimings::default(),
+                None,
             )
             .unwrap();
             std::fs::write(habitat.join("AGENTS.md"), "UNTRUSTED_GENERATED_FILE").unwrap();
@@ -613,6 +623,7 @@ fn owner_memory_failures_block_context_publication_before_launch() {
             "",
             "agent",
             &mut OwnerStartTimings::default(),
+            None,
         )
         .unwrap();
         std::fs::write(habitat.join("AGENTS.md"), "UNCHANGED_CONTEXT").unwrap();

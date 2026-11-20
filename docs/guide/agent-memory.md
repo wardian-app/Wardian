@@ -56,6 +56,20 @@ scope only for a preference or working convention that should follow the agent
 between projects. Every save requires an evidence excerpt. Optional `--source`
 values preserve a link for deeper inspection without coupling retention.
 
+Write one to three plain sentences when saving or updating. The CLI rejects
+tokens over 48 characters, hexadecimal runs of 16 or more characters, and four
+identifier-like words within eight words. A normal sentence with an issue number
+or file name is accepted. Keep detailed identifiers in evidence or source fields.
+
+Direct saves have a soft cap of 25 active memories per agent and exact scope.
+Stable and Current share the cap; agent scope and each workspace count separately.
+`wardian memory list` reports `scope_counts` with `workspace` (null for agent
+scope), `active_count`, and `cap`, including empty visible scopes. At the cap,
+update or remove an existing record before saving another. Updating does not
+free a slot. Existing records stay available above the cap, and identical saves
+with the same idempotency key can still be replayed. Batch consolidation and
+operator maintenance retain their existing policies.
+
 Use `show`, `history`, `update`, and `remove` with the returned memory ID. The
 full ID and any unique prefix are accepted, including the eight-character IDs
 shown in startup-injected memory instructions. If a prefix matches more than

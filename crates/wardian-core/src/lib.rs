@@ -1,5 +1,6 @@
 pub mod agent_messaging;
 pub mod agent_replacement;
+pub mod agent_spawn;
 pub mod artifacts;
 mod atomic_file;
 pub mod automation;
@@ -7,7 +8,9 @@ mod automation_approval_lock;
 pub mod automation_execution_lock;
 pub mod automation_migration;
 pub mod browser;
+pub mod chat_presentation;
 pub mod classes;
+pub mod claude_mod;
 pub mod control;
 pub mod controllers;
 pub mod conversation_lease;

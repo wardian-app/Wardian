@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { normalizeQueuePreferences, queueEventTypeForItem, queueItemIsVisible } from "./queueFilters";
-import type { QueuePreferences } from "../../types";
+import type { QueueItem, QueuePreferences } from "../../types";
 
 const preferences: QueuePreferences = {
   visible_event_types: {
@@ -25,6 +25,13 @@ const preferences: QueuePreferences = {
 };
 
 describe("queueFilters", () => {
+  it("native turn-ended notices respect the existing agent notification preference", () => {
+    const item: QueueItem = { id: "ended", type: "agent_turn_ended", timestamp: 1, read: false };
+    expect(queueEventTypeForItem(item)).toBe("agent_completed");
+    expect(queueItemIsVisible(item, { ...preferences, visible_event_types: {
+      ...preferences.visible_event_types, agent_completed: false,
+    } })).toBe(false);
+  });
   it("maps failed automations to the automation_failed filter key", () => {
     expect(queueEventTypeForItem({
       id: "wf-failed",

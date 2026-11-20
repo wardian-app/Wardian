@@ -81,6 +81,36 @@ pub(super) fn read_capture_state(agent_id: &str) -> io::Result<ConversationCaptu
     serde_json::from_str(&content).map_err(io::Error::other)
 }
 
+/// Recent admission reads only this bounded policy object, never archive bodies.
+pub(super) fn read_recent_capture_state(
+    agent_id: &str,
+) -> io::Result<(ConversationCaptureState, usize)> {
+    use std::io::Read;
+    let path = capture_state_path(agent_id)?;
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((Default::default(), 0))
+        }
+        Err(error) => return Err(error),
+    };
+    let limit = super::chat_read::POLICY_BYTES;
+    if file.metadata()?.len() > limit {
+        return Err(io::Error::other("recent capture policy exceeds byte limit"));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::other(
+            "recent capture policy grew past byte limit",
+        ));
+    }
+    Ok((
+        serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+        bytes.len(),
+    ))
+}
+
 pub(super) fn write_capture_state(
     agent_id: &str,
     state: &ConversationCaptureState,
@@ -244,6 +274,36 @@ pub(super) fn active_handle_for_context(
         next_seq: 1,
         provider_source_key,
     })
+}
+
+/// Read-only lookup for lifecycle-only native capture. Unlike normal writer
+/// selection, this never creates a conversation or closes another source.
+pub(super) fn existing_handle_for_source(
+    context: &ConversationArchiveContext,
+) -> io::Result<Option<ActiveConversationHandle>> {
+    let Some(source) = context.provider_source_key.as_deref() else {
+        return Ok(None);
+    };
+    for entry in read_agent_index(&context.agent_id)? {
+        if entry.status != ConversationStatus::Open {
+            continue;
+        }
+        let directory = conversation_dir(&context.agent_id, &entry.conversation_id)?;
+        let Some(manifest) = read_manifest(&directory.join("manifest.json"))? else {
+            continue;
+        };
+        if manifest.status == ConversationStatus::Open
+            && manifest.provider == context.provider
+            && manifest.provider_source_key.as_deref() == Some(source)
+        {
+            return Ok(Some(ActiveConversationHandle {
+                conversation_id: manifest.conversation_id,
+                next_seq: 1,
+                provider_source_key: Some(source.into()),
+            }));
+        }
+    }
+    Ok(None)
 }
 
 fn hydrate_open_handle(
@@ -499,6 +559,7 @@ pub(super) fn event_record_for_jsonl(
     }
 
     let mut event = event.clone();
+    super::provenance::retain_claude_text_identity(&mut event);
     event.text = None;
     let metadata = event
         .metadata

@@ -44,13 +44,12 @@ fn retired_commands_and_delivery_flags_are_not_callable() {
 }
 
 #[test]
-fn all_six_operations_require_managed_identity_before_storage_or_transport() {
+fn all_five_operations_require_managed_identity_before_storage_or_transport() {
     let home = TempDir::new().unwrap();
     for args in [
         vec!["message", "list"],
         vec!["message", "send", "Peer", "info"],
         vec!["message", "followup", "Peer", "task"],
-        vec!["message", "receive"],
         vec![
             "message",
             "reply",
@@ -73,9 +72,11 @@ fn all_six_operations_require_managed_identity_before_storage_or_transport() {
 }
 
 #[test]
-fn receive_bounds_and_exact_recipient_are_enforced_before_transport() {
+fn retired_commands_and_exact_recipient_are_rejected_before_transport() {
     let home = TempDir::new().unwrap();
     for args in [
+        vec!["message", "receive"],
+        vec!["message", "wait"],
         vec!["message", "receive", "--limit", "0"],
         vec!["message", "receive", "--limit", "101"],
         vec!["message", "receive", "--timeout-ms", "60001"],
@@ -90,4 +91,5 @@ fn receive_bounds_and_exact_recipient_are_enforced_before_transport() {
             "invalid input reached authentication: {args:?}"
         );
     }
+    assert!(home.path().read_dir().unwrap().next().is_none());
 }

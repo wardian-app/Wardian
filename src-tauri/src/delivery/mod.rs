@@ -1,3 +1,4 @@
+pub(crate) mod claude_mod;
 pub mod codex_composer;
 pub(crate) mod codex_menu;
 pub mod codex_shared;

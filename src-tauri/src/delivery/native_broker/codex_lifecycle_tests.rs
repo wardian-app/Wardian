@@ -8,6 +8,29 @@ use wardian_core::conversation_lease::{
     acquire_lease, release_lease_owner_persisted, ConversationLease, ConversationLeaseOwner,
 };
 
+#[cfg(windows)]
+impl NativeDeliveryBroker {
+    pub(crate) async fn install_stop_test_owner(
+        &self,
+        agent_id: &str,
+        generation: u64,
+        owner: Arc<crate::delivery::codex_shared::CodexSharedOwner>,
+    ) {
+        let (tx, _rx) = mpsc::channel(1);
+        self.sessions.lock().await.insert(
+            agent_id.to_owned(),
+            NativeSessionHandle {
+                generation,
+                provider: "codex".into(),
+                capabilities: NativeTransportCapabilities::degraded("codex", "codex_app_server_ws"),
+                tx,
+                shared_codex: Some(owner),
+                stopped: None,
+            },
+        );
+    }
+}
+
 fn spec(generation: u64) -> NativeSessionSpec {
     NativeSessionSpec {
         target_agent_id: "agent".into(),
@@ -21,6 +44,50 @@ fn spec(generation: u64) -> NativeSessionSpec {
             ..Default::default()
         },
     }
+}
+
+#[tokio::test]
+async fn captured_stop_rejects_new_preparations_until_its_owner_gate_is_released() {
+    let broker = Arc::new(NativeDeliveryBroker::new());
+    let captured = broker.capture_codex_stop("agent", Some(7)).await.unwrap();
+    assert!(broker
+        .codex_creations
+        .register("agent", 8)
+        .unwrap_err()
+        .contains("stopping"));
+    assert!(broker.codex_creations.register("other", 8).is_ok());
+    drop(captured);
+    assert!(broker.codex_creations.register("agent", 8).is_ok());
+}
+
+#[tokio::test]
+async fn cancelling_capture_while_waiting_for_gate_releases_stop_admission() {
+    let broker = Arc::new(NativeDeliveryBroker::new());
+    let gate = broker.owner_gate("agent").await.lock_owned().await;
+    let old_request = broker.codex_creations.register("agent", 7).unwrap();
+    let capture = {
+        let broker = broker.clone();
+        tokio::spawn(async move { broker.capture_codex_stop("agent", Some(7)).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !broker
+            .codex_creations
+            .stopping
+            .lock()
+            .unwrap()
+            .contains_key("agent")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(old_request.is_cancelled());
+    assert!(broker.codex_creations.register("agent", 8).is_err());
+    capture.abort();
+    assert!(matches!(capture.await, Err(error) if error.is_cancelled()));
+    assert!(broker.codex_creations.register("agent", 8).is_ok());
+    drop(gate);
 }
 
 fn pause_creation(broker: &NativeDeliveryBroker, generation: u64) -> Arc<CodexCreationTestBarrier> {

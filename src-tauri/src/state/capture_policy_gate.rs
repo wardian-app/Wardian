@@ -6,9 +6,10 @@
 //! a restart each restored agent schedules its own sync, so the boundary could
 //! sit in that queue for minutes while the UI showed nothing.
 //!
-//! Background captures therefore never park in the queue. They poll with
-//! `try_lock` and stand aside while a lifecycle boundary is registered, so a
-//! boundary waits for at most the pass already running.
+//! Background captures therefore take turns in a separate FIFO admission
+//! queue, then poll the policy lock with `try_lock`. They stand aside while a
+//! lifecycle boundary is registered, so a boundary waits for at most the pass
+//! already running and a repeating capture cannot bypass an earlier waiter.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -19,6 +20,7 @@ const BACKGROUND_RETRY: Duration = Duration::from_millis(50);
 #[derive(Default)]
 pub struct CapturePolicyGate {
     lock: Mutex<()>,
+    background_turn: Mutex<()>,
     lifecycle_boundaries: AtomicUsize,
 }
 
@@ -38,6 +40,12 @@ impl Drop for LifecycleBoundary<'_> {
 }
 
 impl CapturePolicyGate {
+    /// Optimistic recent-header admission must stand aside for a registered
+    /// lifecycle boundary without waiting for older archive IO.
+    pub(crate) fn background_admission_open(&self) -> bool {
+        self.lifecycle_boundaries.load(Ordering::SeqCst) == 0
+    }
+
     /// Queues behind the running holder and any earlier queued caller. Policy
     /// transitions and lifecycle boundaries use this lane.
     pub async fn lock(&self) -> MutexGuard<'_, ()> {
@@ -55,8 +63,13 @@ impl CapturePolicyGate {
     }
 
     /// Acquires the gate for best-effort capture. Yields to any registered
-    /// lifecycle boundary and to any caller queued in [`Self::lock`].
+    /// lifecycle boundary and to any caller queued in [`Self::lock`]. Background
+    /// callers wait FIFO without joining the policy queue ahead of a boundary.
     pub async fn lock_background(&self) -> MutexGuard<'_, ()> {
+        // Keep this turn until admission, including across retry sleeps. A
+        // worker starting its next bounded pass must queue behind existing
+        // waiters instead of winning every gap before their timers wake.
+        let _turn = self.background_turn.lock().await;
         loop {
             if self.lifecycle_boundaries.load(Ordering::SeqCst) == 0 {
                 if let Ok(guard) = self.lock.try_lock() {
@@ -135,6 +148,53 @@ mod tests {
 
         drop(registration);
         let _guard = waiting.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_capture_waiter_precedes_a_repeating_capture() {
+        let gate = CapturePolicyGate::default();
+        let saved_pass = gate.lock_background().await;
+        let mut live_capture = std::pin::pin!(gate.lock_background());
+        assert!(tokio::time::timeout(Duration::ZERO, &mut live_capture)
+            .await
+            .is_err());
+
+        drop(saved_pass);
+        let mut next_saved_pass = std::pin::pin!(gate.lock_background());
+        tokio::select! {
+            biased;
+            _ = &mut next_saved_pass => panic!("a repeating saved capture bypassed the waiting live capture"),
+            guard = &mut live_capture => drop(guard),
+        }
+        let _guard = next_saved_pass.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_background_waiter_releases_its_turn() {
+        let gate = Arc::new(CapturePolicyGate::default());
+        let saved_pass = gate.lock_background().await;
+        let first = {
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                let _guard = gate.lock_background().await;
+            })
+        };
+        settle().await;
+        let next = {
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                let _guard = gate.lock_background().await;
+            })
+        };
+        settle().await;
+
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        drop(saved_pass);
+        tokio::time::timeout(Duration::from_secs(1), next)
+            .await
+            .expect("cancelled admission must not strand later background captures")
+            .unwrap();
     }
 
     #[tokio::test(start_paused = true)]

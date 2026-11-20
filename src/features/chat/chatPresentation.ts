@@ -290,8 +290,10 @@ export function compactPath(path: string): string {
 export function previewContent(content: string): string {
   const lines = content.split(/\r\n|\r|\n/);
   const linePreview = lines.slice(0, 6).join("\n");
-  const charPreview = linePreview.slice(0, 900);
-  return `${charPreview}\n\nOutput collapsed; show output to inspect all lines.`;
+  const bounded = linePreview.slice(0, 900);
+  const charPreview = linePreview.length > 900 && !/\s/u.test(linePreview[900])
+    ? bounded.replace(/\S+$/u, "") : bounded;
+  return `${charPreview.trimEnd()}\n\nOutput collapsed; show output to inspect all lines.`;
 }
 
 export function compactTerminalPreview(content: string): string {
@@ -335,10 +337,11 @@ export function workGroupDurationLabel(entries: readonly PresentedWorkEntry[]): 
 }
 
 export function workGroupTitleFromEntries(entries: PresentedWorkEntry[]): string {
-  if (entries.some((entry) => entry.primary_event.kind === "error" || entry.primary_event.status === "failed")) {
+  const events = entries.flatMap((entry) => [entry.primary_event, ...entry.merged_result_events]);
+  if (events.some((event) => event.kind === "error" || event.status === "failed" || event.status === "cancelled" || (typeof event.exit_code === "number" && event.exit_code !== 0))) {
     return "Work log with error";
   }
-  if (entries.some((entry) => entry.primary_event.status === "action_required")) return "Work log needs attention";
+  if (events.some((event) => event.status === "action_required")) return "Work log needs attention";
   return "Work log";
 }
 
@@ -392,7 +395,7 @@ export function sortTranscriptEvents(events: AgentChatEvent[]): AgentChatEvent[]
 }
 
 /**
- * A tool call with no command, no text, and no recognizable identity is a
+ * A tool call with no command, text, input, or recognizable identity is a
  * provider keepalive rather than work worth a row. Actionable approvals and
  * explicit failures remain visible even when their provider payload is thin.
  * Status events only earn a row when they carry a failure or the synthetic
@@ -404,6 +407,7 @@ export function shouldShowChatEvent(event: AgentChatEvent): boolean {
     event.kind === "tool_call" &&
     !event.command?.trim() &&
     !event.text?.trim() &&
+    !stringMetadata(event.metadata, "tool_input_text") &&
     !hasMeaningfulToolIdentity(event) &&
     event.status !== "action_required" &&
     event.status !== "failed" &&

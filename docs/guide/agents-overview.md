@@ -12,6 +12,8 @@ Press `Ctrl+P` / `Cmd+P`, select a pane's **+** button, or use the empty-pane Ho
 
 The right roster controls which agents auxiliary tools target. It does not filter Agents automatically. Use **Filter agents** in the surface to narrow the visible cards by agent name, description, class, provider, or workspace.
 
+Selecting a roster row while Agents is active immediately centers that agent's card in the Agents viewport. The surrounding Workbench pane keeps its scroll position.
+
 ### Remember an Agent's Purpose
 
 Select one agent, open **Agent Configuration** from the left rail, and add an
@@ -30,6 +32,12 @@ are still restoring. Configuration saves and lifecycle actions for such an
 agent wait for its restoration to finish. Once a save succeeds, later resume
 actions use the saved settings, including the choice to start a fresh provider
 conversation. This also applies to paused agents.
+
+If startup finds an active automation run using an agent's provider session, it
+keeps the agent visible as **Headless** until that exact run releases its
+conversation lease. Wardian then makes one guarded restore attempt when the
+saved agent is still on and unchanged. If ownership changes or cannot be
+verified, the agent stays Headless until a later app restart or manual action.
 
 Interactive terminals use the same color capabilities when Wardian is opened
 manually or by automation. The first visible terminal fits an unowned session
@@ -58,6 +66,12 @@ The roster's explicit **Open** and **Open to Side** controls remain terminal
 actions: they open or focus Agent Session tabs instead of changing the
 contextual Agents destination.
 
+Selecting an Off agent in the roster reveals its card in Agents without
+resuming it. Other Off cards stay hidden. The card keeps your configured
+Terminal or Chat mode; use its mode toggle to read Saved Chat. Reading that
+history keeps the agent Off and defers provider model discovery until an
+explicit model-selection action.
+
 ## Choose a Layout Mode
 
 The surface header provides three modes:
@@ -77,6 +91,33 @@ Each card can show either:
 
 Chat messages and activity rows share a centered, readable transcript column that
 expands fluidly on narrow surfaces.
+
+Qualified saved Codex and Claude turns show one collapsed work summary followed
+by the final answer, in both desktop and Remote Chat. Open the summary to see
+ordered steps and muted narration, then **Show output** on a step to inspect
+its input and retained output. JSON is formatted only inside that detail.
+Long output stays in a bounded scrolling area; **Earlier output not shown**
+marks a clipped tail. Counts marked **at least** are incomplete. Older history,
+unproven turn membership, other providers, and native previews retain the
+existing Work log presentation.
+
+Codex custom `exec` calls appear as work steps even when their input is code
+rather than a shell command. Open **Show output** (or **Show full details** in
+legacy Work logs) on the step to inspect
+the original input alongside the tool's output.
+
+Chat can stay open before the first turn. Readable messages appear automatically
+as history becomes available, including when a large source record is skipped.
+The history status describes capture progress while available messages remain readable.
+
+Chat keeps saved messages readable when provider-log capture pauses. A replaced,
+truncated, or rewritten log shows the specific reason in the transcript. A
+replacement cannot inherit the old log's privacy boundaries automatically, so
+its existing history stays unavailable until source ownership and policy can be
+verified or an operator explicitly adopts a fixed interval into the saved
+archive. [Scoped archive adoption](./cli.md) preserves the native capture stop
+and earlier privacy boundaries. Collapsed message and output previews end at a word boundary; open
+full details to read the remaining text.
 
 Use the **Terminal** / **Chat** button in the card header for a temporary per-agent override. The default comes from **Settings > Agents > Agent card display**. Unsent Chat text stays with that agent when you switch modes.
 

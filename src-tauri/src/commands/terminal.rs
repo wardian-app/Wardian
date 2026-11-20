@@ -309,8 +309,8 @@ pub async fn submit_prompt_to_agent(
     input_mode: Option<wardian_core::control::MessageInputMode>,
     state: State<'_, AppState>,
     app: AppHandle,
-) -> Result<wardian_core::control::DeliveryDetail, String> {
-    let detail = crate::control::deliver_prompt_to_agent(
+) -> Result<wardian_core::models::chat::ChatPromptDeliveryDetail, String> {
+    let detail = crate::control::deliver_prompt_to_agent_with_chat_receipt(
         Some(&app),
         &state,
         &session_id,
@@ -320,14 +320,8 @@ pub async fn submit_prompt_to_agent(
     .await
     .map_err(|error| error.to_string())?;
 
-    if let Err(error) =
-        crate::commands::chat::archive_agent_chat_events_for_state(state.inner(), &session_id).await
-    {
-        crate::manager::log_debug(&format!(
-            "[WARDIAN] conversation archive prompt sync failed for {session_id}: {error}"
-        ));
-    }
-
+    // The existing telemetry/restore owner captures provider output. A normal
+    // Chat send must not wait for its native backlog merely to obtain a receipt.
     Ok(detail)
 }
 

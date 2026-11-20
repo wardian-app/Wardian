@@ -37,6 +37,7 @@ export function deadCodeFindings(
 export function splitCfgGated(findings: Finding[], analyses: SourceAnalysis[]): { kept: Finding[]; gated: Finding[] };
 export function prepareCopyRoot(targetDirectory: string, hash: string): string;
 export function pathInsideCopy(copyRoot: string, file: string): string | undefined;
+export function deadCodeCargoEnv(env: NodeJS.ProcessEnv, platform?: NodeJS.Platform): NodeJS.ProcessEnv;
 export function unreachableItems(
   libraryFiles: Map<string, SourceAnalysis>,
   allFiles: Map<string, SourceAnalysis>,

@@ -30,6 +30,8 @@ pub enum TerminalBrokerError {
     RuntimeUnavailable,
     ActorClosed,
     InvalidIdentity,
+    ConversationLeaseConflict,
+    ConversationLeaseAdmission(String),
     InvalidRequest(&'static str),
     PresentationNotFound,
     ConsumerNotFound,
@@ -53,6 +55,17 @@ impl fmt::Display for TerminalBrokerError {
 
 impl std::error::Error for TerminalBrokerError {}
 
+fn automated_input_rejected_before_write(error: &TerminalBrokerError) -> bool {
+    matches!(
+        error,
+        TerminalBrokerError::SessionNotFound
+            | TerminalBrokerError::RuntimeUnavailable
+            | TerminalBrokerError::InvalidIdentity
+            | TerminalBrokerError::InvalidRequest(_)
+            | TerminalBrokerError::StaleRuntimeGeneration { .. }
+    )
+}
+
 /// A single terminal-input write and its completion receipt from the native
 /// PTY writer. A successful enqueue is not treated as a successful PTY write.
 pub struct NativeTerminalWriteRequest {
@@ -72,6 +85,125 @@ pub struct TerminalRuntimeHandles {
     resize: Arc<ResizeHandler>,
     ignore_scrollback_erase: bool,
     reset_parser_on_scrollback_erase: bool,
+}
+
+/// Admission guards stay attached to the actor message so cancellation of the
+/// awaiting caller cannot release lifecycle or lease ownership before bytes
+/// are committed to the native writer.
+pub(crate) struct AutomatedInputAdmissionFence {
+    _lifecycle: tokio::sync::OwnedMutexGuard<()>,
+    _provider_input_generation: crate::state::interactions::ProviderInputGenerationFence,
+    conversation_lease: AutomatedConversationLeaseAdmission,
+}
+
+#[derive(Clone)]
+pub(crate) struct AutomatedConversationLeaseAdmission {
+    agent_id: String,
+    provider: String,
+    resume_session: String,
+}
+
+impl AutomatedConversationLeaseAdmission {
+    pub(crate) fn new(
+        agent_id: impl Into<String>,
+        provider: impl Into<String>,
+        resume_session: impl Into<String>,
+    ) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            provider: provider.into(),
+            resume_session: resume_session.into(),
+        }
+    }
+
+    async fn acquire(
+        &self,
+    ) -> Result<
+        wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+        TerminalBrokerError,
+    > {
+        self.acquire_with_handoff_hook(|| {}).await
+    }
+
+    /// Observe reservation creation before its async handoff to the writer.
+    pub(crate) async fn acquire_with_handoff_hook<F>(
+        &self,
+        after_acquire: F,
+    ) -> Result<
+        wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+        TerminalBrokerError,
+    >
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let agent_id = self.agent_id.clone();
+        let provider = self.provider.clone();
+        let resume_session = self.resume_session.clone();
+        tokio::task::spawn_blocking(move || {
+            use wardian_core::conversation_lease::{
+                ConversationLease, ConversationLeaseAcquireOutcome, PersistedConversationLeaseGuard,
+            };
+
+            let now = chrono::Utc::now();
+            let now_rfc3339 = now.to_rfc3339();
+            let lease = ConversationLease {
+                agent_id,
+                provider,
+                resume_session,
+                owner_kind: "message_delivery".to_string(),
+                owner_id: format!("automatic-input:{}", uuid::Uuid::new_v4()),
+                acquisition_id: uuid::Uuid::new_v4().to_string(),
+                owner_node_id: None,
+                // This reservation fences lease admission without presenting
+                // a live terminal write as a headless provider execution.
+                mode: "lifecycle_transition".to_string(),
+                started_at: now_rfc3339.clone(),
+                heartbeat_at: now_rfc3339.clone(),
+                expires_at: (now + chrono::Duration::minutes(20)).to_rfc3339(),
+            };
+            match wardian_core::conversation_lease::try_acquire_lease(lease.clone(), &now_rfc3339) {
+                Ok(ConversationLeaseAcquireOutcome::Acquired) => {
+                    let guard = PersistedConversationLeaseGuard::new(&lease);
+                    after_acquire();
+                    Ok(guard)
+                }
+                Ok(ConversationLeaseAcquireOutcome::Conflict(_)) => {
+                    Err(TerminalBrokerError::ConversationLeaseConflict)
+                }
+                Err(error) => Err(TerminalBrokerError::ConversationLeaseAdmission(error)),
+            }
+        })
+        .await
+        .map_err(|error| {
+            TerminalBrokerError::ConversationLeaseAdmission(format!(
+                "lease admission worker failed: {error}"
+            ))
+        })?
+    }
+}
+
+async fn release_automated_input_lease(
+    lease: wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+) {
+    let _ = tokio::task::spawn_blocking(move || {
+        let mut lease = lease;
+        lease.release()
+    })
+    .await;
+}
+
+impl AutomatedInputAdmissionFence {
+    pub(crate) fn new(
+        lifecycle: tokio::sync::OwnedMutexGuard<()>,
+        provider_input_generation: crate::state::interactions::ProviderInputGenerationFence,
+        conversation_lease: AutomatedConversationLeaseAdmission,
+    ) -> Self {
+        Self {
+            _lifecycle: lifecycle,
+            _provider_input_generation: provider_input_generation,
+            conversation_lease,
+        }
+    }
 }
 
 impl TerminalRuntimeHandles {
@@ -1143,6 +1275,26 @@ impl TerminalSessionBroker {
         .await
     }
 
+    pub(crate) async fn send_automated_input(
+        &self,
+        session_id: &str,
+        runtime_generation: u64,
+        bytes: Vec<u8>,
+        admission: AutomatedInputAdmissionFence,
+    ) -> Result<(), TerminalBrokerError> {
+        let owned_session = session_id.to_string();
+        self.request(session_id, move |reply| {
+            TerminalSessionMessage::AutomatedInput {
+                session_id: owned_session,
+                runtime_generation,
+                bytes,
+                admission,
+                reply,
+            }
+        })
+        .await
+    }
+
     pub async fn read_legacy_output(
         &self,
         session_id: &str,
@@ -1725,6 +1877,13 @@ enum TerminalSessionMessage {
         bytes: Vec<u8>,
         reply: BrokerReply<()>,
     },
+    AutomatedInput {
+        session_id: String,
+        runtime_generation: u64,
+        bytes: Vec<u8>,
+        admission: AutomatedInputAdmissionFence,
+        reply: BrokerReply<()>,
+    },
     ReadCompatibilityOutput {
         max_bytes: Option<usize>,
         peek: bool,
@@ -2047,6 +2206,37 @@ impl TerminalSessionActor {
                     .send_composer_input(&session_id, runtime_generation, bytes)
                     .await;
                 let _ = reply.send(result);
+            }
+            TerminalSessionMessage::AutomatedInput {
+                session_id,
+                runtime_generation,
+                bytes,
+                admission,
+                reply,
+            } => {
+                let result = match admission.conversation_lease.acquire().await {
+                    Ok(mut lease) => {
+                        let result = self
+                            .send_automated_composer_input(
+                                &session_id,
+                                runtime_generation,
+                                bytes,
+                                &mut lease,
+                            )
+                            .await;
+                        if matches!(&result, Ok(()))
+                            || result
+                                .as_ref()
+                                .is_err_and(automated_input_rejected_before_write)
+                        {
+                            release_automated_input_lease(lease).await;
+                        }
+                        result
+                    }
+                    Err(error) => Err(error),
+                };
+                let _ = reply.send(result);
+                drop(admission);
             }
             TerminalSessionMessage::ReadCompatibilityOutput {
                 max_bytes,
@@ -2755,6 +2945,33 @@ impl TerminalSessionActor {
         runtime_generation: u64,
         bytes: Vec<u8>,
     ) -> Result<(), TerminalBrokerError> {
+        self.validate_composer_input(session_id, runtime_generation)?;
+        if !bytes.is_empty() {
+            self.send_runtime_input(bytes).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_automated_composer_input(
+        &mut self,
+        session_id: &str,
+        runtime_generation: u64,
+        bytes: Vec<u8>,
+        lease: &mut wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+    ) -> Result<(), TerminalBrokerError> {
+        self.validate_composer_input(session_id, runtime_generation)?;
+        if !bytes.is_empty() {
+            self.send_runtime_input_with_lease(bytes, Some(lease))
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn validate_composer_input(
+        &self,
+        session_id: &str,
+        runtime_generation: u64,
+    ) -> Result<(), TerminalBrokerError> {
         self.ensure_session(session_id)?;
         self.ensure_generation(runtime_generation)?;
         if self.runtime_state != TerminalRuntimeState::Live
@@ -2763,13 +2980,18 @@ impl TerminalSessionActor {
         {
             return Err(TerminalBrokerError::RuntimeUnavailable);
         }
-        if !bytes.is_empty() {
-            self.send_runtime_input(bytes).await?;
-        }
         Ok(())
     }
 
     async fn send_runtime_input(&self, bytes: Vec<u8>) -> Result<(), TerminalBrokerError> {
+        self.send_runtime_input_with_lease(bytes, None).await
+    }
+
+    async fn send_runtime_input_with_lease(
+        &self,
+        bytes: Vec<u8>,
+        lease: Option<&mut wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
+    ) -> Result<(), TerminalBrokerError> {
         let input_tx = self
             .runtime
             .as_ref()
@@ -2781,7 +3003,15 @@ impl TerminalSessionActor {
                 tokio::time::timeout(RUNTIME_INPUT_SEND_TIMEOUT, input_tx.send(bytes))
                     .await
                     .map_err(|_| TerminalBrokerError::RuntimeIo("input_timeout".to_string()))?
-                    .map_err(|_| TerminalBrokerError::RuntimeIo("input_channel_closed".to_string()))
+                    .map_err(|_| {
+                        TerminalBrokerError::RuntimeIo("input_channel_closed".to_string())
+                    })?;
+                if let Some(lease) = lease {
+                    // Once the native input queue accepts bytes, cancellation
+                    // can no longer prove that the provider saw no input.
+                    lease.retain_on_drop();
+                }
+                Ok(())
             }
             TerminalRuntimeInput::Acknowledged(input_tx) => {
                 let (completion_tx, completion_rx) = oneshot::channel();
@@ -2795,6 +3025,11 @@ impl TerminalSessionActor {
                 .await
                 .map_err(|_| TerminalBrokerError::RuntimeIo("input_timeout".to_string()))?
                 .map_err(|_| TerminalBrokerError::RuntimeIo("input_channel_closed".to_string()))?;
+                if let Some(lease) = lease {
+                    // Arm retention after queue admission and before awaiting
+                    // the writer receipt; the eventual write may be partial.
+                    lease.retain_on_drop();
+                }
                 tokio::time::timeout(RUNTIME_INPUT_WRITE_TIMEOUT, completion_rx)
                     .await
                     .map_err(|_| TerminalBrokerError::RuntimeIo("input_write_timeout".to_string()))?

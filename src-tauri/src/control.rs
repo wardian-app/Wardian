@@ -1,4 +1,8 @@
 mod agent_lifecycle;
+mod agent_spawn;
+mod archive_adoption;
+mod hold_release;
+mod operator;
 mod pi_startup;
 use pi_startup::pi_output_has_startup_ready_prompt;
 
@@ -12,8 +16,10 @@ pub(crate) use startup_readiness::{
 use crate::manager;
 pub(crate) mod agent_messaging;
 pub(crate) use agent_messaging::message_with_structured_reply_instruction;
+mod chat_prompt;
 mod codex_background;
 mod headless_delivery;
+mod message_delivery;
 use crate::remote::operations::inbox_list_control as list_inbox_control;
 use crate::state::conversation_archive::{
     effective_conversation_logging, ConversationArchiveContext,
@@ -23,7 +29,11 @@ use crate::utils::strip_ansi_controls;
 #[cfg(test)]
 use agent_messaging::bounded_headless_delivery_timeout;
 use agent_messaging::HeadlessMessageDeliveryRequest;
+pub(crate) use chat_prompt::{
+    deliver_prompt_to_agent_with_chat_receipt, deliver_remote_client_message,
+};
 use headless_delivery::deliver_headless_message;
+use message_delivery::deliver_message_to_target_with_delivery_options;
 use std::{
     fmt,
     path::PathBuf,
@@ -31,6 +41,10 @@ use std::{
     time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager};
+#[cfg(test)]
+pub(crate) use test_support::deliver_prompt_to_agent;
+#[cfg(test)]
+use test_support::{conversation_delivery_state_is_recordable, record_conversation_delivery};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentDoctorResponse, AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
@@ -214,6 +228,14 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             token,
             resource,
         } => agent_messaging::handle_controller(app, request, token, resource).await,
+        ControlRequest::RemoteClientPairingOffer { client_origin } => ok_json(
+            &crate::commands::remote::create_remote_client_pairing_offer(
+                app.clone(),
+                client_origin,
+            )
+            .await
+            .map_err(ControlError::request_failed)?,
+        ),
         ControlRequest::AgentMessaging { request, origin } => {
             agent_messaging::handle(app, request, origin).await
         }
@@ -391,79 +413,34 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             confirm_name,
             force,
         } => {
-            let uuid = resolve_target_uuid(app, &target)
-                .await
-                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
             let state = app.state::<AppState>();
+            let uuid = agent_spawn::resolve_removal_uuid(&state, &target)
+                .await?
+                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
             crate::commands::agent::delete_agent(uuid, confirm_name, force, state, app.clone())
                 .await
                 .map_err(ControlError::bad_request)?;
             ok_json(&OkResponse::new())
         }
 
-        ControlRequest::AgentRename { target, name } => {
-            let uuid = resolve_target_uuid(app, &target)
-                .await
-                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
-            crate::commands::agent::rename_agent(
-                uuid.clone(),
-                name,
-                app.state::<AppState>(),
-                app.clone(),
-            )
-            .await
-            .map_err(ControlError::bad_request)?;
-            let identity = live_agent_identity(app, &uuid).await?;
-            ok_json(&AgentUpdateResponse {
-                schema: wardian_core::control::CONTROL_SCHEMA,
-                ok: true,
-                agent: identity,
-                updated_fields: vec!["name".to_string()],
-                restart_required: false,
-                settings: None,
-            })
-        }
-
-        ControlRequest::AgentRestart { target } | ControlRequest::AgentResume { target } => {
-            agent_lifecycle::resume(app, &target).await
-        }
-        ControlRequest::AgentNewSession { target } => {
-            agent_lifecycle::new_session(app, &target).await
-        }
-        ControlRequest::AgentPause { target } => agent_lifecycle::pause(app, &target).await,
+        request @ (ControlRequest::AgentRename { .. }
+        | ControlRequest::AgentReleaseHold { .. }
+        | ControlRequest::AgentAdoptArchive { .. }
+        | ControlRequest::AgentRestart { .. }
+        | ControlRequest::AgentResume { .. }
+        | ControlRequest::AgentNewSession { .. }
+        | ControlRequest::AgentPause { .. }) => operator::dispatch(request, app).await,
 
         ControlRequest::AgentModels {
             provider,
             force_refresh,
         } => ok_json(&crate::providers::models::model_catalog(&provider, force_refresh).await),
 
-        ControlRequest::AgentSpawn {
-            provider,
-            class,
-            name,
-            workspace,
-            model,
-            reasoning_effort,
-        } => {
-            use crate::commands::agent::spawn_agent;
-            let provider = crate::commands::agent::canonical_agent_provider_name(&provider)
-                .map_err(ControlError::bad_request)?;
-            let class = crate::commands::agent::canonical_agent_class_name(&class)
-                .map_err(ControlError::not_found)?;
-            let req = build_spawn_agent_request(
-                provider,
-                class,
-                name,
-                workspace,
-                model,
-                reasoning_effort,
-            )
-            .map_err(ControlError::bad_request)?;
-            let config = spawn_agent(req, app.state::<AppState>(), app.clone())
-                .await
-                .map_err(ControlError::request_failed)?;
-            let identity = agent_config_to_identity(&config, app).await;
-            ok_json(&AgentResponse::new(identity))
+        request @ (ControlRequest::AgentSpawn { .. }
+        | ControlRequest::AgentSpawnAsync { .. }
+        | ControlRequest::AgentSpawnOperationGet { .. }
+        | ControlRequest::AgentSpawnOperationWait { .. }) => {
+            agent_spawn::dispatch(request, app).await
         }
 
         ControlRequest::AgentUpdate {
@@ -1530,36 +1507,6 @@ async fn deliver_message_to_target(
     .await
 }
 
-pub(crate) async fn deliver_prompt_to_agent(
-    app: Option<&AppHandle>,
-    state: &AppState,
-    target: &str,
-    prompt: &str,
-    input_mode: MessageInputMode,
-) -> Result<DeliveryDetail, ControlError> {
-    let delivery = deliver_message_to_target_with_headless_timeout(
-        app,
-        state,
-        target,
-        prompt,
-        None,
-        input_mode,
-        QueuePolicy::QueueIfBusy,
-        None,
-        None,
-        false,
-        crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
-    )
-    .await?;
-
-    record_conversation_delivery(state, &delivery, prompt, None).await;
-    delivery.into_iter().next().ok_or_else(|| {
-        ControlError::request_failed(format!(
-            "prompt delivery produced no result for target: {target}"
-        ))
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn deliver_message_to_target_with_headless_timeout(
     app: Option<&AppHandle>,
@@ -1588,345 +1535,10 @@ async fn deliver_message_to_target_with_headless_timeout(
         headless_timeout,
         None,
         None,
+        None,
+        None,
     )
     .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn deliver_message_to_target_with_delivery_options(
-    app: Option<&AppHandle>,
-    state: &AppState,
-    target: &str,
-    message: &str,
-    thread: Option<&str>,
-    input_mode: MessageInputMode,
-    queue_policy: QueuePolicy,
-    approval_action: Option<&ApprovalAction>,
-    origin: Option<&MessageOrigin>,
-    scope_all: bool,
-    headless_timeout: Duration,
-    orchestration: Option<&wardian_core::control::OrchestrationDeliveryOptions>,
-    parent_interaction_id: Option<&str>,
-) -> Result<Vec<DeliveryDetail>, ControlError> {
-    validate_send_message_options(target, thread, input_mode)?;
-    let sender_session_id = origin
-        .as_ref()
-        .map(|MessageOrigin::WardianAgent { session_id }| session_id.as_str());
-    let session_ids =
-        resolve_send_targets_scoped(state, target, sender_session_id, scope_all).await;
-    if session_ids.is_empty() {
-        return Err(ControlError::not_found(format!(
-            "no agents matched target: {target}"
-        )));
-    }
-
-    let target_infos = delivery_target_infos(state, &session_ids).await?;
-    let mut delivered = 0usize;
-    let mut failures = Vec::new();
-    let mut delivery = Vec::with_capacity(session_ids.len());
-    for initial_info in target_infos {
-        let target_lifecycle_guard = match state.try_lock_agent_lifecycle(&initial_info.uuid).await
-        {
-            Some(guard) => guard,
-            None => state.lock_agent_lifecycle(&initial_info.uuid).await,
-        };
-        let info = delivery_target_info(state, &initial_info.uuid).await?;
-        if !same_delivery_target_incarnation(&initial_info, &info) {
-            failures.push(format!("{}: target_replaced", initial_info.uuid));
-            delivery.push(rejected_delivery_detail(
-                initial_info,
-                "target_replaced",
-                input_mode,
-                queue_policy,
-            ));
-            continue;
-        }
-        let outbound_message = message_with_origin(
-            state,
-            message,
-            input_mode,
-            origin,
-            info.status == "action_required",
-        )
-        .await;
-        let sender_session_id =
-            origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
-        let live_surface_available = state
-            .terminal_sessions
-            .broker_state(&info.uuid)
-            .await
-            .is_ok();
-        let route = if input_mode == MessageInputMode::ApprovalAction
-            || matches!(queue_policy, QueuePolicy::MailboxOnly)
-        {
-            decide_delivery_route(&info.status, input_mode, queue_policy, approval_action)
-        } else if should_route_native_without_live_surface(
-            &info.provider,
-            input_mode,
-            queue_policy,
-            live_surface_available,
-        ) {
-            DeliveryRoute::Headless
-        } else if !status_uses_headless_delivery(&info.status)
-            && provider_input_has_known_not_ready_state(state, &info.uuid).await
-            && !provider_idle_status_allows_live_delivery(&info, queue_policy)
-        {
-            match queue_policy {
-                QueuePolicy::QueueIfBusy => DeliveryRoute::Reject {
-                    failure: "provider_input_not_ready",
-                },
-                QueuePolicy::LiveOnly => DeliveryRoute::Reject {
-                    failure: "not_input_ready",
-                },
-                QueuePolicy::MailboxOnly => unreachable!("handled above"),
-            }
-        } else if active_conversation_lease_for_delivery(&info) {
-            match queue_policy {
-                QueuePolicy::QueueIfBusy => DeliveryRoute::Reject {
-                    failure: "conversation_leased",
-                },
-                QueuePolicy::LiveOnly => DeliveryRoute::Reject {
-                    failure: "conversation_leased",
-                },
-                QueuePolicy::MailboxOnly => unreachable!("handled above"),
-            }
-        } else {
-            decide_delivery_route(&info.status, input_mode, queue_policy, approval_action)
-        };
-        let existing_native_interaction_id = if matches!(route, DeliveryRoute::Headless)
-            && input_mode == MessageInputMode::Message
-            && crate::delivery::native_session::NativeProviderProtocol::for_provider(&info.provider)
-                .is_some()
-        {
-            orchestration
-                .and_then(|options| options.idempotency_key.as_deref())
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-                .map(|key| {
-                    wardian_core::db::native_delivery_by_idempotency(
-                        sender_session_id.as_deref(),
-                        &info.uuid,
-                        orchestration
-                            .map(|options| options.operation)
-                            .unwrap_or_default(),
-                        key,
-                    )
-                    .map_err(|error| ControlError::request_failed(error.to_string()))
-                    .map(|record| record.map(|record| record.envelope.interaction_id))
-                })
-                .transpose()?
-                .flatten()
-        } else {
-            None
-        };
-        let interaction_id = if let Some(interaction_id) = existing_native_interaction_id {
-            interaction_id
-        } else {
-            state
-                .interactions
-                .create_message_durable(
-                    sender_session_id,
-                    vec![info.uuid.clone()],
-                    InteractionBodyRef::Inline {
-                        body: outbound_message.clone(),
-                    },
-                )
-                .await
-                .map_err(ControlError::request_failed)?
-                .id
-        };
-        if let Some(app) = app {
-            let _ = app.emit("pair-activity-changed", ());
-        }
-        match route {
-            DeliveryRoute::Reject { failure } => {
-                failures.push(format!("{}: {failure}", info.uuid));
-                let detail = rejected_delivery_detail(info, failure, input_mode, queue_policy);
-                persist_interaction_delivery_attempt(
-                    state,
-                    &interaction_id,
-                    &detail.uuid,
-                    DeliveryTransportKind::LiveSurface,
-                    &detail,
-                )
-                .await;
-                record_delivery_attempt(state, &detail).await;
-                delivery.push(detail);
-            }
-            DeliveryRoute::Live => {
-                let target_uuid = info.uuid.clone();
-                let result = crate::delivery::submit_live_surface_prompt(
-                    app,
-                    state,
-                    crate::delivery::LiveSurfacePromptRequest {
-                        session_id: target_uuid.clone(),
-                        prompt: outbound_message,
-                        interaction_id: Some(interaction_id.clone()),
-                        input_mode,
-                        queue_policy,
-                        approval_action: approval_action.cloned(),
-                        origin: origin.cloned(),
-                        runtime_state: "live_pty_available",
-                        mark_prompt_started: true,
-                        require_provider_turn_receipt: true,
-                        payload_sent_detail: None,
-                        delivery_message_id: None,
-                    },
-                )
-                .await;
-                match result {
-                    Ok(result) => {
-                        delivered += 1;
-                        delivery.push(result.detail);
-                    }
-                    Err(error) => {
-                        let error_message = error.to_string();
-                        failures.push(format!("{}: {error_message}", info.uuid));
-                        if let Some(detail) = error.detail {
-                            delivery.push(detail);
-                        } else {
-                            let mut detail = failed_delivery_detail(
-                                info,
-                                "live_pty_available",
-                                "send_failed",
-                                error_message,
-                                input_mode,
-                                queue_policy,
-                            );
-                            detail.message_id = Some(interaction_id.clone());
-                            persist_interaction_delivery_attempt(
-                                state,
-                                &interaction_id,
-                                &target_uuid,
-                                DeliveryTransportKind::LiveSurface,
-                                &detail,
-                            )
-                            .await;
-                            record_delivery_attempt(state, &detail).await;
-                            delivery.push(detail);
-                        }
-                    }
-                }
-            }
-            DeliveryRoute::Headless => {
-                if input_mode == MessageInputMode::Message
-                    && info.provider != "codex"
-                    && crate::delivery::native_session::NativeProviderProtocol::for_provider(
-                        &info.provider,
-                    )
-                    .is_some()
-                {
-                    match deliver_native_message(
-                        state,
-                        &info,
-                        &interaction_id,
-                        &outbound_message,
-                        input_mode,
-                        queue_policy,
-                        origin,
-                        orchestration,
-                        parent_interaction_id,
-                    )
-                    .await
-                    {
-                        Ok(detail) => {
-                            delivered += 1;
-                            record_delivery_attempt(state, &detail).await;
-                            delivery.push(detail);
-                            continue;
-                        }
-                        Err(failure) if failure.provider_boundary_crossed => {
-                            failures.push(format!("{}: {}", info.uuid, failure.message));
-                            let detail = native_delivery_failure_detail(
-                                &info,
-                                &interaction_id,
-                                input_mode,
-                                queue_policy,
-                                &failure,
-                            );
-                            persist_interaction_delivery_attempt(
-                                state,
-                                &interaction_id,
-                                &info.uuid,
-                                DeliveryTransportKind::NativeProvider,
-                                &detail,
-                            )
-                            .await;
-                            record_delivery_attempt(state, &detail).await;
-                            delivery.push(detail);
-                            continue;
-                        }
-                        Err(_) => {
-                            // Native negotiation/startup failed before the
-                            // provider message boundary. The explicit reduced
-                            // headless fallback remains safe here.
-                        }
-                    }
-                }
-                match deliver_headless_message(
-                    state,
-                    HeadlessMessageDeliveryRequest {
-                        app,
-                        info: &info,
-                        interaction_id: &interaction_id,
-                        prompt: &outbound_message,
-                        input_mode,
-                        queue_policy,
-                        origin,
-                        timeout: headless_timeout,
-                        lifecycle_guard: Some(target_lifecycle_guard),
-                        orchestration,
-                        parent_interaction_id,
-                    },
-                )
-                .await
-                {
-                    HeadlessMessageDelivery::Completed(detail) => {
-                        if detail.delivery_state == "provider_applied" {
-                            delivered += 1;
-                        } else {
-                            failures.push(format!(
-                                "{}: {}",
-                                detail.uuid,
-                                detail
-                                    .error
-                                    .as_ref()
-                                    .map(|error| error.message.as_str())
-                                    .unwrap_or("headless delivery failed")
-                            ));
-                        }
-                        delivery.push(*detail);
-                    }
-                    HeadlessMessageDelivery::Busy(current_info) => {
-                        failures.push(format!("{}: conversation_leased", current_info.uuid));
-                        delivery.push(rejected_delivery_detail(
-                            *current_info,
-                            "conversation_leased",
-                            input_mode,
-                            queue_policy,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    if delivered == 0 {
-        return Err(ControlError::request_failed(format!(
-            "message was not delivered to any matched agents: {}",
-            failures.join("; ")
-        ))
-        .with_details(delivery_details_json(&delivery)));
-    }
-    if !failures.is_empty() {
-        return Err(ControlError::request_failed(format!(
-            "message delivery failed for {} of {} matched agents: {}",
-            failures.len(),
-            session_ids.len(),
-            failures.join("; ")
-        ))
-        .with_details(delivery_details_json(&delivery)));
-    }
-    Ok(delivery)
 }
 
 async fn native_capability_binding(
@@ -2006,6 +1618,7 @@ async fn deliver_native_message(
     origin: Option<&MessageOrigin>,
     orchestration: Option<&wardian_core::control::OrchestrationDeliveryOptions>,
     parent_interaction_id: Option<&str>,
+    client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
 ) -> Result<DeliveryDetail, crate::delivery::native_broker::NativeBrokerError> {
     let latest_binding = wardian_core::db::latest_native_session_binding(&info.uuid)
         .map_err(|error| crate::delivery::native_broker::NativeBrokerError {
@@ -2065,7 +1678,7 @@ async fn deliver_native_message(
         .await?;
     let receipt = state
         .native_delivery
-        .dispatch(
+        .dispatch_with_client_authority(
             crate::delivery::native_broker::NativeSessionSpec {
                 target_agent_id: info.uuid.clone(),
                 provider: info.provider.clone(),
@@ -2074,6 +1687,7 @@ async fn deliver_native_message(
                 config: info.config.clone(),
             },
             record,
+            client_send_authority,
         )
         .await?;
     let accepted_only = info.provider == "codex"
@@ -2177,10 +1791,16 @@ fn native_delivery_failure_detail(
         }),
         profile: Some(info.provider.clone()),
         error: Some(DeliveryErrorDetail {
-            code: serde_json::to_value(&failure.code)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_string))
-                .unwrap_or_else(|| "native_delivery_failed".to_string()),
+            code: crate::remote::client_messages::authority_failure_code_in_message(
+                &failure.message,
+            )
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| {
+                serde_json::to_value(&failure.code)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "native_delivery_failed".to_string())
+            }),
             message: failure.message.clone(),
         }),
     }
@@ -2335,7 +1955,7 @@ where
     tx.send_bytes(bytes).await.map_err(|error| {
         crate::utils::delivery_transaction::TerminalDeliveryError::terminal_state_unknown(
             "approval_send_failed",
-            format!("Failed to send approval action: {error}"),
+            format!("Failed to send approval action: {}", error.message),
         )
     })?;
     Ok(
@@ -3698,95 +3318,6 @@ async fn record_delivery_attempt(state: &AppState, detail: &DeliveryDetail) {
     }
 }
 
-async fn record_conversation_delivery(
-    state: &AppState,
-    delivery: &[DeliveryDetail],
-    message: &str,
-    origin: Option<&MessageOrigin>,
-) {
-    if message.trim().is_empty() {
-        return;
-    }
-
-    let global_conversation_logging = crate::utils::shell::load_shell_settings()
-        .unwrap_or_default()
-        .conversation_logging;
-    let sender_agent_id =
-        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.as_str());
-    let target_settings = {
-        let agents = state.agents.lock().await;
-        delivery
-            .iter()
-            .filter(|detail| conversation_delivery_state_is_recordable(&detail.delivery_state))
-            .filter_map(|detail| {
-                let agent = agents.get(&detail.uuid)?;
-                let config = agent.config.lock().ok()?;
-                let setting = config.conversation_logging;
-                let workspace = config
-                    .git_worktree_folder
-                    .clone()
-                    .unwrap_or_else(|| config.folder.clone());
-                let provider_session_ids = [
-                    config.resume_session.as_deref(),
-                    config.fresh_provider_session_id.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-                let log_path =
-                    agent.log_path.lock().ok().and_then(|path| {
-                        path.as_ref().map(|path| path.to_string_lossy().to_string())
-                    });
-                let provider_source_key = provider_session_ids
-                    .first()
-                    .map(|session| format!("{}:session:{session}", config.provider))
-                    .or_else(|| log_path.map(|path| format!("{}:source:{path}", config.provider)));
-                let context = ConversationArchiveContext {
-                    agent_id: detail.uuid.clone(),
-                    agent_name: if config.session_name.trim().is_empty() {
-                        detail.uuid.clone()
-                    } else {
-                        config.session_name.clone()
-                    },
-                    agent_class: config.agent_class.clone(),
-                    workspace,
-                    provider: config.provider.clone(),
-                    provider_session_ids,
-                    provider_source_key,
-                };
-                Some((context, setting))
-            })
-            .collect::<Vec<_>>()
-    };
-
-    for (context, agent_conversation_logging) in target_settings {
-        if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
-            != ConversationLoggingSetting::Enabled
-        {
-            continue;
-        }
-        let agent_id = context.agent_id.clone();
-        if let Err(error) = state
-            .conversation_archive
-            .append_delivered_input_with_context(context, message, sender_agent_id)
-        {
-            manager::log_debug(&format!(
-                "[WARDIAN] conversation archive delivery append failed for {agent_id}: {error}"
-            ));
-        }
-    }
-}
-
-fn conversation_delivery_state_is_recordable(delivery_state: &str) -> bool {
-    matches!(
-        delivery_state,
-        "submitted" | "submit_sent_unverified" | "provider_accepted" | "approval_submitted"
-    )
-}
-
 async fn persist_interaction_delivery_attempt(
     state: &AppState,
     interaction_id: &str,
@@ -3872,7 +3403,7 @@ pub(crate) fn spawn_agent_messaging_if_idle(app: &AppHandle, session_id: &str, s
 }
 
 pub(crate) fn spawn_agent_messaging_after_restore(app: &AppHandle, session_id: &str) {
-    agent_messaging::spawn_pending_tasks_when_ready(app, session_id, None);
+    agent_messaging::spawn_after_restore(app, session_id);
 }
 
 pub(crate) async fn dispatch_agent_messaging_from_status_observation(
@@ -3880,8 +3411,7 @@ pub(crate) async fn dispatch_agent_messaging_from_status_observation(
     state: &AppState,
     session_id: &str,
 ) {
-    let _ = agent_messaging::push_native_information(state, session_id).await;
-    let _ = agent_messaging::dispatch_pending_queue(app, state, session_id).await;
+    agent_messaging::dispatch_from_status_observation(app, state, session_id).await;
 }
 
 async fn agent_config_to_identity(
@@ -4127,7 +3657,7 @@ impl ControlError {
         }
     }
 
-    fn not_found(message: impl Into<String>) -> Self {
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self {
             code: "not_found",
             message: message.into(),
@@ -4143,7 +3673,7 @@ impl ControlError {
         }
     }
 
-    fn coded(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn coded(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -4168,7 +3698,7 @@ impl ControlError {
         self
     }
 
-    fn details(&self) -> Option<&serde_json::Value> {
+    pub(crate) fn details(&self) -> Option<&serde_json::Value> {
         self.details.as_ref()
     }
 }

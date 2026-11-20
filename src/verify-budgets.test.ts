@@ -110,6 +110,64 @@ describe('base-relative debt budget comparison', () => {
     const recoveryBase = recoveryManifest('^4.1.8', '^4.1.8', '3.4.13');
     const recoveryHead = recoveryManifest('^4.1.11', '^4.1.11', '3.4.16');
 
+    const currentSecurityManifest = (
+      vitest: unknown,
+      coverage: unknown,
+      undici: unknown,
+      eslint = '^10.9.1',
+    ) => JSON.stringify({
+      devDependencies: {
+        eslint,
+        'typescript-eslint': '^8.68.0',
+        vitest,
+        '@vitest/coverage-v8': coverage,
+      },
+      overrides: { undici },
+    });
+    const currentSecurityBase = currentSecurityManifest('^4.1.11', '^4.1.11', '7.29.1');
+    const currentSecurityHead = currentSecurityManifest('^4.1.12', '^4.1.12', '7.30.1');
+
+    it('allows the exact current audited Vitest, coverage, and undici transitions together', () => {
+      expect(changedLintPolicyFiles(['package.json'], {
+        base: currentSecurityBase,
+        head: currentSecurityHead,
+      })).toEqual([]);
+      expect(() => assertLintPolicyUnchanged(['package.json'], {
+        base: currentSecurityBase,
+        head: currentSecurityHead,
+      })).not.toThrow();
+      expect(() => assertDependencyParity(currentSecurityBase, currentSecurityHead)).not.toThrow();
+    });
+
+    it('rejects adjacent security pins and unrelated contract or lint policy changes', () => {
+      const adjacentSecurityPin = currentSecurityManifest('^4.1.13', '^4.1.12', '7.30.1');
+      expect(changedLintPolicyFiles(['package.json'], {
+        base: currentSecurityBase,
+        head: adjacentSecurityPin,
+      })).toEqual(['package.json']);
+      expect(() => assertLintPolicyUnchanged(['package.json'], {
+        base: currentSecurityBase,
+        head: adjacentSecurityPin,
+      })).toThrow('changes lint policy or dependencies');
+      expect(() => assertDependencyParity(currentSecurityBase, adjacentSecurityPin))
+        .toThrow('Debt budget gate cannot resolve base dependencies');
+
+      const unrelatedContractChange = currentSecurityManifest(
+        '^4.1.12', '^4.1.12', '7.30.1', '^10.9.2',
+      );
+      expect(changedLintPolicyFiles(['package.json'], {
+        base: currentSecurityBase,
+        head: unrelatedContractChange,
+      })).toEqual(['package.json']);
+      expect(() => assertLintPolicyUnchanged(['package.json'], {
+        base: currentSecurityBase,
+        head: unrelatedContractChange,
+      })).toThrow('changes lint policy or dependencies');
+      expect(() => assertDependencyParity(currentSecurityBase, unrelatedContractChange))
+        .toThrow('Debt budget gate cannot resolve base dependencies');
+      expect(changedLintPolicyFiles(['eslint.config.js'])).toEqual(['eslint.config.js']);
+    });
+
     for (const [description, head] of [
       ['Vitest and coverage', recoveryManifest('^4.1.11', '^4.1.11', '3.4.13')],
       ['DOMPurify', recoveryManifest('^4.1.8', '^4.1.8', '3.4.16')],
@@ -165,10 +223,47 @@ describe('base-relative debt budget comparison', () => {
       });
     }
 
+    const auditManifest = (
+      vite: unknown,
+      dompurify: unknown,
+      api: unknown = '2.11.0',
+      updater: unknown = '^2.10.1',
+    ) => JSON.stringify({
+      dependencies: { '@tauri-apps/api': api, '@tauri-apps/plugin-updater': updater },
+      devDependencies: { vite },
+      overrides: { vite, dompurify },
+    });
+    const auditBase = auditManifest('6.4.3', '3.4.16');
+    const auditHead = auditManifest('6.4.5', '3.4.17', '2.12.0', '2.14.0');
+
+    it('allows only the audited Vite, DOMPurify, and Tauri binding transitions', () => {
+      expect(changedLintPolicyFiles(['package.json'], { base: auditBase, head: auditHead })).toEqual([]);
+      expect(() => assertLintPolicyUnchanged(['package.json'], { base: auditBase, head: auditHead })).not.toThrow();
+      expect(() => assertDependencyParity(auditBase, auditHead)).not.toThrow();
+    });
+
+    for (const [description, head] of [
+      ['an unapproved Vite pin', auditManifest('6.4.6', '3.4.17')],
+      ['an unapproved DOMPurify pin', auditManifest('6.4.5', '3.4.18')],
+      ['an unapproved Tauri API patch', auditManifest('6.4.5', '3.4.17', '2.12.1', '2.14.0')],
+      ['an unapproved updater version', auditManifest('6.4.5', '3.4.17', '2.12.0', '2.14.1')],
+    ]) {
+      it(`rejects ${description} during audit recovery`, () => {
+        expect(changedLintPolicyFiles(['package.json'], { base: auditBase, head })).toEqual(['package.json']);
+        expect(() => assertDependencyParity(auditBase, head))
+          .toThrow('Debt budget gate cannot resolve base dependencies');
+      });
+    }
+
     it('rejects an unexpected starting pin and malformed manifest in both comparisons', () => {
       const unexpectedBase = securityManifest('5.0.8', '7.29.0');
       expect(changedLintPolicyFiles(['package.json'], { base: unexpectedBase, head: securityHead })).toEqual(['package.json']);
       expect(() => assertDependencyParity(unexpectedBase, securityHead))
+        .toThrow('Debt budget gate cannot resolve base dependencies');
+      const unexpectedTauriBase = auditManifest('6.4.3', '3.4.16', '2.11.1', '^2.10.1');
+      expect(changedLintPolicyFiles(['package.json'], { base: unexpectedTauriBase, head: auditHead }))
+        .toEqual(['package.json']);
+      expect(() => assertDependencyParity(unexpectedTauriBase, auditHead))
         .toThrow('Debt budget gate cannot resolve base dependencies');
       expect(changedLintPolicyFiles(['package.json'], { base: securityBase, head: '{ not json' })).toEqual(['package.json']);
       expect(() => assertDependencyParity(securityBase, '{ not json'))

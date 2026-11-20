@@ -6,8 +6,11 @@ import { gardenAgentStatusColor } from "./gardenStatus";
 import { resolveCssVar } from "./resolveColor";
 import { revealBetween } from "./gardenSpatialZoom";
 import { pointInCanvasViewport, type CanvasWorldRect } from "./canvasVisibility";
+import { districtCountLabel, districtLabel, districtSummaryLabel } from "./canvasLabels";
 
-export function DistrictLayer({ districts, labels, populations, bands, scale, selectedKey, theme, onSelect, onOpen, continuousZoom = false, viewport = null }: {
+export function DistrictLayer({ districts, labels, populations, bands, scale, selectedKey, theme, onSelect, onOpen, continuousZoom = false, viewport = null, visibleLabelIds }: {
+  /** Shared collision result; omission preserves standalone rendering. */
+  visibleLabelIds?: ReadonlySet<string>;
   viewport?: CanvasWorldRect | null;
   districts: ReadonlyMap<string, TerrainDistrict>;
   labels?: ReadonlyMap<string, string>;
@@ -35,12 +38,14 @@ export function DistrictLayer({ districts, labels, populations, bands, scale, se
       perfectDrawEnabled={false}
       strokeWidth={(selectedKey === `district:${id}` ? 3 : 1.5) / scale}
       onClick={() => onSelect(id)} onTap={() => onSelect(id)} onDblClick={() => onOpen(id)} />
-    {labelVisible && <Text x={district.origin.x - district.radius} y={district.origin.y - district.radius}
+    {labelVisible && (!visibleLabelIds || visibleLabelIds.has(districtLabel(id, district, scale, theme.labelSize).id)) && <Text x={district.origin.x - district.radius} y={district.origin.y - district.radius}
       width={district.radius * 2} align="center" text={labels?.get(id) ?? (id === "commons" ? "Commons" : id.replace(/^[^:]+:/, ""))}
+      height={theme.labelSize / scale} wrap="none" ellipsis
       fontSize={theme.labelSize / scale} fontFamily={theme.font} fill={theme.label}
       onClick={() => onSelect(id)} onTap={() => onSelect(id)} onDblClick={() => onOpen(id)} />}
-    {(habitat || continuousZoom) && population && labelVisible && summaryOpacity > 0 && <Text opacity={summaryOpacity} x={district.origin.x - 150 / scale} y={district.origin.y - district.radius + 20 / scale}
+    {(habitat || continuousZoom) && population && labelVisible && summaryOpacity > 0 && (!visibleLabelIds || visibleLabelIds.has(districtSummaryLabel(id, district, scale, theme.subLabelSize).id)) && <Text opacity={summaryOpacity} x={district.origin.x - 150 / scale} y={district.origin.y - district.radius + 20 / scale}
       width={300 / scale} align="center" text={population.summary} fontSize={theme.subLabelSize / scale}
+      height={theme.subLabelSize / scale} wrap="none" ellipsis
       fontFamily={theme.font} fill={theme.labelMuted}
       onClick={() => onSelect(id)} onTap={() => onSelect(id)} onDblClick={() => onOpen(id)} />}
     {habitat && population?.clustered && clusterOpacity > 0 && pointInCanvasViewport(district.origin, viewport, 28 / scale) && <Group opacity={clusterOpacity} name="district-population" id={id} x={district.origin.x} y={district.origin.y}
@@ -48,8 +53,10 @@ export function DistrictLayer({ districts, labels, populations, bands, scale, se
       <Circle radius={22 / scale} fill={theme.groundFile} stroke={selectedKey === `district:${id}` ? theme.selection : theme.groundBorder}
         perfectDrawEnabled={false}
         strokeWidth={2 / scale} hitStrokeWidth={4 / scale} />
-      <Text x={-20 / scale} y={-7 / scale} width={40 / scale} align="center" text={String(population.agentIds.length)}
-        fontFamily={theme.font} fontSize={theme.labelSize / scale} fill={theme.label} listening={false} />
+      {(!visibleLabelIds || visibleLabelIds.has(districtCountLabel(id, district, scale, theme.labelSize).id)) && <Text
+        x={-20 / scale} y={-7 / scale} width={40 / scale} height={theme.labelSize / scale}
+        wrap="none" ellipsis align="center" text={String(population.agentIds.length)}
+        fontFamily={theme.font} fontSize={theme.labelSize / scale} fill={theme.label} listening={false} />}
       {population.statuses.map((entry, index) => <Circle key={entry.status}
         x={(index - (population.statuses.length - 1) / 2) * 9 / scale} y={15 / scale}
         radius={3 / scale} fill={resolveCssVar(gardenAgentStatusColor(entry.status))} listening={false} />)}

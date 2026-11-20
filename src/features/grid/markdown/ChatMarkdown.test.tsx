@@ -1,9 +1,18 @@
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { safeMarkdownUrl } from "./markdownSafety";
+
+const markdownWork = vi.hoisted(() => vi.fn());
+vi.mock("react-markdown", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-markdown")>();
+  return { ...actual, default: (props: Parameters<typeof actual.default>[0]) => {
+    markdownWork(props.children);
+    return <actual.default {...props} />;
+  } };
+});
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
   writeText: vi.fn(),
@@ -20,6 +29,42 @@ describe("safeMarkdownUrl", () => {
 });
 
 describe("ChatMarkdown", () => {
+  it("isolates unchanged parser work while preserving code-copy state and source/link-policy updates", async () => {
+    vi.mocked(writeText).mockResolvedValue(undefined);
+    const source = "[local](file:///tmp/a.md)\n\n```ts\nconst stable = true;\n```";
+    const policy = { allowFileLinks: true };
+    const view = render(<ChatMarkdown source={source} linkHandling={policy} />);
+    const code = view.container.querySelector("pre");
+    fireEvent.click(screen.getByRole("button", { name: "Copy code block" }));
+    const copied = await screen.findByRole("button", { name: "Copy code block copied" });
+    const calls = markdownWork.mock.calls.length;
+    view.rerender(<ChatMarkdown source={source} linkHandling={policy} />);
+    expect(markdownWork).toHaveBeenCalledTimes(calls);
+    expect(view.container.querySelector("pre")).toBe(code);
+    expect(screen.getByRole("button", { name: "Copy code block copied" })).toBe(copied);
+    view.rerender(<ChatMarkdown source={source} linkHandling={{ allowFileLinks: false }} />);
+    expect(markdownWork).toHaveBeenCalledTimes(calls + 1);
+    expect(screen.queryByRole("link", { name: "local" })).not.toBeInTheDocument();
+    const openNext = vi.fn().mockResolvedValue(undefined);
+    view.rerender(<ChatMarkdown source={source} linkHandling={{ allowFileLinks: true, openUrl: openNext }} />);
+    fireEvent.click(screen.getByRole("link", { name: "local" }));
+    await waitFor(() => expect(openNext).toHaveBeenCalledWith("file:///tmp/a.md"));
+    view.rerender(<ChatMarkdown source="Updated **source** and [unsafe](javascript:alert)." linkHandling={policy} />);
+    expect(screen.getByText("source").tagName).toBe("STRONG");
+    expect(screen.queryByRole("link", { name: "unsafe" })).not.toBeInTheDocument();
+  });
+
+  it("limits prose blocks without narrowing the technical Markdown lane", () => {
+    const view = render(<ChatMarkdown source={"# Heading\n\nParagraph\n\n- List\n\n> Quote\n\n```js\nconst wide = true;\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |"} />);
+    expect(view.container.querySelector(".chat-markdown")).not.toHaveClass("chat-prose-block");
+    expect(screen.getByText("Paragraph")).toHaveClass("chat-prose-block");
+    expect(screen.getByText("Heading")).toHaveClass("chat-prose-block");
+    expect(view.container.querySelector("ul")).toHaveClass("chat-prose-block");
+    expect(view.container.querySelector("blockquote")).toHaveClass("chat-prose-block");
+    expect(screen.getByRole("table").closest(".chat-prose-block")).toBeNull();
+    expect(view.container.querySelector("pre")?.closest(".chat-prose-block") ?? null).toBeNull();
+  });
+
   it("renders email summaries as semantic GFM tables", () => {
     render(
       <ChatMarkdown
@@ -205,7 +250,7 @@ describe("ChatMarkdown", () => {
     expect(screen.getByRole("link", { name: "https://example.test/diagram.png" })).toHaveAttribute("href", "https://example.test/diagram.png");
   });
 
-  it("keeps remote file images inert and does not browser-fallback a rejected file opener", () => {
+  it("keeps remote file images inert", () => {
     const openUrlMock = vi.fn().mockRejectedValue(new Error("browser-only opener rejected file URL"));
     const openWindow = vi.spyOn(window, "open").mockReturnValue({} as Window);
 
@@ -222,6 +267,53 @@ describe("ChatMarkdown", () => {
     expect(openWindow).not.toHaveBeenCalled();
 
     openWindow.mockRestore();
+  });
+
+  it.each([
+    { href: "file:///C:/host/document.md", browserFallback: false },
+    { href: "src/App.tsx:12", browserFallback: false },
+    { href: "http://example.test/docs", browserFallback: true },
+    { href: "https://example.test/docs", browserFallback: true },
+  ])("handles rejected remote opener activation for $href", async ({ href, browserFallback }) => {
+    let rejectOpen!: (error: Error) => void;
+    const pendingOpen = new Promise<void>((_resolve, reject) => {
+      rejectOpen = reject;
+    });
+    const openUrlMock = vi.fn(() => pendingOpen);
+    const openWindow = vi.spyOn(window, "open").mockReturnValue(null);
+
+    try {
+      render(
+        <ChatMarkdown
+          linkHandling={{ allowFileLinks: false, openUrl: openUrlMock }}
+          source="Read the [docs](https://example.test/docs)."
+        />,
+      );
+
+      const link = screen.getByRole("link", { name: "docs" });
+      // Remote rendering keeps file targets inert. Mutate an allowed anchor to
+      // exercise the activation-time rejection guard without changing that policy.
+      link.setAttribute("href", href);
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+      fireEvent(link, click);
+
+      expect(click.defaultPrevented).toBe(true);
+      expect(openUrlMock).toHaveBeenCalledExactlyOnceWith(href);
+      expect(openWindow).not.toHaveBeenCalled();
+
+      // Flush the rejection handler before asserting absence of a fallback.
+      await act(async () => {
+        rejectOpen(new Error("remote opener unavailable"));
+      });
+
+      if (browserFallback) {
+        expect(openWindow).toHaveBeenCalledExactlyOnceWith(href, "_blank", "noopener,noreferrer");
+      } else {
+        expect(openWindow).not.toHaveBeenCalled();
+      }
+    } finally {
+      openWindow.mockRestore();
+    }
   });
 
   it("keeps code block copy and highlighting behavior", async () => {

@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn present_requires_a_managed_session() {
-        let _guard = crate::test_env_lock();
+        let _guard = crate::test_support::test_env_lock();
         let previous = std::env::var_os("WARDIAN_SESSION_ID");
         unsafe { std::env::remove_var("WARDIAN_SESSION_ID") };
         let error = current_session_id().expect_err("missing session");

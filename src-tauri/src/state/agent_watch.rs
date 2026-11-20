@@ -15,6 +15,8 @@ pub struct AgentWatchState {
     max_records: usize,
     max_output_bytes: usize,
     next_sequence: u64,
+    live_chat_boundary: Option<(String, u64)>,
+    recent_file_source: Option<(crate::commands::chat_recent_database::Source, u64)>,
     records: VecDeque<WatchRecord>,
     notify: Arc<Notify>,
     codex_attachment_ready: Arc<AtomicBool>,
@@ -27,6 +29,8 @@ impl AgentWatchState {
             max_records: max_records.max(1),
             max_output_bytes: max_output_bytes.max(1),
             next_sequence: 0,
+            live_chat_boundary: None,
+            recent_file_source: None,
             records: VecDeque::new(),
             notify: Arc::new(Notify::new()),
             // Non-Codex and already-attached runtimes are ready by default;
@@ -50,6 +54,34 @@ impl AgentWatchState {
 
     pub fn latest_cursor(&self) -> String {
         self.cursor_for_sequence(self.next_sequence)
+    }
+
+    /// Called for the fresh runtime Watch before any provider observation.
+    /// Saved/off Watches have no such receipt and cannot claim live privacy.
+    pub(crate) fn bind_live_chat(&mut self, started_at: &str) {
+        self.live_chat_boundary = Some((started_at.to_owned(), self.next_sequence));
+    }
+
+    pub(crate) fn live_chat_boundary(&self) -> Option<&(String, u64)> {
+        self.live_chat_boundary.as_ref()
+    }
+
+    /// Only the normal file parser binds its last actual transcript record.
+    /// Earlier retained Watch rows acquire no ownership from this receipt.
+    pub(crate) fn bind_recent_file_source(
+        &mut self,
+        source: crate::commands::chat_recent_database::Source,
+    ) {
+        self.recent_file_source = self.records.iter().rev().find_map(|record| {
+            matches!(record.kind, WatchRecordKind::Transcript { .. })
+                .then(|| (source.clone(), record.sequence))
+        });
+    }
+
+    pub(crate) fn recent_file_source(
+        &self,
+    ) -> Option<&(crate::commands::chat_recent_database::Source, u64)> {
+        self.recent_file_source.as_ref()
     }
 
     pub fn oldest_available_cursor(&self) -> String {
@@ -79,6 +111,68 @@ impl AgentWatchState {
 
     pub fn push_transcript(&mut self, message: WatchTranscriptMessage) -> WatchCursor {
         self.push_record(WatchRecordKind::Transcript { message })
+    }
+
+    /// File parsers cannot acquire current stdout ownership from a discovered
+    /// path or a live runtime boundary. Their rows need their own source receipt.
+    pub(crate) fn push_file_transcript(&mut self, message: WatchTranscriptMessage) -> WatchCursor {
+        let cursor = self.push_transcript(message);
+        if let Some(record) = self.records.back_mut() {
+            record.file_derived = true;
+        }
+        cursor
+    }
+
+    /// Visit the newest retained transcript records without cloning their bodies.
+    /// The second sequence is the unchanged normal transcript mapper's ordinal.
+    pub(crate) fn visit_recent_transcript(
+        &self,
+        current_status: &str,
+        mut visit: impl FnMut(u64, u64, bool, &WatchTranscriptMessage),
+    ) {
+        // An approval row can precede the transcript in the normal mapper. Do
+        // not guess that identity without its full approval observation.
+        if self.records.len() > 4096
+            || wardian_core::identity::normalize_status(current_status) == "action_required"
+        {
+            return;
+        }
+        let statuses = self
+            .records
+            .iter()
+            .filter(|record| {
+                matches!(&record.kind,
+            WatchRecordKind::Event { kind, payload } if kind == "status"
+                && payload.get("status").and_then(serde_json::Value::as_str).is_some())
+            })
+            .count();
+        let prefix = statuses.max(usize::from(!current_status.trim().is_empty())) as u64;
+        let mut remaining = self.max_output_bytes;
+        let mut retained = 0_u64;
+        for record in self.records.iter().rev() {
+            if let WatchRecordKind::Transcript { message } = &record.kind {
+                if remaining == 0 {
+                    break;
+                }
+                retained += 1;
+                remaining = remaining.saturating_sub(message.text.len());
+            }
+        }
+        let mut selected = 0_u64;
+        for record in self.records.iter().rev() {
+            if let WatchRecordKind::Transcript { message } = &record.kind {
+                if selected >= retained || selected >= 80 {
+                    break;
+                }
+                visit(
+                    record.sequence,
+                    prefix + retained - selected,
+                    record.file_derived,
+                    message,
+                );
+                selected += 1;
+            }
+        }
     }
 
     pub fn snapshot_since(
@@ -170,7 +264,11 @@ impl AgentWatchState {
     fn push_record(&mut self, kind: WatchRecordKind) -> WatchCursor {
         self.next_sequence = self.next_sequence.saturating_add(1);
         let sequence = self.next_sequence;
-        self.records.push_back(WatchRecord { sequence, kind });
+        self.records.push_back(WatchRecord {
+            sequence,
+            kind,
+            file_derived: false,
+        });
         while self.records.len() > self.max_records {
             self.records.pop_front();
         }
@@ -356,6 +454,7 @@ impl WatchStateError {
 struct WatchRecord {
     sequence: u64,
     kind: WatchRecordKind,
+    file_derived: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +489,35 @@ fn utf8_tail_start(bytes: &[u8], limit: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_watch_origin_is_per_record_without_changing_public_transcript() {
+        let mut state = AgentWatchState::new("agent-1".into(), 16, 1024);
+        let message = crate::providers::transcript::extract_transcript_message(
+            "mock",
+            r#"{"type":"model","content":"same body","turn_id":"turn"}"#,
+        )
+        .unwrap();
+        state.push_transcript(message.clone());
+        state.push_file_transcript(message);
+        let mut origins = Vec::new();
+        state.visit_recent_transcript("Off", |sequence, ordinal, file_derived, message| {
+            origins.push((sequence, ordinal, file_derived, message.text.clone()));
+        });
+        assert_eq!(
+            origins,
+            [
+                (2, 3, true, "same body".into()),
+                (1, 2, false, "same body".into())
+            ]
+        );
+        let transcript = state.snapshot_since(None, Some(1024)).unwrap().transcript;
+        assert_eq!(transcript.messages.len(), 2);
+        assert!(transcript
+            .messages
+            .iter()
+            .all(|message| message.text == "same body"));
+    }
 
     #[test]
     fn watch_state_returns_output_since_cursor_without_draining() {

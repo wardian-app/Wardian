@@ -1,5 +1,7 @@
+pub mod attachments;
 pub mod audit;
 pub mod auth;
+pub mod client_messages;
 pub mod crypto;
 pub mod gateway;
 pub mod listener;

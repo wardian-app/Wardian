@@ -2,6 +2,7 @@
 //! These tests own a loopback peer, not a provider process or a paid/native probe.
 
 use super::*;
+use crate::control::agent_messaging::tests::origin;
 use crate::control::agent_messaging::{handle_in_state, Request, Response};
 use crate::control::test_support::TestWardianHome;
 use futures_util::{FutureExt, SinkExt, StreamExt};
@@ -280,12 +281,6 @@ async fn scenario(
     }
 }
 
-fn origin(id: &str) -> MessageOrigin {
-    MessageOrigin::WardianAgent {
-        session_id: id.into(),
-    }
-}
-
 async fn receive(
     state: &AppState,
     recipient: &str,
@@ -293,22 +288,46 @@ async fn receive(
     cursor: Option<String>,
     ack_cursor: Option<String>,
 ) -> Result<AgentMessagePage, ControlError> {
-    let response = handle_in_state(
-        None,
-        state,
-        Request::ReceiveMessages {
-            cursor,
-            ack_cursor,
-            limit: None,
-            timeout_ms: Some(timeout_ms),
-        },
-        origin(recipient),
-    )
-    .await?;
-    let Response::ReceiveMessages { page } = response else {
-        panic!("receive response")
-    };
-    Ok(page)
+    // This test-only observer exercises the private mailbox diagnostics. The
+    // agent-facing control operation is retired and covered by rejection tests.
+    let mut mailbox = state.interactions.subscribe_agent_mailbox(recipient).await;
+    let provider_revision = mailbox.borrow().provider_revision;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        mailbox.borrow_and_update();
+        let mut page = state
+            .interactions
+            .receive_agent_messages(recipient, cursor.as_deref(), ack_cursor.as_deref(), 100)
+            .await
+            .map_err(super::super::control_error)?;
+        let current = *mailbox.borrow();
+        if current.deleted {
+            return Err(ControlError::coded("unauthorized", "Receiver was deleted."));
+        }
+        if !page.messages.is_empty()
+            || current.provider_revision != provider_revision
+            || timeout_ms == 0
+        {
+            if page.messages.is_empty() && current.provider_revision != provider_revision {
+                page.wake_reason = Some("provider_context_available".into());
+            }
+            return Ok(page);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            page.timed_out = true;
+            return Ok(page);
+        }
+        match tokio::time::timeout_at(deadline, mailbox.changed()).await {
+            Ok(Ok(())) => continue,
+            Ok(Err(_)) => {
+                return Err(ControlError::coded(
+                    "mailbox_unavailable",
+                    "Mailbox diagnostic wait ended.",
+                ));
+            }
+            Err(_) => continue,
+        }
+    }
 }
 
 async fn wait_agent(
@@ -316,19 +335,37 @@ async fn wait_agent(
     recipient: &str,
     timeout_ms: u64,
 ) -> Result<bool, ControlError> {
-    let response = handle_in_state(
-        None,
-        state,
-        Request::WaitAgent {
-            timeout_ms: Some(timeout_ms),
-        },
-        origin(recipient),
-    )
-    .await?;
-    let Response::WaitAgent { timed_out } = response else {
-        panic!("wait-agent response")
-    };
-    Ok(timed_out)
+    let mut mailbox = state.interactions.subscribe_agent_mailbox(recipient).await;
+    let observed = *mailbox.borrow_and_update();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let unread = state
+            .interactions
+            .has_unacknowledged_agent_messages(recipient)
+            .await
+            .map_err(super::super::control_error)?;
+        let current = *mailbox.borrow();
+        if current.deleted {
+            return Err(ControlError::coded("unauthorized", "Receiver was deleted."));
+        }
+        if unread || current.revision != observed.revision || mailbox.has_changed().unwrap_or(false)
+        {
+            return Ok(false);
+        }
+        if timeout_ms == 0 || tokio::time::Instant::now() >= deadline {
+            return Ok(true);
+        }
+        match tokio::time::timeout_at(deadline, mailbox.changed()).await {
+            Ok(Ok(())) => return Ok(false),
+            Ok(Err(_)) => {
+                return Err(ControlError::coded(
+                    "mailbox_unavailable",
+                    "Mailbox diagnostic wait ended.",
+                ));
+            }
+            Err(_) => continue,
+        }
+    }
 }
 
 /// With uncontended fixture locks and synchronous DB reads, the first Pending

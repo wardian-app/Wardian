@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "payload": {
+    "turns": [{
+      "turn_key": "turn:fixture",
+      "order_key": "order:prompt",
+      "membership_complete": true,
+      "status": "unknown",
+      "prompt_item_keys": ["item:prompt"],
+      "answer_item_keys": [],
+      "references_complete": true,
+      "duration_ms": null,
+      "reported_changes": null,
+      "step_count": 0,
+      "answer_recorded": false,
+      "failed_step_count": 0,
+      "counts_complete": true
+    }],
+    "detail": null,
+    "state_event_refs": [],
+    "legacy_turns": [],
+    "items": [{
+      "item_key": "item:prompt",
+      "turn_key": "turn:fixture",
+      "order_key": "order:prompt",
+      "kind": "prompt",
+      "provenance": "pending",
+      "evidence": { "kind": "submission", "submission_id": "fixture-submission" },
+      "evidence_version": "fixture-version",
+      "admission_id": "fixture-admission",
+      "submission_status": "queued",
+      "event_refs": [],
+      "preview": { "text": "Run the synthetic fixture tests.", "attachment_refs": [] },
+      "step": null
+    }]
+  }
+}

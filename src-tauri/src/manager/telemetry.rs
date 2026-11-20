@@ -20,7 +20,11 @@ use crate::providers::pi::PiProvider;
 #[path = "telemetry/background_capture_tests.rs"]
 mod background_capture_tests;
 mod collection;
+mod log_read;
 use collection::collect_agent_metrics_with_sampler;
+#[cfg(test)]
+use log_read::LOG_PARSE_TAIL_BYTES;
+use log_read::{read_log_suffix, read_log_with_watch_source};
 mod sampling;
 mod status;
 mod timings;
@@ -183,55 +187,9 @@ fn discover_gemini_log_in_tmp(
         })
 }
 
-/// Provider logs are re-parsed whenever they change and grow to hundreds of
-/// megabytes for long-lived codex sessions. Status is derived from the most
-/// recent lines, so parsing is capped to this tail; files under the cap are
-/// read whole (gemini legacy logs are a single JSON document and stay intact).
-/// For capped files the query count and last-query timestamp are derived from
-/// the retained tail, while the init timestamp falls back to persisted Born
-/// time.
-const LOG_PARSE_TAIL_BYTES: u64 = 4 * 1024 * 1024;
-
 /// Restart hydration gets one larger, still bounded, lookback for a provider
 /// user record that sits just before a very large assistant/tool record.
 const LOG_QUERY_TIMESTAMP_LOOKBACK_BYTES: u64 = 64 * 1024 * 1024;
-
-fn read_log_bounded(path: &std::path::Path) -> std::io::Result<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    if len <= LOG_PARSE_TAIL_BYTES {
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-        return Ok(content);
-    }
-    file.seek(SeekFrom::Start(len - LOG_PARSE_TAIL_BYTES))?;
-    let mut bytes = Vec::with_capacity(LOG_PARSE_TAIL_BYTES as usize);
-    file.read_to_end(&mut bytes)?;
-    let content = String::from_utf8_lossy(&bytes);
-    // Drop the first (possibly partial) line so parsing starts on a boundary.
-    Ok(content
-        .split_once('\n')
-        .map(|(_, rest)| rest.to_string())
-        .unwrap_or_default())
-}
-
-fn read_log_suffix(path: &std::path::Path, max_bytes: u64) -> std::io::Result<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    let start = len.saturating_sub(max_bytes);
-    file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::with_capacity((len - start) as usize);
-    file.read_to_end(&mut bytes)?;
-    if start > 0 {
-        let Some(first_line_end) = bytes.iter().position(|byte| *byte == b'\n') else {
-            return Ok(String::new());
-        };
-        bytes.drain(..=first_line_end);
-    }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
 
 fn is_user_query_log_record(provider: &str, value: &serde_json::Value) -> bool {
     match provider {
@@ -1247,7 +1205,26 @@ fn latest_gemini_assistant_message(
         .find_map(|line| extract_transcript_message("gemini", line))
 }
 
-fn record_latest_gemini_assistant_text(snap: &AgentSnapshot, content: &str) {
+fn record_latest_gemini_with_source(
+    snap: &AgentSnapshot,
+    content: &str,
+    source: Option<crate::commands::chat_recent_database::Source>,
+) {
+    let source = source.filter(|source| {
+        source.valid().unwrap_or(false)
+            && snap
+                .resume_session
+                .as_deref()
+                .is_some_and(|session| gemini_log_matches_session(content, session))
+    });
+    record_latest_gemini_assistant_text(snap, content, source);
+}
+
+fn record_latest_gemini_assistant_text(
+    snap: &AgentSnapshot,
+    content: &str,
+    source: Option<crate::commands::chat_recent_database::Source>,
+) {
     let Some(message) = latest_gemini_assistant_message(content) else {
         return;
     };
@@ -1262,9 +1239,15 @@ fn record_latest_gemini_assistant_text(snap: &AgentSnapshot, content: &str) {
                 && latest.turn_id == message.turn_id
                 && latest.text == message.text
         }) {
+            if let Some(source) = source {
+                watch_state.bind_recent_file_source(source);
+            }
             return;
         }
-        watch_state.push_transcript(message);
+        watch_state.push_file_transcript(message);
+        if let Some(source) = source {
+            watch_state.bind_recent_file_source(source);
+        }
     }
 
     if let Ok(mut stamp) = snap.last_output_at.lock() {
@@ -1302,7 +1285,7 @@ fn record_latest_antigravity_assistant_text(snap: &AgentSnapshot, content: &str)
         }) {
             return;
         }
-        watch_state.push_transcript(message);
+        watch_state.push_file_transcript(message);
     }
 
     if let Ok(mut stamp) = snap.last_output_at.lock() {

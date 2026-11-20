@@ -27,9 +27,11 @@ test("Windows sessions replace inherited profiles only in the child and never re
     assert.ok(fs.statSync(child.WEBVIEW2_USER_DATA_FOLDER).isDirectory());
     assert.equal(child.webview2_user_data_folder, undefined);
     assert.equal(child.KEEP, "unchanged");
+    assert.equal(child.WARDIAN_E2E_RUN_ID, "owned");
   }
   assert.equal(env.WEBVIEW2_USER_DATA_FOLDER, "default-profile");
   assert.equal(env.webview2_user_data_folder, "other-profile");
+  assert.equal(env.WARDIAN_E2E_RUN_ID, undefined);
   assert.equal(fs.readFileSync(path.join(first.WEBVIEW2_USER_DATA_FOLDER, "keep"), "utf8"), "existing session");
 });
 
@@ -46,7 +48,9 @@ test("missing or foreign home ownership fails before creating profiles", (t) => 
 test("non-Windows sessions preserve environment without profile filesystem access", () => {
   const env = { WEBVIEW2_USER_DATA_FOLDER: "inherited" };
   const child = nativeSessionEnvironment({ home: "not-created", runId: "test", env, platform: "linux" });
-  assert.deepEqual(child, { ...env, WARDIAN_HOME: "not-created", WARDIAN_E2E_NATIVE_HOME: "not-created" });
+  assert.deepEqual(child, { ...env, WARDIAN_HOME: "not-created", WARDIAN_E2E_NATIVE_HOME: "not-created",
+    WARDIAN_E2E_RUN_ID: "test" });
+  assert.equal(env.WARDIAN_E2E_RUN_ID, undefined);
   assert.notEqual(child, env);
 });
 

@@ -23,6 +23,19 @@ afterEach(() => {
 });
 
 describe("RemoteInboxView", () => {
+  it("native turn-ended mobile card preserves unknown outcome in its expanded answer", () => {
+    useRemoteStore.setState({ remoteQueueItems: [{
+      id: "turn-ended", type: "agent_turn_ended", timestamp: Date.now(), read: false,
+      agent_name: "Example", agent_session_id: "example-agent", turn_outcome: "unknown",
+      summary: "Outcome unverified\nShort summary",
+      response_text: "Full provider answer that differs from the summary",
+    }] });
+    render(<RemoteInboxView />);
+    expect(screen.getByText("Claude turn ended")).toBeInTheDocument();
+    expect(screen.queryByText("Agent task completed")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show full summary" }));
+    expect(screen.getByText(/Outcome unverified\s+Full provider answer/)).toBeInTheDocument();
+  });
   it("loads older remote Inbox items in 20-item batches as the list is scrolled", () => {
     useRemoteStore.setState({
       remoteQueueItems: Array.from({ length: 60 }, (_, index) => ({

@@ -17,6 +17,7 @@ pub(super) async fn deliver_headless_message(
         lifecycle_guard,
         orchestration,
         parent_interaction_id,
+        client_send_authority,
     } = request;
     // Direct offline delivery runs a provider against the target agent's
     // workspace. Hold the same home-wide shared guard as automation drives
@@ -156,6 +157,7 @@ pub(super) async fn deliver_headless_message(
                 lifecycle_guard: None,
                 orchestration,
                 parent_interaction_id,
+                client_send_authority,
             },
             lease_guard,
             generation,
@@ -163,7 +165,7 @@ pub(super) async fn deliver_headless_message(
         .await;
     }
 
-    let result = crate::delivery::run_headless_process_prompt(
+    let result = crate::delivery::headless_process::run_headless_process_prompt_with_authority(
         state,
         crate::delivery::HeadlessProcessPromptRequest {
             node: "message_delivery".to_string(),
@@ -179,6 +181,7 @@ pub(super) async fn deliver_headless_message(
             lease_owner: Some(lease_guard.owner().clone()),
             cancellation_marker: None,
         },
+        client_send_authority.clone(),
     )
     .await;
 
@@ -232,12 +235,19 @@ pub(super) async fn deliver_headless_message(
         Err(error) => {
             let diagnostic =
                 crate::delivery::headless_process::sanitize_headless_error(error.message(), prompt);
+            let error_code = if client_send_authority.is_some()
+                && crate::remote::client_messages::is_authority_failure_code(error.message())
+            {
+                error.message()
+            } else {
+                "headless_process_failed"
+            };
             let mut detail = headless_message_failure_detail(
                 &current_info,
                 interaction_id,
                 input_mode,
                 queue_policy,
-                "headless_process_failed",
+                error_code,
                 diagnostic,
             );
             // The process runner already persisted this attempt. This watch

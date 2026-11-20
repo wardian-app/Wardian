@@ -8,6 +8,8 @@ pub mod browser;
 pub mod change_review;
 pub mod change_snapshot;
 pub mod chat;
+pub(crate) mod chat_recent_database;
+pub(crate) mod chat_recent_seed;
 pub mod class;
 pub mod conversation;
 pub mod debug;

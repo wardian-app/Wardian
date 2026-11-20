@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use wardian_core::control::{ControlRequest, ReplyStatus};
 const WORKER: &str = "ea503f0d-e934-4c72-9185-3e780b889c29";
+const UNSELECTED_WORKER: &str = "f63fd4e1-48e0-489e-9d99-a1906232145d";
 
 async fn exchange<T: AsyncRead + AsyncWrite + Unpin>(stream: T, state: Arc<AppState>) {
     let mut reader = BufReader::new(stream);
@@ -73,7 +74,7 @@ async fn exchange<T: AsyncRead + AsyncWrite + Unpin>(stream: T, state: Arc<AppSt
     reader.get_mut().flush().await.unwrap();
 }
 
-pub(super) async fn run_http_real_cli_canonical_task_reply() {
+pub(super) async fn run_controller_real_cli_acceptance() {
     let home = TestWardianHome::new_async().await;
     let cli = std::env::var_os("WARDIAN_BRIDGE_E2E_CLI").expect("built CLI path required");
     let driver = std::env::var_os("WARDIAN_BRIDGE_E2E_DRIVER").expect("Node driver path required");
@@ -81,6 +82,14 @@ pub(super) async fn run_http_real_cli_canonical_task_reply() {
     let agent = crate::control::tests::test_agent(WORKER, "Fixture worker", "Test");
     *agent.current_status.lock().unwrap() = "Off".into();
     state.agents.lock().await.insert(WORKER.into(), agent);
+    let unselected =
+        crate::control::tests::test_agent(UNSELECTED_WORKER, "Unselected fixture", "Test");
+    *unselected.current_status.lock().unwrap() = "Off".into();
+    state
+        .agents
+        .lock()
+        .await
+        .insert(UNSELECTED_WORKER.into(), unselected);
     let resource = "https://bridge.example/mcp";
     let grant = ControllerStore::current()
         .unwrap()
@@ -139,6 +148,7 @@ pub(super) async fn run_http_real_cli_canonical_task_reply() {
         .env("WARDIAN_BRIDGE_E2E_TOKEN", &grant.token)
         .env("WARDIAN_BRIDGE_E2E_RESOURCE", resource)
         .env("WARDIAN_BRIDGE_E2E_AGENT", WORKER)
+        .env("WARDIAN_BRIDGE_E2E_UNSELECTED_AGENT", UNSELECTED_WORKER)
         .env("WARDIAN_BRIDGE_TEST_AUDIT", home.path().join("audit.jsonl"))
         .env_remove("WARDIAN_SESSION_ID")
         .kill_on_drop(true);
@@ -152,19 +162,20 @@ pub(super) async fn run_http_real_cli_canonical_task_reply() {
     assert!(output.status.success(), "HTTP e2e driver failed: {stderr}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
-        "native_controller_http_roundtrip_passed",
-        "driver must complete the actual HTTP acceptance assertions"
+        "native_controller_http_roundtrip_passed\nnative_controller_stdio_roundtrip_passed",
+        "driver must complete the actual HTTP and stdio acceptance assertions"
     );
     eprintln!("native_controller_http_roundtrip_passed");
+    eprintln!("native_controller_stdio_roundtrip_passed");
     assert_eq!(
         state.agents.lock().await.len(),
-        1,
+        2,
         "controller must not become a worker"
     );
     assert!(
         !state
             .interactions
-            .has_unacknowledged_agent_messages(&grant.principal.mailbox_owner())
+            .has_unacknowledged_controller_messages(&grant.principal.mailbox_owner())
             .await
             .unwrap(),
         "reply acknowledgement commits to the canonical controller mailbox"
@@ -178,7 +189,7 @@ pub(super) async fn run_http_real_cli_canonical_task_reply() {
     })
     .unwrap();
     assert_eq!(
-        count, 1,
-        "stable HTTP idempotency must admit exactly one task"
+        count, 2,
+        "HTTP replay must admit one task and the stdio client one separate task"
     );
 }

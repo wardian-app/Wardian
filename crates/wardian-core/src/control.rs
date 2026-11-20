@@ -18,6 +18,10 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Create an operator-requested, origin-bound companion-client pairing offer.
+    RemoteClientPairingOffer {
+        client_origin: String,
+    },
     AgentMessaging {
         request: crate::agent_messaging::AgentMessagingRequest,
         origin: MessageOrigin,
@@ -45,6 +49,21 @@ pub enum ControlRequest {
     AgentNewSession {
         target: String,
     },
+    /// Explicit operator authorization; a negative process scan is not exit proof.
+    AgentReleaseHold {
+        target: String,
+        acquisition_id: String,
+        operator_verified_exit: bool,
+        #[serde(default)]
+        origin: Option<MessageOrigin>,
+    },
+    /// Adopt one archive range using recorded operator approval and a stable authorization ID.
+    AgentAdoptArchive {
+        target: String,
+        request: ArchiveAdoptionRequest,
+        #[serde(default)]
+        origin: Option<MessageOrigin>,
+    },
     AgentPause {
         target: String,
     },
@@ -65,6 +84,18 @@ pub enum ControlRequest {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
+    },
+    /// Admit a durable spawn with a client-known idempotency key.
+    AgentSpawnAsync {
+        operation_id: String,
+        request: crate::agent_spawn::AgentSpawnRequest,
+    },
+    AgentSpawnOperationGet {
+        operation_id: String,
+    },
+    AgentSpawnOperationWait {
+        operation_id: String,
+        timeout_ms: u64,
     },
     AgentUpdate {
         target: String,
@@ -466,6 +497,35 @@ pub struct AgentListResponse {
     pub agents: Vec<AgentIdentity>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSpawnAdmissionResponse {
+    pub schema: u8,
+    pub operation: crate::agent_spawn::AgentSpawnOperation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSpawnOperationResponse {
+    pub schema: u8,
+    pub operation: crate::agent_spawn::AgentSpawnOperation,
+    pub timed_out: bool,
+    #[serde(default)]
+    pub availability: AgentSpawnAvailability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_agent: Option<AgentIdentity>,
+}
+
+/// Current authoritative roster evidence, independent of historical registration.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSpawnAvailability {
+    NotRegistered,
+    Current,
+    Missing,
+    Incompatible,
+    #[default]
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentUpdateResponse {
     pub schema: u8,
@@ -593,6 +653,54 @@ pub struct TopologyMutationResponse {
 pub struct OkResponse {
     pub schema: u8,
     pub ok: bool,
+}
+
+/// Exact hold released after a durable operator authorization was recorded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentReleaseHoldResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub agent_id: String,
+    pub provider: String,
+    pub resume_session: String,
+    pub acquisition_id: String,
+    pub authorization_id: String,
+}
+
+/// Native source identity captured when the operator approved the archive range.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveAdoptionNativeIdentity {
+    pub platform: String,
+    pub primary: u64,
+    pub secondary: u64,
+}
+
+/// Recorded user approval for one exact archive range. OS identity alone is not consent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveAdoptionRequest {
+    /// Reuse this ID when retrying the same authorization for idempotent adoption.
+    pub authorization_id: String,
+    pub conversation_id: String,
+    pub provider_session: String,
+    pub source_path: String,
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub native_identity: ArchiveAdoptionNativeIdentity,
+    pub approval_reference: String,
+    pub approval_text: String,
+}
+
+/// Desktop-authoritative outcome for a scoped archive adoption authorization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveAdoptionResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub agent_id: String,
+    pub authorization_id: String,
+    pub conversation_id: String,
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub status: String,
 }
 
 impl OkResponse {
@@ -886,6 +994,17 @@ pub struct WatchOutput {
     pub omitted_bytes: usize,
 }
 
+/// Producer claim of one mirrored observation, requiring host session/source
+/// verification and a verified acquired record before it can be paired.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchMirrorIdentity {
+    pub observation_id: String,
+    pub incarnation: String,
+    pub logged: bool,
+    /// Locally derived raw-object digest used only to reject conflicting claims.
+    pub payload_sha256: String,
+}
+
 /// Provider session, source, and turn identity binding for a watched message.
 /// Absence of this value leaves the watch observation unbound to native logs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -893,6 +1012,8 @@ pub struct WatchTranscriptProvenance {
     pub provider_session_id: String,
     pub source_path: String,
     pub provider_turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<WatchMirrorIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1028,6 +1149,29 @@ pub fn socket_path() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_provenance_defaults_absent_mirror_and_round_trips_claim() {
+        let legacy = serde_json::json!({
+            "provider_session_id": "mock-session", "source_path": "", "provider_turn_id": ""
+        });
+        let mut provenance: WatchTranscriptProvenance =
+            serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(provenance.mirror, None);
+        assert_eq!(serde_json::to_value(&provenance).unwrap(), legacy);
+
+        provenance.mirror = Some(WatchMirrorIdentity {
+            observation_id: "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc:1".to_string(),
+            incarnation: "c60e52bf-71f2-43f1-a313-9ea96fe2f7bc".to_string(),
+            logged: false,
+            payload_sha256: "a".repeat(64),
+        });
+        let restored = serde_json::from_value::<WatchTranscriptProvenance>(
+            serde_json::to_value(&provenance).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored, provenance);
+    }
 
     #[test]
     fn artifact_present_request_serializes_origin_and_repeated_addresses() {
@@ -1182,6 +1326,107 @@ mod tests {
     }
 
     #[test]
+    fn release_hold_wire_contract_requires_exact_authorization_fields() {
+        let value = serde_json::json!({"command":"agent_release_hold", "target":"coder-a1",
+            "acquisition_id":"exact", "operator_verified_exit":true});
+        let request: ControlRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            matches!(request, ControlRequest::AgentReleaseHold { ref acquisition_id, operator_verified_exit: true, origin: None, .. } if acquisition_id == "exact")
+        );
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["command"],
+            "agent_release_hold"
+        );
+        for field in ["target", "acquisition_id", "operator_verified_exit"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ControlRequest>(missing).is_err());
+        }
+    }
+
+    #[test]
+    fn archive_adoption_request_round_trips_exact_scope_and_approval() {
+        let value = serde_json::json!({
+            "command": "agent_adopt_archive", "target": "coder-a1",
+            "request": {
+                "authorization_id": "a5f6ad8a-0ac5-4ec2-99e0-b856663594a8",
+                "conversation_id": "conversation-1",
+                "provider_session": "89b85617-bcad-4d38-8329-67d3297d7c94",
+                "source_path": "/archive/session.jsonl", "start_offset": 123, "end_offset": 456,
+                "native_identity": {"platform": "unix", "primary": u64::MAX, "secondary": 17},
+                "approval_reference": "recorded-user-approval-1",
+                "approval_text": "I approve adopting exactly this range."
+            }
+        });
+        let request: ControlRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(matches!(
+            &request,
+            ControlRequest::AgentAdoptArchive { origin: None, .. }
+        ));
+        let mut expected = value.clone();
+        expected["origin"] = serde_json::Value::Null;
+        assert_eq!(serde_json::to_value(&request).unwrap(), expected);
+        for origin in [
+            None,
+            Some(MessageOrigin::WardianAgent {
+                session_id: "managed-actor".into(),
+            }),
+        ] {
+            let mut with_origin = value.clone();
+            with_origin["origin"] = serde_json::to_value(origin).unwrap();
+            let request: ControlRequest = serde_json::from_value(with_origin.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&request).unwrap(), with_origin);
+        }
+        for field in ["target", "request"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ControlRequest>(missing).is_err());
+        }
+        for field in value["request"].as_object().unwrap().keys() {
+            let mut missing = value.clone();
+            missing["request"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<ControlRequest>(missing).is_err(),
+                "{field}"
+            );
+        }
+        for field in ["platform", "primary", "secondary"] {
+            let mut missing = value.clone();
+            missing["request"]["native_identity"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<ControlRequest>(missing).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn archive_adoption_response_round_trips() {
+        let response = ArchiveAdoptionResponse {
+            schema: CONTROL_SCHEMA,
+            ok: true,
+            agent_id: "agent-1".into(),
+            authorization_id: "a5f6ad8a-0ac5-4ec2-99e0-b856663594a8".into(),
+            conversation_id: "conversation-1".into(),
+            start_offset: 123,
+            end_offset: 456,
+            status: "adopted".into(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ArchiveAdoptionResponse>(&json).unwrap(),
+            response
+        );
+        assert!(serde_json::from_value::<ArchiveAdoptionResponse>(
+            serde_json::json!({"schema": 1, "ok": true})
+        )
+        .is_err());
+    }
+
+    #[test]
     fn agent_spawn_request_serializes_provider_and_class() {
         let req = ControlRequest::AgentSpawn {
             provider: "codex".to_string(),
@@ -1198,6 +1443,44 @@ mod tests {
         assert!(json.contains(r#""class":"Reviewer""#));
         assert!(json.contains(r#""model":"gpt-5.6-sol""#));
         assert!(json.contains(r#""reasoning_effort":"high""#));
+    }
+
+    #[test]
+    fn durable_spawn_protocol_has_separate_admission_get_and_wait_commands() {
+        let request = crate::agent_spawn::AgentSpawnRequest {
+            provider: "codex".into(),
+            class: "Reviewer".into(),
+            name: Some("reviewer-a1".into()),
+            workspace: Some("<workspace>".into()),
+            model: None,
+            reasoning_effort: None,
+        };
+        let admission = ControlRequest::AgentSpawnAsync {
+            operation_id: "135f2570-fb38-4b35-9af9-dd9e576e8cc1".into(),
+            request,
+        };
+        let json = serde_json::to_string(&admission).unwrap();
+        assert!(json.contains(r#""command":"agent_spawn_async""#));
+        assert!(json.contains(r#""operation_id":"135f2570-fb38-4b35-9af9-dd9e576e8cc1""#));
+        assert!(serde_json::from_str::<ControlRequest>(&json).is_ok());
+
+        for (request, command) in [
+            (
+                ControlRequest::AgentSpawnOperationGet {
+                    operation_id: "135f2570-fb38-4b35-9af9-dd9e576e8cc1".into(),
+                },
+                "agent_spawn_operation_get",
+            ),
+            (
+                ControlRequest::AgentSpawnOperationWait {
+                    operation_id: "135f2570-fb38-4b35-9af9-dd9e576e8cc1".into(),
+                    timeout_ms: 15_000,
+                },
+                "agent_spawn_operation_wait",
+            ),
+        ] {
+            assert!(serde_json::to_string(&request).unwrap().contains(command));
+        }
     }
 
     #[test]

@@ -230,7 +230,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
   const renderableAgents = filteredAgents.filter((agent: AgentConfig) => {
     const agentId = agent.session_id.toString();
     return !offAgentIds.has(agentId) || startingAgentIds.has(agentId)
-      || telemetry[agentId]?.current_status === "Headless";
+      || telemetry[agentId]?.current_status === "Headless" || focusedAgentId === agentId;
   });
   const cardModeForAgent = useCallback((agentId: string): GridCardMode => startingAgentIds.has(agentId)
     ? "terminal" : cardModeOverrides[agentId] ?? gridCardDisplayMode, [startingAgentIds, cardModeOverrides, gridCardDisplayMode]);
@@ -570,6 +570,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
                 {cardMode === 'chat' && isAgentRendererResident ? (
                   <AgentChatView
                     autoFocusComposer={composerFocusAgentId === agentId}
+                    deferModelDiscovery={isOff}
                     draft={chatDrafts[agentId] ?? ""}
                     sessionId={agentId}
                     agent={agent}

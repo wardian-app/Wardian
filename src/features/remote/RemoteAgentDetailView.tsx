@@ -1,16 +1,22 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, RefreshCw, Send } from "lucide-react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, RefreshCw } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type {
   AgentChatEvent,
+  AgentChatDetail,
+  AgentChatPage,
+  ChatStepDetail,
   RemoteAgentSummary,
   RemoteTerminalBrokerEvent,
   TerminalSnapshot,
 } from "../../types";
 import { formatAgentStatusLabel } from "../../utils/statusUtils";
 import { ChatTranscriptRow } from "../chat/ChatTranscriptRows";
+import { chatReadProgress } from "../chat/chatReadState";
+import { captureChatScrollAnchor, restoreChatScrollAnchor, type ChatScrollAnchor } from "../chat/chatScrollAnchor";
+import { useChatReadingPresentation } from "../chat/useChatReadingPresentation";
 import type { ChatMarkdownLinkHandling } from "../grid/markdown/ChatMarkdown";
 import {
   isProcessingAgentStatus,
@@ -18,8 +24,9 @@ import {
   shouldShowChatEvent,
   sortTranscriptEvents,
 } from "../chat/chatPresentation";
-import { chatTranscriptRowKey, withTurnChangeSummaries } from "../chat/chatTurns";
-import { derivePresentedChatRows } from "../grid/workLogPresentation";
+import { chatTranscriptRowKey } from "../chat/chatTurns";
+import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
+import { RemoteAttachmentComposer } from "./RemoteAttachmentComposer";
 import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
 import { useRemoteStore } from "./useRemoteStore";
@@ -445,10 +452,19 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const terminalLoading = useRemoteStore((state) => state.terminalLoading);
   const terminalError = useRemoteStore((state) => state.terminalError);
   const chatEvents = useRemoteStore((state) => state.chatEvents);
+  const presentationPage = useRemoteStore((state) => state.chatPresentationPage ?? state.chatPage);
   const chatLoading = useRemoteStore((state) => state.chatLoading);
   const chatLoadingOlder = useRemoteStore((state) => state.chatLoadingOlder);
   const chatHasOlder = useRemoteStore((state) => state.chatHasOlder);
+  const chatBrowsingOlder = useRemoteStore((state) => state.chatBrowsingOlder);
+  const jumpToLatestChat = useRemoteStore((state) => state.jumpToLatestActiveAgentChat);
   const chatError = useRemoteStore((state) => state.chatError);
+  const chatProgress = useRemoteStore((state) => state.chatPage?.progress ?? "indexing");
+  const chatPresentationScope = useRemoteStore((state) => JSON.stringify([agent.session_id, agent.provider,
+    state.chatPage?.conversation_id, state.chatPage?.generation, state.chatPage?.source_epoch]));
+  const chatScopeReady = useRemoteStore((state) => state.chatPage !== null);
+  const loadChatDetail = useRemoteStore((state) => state.loadActiveAgentChatDetail);
+  const loadChatStepDetail = useRemoteStore((state) => state.loadActiveAgentChatStepDetail);
   const sending = useRemoteStore((state) => state.sending);
   const closeAgent = useRemoteStore((state) => state.closeAgent);
   const setActiveAgentViewMode = useRemoteStore((state) => state.setActiveAgentViewMode);
@@ -456,7 +472,6 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const refreshActiveAgentChat = useRemoteStore((state) => state.refreshActiveAgentChat);
   const loadOlderActiveAgentChat = useRemoteStore((state) => state.loadOlderActiveAgentChat);
   const sendPromptToActiveAgent = useRemoteStore((state) => state.sendPromptToActiveAgent);
-  const [prompt, setPrompt] = useState("");
   const contentEndRef = useRef<HTMLDivElement | null>(null);
   const lastVisibleChatEventIdRef = useRef<string | undefined>(undefined);
 
@@ -470,19 +485,14 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   );
 
   useEffect(() => {
-    const lastVisibleChatEventId = visibleEvents[visibleEvents.length - 1]?.id;
+    const lastEvent = visibleEvents[visibleEvents.length - 1];
+    const lastVisibleChatEventId = lastEvent?.metadata.chat_display_key as string | undefined ?? lastEvent?.id;
     const shouldScroll = activeAgentViewMode === "terminal" || lastVisibleChatEventId !== lastVisibleChatEventIdRef.current;
     lastVisibleChatEventIdRef.current = lastVisibleChatEventId;
-    if (shouldScroll) contentEndRef.current?.scrollIntoView({ block: "end" });
+    const scroll = contentEndRef.current?.closest("section");
+    const nearBottom = scroll ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 48 : true;
+    if (shouldScroll && (activeAgentViewMode === "terminal" || nearBottom)) contentEndRef.current?.scrollIntoView({ block: "end" });
   }, [activeAgentViewMode, visibleEvents]);
-
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    const trimmed = prompt.trim();
-    if (!trimmed || chatInputDisabledReason(agent.status, sending)) return;
-    await sendPromptToActiveAgent(trimmed, trimmed.startsWith("/") ? "command" : "message");
-    setPrompt("");
-  };
 
   const refresh = () => {
     if (activeAgentViewMode === "chat") {
@@ -492,11 +502,10 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
     }
   };
   const disabledReason = chatInputDisabledReason(agent.status, sending);
-  const canSubmit = prompt.trim().length > 0 && !disabledReason;
 
   return (
     <main
-      className="flex h-dvh overflow-hidden flex-col bg-wardian-bg text-primary"
+      className="wardian-chat-pane flex h-dvh overflow-hidden flex-col bg-wardian-bg text-primary"
       data-testid="remote-agent-detail"
     >
       <header className="shrink-0 border-b border-wardian-border bg-wardian-bg/95 px-3 py-3 backdrop-blur">
@@ -554,44 +563,36 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
 
       {activeAgentViewMode === "chat" ? (
         <ChatPane
+          presentationScope={chatPresentationScope}
+          scopeReady={chatScopeReady}
+          key={agent.session_id}
           agent={agent}
+          presentationPage={presentationPage}
+          chatEvents={chatEvents}
           visibleEvents={visibleEvents}
           loading={chatLoading}
           loadingOlder={chatLoadingOlder}
           hasOlder={chatHasOlder}
+          browsingOlder={chatBrowsingOlder}
+          onJumpToLatest={jumpToLatestChat}
           error={chatError}
           endRef={contentEndRef}
           isSubmitting={sending}
           onApprovalSubmit={(response) => void sendPromptToActiveAgent(response)}
-          onLoadOlder={() => void loadOlderActiveAgentChat()}
+          onLoadOlder={loadOlderActiveAgentChat}
+          onRetryChat={() => void refreshActiveAgentChat()}
+          onLoadDetail={loadChatDetail}
+          onLoadStepDetail={loadChatStepDetail}
+          progress={chatProgress}
         />
       ) : (
         <TerminalPane agent={agent} loading={terminalLoading} error={terminalError} endRef={contentEndRef} />
       )}
 
-      {activeAgentViewMode === "chat" && (
-        <form onSubmit={(event) => void submit(event)} className="shrink-0 border-t border-wardian-border bg-wardian-bg/95 p-3 backdrop-blur">
-          <div className="flex items-end gap-2">
-            <textarea
-              aria-label={`Prompt ${agent.session_name}`}
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              disabled={Boolean(disabledReason)}
-              rows={2}
-              className="min-h-14 flex-1 resize-none rounded-md border border-wardian-border bg-wardian-card px-3 py-2 text-sm text-primary outline-none transition-colors placeholder:text-muted-neutral focus:border-[var(--color-wardian-accent)] disabled:cursor-not-allowed disabled:opacity-70"
-              placeholder={disabledReason ?? "Prompt agent"}
-            />
-            <button
-              type="submit"
-              disabled={!canSubmit}
-              className="inline-flex h-14 w-14 shrink-0 items-center justify-center rounded-md border border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <span className="sr-only">Send prompt</span>
-              <Send className="h-4 w-4" aria-hidden="true" />
-            </button>
-          </div>
-        </form>
-      )}
+      <div hidden={activeAgentViewMode !== "chat"} className="shrink-0">
+        <RemoteAttachmentComposer key={agent.session_id} agent={agent} disabledReason={disabledReason}
+          sendText={sendPromptToActiveAgent} onAccepted={() => { void refreshActiveAgentChat(); }} />
+      </div>
     </main>
   );
 };
@@ -985,75 +986,144 @@ function binaryStringToBase64(value: string) {
 }
 
 function ChatPane({
+  presentationScope,
+  scopeReady,
   agent,
+  presentationPage,
+  chatEvents,
   visibleEvents,
   loading,
   loadingOlder,
   hasOlder,
+  browsingOlder,
+  onJumpToLatest,
   error,
   endRef,
   isSubmitting,
   onApprovalSubmit,
   onLoadOlder,
+  onRetryChat,
+  onLoadDetail,
+  onLoadStepDetail,
+  progress,
 }: {
+  presentationScope: string;
+  scopeReady: boolean;
   agent: RemoteAgentSummary;
+  presentationPage: AgentChatPage | null;
+  chatEvents: AgentChatEvent[];
   visibleEvents: AgentChatEvent[];
   loading: boolean;
   loadingOlder: boolean;
   hasOlder: boolean;
+  browsingOlder: boolean;
+  onJumpToLatest: () => void;
   error: string;
   endRef: React.RefObject<HTMLDivElement | null>;
   isSubmitting: boolean;
   onApprovalSubmit: (response: string) => void;
-  onLoadOlder: () => void;
+  onLoadOlder: () => Promise<void>;
+  onRetryChat: () => void;
+  onLoadDetail: (reference: string) => Promise<AgentChatDetail>;
+  onLoadStepDetail: (reference: string) => Promise<ChatStepDetail>;
+  progress: string;
 }) {
+  const scrollRef = useRef<HTMLElement>(null);
+  const prepend = useRef<ChatScrollAnchor | null>(null);
+  const [settledPrepend, setSettledPrepend] = useState<ChatScrollAnchor | null>(null);
+  const readingPresentation = useChatReadingPresentation(presentationScope, visibleEvents, scopeReady);
+  const committedPresentation = useCommittedChatPresentation(presentationPage, chatEvents);
+  const loadOlder = async () => {
+    if (!hasOlder || loadingOlder || prepend.current) return;
+    const scroll = scrollRef.current;
+    const snapshot = scroll ? captureChatScrollAnchor(scroll) : null;
+    if (snapshot) {
+      readingPresentation.retainVisible(rows, scroll!);
+      prepend.current = snapshot;
+    }
+    try {
+      await onLoadOlder();
+    } finally {
+      // A skipped or empty read may never change loadingOlder or visibleEvents.
+      // Signal completion without restoring before the prepend DOM commits.
+      if (snapshot && prepend.current === snapshot) setSettledPrepend(snapshot);
+    }
+  };
+  useLayoutEffect(() => { prepend.current = null; }, [presentationScope]);
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    if (scroll && prepend.current && settledPrepend === prepend.current && !loadingOlder) {
+      restoreChatScrollAnchor(scroll, prepend.current);
+      prepend.current = null;
+    }
+  }, [loadingOlder, visibleEvents, settledPrepend]);
+  const progressText = chatReadProgress(progress, visibleEvents.some(shouldShowChatEvent));
   const rows = useMemo(
     () =>
-      withTurnChangeSummaries(derivePresentedChatRows(sortTranscriptEvents(visibleEvents).filter(shouldShowChatEvent)), {
-        // Remote pages from the newest end, so while older events remain
-        // unloaded the leading rows are the tail of a turn whose earlier edits
-        // are off-page. Summarizing them would understate that turn.
-        has_older_events: hasOlder,
-      }),
-    [hasOlder, visibleEvents],
+      deriveCommittedChatRows(visibleEvents, committedPresentation,
+        readingPresentation.boundaries, hasOlder),
+    [hasOlder, visibleEvents, committedPresentation, readingPresentation.boundaries],
   );
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
   return (
-    <section className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}>
+    <section className="chat-transcript-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`} ref={scrollRef} onScroll={() => {
+      const scroll = scrollRef.current;
+      if (!scroll || prepend.current) return;
+      if (scroll.scrollTop <= 160 && hasOlder && !loadingOlder) { void loadOlder(); return; }
+      if (readingPresentation.active) {
+        const snapshot = captureChatScrollAnchor(scroll);
+        if (readingPresentation.retainVisible(rows, scroll)) { prepend.current = snapshot; setSettledPrepend(snapshot); }
+      }
+    }}>
       <div className="chat-transcript-list space-y-3">
-        {error && <div className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{error}</div>}
+        {error && <div role="alert" className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">
+          <p>{error}</p>
+          <button type="button" onClick={onRetryChat} disabled={loading || loadingOlder}
+            className="mt-2 rounded-md border border-wardian-border px-3 py-1 text-wardian-text disabled:opacity-50">Retry Chat</button>
+        </div>}
         {loading && visibleEvents.length === 0 && (
           <div className="inline-flex items-center gap-2 text-sm text-muted-neutral">
             <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
             Loading chat...
           </div>
         )}
-        {!loading && visibleEvents.length === 0 && (
+        {progressText ? <p role="status" className="text-xs text-muted-neutral">{progressText}</p> : null}
+        {!error && !loading && visibleEvents.length === 0 && !progressText && (
           <div className="rounded-md border border-dashed border-wardian-border px-3 py-4 text-xs text-muted-neutral">
             No chat transcript yet.
           </div>
         )}
+        {browsingOlder ? (
+          <button
+            type="button"
+            className="w-full rounded border border-wardian-border bg-wardian-card px-3 py-2 text-xs font-semibold leading-5 text-muted-neutral hover:text-primary"
+            onClick={() => { prepend.current = null; readingPresentation.clear(); onJumpToLatest(); }}
+          >Jump to latest</button>
+        ) : null}
         {hasOlder ? (
           <button
             type="button"
             className="w-full rounded border border-wardian-border bg-wardian-card px-3 py-2 text-xs font-semibold leading-5 text-muted-neutral hover:text-primary"
-            onClick={onLoadOlder}
+            onClick={loadOlder}
             disabled={loadingOlder}
           >
             {loadingOlder ? "Loading older transcript..." : "Load older transcript"}
           </button>
         ) : null}
         {rows.map((row) => (
-          <ChatTranscriptRow
-            key={chatTranscriptRowKey(row)}
-            agentIsWorking={isProcessingAgentStatus(agent.status) || isSubmitting}
-            isSubmitting={isSubmitting}
-            layout="full_width"
-            liveApprovalId={liveApprovalId}
-            linkHandling={REMOTE_CHAT_LINK_HANDLING}
-            onApprovalSubmit={onApprovalSubmit}
-            row={row}
-          />
+          <div key={`${agent.session_id}:${readingPresentation.rowEpoch}:${chatTranscriptRowKey(row)}`} data-chat-row-key={chatTranscriptRowKey(row)}>
+            <ChatTranscriptRow
+              agentIsWorking={isProcessingAgentStatus(agent.status) || isSubmitting}
+              isSubmitting={isSubmitting}
+              layout="full_width"
+              liveApprovalId={liveApprovalId}
+              linkHandling={REMOTE_CHAT_LINK_HANDLING}
+              onApprovalSubmit={onApprovalSubmit}
+              onLoadDetail={onLoadDetail}
+              onLoadStepDetail={onLoadStepDetail}
+              row={row}
+            />
+          </div>
         ))}
         <div ref={endRef} aria-hidden="true" />
       </div>

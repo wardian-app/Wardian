@@ -207,6 +207,7 @@ pub struct LiveSurfacePromptRequest {
     pub queue_policy: QueuePolicy,
     pub approval_action: Option<ApprovalAction>,
     pub origin: Option<MessageOrigin>,
+    pub write_fence: Option<crate::utils::delivery_transaction::AutomatedInputWriteFence>,
     pub runtime_state: &'static str,
     pub mark_prompt_started: bool,
     /// Automated delivery waits for provider-confirmed turn start so it can
@@ -247,6 +248,7 @@ impl LiveSurfacePromptRequest {
             queue_policy: QueuePolicy::LiveOnly,
             approval_action: None,
             origin: None,
+            write_fence: None,
             runtime_state: "live_pty_available",
             mark_prompt_started: true,
             require_provider_turn_receipt: false,
@@ -292,6 +294,26 @@ pub async fn submit_live_surface_prompt(
     app: Option<&AppHandle>,
     state: &AppState,
     request: LiveSurfacePromptRequest,
+) -> Result<LiveSurfacePromptResult, Box<LiveSurfaceDeliveryError>> {
+    submit_live_surface_prompt_inner(app, state, request, None).await
+}
+
+/// Submit through the live surface after rechecking paired-client authority
+/// at each payload and submit-key write, releasing before receipt waits.
+pub(crate) async fn submit_live_surface_prompt_with_authority(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    request: LiveSurfacePromptRequest,
+    authority: crate::remote::client_messages::ClientSendAuthority,
+) -> Result<LiveSurfacePromptResult, Box<LiveSurfaceDeliveryError>> {
+    submit_live_surface_prompt_inner(app, state, request, Some(authority)).await
+}
+
+async fn submit_live_surface_prompt_inner(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    request: LiveSurfacePromptRequest,
+    authority: Option<crate::remote::client_messages::ClientSendAuthority>,
 ) -> Result<LiveSurfacePromptResult, Box<LiveSurfaceDeliveryError>> {
     let delivery_lock = state.delivery_lock_for(&request.session_id).await;
     let _delivery_guard = delivery_lock.lock().await;
@@ -400,6 +422,50 @@ pub async fn submit_live_surface_prompt(
             .await);
         }
     };
+    let mut claude_mod_fallback = None;
+    if super::claude_mod::is_peer_delivery(&provider, &request) {
+        match super::claude_mod::try_deliver(
+            app,
+            state,
+            &request,
+            &config,
+            &interaction_id,
+            broker_state.runtime_generation,
+        )
+        .await
+        {
+            Ok(result) => return result.map_err(Box::new),
+            Err(reason) => {
+                claude_mod_fallback = Some(reason.as_str().to_string());
+                crate::utils::logging::log_debug(&format!(
+                    "[Wardian] Claude delivery mod terminal fallback session={} generation={} reason={}",
+                    request.session_id, broker_state.runtime_generation, reason.as_str(),
+                ));
+                // Persist the reason before constructing a terminal sink, including
+                // cases where the fallback's own readiness check later fails.
+                state
+                    .interactions
+                    .record_delivery_attempt_durable(
+                        &interaction_id,
+                        &request.session_id,
+                        DeliveryTransportKind::LiveSurface,
+                        broker_state.runtime_generation,
+                        request.runtime_state,
+                        "queued",
+                        Some("terminal_fallback".into()),
+                        Some("claude_mod_unavailable".into()),
+                        claude_mod_fallback.clone(),
+                        None,
+                    )
+                    .await
+                    .map_err(|message| LiveSurfaceDeliveryError {
+                        message,
+                        detail: None,
+                        retry_safe: true,
+                    })?;
+            }
+        }
+    }
     let native_write_receipts = match state
         .terminal_sessions
         .native_write_receipts_enabled(&request.session_id)
@@ -428,19 +494,32 @@ pub async fn submit_live_surface_prompt(
             .await);
         }
     };
-    let input = if request.origin.is_none()
-        && matches!(
-            request.input_mode,
-            MessageInputMode::Message | MessageInputMode::Command
-        ) {
-        BrokerTerminalInputSink::new_for_composer(
-            state.terminal_sessions.clone(),
-            request.session_id.clone(),
-            broker_state.runtime_generation,
-        )
-    } else {
-        BrokerTerminalInputSink::new(state.terminal_sessions.clone(), request.session_id.clone())
-    };
+    let input: Box<dyn crate::utils::delivery_transaction::TerminalInputSink> =
+        if let Some(fence) = request.write_fence.clone() {
+            Box::new(
+                crate::utils::delivery_transaction::AutomatedTerminalInputSink::new(
+                    state,
+                    request.session_id.clone(),
+                    fence,
+                ),
+            )
+        } else if request.origin.is_none()
+            && matches!(
+                request.input_mode,
+                MessageInputMode::Message | MessageInputMode::Command
+            )
+        {
+            Box::new(BrokerTerminalInputSink::new_for_composer(
+                state.terminal_sessions.clone(),
+                request.session_id.clone(),
+                broker_state.runtime_generation,
+            ))
+        } else {
+            Box::new(BrokerTerminalInputSink::new(
+                state.terminal_sessions.clone(),
+                request.session_id.clone(),
+            ))
+        };
     // This event is emitted after the payload has been acknowledged by the
     // native PTY writer but before the submit key. It gives send-and-watch an
     // ordering boundary that precedes every provider response for this exact
@@ -466,8 +545,12 @@ pub async fn submit_live_surface_prompt(
     let outcome = if let (MessageInputMode::ApprovalAction, Some(action)) =
         (request.input_mode, request.approval_action.as_ref())
     {
-        match crate::control::submit_approval_action_for_delivery_service(&input, &provider, action)
-            .await
+        match crate::control::submit_approval_action_for_delivery_service(
+            input.as_ref(),
+            &provider,
+            action,
+        )
+        .await
         {
             Ok(outcome) => outcome,
             Err(message) => {
@@ -701,11 +784,33 @@ pub async fn submit_live_surface_prompt(
         } else {
             None
         };
-        let sender: &dyn crate::utils::delivery_transaction::TerminalInputSink = pi_ticket
+        let receipt_sender = pi_ticket
             .as_ref()
-            .map(|ticket| ticket as &dyn crate::utils::delivery_transaction::TerminalInputSink)
-            .unwrap_or(&input);
-        match crate::utils::terminal_input::submit_prompt_via_sender(
+            .map(|ticket| ticket as &dyn crate::utils::delivery_transaction::TerminalInputSink);
+        let sender = crate::utils::delivery_transaction::select_delivery_input_sink(
+            input.as_ref(),
+            receipt_sender,
+            request.write_fence.is_some(),
+        );
+        let ticket_guarded_sender = if request.write_fence.is_some() {
+            pi_ticket
+                .as_ref()
+                .map(|ticket| ticket.guard_input_sink(sender))
+        } else {
+            None
+        };
+        let sender = ticket_guarded_sender
+            .as_ref()
+            .map(|guarded| guarded as &dyn crate::utils::delivery_transaction::TerminalInputSink)
+            .unwrap_or(sender);
+        let authority_input = authority.map(|authority| {
+            crate::remote::client_messages::AuthorityInputSink::new(sender, authority)
+        });
+        let sender = authority_input
+            .as_ref()
+            .map(|input| input as &dyn crate::utils::delivery_transaction::TerminalInputSink)
+            .unwrap_or(sender);
+        match crate::utils::terminal_input::submit_prompt_via_sender_with_submit_guard(
             sender,
             &provider,
             &request.prompt,
@@ -761,6 +866,7 @@ pub async fn submit_live_surface_prompt(
                 })? = Some(proof);
                 Ok(())
             },
+            || async { Ok(()) },
         )
         .await
         {
@@ -855,7 +961,7 @@ pub async fn submit_live_surface_prompt(
         ),
         delivery_phase: Some(outcome.delivery_phase),
         observed_state: outcome.observed_state,
-        reason: outcome.reason,
+        reason: claude_mod_fallback.clone().or(outcome.reason),
         profile: Some(crate::utils::delivery_profile::delivery_profile(&provider).provider),
         error: None,
     };
@@ -945,6 +1051,9 @@ pub async fn submit_live_surface_prompt(
         } else {
             "provider emitted a turn-start event after native terminal submission".to_string()
         });
+        if let Some(reason) = claude_mod_fallback {
+            detail.reason = Some(reason);
+        }
         persist_live_surface_delivery_detail(state, &interaction_id, &request.session_id, &detail)
             .await
             .map_err(|message| LiveSurfaceDeliveryError {
@@ -1028,6 +1137,15 @@ async fn record_terminal_delivery_error(
     provider: &str,
     error: TerminalDeliveryError,
 ) -> Box<LiveSurfaceDeliveryError> {
+    let authority_error_code = matches!(
+        error.phase,
+        "service_unavailable"
+            | "deadline_expired"
+            | "origin_forbidden"
+            | "device_revoked"
+            | "grant_required"
+    )
+    .then_some(error.phase);
     let default_payload_reason = (error.phase == "payload_apply_unconfirmed").then(|| {
         "The PTY accepted the payload bytes, but Codex did not prove that its composer applied them; Return was withheld and automatic retry is unsafe"
             .to_string()
@@ -1042,11 +1160,13 @@ async fn record_terminal_delivery_error(
         }),
         FailedLiveSurfaceAttempt {
             runtime_state: request.runtime_state,
-            error_code: if error.phase == "payload_apply_unconfirmed" {
-                "payload_apply_unconfirmed"
-            } else {
-                "send_failed"
-            },
+            error_code: authority_error_code.unwrap_or(
+                if error.phase == "payload_apply_unconfirmed" {
+                    "payload_apply_unconfirmed"
+                } else {
+                    "send_failed"
+                },
+            ),
             message: error.message,
             delivery_phase: Some(error.phase.to_string()),
             observed_state: error.observed_state,

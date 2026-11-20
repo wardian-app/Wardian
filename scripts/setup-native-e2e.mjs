@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { extractWindowsZip } from "./windows-zip.mjs";
 
 import {
   assertNativeNodeDependencies,
@@ -159,30 +160,17 @@ function run(command, args, options = {}) {
   }
 }
 
-function powershellQuote(value) {
-  return `'${value.replaceAll("'", "''")}'`;
-}
-
-function downloadMatchingWindowsEdgeDriver(version) {
+async function downloadMatchingWindowsEdgeDriver(version) {
   const archivePath = path.join(nativeToolsDir, `.msedgedriver-${version}.zip`);
   const extractionPath = path.join(nativeToolsDir, `.msedgedriver-${version}`);
   const driverPath = path.join(nativeToolsDir, "msedgedriver.exe");
-  const sourceExpression = "Get-ChildItem -LiteralPath $extract -Filter msedgedriver.exe -Recurse -File | Select-Object -First 1";
-  const powershell = [
-    "$ErrorActionPreference = 'Stop'",
-    `$archive = ${powershellQuote(archivePath)}`,
-    `$extract = ${powershellQuote(extractionPath)}`,
-    `$destination = ${powershellQuote(driverPath)}`,
-    `$url = ${powershellQuote(edgeDriverDownloadUrl(version))}`,
-    "Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive",
-    "Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force",
-    `$source = ${sourceExpression}`,
-    "if (-not $source) { throw 'The downloaded Edge WebDriver archive did not contain msedgedriver.exe.' }",
-    "Copy-Item -LiteralPath $source.FullName -Destination $destination -Force",
-  ].join("; ");
-
   try {
-    run("powershell", ["-NoProfile", "-NonInteractive", "-Command", powershell]);
+    const response = await fetch(edgeDriverDownloadUrl(version));
+    if (!response.ok) throw new Error(`Edge WebDriver download failed: HTTP ${response.status}`);
+    fs.writeFileSync(archivePath, Buffer.from(await response.arrayBuffer()));
+    extractWindowsZip(archivePath, extractionPath);
+    // Microsoft's Windows archives place the executable at the archive root.
+    fs.copyFileSync(path.join(extractionPath, "msedgedriver.exe"), driverPath);
   } finally {
     fs.rmSync(archivePath, { force: true });
     fs.rmSync(extractionPath, { force: true, recursive: true });
@@ -249,13 +237,13 @@ export function msEdgeDriverToolInstallArgs() {
   ];
 }
 
-function ensureWindowsEdgeDriver() {
+async function ensureWindowsEdgeDriver() {
   fs.mkdirSync(nativeToolsDir, { recursive: true });
 
   const webview2Version = installedWebview2Version();
   if (webview2Version) {
     console.log(`Downloading Edge WebDriver matching WebView2 ${webview2Version}...`);
-    downloadMatchingWindowsEdgeDriver(webview2Version);
+    await downloadMatchingWindowsEdgeDriver(webview2Version);
     return;
   }
 
@@ -292,7 +280,7 @@ export function nativeDriverGuidance(platform = process.platform) {
   return "Install chromedriver or geckodriver with your OS package manager and ensure it is on PATH, or set WARDIAN_NATIVE_WEBDRIVER.";
 }
 
-function ensureNativeDriver(options) {
+async function ensureNativeDriver(options) {
   if (options.skipNativeDriver) {
     console.log("Skipping native WebDriver setup.");
     return;
@@ -304,7 +292,7 @@ function ensureNativeDriver(options) {
   }
 
   if (process.platform === "win32") {
-    ensureWindowsEdgeDriver();
+    await ensureWindowsEdgeDriver();
     return;
   }
 
@@ -329,7 +317,7 @@ Options:
 `);
 }
 
-export function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
   if (options.help) {
     printHelp();
@@ -340,7 +328,7 @@ export function main(argv = process.argv.slice(2)) {
   validateNativeSetupDependencies();
   validateNativeSetupArtifact();
   ensureTauriDriver(options);
-  ensureNativeDriver(options);
+  await ensureNativeDriver(options);
 
   console.log("");
   console.log("Native E2E prerequisites are prepared.");
@@ -352,7 +340,7 @@ export function main(argv = process.argv.slice(2)) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    main();
+    await main();
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

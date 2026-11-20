@@ -15,6 +15,291 @@ async fn agent(state: &AppState, id: &str, name: &str) {
     state.agents.lock().await.insert(id.into(), agent);
 }
 
+/// Drive the actual app delivery and canonical settlement with only the Claude
+/// process replaced by its file protocol producer. Never acknowledge PTY input.
+async fn claude_mod_surface_settlement(
+    dropped: bool,
+    before_settlement: Option<wardian_core::native_transport::NativeDeliveryPhase>,
+) {
+    use serde_json::json;
+    use wardian_core::native_transport::NativeDeliveryPhase;
+
+    let home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    agent(&state, "sender", "Sender").await;
+    agent(&state, "receiver", "Receiver").await;
+    let claude_session = "2d1f06c5-b097-422f-a2b7-06ccdb362e40";
+    let config = {
+        let agents = state.agents.lock().await;
+        let receiver = agents.get("receiver").unwrap();
+        *receiver.current_status.lock().unwrap() = "Idle".into();
+        let mut config = receiver.config.lock().unwrap();
+        config.provider = "claude".into();
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.is_off = false;
+        config.fresh_provider_session_id = None;
+        config.resume_session = Some(claude_session.into());
+        config.clone()
+    };
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(8);
+    install_test_terminal_runtime(&state, "receiver", input_tx).await;
+    let runtime_generation = state
+        .terminal_sessions
+        .broker_state("receiver")
+        .await
+        .unwrap()
+        .runtime_generation;
+    // Deliberately diverge counters: the inbox belongs to the terminal runtime.
+    for _ in 0..2 {
+        state
+            .interactions
+            .start_provider_input_generation("receiver", ProviderInputReadiness::Ready, None)
+            .await;
+    }
+    let input_generation = state
+        .interactions
+        .current_provider_input_generation("receiver")
+        .await
+        .unwrap();
+    assert_ne!(runtime_generation, input_generation);
+    let mod_dir = crate::delivery::claude_mod::materialize_launch(&config, runtime_generation)
+        .expect("materialize the production generation inbox");
+    let inbox = mod_dir.parent().unwrap().join("inbox");
+    let write_record = |path: std::path::PathBuf, value: serde_json::Value| {
+        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    };
+    let at = chrono::Utc::now().timestamp_millis();
+    write_record(
+        inbox.join("ready.json"),
+        json!({"schema": 1, "generation": runtime_generation,
+            "session_id": claude_session, "mod_version": "0.1.0", "at": at}),
+    );
+    write_record(
+        inbox.join("heartbeat.json"),
+        json!({"schema": 1, "generation": runtime_generation,
+            "session_id": claude_session, "at": at}),
+    );
+    let admitted = task(&state).await;
+    let claim = state
+        .interactions
+        .claim_agent_task("receiver", input_generation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.record.id, admitted.record.id);
+    let context = prepare_claim_context(&state, &claim).await.unwrap();
+    let mut request = crate::delivery::LiveSurfacePromptRequest::message("receiver", &context);
+    request.interaction_id = Some(claim.record.id.clone());
+    request.delivery_message_id = Some(claim.record.id.clone());
+    request.origin = Some(origin("sender"));
+    request.runtime_state = "agent_messaging_task";
+    request.require_provider_turn_receipt = true;
+
+    let producer = async {
+        // The real mod can only claim a delivery after the app publishes it.
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let files = std::fs::read_dir(inbox.join("pending")).unwrap();
+                for file in files {
+                    let path = file.unwrap().path();
+                    if path
+                        .extension()
+                        .is_some_and(|extension| extension == "json")
+                    {
+                        let pending: serde_json::Value =
+                            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                        return pending;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("app must publish to mod instead of falling back to PTY");
+        assert_eq!(pending["schema"], 1);
+        assert_eq!(pending["interaction_id"], claim.record.id);
+        assert_eq!(pending["runtime_generation"], runtime_generation);
+        assert_eq!(pending["text"], context);
+        assert_eq!(owner(&claim.record.id), "dispatching");
+        let mut record = json!({"schema": 1, "generation": runtime_generation,
+            "interaction_id": claim.record.id, "session_id": claude_session,
+            "at": chrono::Utc::now().timestamp_millis()});
+        write_record(
+            inbox
+                .join("claimed")
+                .join(format!("{}.json", claim.record.id)),
+            record.clone(),
+        );
+        let outcome = if dropped {
+            record["reason"] = json!("stopped by user");
+            "dropped"
+        } else {
+            "queued"
+        };
+        write_record(
+            inbox
+                .join(outcome)
+                .join(format!("{}.json", claim.record.id)),
+            record,
+        );
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(
+            crate::delivery::submit_live_surface_prompt(None, &state, request),
+            producer
+        )
+    })
+    .await
+    .expect("mod outcome must settle without a provider or PTY acknowledgement");
+    assert!(matches!(
+        input_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    let settlement = surface_settlement(&result);
+    if dropped {
+        let error = result.as_ref().expect_err("a drop is a failed submission");
+        assert!(!error.retry_safe);
+        assert_eq!(error.message, "stopped by user");
+        assert_eq!(
+            error.detail.as_ref().unwrap().delivery_phase.as_deref(),
+            Some("failed")
+        );
+        assert_eq!(settlement, Ok("failed"));
+    } else {
+        let accepted = result
+            .as_ref()
+            .expect("numeric heartbeat admits the mod route");
+        assert_eq!(
+            accepted.detail.delivery_phase.as_deref(),
+            Some("provider_accepted")
+        );
+        assert_eq!(settlement, Ok("provider_accepted"));
+    }
+    assert_eq!(owner(&claim.record.id), "dispatching");
+    if let Some(phase) = before_settlement {
+        // Freeze the caller's accepted snapshot, then run the observer to its
+        // stopping point before the caller clears canonical dispatch ownership.
+        assert!(!dropped);
+        assert_eq!(settlement, Ok("provider_accepted"));
+        let mut record = wardian_core::db::native_delivery(&claim.record.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.phase, NativeDeliveryPhase::ProviderAccepted);
+        let expected_owner = match phase {
+            NativeDeliveryPhase::TurnStarted => {
+                let row = json!({"type": "user", "sessionId": claude_session,
+                    "message": {"role": "user", "content": format!("The wardian plugin sent a message:\n{context}")}});
+                assert!(wardian_core::claude_mod::transcript_row_matches(
+                    &row,
+                    claude_session,
+                    &std::collections::BTreeSet::from([claude_session.into()]),
+                    &claim.record.id
+                ));
+                "provider_visible"
+            }
+            NativeDeliveryPhase::Failed => {
+                record.detail = Some("stopped by user after accepted snapshot".into());
+                "failed"
+            }
+            _ => panic!("unsupported observer race phase"),
+        };
+        record.phase = phase;
+        wardian_core::db::upsert_native_delivery(&record).unwrap();
+        store::reconcile_claude_mod_receipt(&claim.record.id).unwrap();
+        assert_eq!(
+            owner(&claim.record.id),
+            "dispatching",
+            "the observer cannot take the caller's active canonical claim"
+        );
+        // No observer runs after this call. finish_agent_task must consume the
+        // stronger persisted receipt even though its argument is still accepted.
+        native::settle(&state, &claim, settlement).await.unwrap();
+        assert_eq!(owner(&claim.record.id), expected_owner);
+        assert_eq!(
+            wardian_core::db::native_delivery(&claim.record.id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            phase
+        );
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        return;
+    }
+    native::settle(&state, &claim, settlement).await.unwrap();
+    assert_eq!(
+        owner(&claim.record.id),
+        if dropped {
+            "failed"
+        } else {
+            "provider_accepted"
+        }
+    );
+    let mut native_record = wardian_core::db::native_delivery(&claim.record.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(native_record.envelope.generation, runtime_generation);
+    assert_eq!(native_record.transport, "claude_mod");
+    assert_eq!(
+        native_record.phase,
+        if dropped {
+            NativeDeliveryPhase::Failed
+        } else {
+            NativeDeliveryPhase::ProviderAccepted
+        }
+    );
+    if !dropped {
+        // Simulate the transcript observer's native receipt after validating the
+        // exact plugin row. App transcript-file discovery is outside this test.
+        let row = json!({"type": "user", "sessionId": claude_session,
+            "message": {"role": "user", "content": format!("The wardian plugin sent a message:\n{context}")}});
+        assert!(wardian_core::claude_mod::transcript_row_matches(
+            &row,
+            claude_session,
+            &std::collections::BTreeSet::from([claude_session.into()]),
+            &claim.record.id
+        ));
+        native_record.phase = NativeDeliveryPhase::TurnStarted;
+        wardian_core::db::upsert_native_delivery(&native_record).unwrap();
+        store::reconcile_claude_mod_receipt(&claim.record.id).unwrap();
+        assert_eq!(owner(&claim.record.id), "provider_visible");
+    }
+    assert!(matches!(
+        input_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn claude_mod_surface_queued_is_canonically_accepted_until_transcript_receipt() {
+    claude_mod_surface_settlement(false, None).await;
+}
+
+#[tokio::test]
+async fn claude_mod_surface_dropped_is_canonically_failed_without_pty_input() {
+    claude_mod_surface_settlement(true, None).await;
+}
+
+#[tokio::test]
+async fn claude_mod_surface_transcript_before_accepted_settlement_remains_visible() {
+    claude_mod_surface_settlement(
+        false,
+        Some(wardian_core::native_transport::NativeDeliveryPhase::TurnStarted),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn claude_mod_surface_late_drop_before_accepted_settlement_remains_failed() {
+    claude_mod_surface_settlement(
+        false,
+        Some(wardian_core::native_transport::NativeDeliveryPhase::Failed),
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn automation_information_preserves_exact_name_uuid_and_recipient_binding() {
     let _home = TestWardianHome::new_async().await;
@@ -148,7 +433,7 @@ async fn automation_bound_uuid_survives_real_catalog_name_reassignment() {
     assert!(receive(&state, b).await.messages.is_empty());
 }
 
-fn origin(id: &str) -> MessageOrigin {
+pub(super) fn origin(id: &str) -> MessageOrigin {
     MessageOrigin::WardianAgent {
         session_id: id.into(),
     }
@@ -170,23 +455,121 @@ async fn task(state: &AppState) -> store::Admitted {
 }
 
 async fn receive(state: &AppState, recipient: &str) -> AgentMessagePage {
-    let response = handle_in_state(
-        None,
-        state,
-        Request::ReceiveMessages {
-            cursor: None,
-            ack_cursor: None,
-            limit: None,
-            timeout_ms: None,
-        },
-        origin(recipient),
-    )
-    .await
-    .unwrap();
-    let Response::ReceiveMessages { page } = response else {
-        panic!("receive page")
+    state
+        .interactions
+        .receive_agent_messages(recipient, None, None, 100)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn requester_origin_uses_persisted_provider_identity_when_archive_logging_is_disabled() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    agent(&state, "sender", "Sender").await;
+    let config = {
+        let agents = state.agents.lock().await;
+        agents.get("sender").unwrap().config.clone()
     };
-    page
+    {
+        let mut config = config.lock().unwrap();
+        config.provider = "Antigravity".into();
+        config.resume_session = Some("conversation-original".into());
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Disabled;
+    }
+    let generation = state
+        .interactions
+        .start_provider_input_generation("sender", ProviderInputReadiness::Ready, None)
+        .await
+        .generation;
+
+    let origin = requester_origin_for_admission(&state, "sender")
+        .await
+        .expect("persisted resume identity is sufficient without archive logging");
+
+    assert_eq!(origin.provider, "antigravity");
+    assert_eq!(origin.conversation_id, "conversation-original");
+    assert_eq!(origin.generation, generation);
+}
+
+#[tokio::test]
+async fn followup_admission_waits_for_requester_lifecycle_identity_fence() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    agent(&state, "sender", "Sender").await;
+    agent(&state, "receiver", "Receiver").await;
+    let config = {
+        let agents = state.agents.lock().await;
+        agents.get("sender").unwrap().config.clone()
+    };
+    {
+        let mut config = config.lock().unwrap();
+        config.provider = "antigravity".into();
+        config.resume_session = Some("old-conversation".into());
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Disabled;
+    }
+    state
+        .interactions
+        .start_provider_input_generation("sender", ProviderInputReadiness::Ready, None)
+        .await;
+
+    let lifecycle = state.lock_agent_lifecycle("sender").await;
+    let admission = handle_in_state(
+        None,
+        &state,
+        Request::FollowupTask {
+            target: "receiver".into(),
+            message: "work".into(),
+            idempotency_key: None,
+        },
+        origin("sender"),
+    );
+    tokio::pin!(admission);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut admission)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store::with_db(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM agent_message_delivery WHERE operation='followup_task'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .unwrap(),
+        0,
+        "request origin and canonical admission must share the sender lifecycle fence"
+    );
+
+    config.lock().unwrap().resume_session = Some("new-conversation".into());
+    let next_generation = state
+        .interactions
+        .start_provider_input_generation("sender", ProviderInputReadiness::Ready, None)
+        .await
+        .generation;
+    drop(lifecycle);
+
+    let Response::FollowupTask { request_id, .. } =
+        tokio::time::timeout(std::time::Duration::from_secs(1), admission)
+            .await
+            .expect("admission resumes after lifecycle transition")
+            .unwrap()
+    else {
+        panic!("followup receipt")
+    };
+    let captured = store::with_db(|conn| store::requester_origin(conn, &request_id)).unwrap();
+    assert_eq!(
+        captured,
+        Some(store::RequesterOrigin {
+            provider: "antigravity".into(),
+            conversation_id: "new-conversation".into(),
+            generation: next_generation,
+        })
+    );
 }
 
 fn owner(id: &str) -> String {
@@ -1372,13 +1755,13 @@ async fn off_info_stays_off_task_receipt_is_async_and_receiver_reply_is_correlat
 }
 
 #[tokio::test]
-async fn receive_timeout_does_not_complete_or_cancel_task() {
+async fn retired_receive_rejects_before_claim_ack_or_task_mutation() {
     let _home = TestWardianHome::new_async().await;
     let state = AppState::new();
     agent(&state, "sender", "Sender").await;
     agent(&state, "receiver", "Receiver").await;
     let task = task(&state).await;
-    let response = handle_in_state(
+    let error = handle_in_state(
         None,
         &state,
         Request::ReceiveMessages {
@@ -1390,10 +1773,8 @@ async fn receive_timeout_does_not_complete_or_cancel_task() {
         origin("sender"),
     )
     .await
-    .unwrap();
-    assert!(
-        matches!(response, Response::ReceiveMessages { page } if page.timed_out && page.messages.is_empty() && page.wake_reason.is_none())
-    );
+    .unwrap_err();
+    assert_eq!(error.code, "automatic_delivery");
     assert_eq!(stored_status(&task.record.id), "awaiting_reply");
     assert_eq!(owner(&task.record.id), "pending");
     assert!(state
@@ -1401,6 +1782,17 @@ async fn receive_timeout_does_not_complete_or_cancel_task() {
         .structured_reply(&task.record.id)
         .await
         .is_none());
+    assert_eq!(
+        store::with_db(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM agent_message_ack WHERE recipient='sender'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .unwrap(),
+        0
+    );
     let late = state
         .interactions
         .reply_agent_message(
@@ -1844,7 +2236,7 @@ async fn deleted_receiver_cannot_recreate_cursor_metadata_after_authentication()
         .await
         .unwrap_err()
         .code,
-        "unauthorized"
+        "automatic_delivery"
     );
     assert!(state
         .interactions
@@ -2222,16 +2614,25 @@ async fn context_failure_releases_claim_before_any_provider_boundary() {
     let state = AppState::new();
     agent(&state, "sender", "Sender").await;
     agent(&state, "receiver", "Receiver").await;
+    // Bind the requester so malformed context is tested after a valid claim.
+    let requester_origin = store::RequesterOrigin {
+        provider: "codex".into(),
+        conversation_id: "sender-thread".into(),
+        generation: 1,
+    };
     let task = state
         .interactions
-        .admit_agent_message(store::Admission {
-            sender: "sender",
-            recipient: "receiver",
-            message: "work",
-            idempotency_key: None,
-            task: true,
-            generation: 0,
-        })
+        .admit_agent_message_with_requester_origin(
+            store::Admission {
+                sender: "sender",
+                recipient: "receiver",
+                message: "work",
+                idempotency_key: None,
+                task: true,
+                generation: 0,
+            },
+            Some(&requester_origin),
+        )
         .await
         .unwrap();
     let replied = state
@@ -2241,7 +2642,7 @@ async fn context_failure_releases_claim_before_any_provider_boundary() {
         .unwrap();
     let claim = state
         .interactions
-        .claim_agent_information("sender", &replied.record.id, 0)
+        .claim_agent_reply_continuation("sender", &replied.record.id, 0)
         .await
         .unwrap()
         .unwrap();

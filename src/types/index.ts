@@ -3,7 +3,17 @@ export type UserFacingProviderName = "claude" | "codex" | "gemini" | "antigravit
 
 export type GridCardDisplayMode = "terminal" | "chat";
 
-export interface PromptDeliveryDetail {
+/** Optional identity of the generated row committed by this submission. */
+export interface ChatInputReceipt {
+    chat_event_id: string;
+    chat_agent_id: string;
+    chat_conversation_id: string;
+    chat_source_epoch: string | null;
+}
+
+export type ChatReceiptFields = Partial<{ [K in keyof ChatInputReceipt]: ChatInputReceipt[K] | null }>;
+
+export interface PromptDeliveryDetail extends ChatReceiptFields {
     uuid: string;
     name: string;
     provider: string;
@@ -62,6 +72,132 @@ export interface AgentChatEvent {
     created_at: string | null;
     sequence: number | null;
     metadata: Record<string, unknown>;
+}
+
+export interface AgentChatPage {
+    session_id: string;
+    conversation_id: string | null;
+    generation: string | null;
+    source_epoch: string | null;
+    /** Trusted recent-preview owner, never canonical identity or renewal authority. */
+    recent_admission?: string | null;
+    /** Complete owned archive read under a native capture stop; no source renewal authority. */
+    archive_read_ready?: boolean;
+    revision: string;
+    /** Optional producer presentation from this same committed view. */
+    presentation?: ChatPresentation;
+    events: AgentChatEvent[];
+    next_before: string | null;
+    unchanged: boolean;
+    reset: boolean;
+    /** Backend confirmation that this response honored an older-page frontier. */
+    older_page?: boolean;
+    progress: string;
+    aliases: { observation_id: string; canonical_id: string }[];
+    removed_ids: string[];
+    detail: AgentChatDetail | null;
+    revalidated_ids?: string[] | null;
+    bytes_read: number;
+    records_decoded: number;
+}
+
+export interface AgentChatDetail {
+    event_id: string;
+    text: string;
+    next: string | null;
+    complete: boolean;
+}
+
+/** Interpret payload only after recognizing the version; unknown versions use legacy events. */
+export interface ChatPresentation {
+    version: number;
+    payload: ChatPresentationV1 | Record<string, unknown> | unknown[] | string | number | boolean | null;
+}
+
+/** Scope, revision, aliases, removals and bounded cursors come from the enclosing page. */
+export interface ChatPresentationV1 {
+    turns: ChatPresentedTurn[];
+    items: ChatPresentedItem[];
+    state_event_refs: { event_id: string; turn_key: string }[];
+    legacy_turns: ChatLegacyTurn[];
+    detail: ChatStepDetail | null;
+}
+
+export type ChatTurnStatus = "running" | "completed" | "action_required" | "failed" | "cancelled" | "incomplete" | "unknown";
+export type ChatStepStatus = ChatTurnStatus;
+
+export interface ChatPresentedTurn {
+    turn_key: string;
+    order_key: string;
+    membership_complete: boolean;
+    status: ChatTurnStatus;
+    /** References in this bounded page, not necessarily the whole turn. */
+    prompt_item_keys: string[];
+    answer_item_keys: string[];
+    references_complete: boolean;
+    duration_ms: number | null;
+    reported_changes: { file_count: number; evidence_ref: string } | null;
+    /** Producer totals include unloaded steps. */
+    step_count: number;
+    answer_recorded: boolean;
+    failed_step_count: number;
+    counts_complete: boolean;
+}
+
+export type ChatEvidenceIdentity =
+    | { kind: "source"; source_key: string; source_epoch: string; record_key: string }
+    | { kind: "submission"; submission_id: string };
+
+export interface ChatLegacyTurn {
+    turn_key: string;
+    order_key: string;
+    event_refs: string[];
+    kind: "unmigrated" | "earlier_activity";
+    membership_complete: boolean;
+}
+
+export interface ChatPresentedItem {
+    item_key: string;
+    turn_key: string;
+    order_key: string;
+    kind: "prompt" | "step" | "narration" | "answer";
+    provenance: "pending" | "provisional" | "canonical";
+    evidence: ChatEvidenceIdentity;
+    evidence_version: string;
+    admission_id: string | null;
+    submission_status: "queued" | "delivered" | "failed" | "cancelled" | "uncertain" | null;
+    event_refs: string[];
+    preview: { text: string; attachment_refs: string[] } | null;
+    step: ChatPresentedStep | null;
+}
+
+export interface ChatPresentedStep {
+    tool_name: string;
+    category: "shell" | "read" | "browser" | "edit" | "tool";
+    description: string;
+    status: ChatStepStatus;
+    summary: string | null;
+    invocation_ref: string | null;
+    result_ref: string | null;
+    approval_ref: string | null;
+    detail_availability: "pending" | "available" | "unavailable";
+    detail_ref: string | null;
+}
+
+/** Single retained tail; there is no continuation to accumulate in Chat state. */
+export interface ChatStepDetail {
+    step_key: string;
+    revision: string;
+    text: string;
+    input_text: string | null;
+    input_truncated: boolean;
+    result_summary: string | null;
+    format: "text" | "json";
+    pending: boolean;
+    unavailable: boolean;
+    complete: boolean;
+    truncated_before: boolean;
+    total_bytes: number | null;
 }
 
 export interface ProviderReadiness {
@@ -354,7 +490,7 @@ export interface ProviderQuestion {
 
 export interface QueueItem {
     id: string;
-    type: "action_needed" | "agent_completed" | "automation_completed" | "agent_update" | "approval_request";
+    type: "action_needed" | "agent_completed" | "agent_turn_ended" | "automation_completed" | "agent_update" | "approval_request";
     timestamp: number;
     read: boolean;
     /** Internal durable marker used to keep cleared automation runs out of Inbox. */
@@ -374,6 +510,11 @@ export interface QueueItem {
     summary?: string;
     /** Full provider-authored final response for durable completion records. */
     response_text?: string;
+    /** Native turn-end evidence does not assert successful task completion. */
+    turn_outcome?: "unknown" | "aborted";
+    provider_reason?: string | null;
+    provider_session_id?: string;
+    provider_turn_id?: string;
     /**
      * Where a completion's timestamp came from: Claude's settled-Stop-hooks
      * telemetry event, the legacy Claude Stop-hook outbox file, the provider
@@ -381,6 +522,7 @@ export interface QueueItem {
      * event.
      */
     timestamp_source?:
+      | "claude_mod_turn_complete"
       | "claude_stop_hooks_settled_event"
       | "hook_outbox_mtime"
       | "processing_time_fallback"

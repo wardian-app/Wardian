@@ -17,7 +17,7 @@ use wardian_core::models::{
 
 use wardian_core::automation::{self, Blueprint};
 use wardian_core::schedule::{
-    compute_next_run, load_schedules, resolve_workspace_path, save_schedules,
+    compute_next_run, load_schedules, mutate_schedules, resolve_workspace_path,
     validate_schedule_definition,
 };
 
@@ -1597,7 +1597,6 @@ pub async fn schedule_create(
     let workspace = resolve_workspace_path(&workspace)?
         .to_string_lossy()
         .into_owned();
-    let mut schedules = load_schedules();
     let now = now_ms();
     let bindings = bindings.unwrap_or_default();
     let (bindings, assignments) = normalize_schedule_assignments(assignments, &bindings)?;
@@ -1620,8 +1619,11 @@ pub async fn schedule_create(
     };
     let mut record = record;
     record.next_run_epoch_ms = compute_next_run(&record.schedule, now);
-    schedules.push(record.clone());
-    save_schedules(&schedules).map_err(|error| error.to_string())?;
+    let record = mutate_schedules(|schedules| {
+        schedules.push(record.clone());
+        Ok((record, true))
+    })
+    .map_err(|error| error.to_string())?;
     emit_schedules_updated(&app);
     Ok(record)
 }
@@ -1641,14 +1643,6 @@ pub async fn schedule_update(
     bindings: Option<HashMap<String, String>>,
     assignments: Option<wardian_core::models::AutomationAssignments>,
 ) -> Result<AutomationSchedule, String> {
-    let mut schedules = load_schedules();
-    let existing = schedules
-        .iter_mut()
-        .find(|schedule| schedule.id == id)
-        .ok_or_else(|| format!("schedule not found: {id}"))?;
-
-    let next_blueprint_id = blueprint_id.unwrap_or_else(|| existing.blueprint_id.clone());
-    validate_schedule_blueprint(&next_blueprint_id)?;
     if let Some(name) = name.as_deref() {
         if name.trim().is_empty() {
             return Err("schedule name must not be empty".to_string());
@@ -1662,48 +1656,65 @@ pub async fn schedule_update(
     let workspace = resolve_workspace_path(&workspace)?
         .to_string_lossy()
         .into_owned();
-
-    let (next_bindings, next_assignments) = match (bindings, assignments) {
-        (None, None) => (existing.bindings.clone(), existing.assignments.clone()),
-        (bindings, assignments) => {
-            normalize_schedule_assignments(assignments, &bindings.unwrap_or_default())?
-        }
-    };
-    let schedule_changed = {
-        schedule.occurrence_count = existing.schedule.occurrence_count;
-        serde_json::to_value(&schedule).map_err(|error| error.to_string())?
-            != serde_json::to_value(&existing.schedule).map_err(|error| error.to_string())?
-    };
     let now = now_ms();
-    let was_paused = existing.is_paused;
+    let updated = mutate_schedules(|schedules| {
+        let existing = schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == id)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("schedule not found: {id}"),
+                )
+            })?;
 
-    existing.blueprint_id = next_blueprint_id;
-    if let Some(name) = name {
-        existing.name = name;
-    }
-    if provider.is_some() {
-        existing.provider = provider;
-    }
-    existing.workspace = Some(workspace);
-    if let Some(input) = input {
-        existing.input = input;
-    }
-    existing.bindings = next_bindings;
-    existing.assignments = next_assignments;
-    existing.schedule = schedule;
+        let next_blueprint_id = blueprint_id.unwrap_or_else(|| existing.blueprint_id.clone());
+        validate_schedule_blueprint(&next_blueprint_id)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        let (next_bindings, next_assignments) = match (bindings, assignments) {
+            (None, None) => (existing.bindings.clone(), existing.assignments.clone()),
+            (bindings, assignments) => {
+                normalize_schedule_assignments(assignments, &bindings.unwrap_or_default())
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+            }
+        };
+        let schedule_changed = {
+            schedule.occurrence_count = existing.schedule.occurrence_count;
+            serde_json::to_value(&schedule)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+                != serde_json::to_value(&existing.schedule)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+        };
+        let was_paused = existing.is_paused;
 
-    if was_paused {
-        existing.next_run_epoch_ms = None;
-        if schedule_changed {
-            existing.paused_remaining_ms = None;
+        existing.blueprint_id = next_blueprint_id;
+        if let Some(name) = name {
+            existing.name = name;
         }
-    } else if schedule_changed || existing.next_run_epoch_ms.is_none() {
-        existing.paused_remaining_ms = None;
-        existing.next_run_epoch_ms = compute_next_run(&existing.schedule, now);
-    }
+        if provider.is_some() {
+            existing.provider = provider;
+        }
+        existing.workspace = Some(workspace);
+        if let Some(input) = input {
+            existing.input = input;
+        }
+        existing.bindings = next_bindings;
+        existing.assignments = next_assignments;
+        existing.schedule = schedule;
 
-    let updated = existing.clone();
-    save_schedules(&schedules).map_err(|error| error.to_string())?;
+        if was_paused {
+            existing.next_run_epoch_ms = None;
+            if schedule_changed {
+                existing.paused_remaining_ms = None;
+            }
+        } else if schedule_changed || existing.next_run_epoch_ms.is_none() {
+            existing.paused_remaining_ms = None;
+            existing.next_run_epoch_ms = compute_next_run(&existing.schedule, now);
+        }
+
+        Ok((existing.clone(), true))
+    })
+    .map_err(|error| error.to_string())?;
     emit_schedules_updated(&app);
     Ok(updated)
 }
@@ -1715,41 +1726,57 @@ pub async fn schedule_list() -> Result<Vec<AutomationSchedule>, String> {
 
 #[tauri::command]
 pub async fn schedule_pause(app: AppHandle, id: String) -> Result<(), String> {
-    let mut schedules = load_schedules();
     let now = now_ms();
-    if let Some(schedule) = schedules.iter_mut().find(|schedule| schedule.id == id) {
-        schedule.is_paused = true;
-        schedule.paused_remaining_ms = schedule
-            .next_run_epoch_ms
-            .map(|next_run| next_run.saturating_sub(now));
-        schedule.next_run_epoch_ms = None;
-    }
-    save_schedules(&schedules).map_err(|error| error.to_string())?;
+    mutate_schedules(|schedules| {
+        let changed = schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == id)
+            .is_some_and(|schedule| {
+                schedule.is_paused = true;
+                schedule.paused_remaining_ms = schedule
+                    .next_run_epoch_ms
+                    .map(|next_run| next_run.saturating_sub(now));
+                schedule.next_run_epoch_ms = None;
+                true
+            });
+        Ok(((), changed))
+    })
+    .map_err(|error| error.to_string())?;
     emit_schedules_updated(&app);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn schedule_resume(app: AppHandle, id: String) -> Result<(), String> {
-    let mut schedules = load_schedules();
     let now = now_ms();
-    if let Some(schedule) = schedules.iter_mut().find(|schedule| schedule.id == id) {
-        schedule.is_paused = false;
-        schedule.next_run_epoch_ms = match schedule.paused_remaining_ms.take() {
-            Some(remaining) => Some(now.saturating_add(remaining)),
-            None => compute_next_run(&schedule.schedule, now),
-        };
-    }
-    save_schedules(&schedules).map_err(|error| error.to_string())?;
+    mutate_schedules(|schedules| {
+        let changed = schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == id)
+            .is_some_and(|schedule| {
+                schedule.is_paused = false;
+                schedule.next_run_epoch_ms = match schedule.paused_remaining_ms.take() {
+                    Some(remaining) => Some(now.saturating_add(remaining)),
+                    None => compute_next_run(&schedule.schedule, now),
+                };
+                true
+            });
+        Ok(((), changed))
+    })
+    .map_err(|error| error.to_string())?;
     emit_schedules_updated(&app);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn schedule_remove(app: AppHandle, id: String) -> Result<(), String> {
-    let mut schedules = load_schedules();
-    schedules.retain(|schedule| schedule.id != id);
-    save_schedules(&schedules).map_err(|error| error.to_string())?;
+    mutate_schedules(|schedules| {
+        let before = schedules.len();
+        schedules.retain(|schedule| schedule.id != id);
+        let changed = schedules.len() != before;
+        Ok(((), changed))
+    })
+    .map_err(|error| error.to_string())?;
     emit_schedules_updated(&app);
     Ok(())
 }
@@ -1757,13 +1784,19 @@ pub async fn schedule_remove(app: AppHandle, id: String) -> Result<(), String> {
 /// Fire ASAP: set next_run to now so the scheduler's next tick launches it live.
 #[tauri::command]
 pub async fn schedule_run_now(app: AppHandle, id: String) -> Result<(), String> {
-    let mut schedules = load_schedules();
     let now = now_ms();
-    if let Some(schedule) = schedules.iter_mut().find(|schedule| schedule.id == id) {
-        schedule.is_paused = false;
-        schedule.next_run_epoch_ms = Some(now);
-    }
-    save_schedules(&schedules).map_err(|error| error.to_string())?;
+    mutate_schedules(|schedules| {
+        let changed = schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == id)
+            .is_some_and(|schedule| {
+                schedule.is_paused = false;
+                schedule.next_run_epoch_ms = Some(now);
+                true
+            });
+        Ok(((), changed))
+    })
+    .map_err(|error| error.to_string())?;
     emit_schedules_updated(&app);
     Ok(())
 }
@@ -2560,7 +2593,11 @@ edges:
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set_async(dir.path()).await;
 
-        wardian_core::schedule::save_schedules(&[sample_schedule()]).unwrap();
+        wardian_core::schedule::mutate_schedules(|schedules| {
+            schedules.push(sample_schedule());
+            Ok(((), true))
+        })
+        .unwrap();
         let loaded = schedule_list().await.unwrap();
 
         assert_eq!(loaded.len(), 1);
@@ -2576,7 +2613,11 @@ edges:
         schedule.is_paused = true;
         schedule.paused_remaining_ms = Some(1234);
         schedule.next_run_epoch_ms = None;
-        wardian_core::schedule::save_schedules(&[schedule]).unwrap();
+        wardian_core::schedule::mutate_schedules(|schedules| {
+            schedules.push(schedule);
+            Ok(((), true))
+        })
+        .unwrap();
 
         let loaded = wardian_core::schedule::load_schedules();
         assert_eq!(loaded.len(), 1);

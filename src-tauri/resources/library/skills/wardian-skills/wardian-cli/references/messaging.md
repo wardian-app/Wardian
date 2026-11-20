@@ -2,7 +2,7 @@
 
 ## Canonical Peer Operations
 
-Run peer commands from an authenticated managed Wardian agent. All six use the
+Run peer commands from an authenticated managed Wardian agent. These use the
 same canonical service as the corresponding MCP tools. Never set or replace
 sender identity to impersonate another agent. External terminals cannot send
 or complete peer tasks.
@@ -10,24 +10,30 @@ or complete peer tasks.
 | CLI | Canonical operation | Meaning |
 | --- | --- | --- |
 | `message list` | `list_agents` | List recipients visible to this sender. |
-| `message send` | `send_message` | Admit information without starting or interrupting a turn. |
+| `message send` | `send_message` | Admit and automatically deliver information, waking an idle recipient when its original conversation is available. |
 | `message followup` | `followup_task` | Admit a task; the service may wake the recipient. |
-| `message receive` | `receive_messages` | Read this recipient's page and optionally acknowledge a consumed page. |
 | `message reply` | `reply` | Complete a task as its authorized recipient. |
 | `message interrupt` | `interrupt_agent` | Explicitly interrupt one current turn when authorized. |
 
 Use one exact name or UUID. Broadcast and class selectors are unsupported.
 The CLI uses canonical admission without a legacy queue or automatic replay.
-The runtime uses native existing-session integration where supported; composer
-delivery is retained only for demonstrably unsupported cases. A native failure
-or uncertain receipt does not establish that a provider is unsupported.
-Provider commands and approval actions are not peer message modes.
+Wardian automatically resumes the requester's original conversation when a
+correlated task reply commits and a safe provider route is available.
+Agent-facing receive and wait commands are retired; backend mailbox records
+remain available for read-only diagnostics.
+New informational messages wake an idle recipient through the same durable
+delivery service. They create no task, reply obligation, automatic reply, or
+task result. Messages stored before wake eligibility was recorded remain
+context-only and are never replayed as startup wakeups. Off, pause, session
+replacement, and provider changes remain authoritative fences. The runtime uses
+existing-session provider integration where supported. A failure or uncertain
+receipt does not establish that a provider is unsupported. Provider commands
+and approval actions are not peer message modes.
 
 ```bash
 wardian message list
 wardian message send reviewer-a1 "The documentation check passed."
 wardian message followup reviewer-a1 --file review-request.md --idempotency-key review-1288
-wardian message receive --timeout-ms 60000
 ```
 
 For substantial literal text, use a file or stdin:
@@ -46,37 +52,32 @@ Review the issue diff. Return blocking findings and concrete validation.
 '@ | wardian message followup reviewer-a1 --stdin
 ```
 
-## Receive The Correlated Result
+## Automatic Reply Continuation
 
 Save the exact `request_id` from the followup receipt. Admission and provider
-acceptance do not establish completion. A received reply belongs to that task
-only when its `parent_interaction_id` equals the saved ID. Check `reply_status`:
-`done`, `blocked`, or `failed`. Do not infer completion from Idle status,
-terminal text, an empty page, or an unrelated answer.
+acceptance do not establish completion. When a safe provider route is available,
+Wardian resumes the original requester conversation with a reply whose
+`parent_interaction_id` matches the saved ID. The reply retains its
+`reply_status`: `done`, `blocked`, or `failed`. Do not infer completion from
+Idle status, terminal text, or an unrelated answer.
 
 Canonical tasks dispatched to an exact native Codex turn automatically return
 that turn's final result to the requester unless an explicit reply has already
-completed the task. Tasks acquired through receive, composer delivery, and
-providers without exact native completion support require explicit reply.
-Several tasks steered into one turn share its final result. Completion wakes
-an existing receive wait without starting a finished requester's turn.
+completed the task. Several tasks steered into one turn share its final result.
+The terminal reply continues through the requester's original provider
+conversation and creates no new reply obligation.
 
 ```bash
-wardian message receive --cursor '<next-cursor>' --timeout-ms 60000
-wardian message receive --cursor '<next-cursor>' --ack-cursor '<consumed-page-ack-cursor>'
 wardian message reply '<exact-request-id>' --status done --file findings.md
 ```
 
-Cursors are opaque and recipient-bound. After a timed-out receive, preserve
-its `next_cursor` and continue within the caller's overall deadline.
-Acknowledge only a page already consumed. Each call accepts a limit of 1–100
-and a timeout of 0–60000 milliseconds; there is no hidden unbounded wait.
-
 Send and followup accept an optional `--idempotency-key` for stable admission
 identity. Preserve that exact key; it is not the task's canonical request ID
-and does not authorize autonomous replay. If a receipt is lost or invalid,
-preserve and report uncertainty. Do not resubmit, substitute another key or
-command, or invent a successful reply. A receive timeout never resubmits work.
+and does not authorize autonomous replay. After an admission timeout, the CLI
+never resubmits automatically; preserve and report uncertainty. If a receipt
+is lost or invalid, do not resubmit, substitute another key or
+command, or invent a successful reply. A delayed reply is recovered by Wardian
+when the original conversation becomes ready; agents do not poll or replay it.
 
 When separately authorized to interrupt current work:
 

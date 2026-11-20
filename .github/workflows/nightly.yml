@@ -27,13 +27,17 @@ jobs:
         run: |
           node --input-type=module -e "import { DatabaseSync } from 'node:sqlite'; const db = new DatabaseSync(':memory:'); try { const row = db.prepare('SELECT 1 AS ready').get(); if (row.ready !== 1) throw new Error('Native SQLite preflight failed'); console.log(process.version + ': node:sqlite ready'); } finally { db.close(); }"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.100.0
+      - name: Report Rust compiler
+        run: rustc --version
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
       - name: Install dependencies
         run: npm ci
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
       - name: Setup native E2E drivers
         run: npm run setup:e2e:native
       - name: Build native debug app

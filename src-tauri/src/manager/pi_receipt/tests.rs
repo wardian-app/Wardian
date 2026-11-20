@@ -401,6 +401,27 @@ async fn timeout_and_stopped_stream_leave_submission_uncertain_without_accepting
     assert!(f.receipt.ticket("prompt", broker()).is_err());
 }
 
+#[tokio::test]
+async fn stopped_ticket_guard_rejects_before_delegate_write() {
+    let f = Fixture::new();
+    f.ready();
+    let ticket = f.receipt.ticket("prompt", broker()).unwrap();
+    f.receipt.stop();
+    let (delegate, mut received) = tokio::sync::mpsc::channel(1);
+    let guarded = ticket.guard_input_sink(&delegate);
+
+    let error = guarded
+        .send_bytes(b"late Pi input".to_vec())
+        .await
+        .expect_err("a stopped ticket rejects before delegating");
+
+    assert!(!error.retry_safe);
+    assert!(
+        received.try_recv().is_err(),
+        "the delegate receives no bytes"
+    );
+}
+
 #[test]
 fn delayed_native_log_retains_completion_but_cannot_double_count_hook_start() {
     use wardian_core::models::provider::AgentProvider;

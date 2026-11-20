@@ -212,8 +212,12 @@ resolve approvals inside the composition.
 - **`+` / `-`** to zoom in and out.
 - **`0` or `f`** to fit the whole map into view.
 
-The current zoom level is shown in the bottom-right controls, next to buttons
-for zooming and for **Fit**. The zoom readout is worth checking first if the
+The current zoom level is shown in the footer controls, next to buttons
+for zooming, **Fit**, and **?**. Open **?** for mouse and keyboard instructions;
+close it to reclaim the reading space. Navigation, selection, help, and data
+notices reserve space outside the map so they do not cover its objects.
+Crowded map labels are shortened or hidden while their objects remain selectable.
+The zoom readout is worth checking first if the
 canvas ever looks empty — it usually means the view is scrolled away from the
 content rather than that there is nothing to show.
 

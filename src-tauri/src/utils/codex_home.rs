@@ -3,6 +3,7 @@
 mod cleanup;
 mod copy_metadata;
 mod habitat_alias;
+mod launch_context;
 mod migration;
 mod platform;
 mod preparation_turn;
@@ -15,7 +16,8 @@ mod upstream;
 #[cfg(test)]
 mod upstream_tests;
 
-pub(crate) use upstream::resolve_upstream_home;
+pub(crate) use launch_context::CodexLaunchContext;
+pub(crate) use upstream::{resolve_upstream_home, UpstreamHome};
 
 pub(crate) use cleanup::cleanup_managed_home;
 pub(crate) use habitat_alias::{
@@ -25,7 +27,21 @@ pub(crate) use habitat_alias::{
 pub(crate) use preparation_turn::preparation_turn;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
+pub(crate) use storage::directory_identity;
 pub(crate) use storage::HomePreparationGuard;
+
+/// Hash an existing ownership record through the no-follow, bounded reader.
+/// Removal stores the digest, never the record's paths or credential contents.
+pub(crate) fn ownership_record_digest(path: &Path) -> Result<Option<String>, String> {
+    use sha2::{Digest, Sha256};
+    storage::read_record::<serde_json::Value>(path)?
+        .map(|record| {
+            serde_json::to_vec(&record)
+                .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
+}
 
 const RECORD: &str = ".wardian-codex-home.json";
 const READY: &str = ".wardian-codex-home-ready.json";

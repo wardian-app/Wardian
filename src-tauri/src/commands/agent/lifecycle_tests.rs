@@ -9,6 +9,13 @@ use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride};
 
 use super::{stop_native_owner, stop_native_owner_with_before_capture, PendingRuntime};
 
+pub(in crate::commands) fn acquire_test_roster_barrier(
+) -> wardian_core::agent_replacement::AgentRosterBarrier {
+    wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+        .expect("test roster barrier")
+        .expect("test roster barrier acquired")
+}
+
 #[test]
 fn pending_pi_registration_and_spawn_do_not_publish_a_resume_session() {
     let mut config = wardian_core::models::AgentConfig {
@@ -270,7 +277,7 @@ async fn codex_stop_preflight_error_does_not_install_hold_or_detach_runtime() {
 
     let error = stop_native_owner_with_before_capture(&state, id, false, |_| {
         callback_ran.store(true, Ordering::SeqCst);
-        Ok(())
+        Ok(None)
     })
     .await
     .unwrap_err();
@@ -280,6 +287,83 @@ async fn codex_stop_preflight_error_does_not_install_hold_or_detach_runtime() {
     assert!(agents[id].child_process.is_some());
     assert_eq!(agents[id].runtime_generation, Some(7));
     assert_eq!(child.kills.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn uncontained_clear_stop_completes_while_old_hold_blocks_resume_and_allows_fresh() {
+    use wardian_core::conversation_lease::{
+        load_leases_checked, retarget_lifecycle_lease_persisted, ConversationLeaseRetargetOutcome,
+    };
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    let id = "uncontained-clear";
+    let child = Arc::new(ChildState::default());
+    child.exited.store(true, Ordering::SeqCst);
+    let runtime = fixture.runtime(id, &child);
+    runtime.config.lock().unwrap().resume_session = Some("old-session".into());
+    let state = AppState::new();
+    state.agents.lock().await.insert(id.into(), runtime);
+    let lifecycle =
+        super::super::acquire_agent_lifecycle_transition_lease_for_session(&state, id, "clear")
+            .await
+            .unwrap();
+    let _gate = state.lock_agent_lifecycle(id).await;
+    let mut bound_hold = None;
+    stop_native_owner_with_before_capture(&state, id, false, |agent| {
+        let hold = super::hold_previous_provider_before_rotation(agent, &lifecycle)?;
+        assert!(hold.is_some());
+        bound_hold = hold.clone();
+        Ok(hold)
+    })
+    .await
+    .unwrap();
+    await_quiescent(&fixture.home, id).await.unwrap();
+    assert!(load_leases_checked()
+        .unwrap()
+        .iter()
+        .any(|lease| { Some(lease.owner()) == bound_hold }));
+    let now = chrono::Utc::now();
+    let now_text = now.to_rfc3339();
+    let expiry = (now + chrono::Duration::minutes(5)).to_rfc3339();
+    assert!(matches!(
+        retarget_lifecycle_lease_persisted(
+            lifecycle.owner(),
+            id,
+            "codex",
+            "old-session",
+            &now_text,
+            &expiry,
+        )
+        .unwrap(),
+        ConversationLeaseRetargetOutcome::Conflict(_)
+    ));
+    assert_eq!(
+        retarget_lifecycle_lease_persisted(
+            lifecycle.owner(),
+            id,
+            "codex",
+            "fresh-session",
+            &now_text,
+            &expiry,
+        )
+        .unwrap(),
+        ConversationLeaseRetargetOutcome::Retargeted
+    );
+    drop(lifecycle);
+    let error =
+        super::super::acquire_agent_lifecycle_transition_lease_for_session(&state, id, "resume")
+            .await
+            .unwrap_err();
+    assert!(error.contains("uncertain_previous_provider"), "{error}");
+    let mut fresh = state.agents.lock().await[id].config.lock().unwrap().clone();
+    assert_eq!(fresh.resume_session.as_deref(), Some("old-session"));
+    fresh.resume_session = Some("fresh-session".into());
+    let _fresh_lease =
+        super::super::acquire_agent_lifecycle_transition_lease(&fresh, "fresh-rotation").unwrap();
+    assert!(load_leases_checked()
+        .unwrap()
+        .iter()
+        .any(|lease| { Some(lease.owner()) == bound_hold }));
 }
 
 #[tokio::test]
@@ -315,7 +399,7 @@ async fn failed_legacy_stop_blocks_normal_owner_preparation_until_explicit_retry
         workspace: fixture.workspace.clone(),
         config,
     };
-    let error = CodexSharedOwner::start(&spec, std::future::pending())
+    let error = CodexSharedOwner::start(&spec, None, std::future::pending())
         .await
         .unwrap_err();
     assert!(
@@ -353,7 +437,7 @@ async fn failed_legacy_stop_blocks_normal_owner_preparation_until_explicit_retry
         .expect("explicit lifecycle retry joins the retained handle");
     assert_eq!(child.drops.load(Ordering::SeqCst), 1);
     await_quiescent(&fixture.home, id).await.unwrap();
-    let error = CodexSharedOwner::start(&spec, std::future::pending())
+    let error = CodexSharedOwner::start(&spec, None, std::future::pending())
         .await
         .unwrap_err();
     assert!(
@@ -382,17 +466,91 @@ async fn cancelled_uncommitted_runtime_retains_stop_and_allows_explicit_retry() 
         .await
         .expect("preflight token must not block owner startup");
     let pending = pending.attach(runtime);
-    let (ready, received) = tokio::sync::oneshot::channel();
+    let barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+        .expect("roster barrier")
+        .expect("held roster barrier");
+    let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
     let caller = tokio::spawn(async move {
-        let _pending = pending;
-        ready.send(()).unwrap();
-        std::future::pending::<()>().await;
+        crate::manager::roster_io::ROSTER_BARRIER_ATTEMPT
+            .scope(std::cell::RefCell::new(Some(attempt_tx)), async move {
+                let _pending = pending;
+                crate::manager::roster_io::acquire_roster_barrier_with_timeout(
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+            })
+            .await
     });
-    received.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), attempt_rx)
+        .await
+        .expect("waiter reaches actual roster contention")
+        .expect("contention signal");
     caller.abort();
-    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(
+        matches!(caller.await, Err(error) if error.is_cancelled()),
+        "aborted roster waiter should return a cancelled join error"
+    );
+    assert!(
+        !fixture.home.join("settings/agent-replacements").exists(),
+        "cancellation before admission must not create a replacement journal"
+    );
+    drop(barrier);
     let error = await_quiescent(&fixture.home, id).await.unwrap_err();
     assert!(error.contains("retained fake kill failure"), "{error}");
+    assert_eq!(child.drops.load(Ordering::SeqCst), 0);
+    assert_terminal_closed(&terminal, id, &mut input).await;
+    child.exited.store(true, Ordering::SeqCst);
+    retry_stop(&fixture.home, id).unwrap();
+    await_quiescent(&fixture.home, id).await.unwrap();
+    assert_eq!(child.drops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn timed_out_uncommitted_runtime_retains_cleanup_without_journaling() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    let id = "timed-out-uncommitted";
+    let child = Arc::new(ChildState::default());
+    let runtime = fixture.runtime(id, &child);
+    let terminal = Arc::new(TerminalSessionBroker::default());
+    let (generation, mut input) = attached_terminal(&terminal, id).await;
+    let mut runtime = runtime;
+    runtime.runtime_generation = Some(generation);
+    let config = runtime.config.lock().unwrap().clone();
+    let pending = PendingRuntime::prepare(&config, &terminal).unwrap();
+    await_quiescent(&fixture.home, id)
+        .await
+        .expect("preflight token must not block owner startup");
+    let pending = pending.attach(runtime);
+    let barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+        .expect("roster barrier")
+        .expect("held roster barrier");
+
+    let admission_error = match crate::manager::roster_io::acquire_roster_barrier_with_timeout(
+        std::time::Duration::from_millis(40),
+    )
+    .await
+    {
+        Ok(barrier) => {
+            drop(barrier);
+            panic!("admission must time out while the real roster barrier is held");
+        }
+        Err(error) => error,
+    };
+    assert!(admission_error.contains("Timed out waiting for the agent roster barrier"));
+    assert!(
+        !fixture.home.join("settings/agent-replacements").exists(),
+        "timeout before admission must not create a replacement journal"
+    );
+    let cleanup_error = pending.stop_after_failure(admission_error).await;
+    assert!(cleanup_error.starts_with("Timed out waiting"));
+    assert_eq!(child.kills.load(Ordering::SeqCst), 1);
+    drop(barrier);
+    let retained = await_quiescent(&fixture.home, id).await.unwrap_err();
+    assert!(
+        retained.contains("retained fake kill failure"),
+        "{retained}"
+    );
     assert_eq!(child.drops.load(Ordering::SeqCst), 0);
     assert_terminal_closed(&terminal, id, &mut input).await;
     child.exited.store(true, Ordering::SeqCst);
@@ -505,7 +663,7 @@ async fn cancelled_attached_candidate_closes_terminal_before_releasing_stop_fenc
     });
     received.await.unwrap();
     caller.abort();
-    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         await_quiescent(&fixture.home, id),

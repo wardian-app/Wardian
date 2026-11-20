@@ -1,7 +1,95 @@
+use std::collections::HashSet;
+
+const MAX_APPROVED_CLIENT_ORIGINS: usize = 32;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalOrigin {
     raw: String,
     host: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalClientOrigin {
+    raw: String,
+}
+
+impl CanonicalClientOrigin {
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+}
+
+pub fn canonicalized_client_origins(origins: &[String]) -> Result<Vec<String>, String> {
+    if origins.len() > MAX_APPROVED_CLIENT_ORIGINS {
+        return Err("too many approved client origins".to_string());
+    }
+
+    let mut canonical = Vec::with_capacity(origins.len());
+    let mut seen = HashSet::with_capacity(origins.len());
+    for value in origins {
+        let origin = parse_client_origin(value)?;
+        if !seen.insert(origin.raw().to_string()) {
+            return Err("duplicate approved client origin".to_string());
+        }
+        canonical.push(origin.raw().to_string());
+    }
+    Ok(canonical)
+}
+
+pub fn is_approved_client_origin(approved_origins: &[String], request_origin: &str) -> bool {
+    let Ok(origin) = parse_client_origin(request_origin) else {
+        return false;
+    };
+    origin.raw() == request_origin
+        && approved_origins
+            .iter()
+            .any(|approved| approved == request_origin)
+}
+
+pub fn parse_client_origin(value: &str) -> Result<CanonicalClientOrigin, String> {
+    let value = value.trim();
+    if value == "null" || value.contains('*') {
+        return Err("client origin must identify one exact browser origin".to_string());
+    }
+    let url = url::Url::parse(value)
+        .map_err(|_| "client origin must be a valid browser origin".to_string())?;
+    let authority_contains_userinfo = value
+        .split_once("://")
+        .and_then(|(_, authority_and_path)| authority_and_path.split(['/', '?', '#']).next())
+        .is_some_and(|authority| authority.contains('@'));
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || authority_contains_userinfo
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("client origin must be scheme plus authority only".to_string());
+    }
+    let scheme = url.scheme();
+    let host = url
+        .host()
+        .ok_or_else(|| "client origin must include a host".to_string())?;
+    let is_loopback = match host {
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+        url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+    };
+    if scheme != "https" && !(scheme == "http" && is_loopback) {
+        return Err("client origin must use HTTPS or configured HTTP loopback".to_string());
+    }
+    let authority_host = match host {
+        url::Host::Ipv4(address) => address.to_string(),
+        url::Host::Ipv6(address) => format!("[{address}]"),
+        url::Host::Domain(domain) => domain.to_ascii_lowercase(),
+    };
+    let authority = match url.port() {
+        Some(port) => format!("{authority_host}:{port}"),
+        None => authority_host,
+    };
+    Ok(CanonicalClientOrigin {
+        raw: format!("{scheme}://{authority}"),
+    })
 }
 
 impl CanonicalOrigin {
@@ -74,6 +162,63 @@ mod tests {
         assert_eq!(canonical.raw(), "https://wardian.tailnet.ts.net");
         assert!(canonical
             .allows_host_and_origin("Wardian.Tailnet.TS.Net", "https://wardian.tailnet.ts.net"));
+    }
+
+    #[test]
+    fn client_origins_normalize_browser_origins_and_allow_only_configured_loopback_http() {
+        let configured = canonicalized_client_origins(&[
+            "https://Client.Example".to_string(),
+            "https://client.example:8443".to_string(),
+            "http://localhost:3000".to_string(),
+            "http://127.0.0.1:80".to_string(),
+        ])
+        .expect("valid distinct origins");
+        assert_eq!(
+            configured,
+            [
+                "https://client.example",
+                "https://client.example:8443",
+                "http://localhost:3000",
+                "http://127.0.0.1"
+            ]
+        );
+        assert!(is_approved_client_origin(
+            &configured,
+            "https://client.example"
+        ));
+        assert!(!is_approved_client_origin(
+            &configured,
+            "https://client.example/"
+        ));
+        assert!(!is_approved_client_origin(
+            &configured,
+            "https://other.example"
+        ));
+        assert!(!is_approved_client_origin(&configured, "null"));
+        assert!(!is_approved_client_origin(
+            &configured,
+            "http://127.0.0.1:80"
+        ));
+
+        for invalid in [
+            "https://*",
+            "https://*.example",
+            "file://client.example",
+            "http://client.example",
+            "https://user@client.example",
+            "https://@client.example",
+            "https://client.example/path",
+            "https://client.example?x=1",
+            "https://client.example#frag",
+        ] {
+            assert!(parse_client_origin(invalid).is_err(), "accepted {invalid}");
+        }
+        assert!(parse_client_origin("https://client.example/").is_ok());
+        assert!(canonicalized_client_origins(&[
+            "https://client.example".to_string(),
+            "https://CLIENT.example/".to_string(),
+        ])
+        .is_err());
     }
 
     #[test]

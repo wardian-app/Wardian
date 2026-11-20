@@ -1,6 +1,42 @@
 //! Per-agent lifecycle exclusion and awaited native-owner shutdown.
 use crate::state::AppState;
 
+/// Worktree mutation has committed before reset begins. The reset may fail at
+/// any stage, so describe the saved assignment without asserting runtime state.
+pub(super) fn worktree_reset_error(error: String) -> String {
+    format!("Workspace assignment was saved, but the session reset did not complete: {error}")
+}
+
+/// Explain a durable conflict without implying that missing exit evidence can
+/// be reconstructed by retrying an old, unbound hold.
+pub(super) fn lease_conflict_message(
+    name: &str,
+    operation: &str,
+    conflict: &wardian_core::conversation_lease::ConversationLease,
+) -> String {
+    let recovery = if conflict.mode == "uncertain_previous_provider" {
+        "; exact old-provider exit evidence is unavailable for online release; retain this hold until verified recovery"
+    } else {
+        ""
+    };
+    format!(
+        "cannot {operation} agent {name} while its saved conversation is in use by {} {} ({}){recovery}",
+        conflict.owner_kind, conflict.owner_id, conflict.mode
+    )
+}
+
+/// Retry only a stop already bound to retained handles before ordinary lease
+/// acquisition. Persisted legacy holds without that binding remain untouched.
+pub(super) async fn recover_prior_hold_for_config(
+    config: &wardian_core::models::AgentConfig,
+) -> Result<(), String> {
+    if config.provider == "codex" {
+        let home = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
+        crate::manager::codex_stop::recover_prior_hold(&home, &config.session_id).await?;
+    }
+    Ok(())
+}
+
 /// Fence the previous conversation before stop. Only a later verified runtime
 /// receipt or explicit recovery may release this exact hold acquisition.
 pub(super) fn hold_previous_provider_before_rotation(
@@ -34,7 +70,7 @@ pub(super) fn hold_previous_provider_before_rotation(
 
 #[cfg(test)]
 #[path = "agent/lifecycle_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(test)]
 #[path = "agent/rename_tests.rs"]
@@ -259,11 +295,12 @@ pub(super) async fn stop_native_owner(
     session_id: &str,
     remove_terminal: bool,
 ) -> Result<(), String> {
-    stop_native_owner_with_before_capture(state, session_id, remove_terminal, |_| Ok(())).await
+    stop_native_owner_with_before_capture(state, session_id, remove_terminal, |_| Ok(None)).await
 }
 
 /// Run an exact-owner action under the roster lock just before Codex runtime
 /// capture. A failed native preflight never reaches the action or detaches it.
+/// The returned hold travels with those handles through cancellation and retry.
 pub(super) async fn stop_native_owner_with_before_capture<F>(
     state: &AppState,
     session_id: &str,
@@ -271,14 +308,19 @@ pub(super) async fn stop_native_owner_with_before_capture<F>(
     before_capture: F,
 ) -> Result<(), String>
 where
-    F: FnOnce(&crate::state::ActiveAgent) -> Result<(), String>,
+    F: FnOnce(
+        &crate::state::ActiveAgent,
+    )
+        -> Result<Option<wardian_core::conversation_lease::ConversationLeaseOwner>, String>,
 {
+    // Codex capture now retains its native owner until the TUI tree is joined.
+    // Cancellation after capture is handled by the retained stop worker.
+    stop_codex_runtime(state, session_id, remove_terminal, before_capture).await?;
     state
         .native_delivery
         .dispose_agent(session_id)
         .await
-        .map_err(|error| error.to_string())?;
-    stop_codex_runtime(state, session_id, remove_terminal, before_capture).await
+        .map_err(|error| error.to_string())
 }
 
 /// Explicit lifecycle operations may retry the same retained children. Native
@@ -291,15 +333,17 @@ async fn stop_codex_runtime<F>(
     before_capture: F,
 ) -> Result<(), String>
 where
-    F: FnOnce(&crate::state::ActiveAgent) -> Result<(), String>,
+    F: FnOnce(
+        &crate::state::ActiveAgent,
+    )
+        -> Result<Option<wardian_core::conversation_lease::ConversationLeaseOwner>, String>,
 {
-    let config = {
+    let (config, captured_generation) = {
         let agents = state.agents.lock().await;
-        agents
+        let agent = agents
             .get(session_id)
-            .ok_or_else(|| format!("Agent {session_id} not found"))?
-            .config
-            .clone()
+            .ok_or_else(|| format!("Agent {session_id} not found"))?;
+        (agent.config.clone(), agent.runtime_generation)
     };
     let is_codex = config
         .lock()
@@ -314,15 +358,28 @@ where
     crate::manager::codex_stop::await_quiescent(&home, session_id).await?;
     // Validate while the roster still owns the runtime. Lifecycle exclusion
     // covers the interval until capture; this token does not fence owner startup.
-    let registration = crate::manager::codex_stop::prepare_stop(&home, session_id)?;
+    let owner = state
+        .native_delivery
+        .capture_codex_stop(session_id, captured_generation)
+        .await
+        .map_err(|error| error.to_string())?;
+    let registration =
+        crate::manager::codex_stop::prepare_stop(&home, session_id)?.with_codex_owner(owner)?;
     let (guard, generation) = {
         let mut agents = state.agents.lock().await;
         let agent = agents
             .get_mut(session_id)
             .ok_or_else(|| format!("Agent {session_id} not found"))?;
-        before_capture(agent)?;
+        if agent.runtime_generation != captured_generation
+            || !std::sync::Arc::ptr_eq(&agent.config, &config)
+        {
+            return Err("Codex runtime changed before stop capture".into());
+        }
+        let hold = before_capture(agent)?;
         let generation = agent.runtime_generation;
-        let guard = registration.capture(super::take_agent_runtime_for_termination(agent));
+        let guard = registration
+            .with_prior_hold(hold)
+            .capture(super::take_agent_runtime_for_termination(agent));
         (guard, generation)
     };
     // From capture onward neither cancellation nor a later rollback can restore
@@ -358,6 +415,38 @@ where
 pub(super) struct PendingRuntime {
     runtime: Option<crate::state::ActiveAgent>,
     registration: Option<crate::manager::codex_stop::StopRegistration>,
+}
+
+/// Inputs retained across roster admission and replacement commit.
+pub(super) struct PendingRuntimeAdmissionContext<'a> {
+    pub(super) state: &'a AppState,
+    pub(super) app: &'a tauri::AppHandle,
+    pub(super) session_id: &'a str,
+    pub(super) heartbeat: &'a super::LifecycleLeaseHeartbeat,
+    pub(super) unpublished_failure: &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(super) operation: &'a str,
+}
+
+impl<'a> PendingRuntimeAdmissionContext<'a> {
+    pub(super) fn new(
+        request: (&'a AppState, &'a tauri::AppHandle, &'a str),
+        lifecycle: (
+            &'a super::LifecycleLeaseHeartbeat,
+            &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ),
+        operation: &'a str,
+    ) -> Self {
+        let (state, app, session_id) = request;
+        let (heartbeat, unpublished_failure) = lifecycle;
+        Self {
+            state,
+            app,
+            session_id,
+            heartbeat,
+            unpublished_failure,
+            operation,
+        }
+    }
 }
 
 impl PendingRuntime {
@@ -421,6 +510,57 @@ impl PendingRuntime {
 
     pub(super) async fn stop_after_failure(self, error: String) -> String {
         self.begin_stop().failure(error).await
+    }
+
+    /// Admit and commit one replacement while retaining its cleanup registration.
+    /// The durable roster barrier is acquired before either shared roster mutex.
+    pub(super) async fn commit_after_roster_admission<T>(
+        mut self,
+        context: PendingRuntimeAdmissionContext<'_>,
+        commit: impl FnOnce(
+            &mut Self,
+            &mut std::collections::HashMap<String, crate::state::ActiveAgent>,
+            &Vec<String>,
+            wardian_core::agent_replacement::AgentRosterBarrier,
+        ) -> Result<T, String>,
+    ) -> Result<(Self, T), String> {
+        let result = async {
+            let barrier = crate::manager::roster_io::acquire_roster_barrier_with_timeout(
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+            context.heartbeat.ensure_active(context.operation)?;
+            let mut agents = context.state.agents.lock().await;
+            let order = context.state.agent_order.lock().await;
+            context.heartbeat.ensure_active(context.operation)?;
+            commit(&mut self, &mut agents, &order, barrier)
+        }
+        .await;
+
+        match result {
+            Ok(result) => {
+                debug_assert!(
+                    self.runtime.is_none(),
+                    "successful replacement commit must transfer the pending runtime"
+                );
+                Ok((self, result))
+            }
+            Err(error) => {
+                let error = self.stop_after_failure(error).await;
+                let error = super::retain_uncertain_replacement_until_expiry(
+                    context.unpublished_failure,
+                    error,
+                );
+                super::restore_agent_status_after_failed_runtime_start(
+                    context.state,
+                    context.app,
+                    context.session_id,
+                    "Error",
+                )
+                .await;
+                Err(error)
+            }
+        }
     }
 }
 

@@ -14,6 +14,7 @@
  * Supported scenarios:
  *   basic         — init → user → generating → model_response → turn_completed
  *   file_changes  — init → user → read/edit/write/shell tool calls → model_response → turn_completed
+ *   chat_acceptance — file_changes → paged history/full body/distinct repeated turns → completed assistant (waits for stdin)
  *   resume        — init(session_id) → generating → model_response → turn_completed
  *   action_needed — init → user → action_required (waits for stdin) → turn_completed
  *   delayed_ready — init → user → generating → MOCK_INPUT_READY → model_response → turn_completed
@@ -27,6 +28,7 @@
  *   multi_turn    — init → [user → generating → model_response → turn_completed] × 3
  *   interactive_multi_turn — init → action_required → stdin-driven responses × 2
  *   interactive_echo_then_response — init → action_required → accepted input → prompt echo → response
+ *   interactive_idle_echo — init → idle → stdin-driven message echo and response
  *   ansi_output   — init → ANSI terminal output → model_response → turn_completed
  */
 
@@ -35,29 +37,49 @@
 const fs = require("node:fs");
 const readline = require("node:readline");
 const { spawnSync } = require("node:child_process");
+const { randomUUID } = require("node:crypto");
 
 const transcriptLog = process.env.WARDIAN_MOCK_LOG || "";
 
 const scenario = process.env.WARDIAN_MOCK_SCENARIO || "basic";
 const delay = parseInt(process.env.WARDIAN_MOCK_DELAY_MS || "100", 10);
 const sessionId = process.env.WARDIAN_MOCK_SESSION_ID || "mock-session-001";
+const incarnation = randomUUID();
+let observationSequence = 0;
 
 // Check for --print flag (headless mode)
 const isPrint = process.argv.includes("--print");
 
 function emit(obj) {
-  const line = JSON.stringify(obj) + "\n";
-  process.stdout.write(line);
+  const record = ["message", "model", "info"].includes(obj.type)
+    ? {
+        ...obj,
+        wardian_mirror: {
+          observation_id: `${incarnation}:${++observationSequence}`,
+          incarnation,
+          provider_session_id: sessionId,
+          logged: Boolean(transcriptLog),
+        },
+      }
+    : obj;
+  let line = JSON.stringify(record) + "\n";
   // Real providers are observed through a log they own, and the chat
   // transcript reads normalized events back from that log rather than from the
   // terminal. Mirroring here gives the mock provider the same surface.
+  // Append first so a logged observation cannot outrun its mirror on stdout.
   if (transcriptLog) {
     try {
       fs.appendFileSync(transcriptLog, line);
     } catch {
       // The log is test scaffolding; losing it must never stop the run.
+      // Keep the observation identity, but do not claim the mirror was saved.
+      if (record.wardian_mirror) {
+        record.wardian_mirror.logged = false;
+        line = JSON.stringify(record) + "\n";
+      }
     }
   }
+  process.stdout.write(line);
 }
 
 function sleep(ms) {
@@ -225,6 +247,49 @@ async function runFileChanges() {
   emit(events.turnCompleted());
 }
 
+/** Independent raw-provider declaration; importing it never starts a provider. */
+function chatAcceptanceFixture() {
+  return {
+    historyTurns: 96,
+    longBody: "bounded mock body ".repeat(3334).slice(0, 59999) + ".",
+    repeatBody: "These are two distinct completed assistant turns with equal text.",
+    latestBody: "Native acceptance completed assistant: the amber otter has finished.",
+    latestTurn: "chat-acceptance-completed",
+    // Each added turn has user/model/result frames. The unchanged file_changes
+    // prefix has fewer than 32 frames. Status frames are included conservatively.
+    maxRawFrames: 32 + (96 + 4) * 3,
+  };
+}
+
+/** Real Mock grammar, consumed by the normal producer, never prebuilt Chat DTOs. */
+function* chatAcceptanceEvents() {
+  const fixture = chatAcceptanceFixture();
+  const turns = Array.from({ length: fixture.historyTurns }, (_, index) => ({
+    id: `chat-acceptance-history-${index}`,
+    prompt: `Please retain controlled history turn ${index}.`,
+    body: `Controlled assistant history ${index} is complete.`,
+  }));
+  turns.push(
+    { id: "chat-acceptance-long", prompt: "Retain the full bounded body.", body: fixture.longBody },
+    { id: "chat-acceptance-repeat-a", prompt: "Complete repeated turn A.", body: fixture.repeatBody },
+    { id: "chat-acceptance-repeat-b", prompt: "Complete repeated turn B.", body: fixture.repeatBody },
+    { id: fixture.latestTurn, prompt: "Complete the independent native timing target.", body: fixture.latestBody },
+  );
+  for (const turn of turns) {
+    yield { type: "user", turn_id: turn.id, content: turn.prompt };
+    yield { type: "model", turn_id: turn.id, content: turn.body };
+    yield { type: "result", turn_id: turn.id, status: "success" };
+  }
+}
+
+async function runChatAcceptance() {
+  await runFileChanges();
+  for (const event of chatAcceptanceEvents()) emit(event);
+  // Keep live and saved-Off measurements distinct. Only the owned test's normal
+  // pause ends this process; no submitted Chat prompt is needed for the fixture.
+  await waitForStdin();
+}
+
 async function runResume() {
   emit(events.init(sessionId));
   await sleep(delay);
@@ -366,6 +431,17 @@ async function runMultiTurn() {
   }
 }
 
+async function runPagedChat() {
+  emit(events.init());
+  const longDetail = "Paged client chat detail body. ".repeat(1_400);
+  for (let turn = 1; turn <= 90; turn++) {
+    emit(events.user(`Client page prompt ${turn}.`));
+    await sleep(delay);
+    emit(events.modelResponse(turn === 90 ? longDetail : `Client page response ${turn}.`));
+    emit(events.turnCompleted());
+  }
+}
+
 async function runInteractiveMultiTurn() {
   emit(events.init());
   await sleep(delay);
@@ -411,6 +487,38 @@ async function runInteractiveEchoThenResponse() {
   emit(events.turnCompleted());
 }
 
+async function runInteractiveIdleEcho() {
+  emit(events.init());
+  await sleep(delay);
+  emit(events.user("Mock provider ready."));
+  await sleep(delay);
+  emit(events.generating());
+  await sleep(delay);
+  emit(events.modelResponse("Ready for a message."));
+  await sleep(delay);
+  emit(events.turnCompleted());
+
+  const lines = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
+  try {
+    for await (const line of lines) {
+      const input = String(line).trim();
+      if (!input) continue;
+      emit(events.user(input));
+      await sleep(delay);
+      emit(events.generating());
+      await sleep(delay);
+      emit(events.modelResponse(`Echo: ${input}`));
+      await sleep(delay);
+      emit(events.turnCompleted());
+    }
+  } finally {
+    lines.close();
+  }
+}
+
 async function runAnsiOutput() {
   emit(events.init());
   await sleep(delay);
@@ -443,6 +551,7 @@ async function main() {
   const scenarios = {
     basic: runBasic,
     file_changes: runFileChanges,
+    chat_acceptance: runChatAcceptance,
     resume: runResume,
     action_needed: runActionNeeded,
     delayed_ready: runDelayedReady,
@@ -453,8 +562,10 @@ async function main() {
     headless_delayed: runHeadlessDelayed,
     headless_structured_reply: runHeadlessStructuredReply,
     multi_turn: runMultiTurn,
+    paged_chat: runPagedChat,
     interactive_multi_turn: runInteractiveMultiTurn,
     interactive_echo_then_response: runInteractiveEchoThenResponse,
+    interactive_idle_echo: runInteractiveIdleEcho,
     ansi_output: runAnsiOutput,
   };
 
@@ -470,7 +581,11 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((err) => {
-  process.stderr.write(`Mock agent error: ${err.message}\n`);
-  process.exit(1);
-});
+module.exports = { chatAcceptanceFixture, chatAcceptanceEvents };
+
+if (require.main === module) {
+  main().catch((err) => {
+    process.stderr.write(`Mock agent error: ${err.message}\n`);
+    process.exit(1);
+  });
+}

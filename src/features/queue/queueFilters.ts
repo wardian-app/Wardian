@@ -71,7 +71,7 @@ export function normalizeQueuePreferences(value: unknown): QueuePreferences {
 }
 
 export function queueEventTypeForItem(item: QueueItem): QueueEventType {
-  if (item.type === "agent_update") return "agent_completed";
+  if (item.type === "agent_update" || item.type === "agent_turn_ended") return "agent_completed";
   if (item.type === "approval_request") return "action_needed";
   if (item.type === "automation_completed" && item.status === "failed") return "automation_failed";
   return item.type;

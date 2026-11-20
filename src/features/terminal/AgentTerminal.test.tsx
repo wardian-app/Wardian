@@ -2382,6 +2382,135 @@ describe("AgentTerminal scrollback", () => {
     assertFocusIsPassiveBeforeExplicitActivation,
   );
 
+  let recoveryFixtureNumber = 0;
+  function installRecoveryHandoffFixture(initialError = "SessionNotFound") {
+    const presentationId = "recovery-pane-" + ++recoveryFixtureNumber;
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    let registrations = 0;
+    let generation = 1;
+    let owner: string | null = null;
+    const acknowledgement = (
+      runtimeGeneration: number,
+      status: "accepted" | "rejected" = "accepted",
+      currentOwner: string | null = status === "accepted" ? presentationId : null,
+    ) => ({
+      decision: {
+        status,
+        reason: status === "accepted" ? null : "lease_epoch_changed" as const,
+        runtime_generation: runtimeGeneration,
+        lease_epoch: status === "accepted" ? 1 : 0,
+        owner_presentation_id: currentOwner,
+      },
+      broker_state: {
+        ...modernBrokerState(currentOwner),
+        runtime_generation: runtimeGeneration,
+      },
+      snapshot: { ...modernSnapshot(), runtime_generation: runtimeGeneration },
+    });
+    const acknowledgements = new Map<number, ReturnType<typeof deferred<ReturnType<typeof acknowledgement>>>>();
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    const requestFrame = vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation((callback) => {
+      const id = ++nextFrame;
+      frames.set(id, callback);
+      return id;
+    });
+    const cancelFrame = vi.spyOn(globalThis, "cancelAnimationFrame").mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const brokerState = () => ({ ...modernBrokerState(owner), runtime_generation: generation });
+    const snapshot = () => ({ ...modernSnapshot(), runtime_generation: generation });
+    mockListen.mockImplementation(async (name, handler) => {
+      listeners.set(name, handler as (event: { payload: unknown }) => void);
+      return () => listeners.delete(name);
+    });
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as {
+        request?: { presentation_id?: string; runtime_generation?: number };
+      } | undefined)?.request;
+      const requestedId = request?.presentation_id ?? presentationId;
+      if (command === "register_terminal_presentation") {
+        if (++registrations === 1) throw new Error(initialError);
+        return {
+          ...modernRegistrationResult(requestedId, owner),
+          broker_state: brokerState(), initial_snapshot: snapshot(),
+        };
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: brokerState(), initial_snapshot: snapshot() };
+      }
+      if (command === "begin_terminal_activation") {
+        const runtimeGeneration = request?.runtime_generation ?? generation;
+        return {
+          decision: { ...acknowledgement(runtimeGeneration).decision, owner_presentation_id: null },
+          activation_id: "activation-" + runtimeGeneration,
+          snapshot: { ...modernSnapshot(), runtime_generation: runtimeGeneration },
+          sequence_barrier: 0,
+        };
+      }
+      if (command === "ack_terminal_activation") {
+        const runtimeGeneration = request?.runtime_generation ?? generation;
+        const reply = deferred<ReturnType<typeof acknowledgement>>();
+        acknowledgements.set(runtimeGeneration, reply);
+        const result = await reply.promise;
+        if (runtimeGeneration === generation) owner = result.broker_state.owner_presentation_id;
+        return result;
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(requestedId, owner).presentation;
+      }
+      if (command === "request_terminal_snapshot") return snapshot();
+      if (command === "update_terminal_presentation") {
+        return {
+          ...modernRegistrationResult(requestedId, owner),
+          broker_state: brokerState(), initial_snapshot: snapshot(),
+        };
+      }
+      if (command === "read_terminal_events") {
+        return { ...modernCaughtUpBatch(), runtime_generation: generation };
+      }
+      if (command === "ack_terminal_events" || command === "unsubscribe_terminal_events") return undefined;
+      if (command === "unregister_terminal_presentation") return brokerState();
+      return null;
+    });
+    return {
+      presentationId, acknowledgements, acknowledgement,
+      get registrations() { return registrations; },
+      async recover(runtimeGeneration: number, ownerPresentationId: string | null = null) {
+        generation = runtimeGeneration;
+        owner = ownerPresentationId;
+        expect(listeners.has("terminal-session-lifecycle")).toBe(true);
+        await act(async () => {
+          listeners.get("terminal-session-lifecycle")?.({ payload: {
+            session_id: "modern-agent", runtime_generation: generation, lifecycle: "runtime_replaced",
+          } });
+        });
+      },
+      async flushFrame() {
+        const pending = [...frames.keys()];
+        await act(async () => {
+          for (const id of pending) {
+            const callback = frames.get(id);
+            frames.delete(id);
+            callback?.(performance.now());
+          }
+        });
+        return pending.length;
+      },
+      async dispose() {
+        await act(async () => {
+          for (const [runtimeGeneration, reply] of acknowledgements) {
+            reply.resolve(acknowledgement(runtimeGeneration));
+          }
+        });
+        cleanup();
+        frames.clear();
+        requestFrame.mockRestore();
+        cancelFrame.mockRestore();
+      },
+    };
+  }
+
   it.each([false, true])("activates an unowned Agents terminal after registration (deferred=%s)", async (deferredRegistration) => {
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     let registrations = 0;
@@ -2438,32 +2567,7 @@ describe("AgentTerminal scrollback", () => {
       return null;
     });
 
-    render(
-      <AgentTerminal
-        sessionId="modern-agent"
-        presentationId="agents-pane"
-        provider="codex"
-        theme="dark"
-        autoActivateWhenUnowned
-      />,
-    );
-
-    if (deferredRegistration) {
-      await waitFor(() => expect(registrations).toBe(1));
-      await act(async () => {
-        listeners.get("terminal-session-lifecycle")?.({ payload: {
-          session_id: "modern-agent", runtime_generation: 1, lifecycle: "runtime_replaced",
-        } });
-      });
-    }
-
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
-      "ack_terminal_activation",
-      expect.anything(),
-    ));
-    expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
-
-    activationAck.resolve({
+    const acknowledgement: Awaited<typeof activationAck.promise> = {
       decision: {
         status: "accepted",
         reason: null,
@@ -2473,16 +2577,363 @@ describe("AgentTerminal scrollback", () => {
       },
       broker_state: modernBrokerState("agents-pane"),
       snapshot: modernSnapshot(),
+    };
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    const requestFrame = vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation((callback) => {
+      const id = ++nextFrame;
+      frames.set(id, callback);
+      return id;
     });
+    const cancelFrame = vi.spyOn(globalThis, "cancelAnimationFrame").mockImplementation((id) => {
+      frames.delete(id);
+    });
+    try {
+      render(
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="agents-pane"
+          provider="codex"
+          theme="dark"
+          autoActivateWhenUnowned
+        />,
+      );
 
-    await waitFor(() => {
+      if (deferredRegistration) {
+        await waitFor(() => expect(registrations).toBe(1));
+        await act(async () => {
+          listeners.get("terminal-session-lifecycle")?.({ payload: {
+            session_id: "modern-agent", runtime_generation: 1, lifecycle: "runtime_replaced",
+          } });
+        });
+      }
+
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+        "ack_terminal_activation",
+        expect.anything(),
+      ));
+      // Recovery queues replacement sizing before the handshake finishes.
+      // Drive that frame and its write/microtasks while ACK is still held.
+      const pendingFrames = [...frames.keys()];
+      if (deferredRegistration) {
+        expect(pendingFrames.length).toBeGreaterThan(0);
+      }
+      await act(async () => {
+        for (const id of pendingFrames) {
+          const callback = frames.get(id);
+          frames.delete(id);
+          callback?.(performance.now());
+        }
+      });
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+
+      activationAck.resolve(acknowledgement);
+      await waitFor(() => {
+        expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
+      });
+      if (deferredRegistration) {
+        expect(mockInvoke).toHaveBeenCalledWith("report_terminal_presentation_viewport", expect.anything());
+      } else {
+        const fitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value;
+        expect(fitAddon.proposeDimensions).toHaveBeenCalled();
+      }
+    } finally {
+      // RED must also release the actual pending activation before client teardown.
+      await act(async () => { activationAck.resolve(acknowledgement); });
+      cleanup();
+      frames.clear();
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+    }
+  });
+
+  it.each(["rejected", "failed"] as const)("retries a recovered handoff without revealing after %s ACK", async (outcome) => {
+    const fixture = installRecoveryHandoffFixture();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.registrations).toBe(1));
+      await fixture.recover(1);
+      await waitFor(() => expect(fixture.acknowledgements.has(1)).toBe(true));
+      await act(async () => {
+        const reply = fixture.acknowledgements.get(1)!;
+        if (outcome === "failed") reply.reject(new Error("ACK unavailable"));
+        else reply.resolve(fixture.acknowledgement(1, "rejected"));
+      });
+      await fixture.flushFrame();
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+      await fixture.recover(2);
+      await waitFor(() => expect(fixture.acknowledgements.has(2)).toBe(true));
+      await fixture.flushFrame();
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+      await act(async () => {
+        fixture.acknowledgements.get(2)!.resolve(fixture.acknowledgement(2));
+      });
+      await waitFor(() => expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" }));
+      if (outcome === "failed") {
+        expect(warn).toHaveBeenCalledWith("Failed to activate restored terminal", expect.any(Error));
+      }
+    } finally {
+      await fixture.dispose();
+      warn.mockRestore();
+    }
+  });
+
+  it.each(["accepted", "rejected"] as const)("keeps a newer recovery hidden after the prior generation's %s ACK", async (status) => {
+    const fixture = installRecoveryHandoffFixture();
+    try {
+      render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.registrations).toBe(1));
+      await fixture.recover(1);
+      await waitFor(() => expect(fixture.acknowledgements.has(1)).toBe(true));
+      await fixture.recover(2);
+      await act(async () => {
+        fixture.acknowledgements.get(1)!.resolve(fixture.acknowledgement(1, status,
+          status === "accepted" ? fixture.presentationId : "other-pane"));
+      });
+      await waitFor(() => expect(fixture.acknowledgements.has(2)).toBe(true));
+      await fixture.flushFrame();
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+      await act(async () => {
+        fixture.acknowledgements.get(2)!.resolve(fixture.acknowledgement(2));
+      });
+      await waitFor(() => expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" }));
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("resumes a pending recovery when existing renderer metrics return", async () => {
+    const fixture = installRecoveryHandoffFixture();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) { resizeCallback = callback; }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    try {
+      render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.registrations).toBe(1));
+      const fit = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1].value;
+      fit.proposeDimensions.mockReturnValue(undefined);
+      await fixture.recover(1);
+      await fixture.flushFrame();
+      expect(fixture.acknowledgements.size).toBe(0);
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+      fit.proposeDimensions.mockReturnValue({ cols: 80, rows: 24 });
+      act(() => resizeCallback?.([], {} as ResizeObserver));
+      await fixture.flushFrame();
+      await waitFor(() => expect(fixture.acknowledgements.has(1)).toBe(true));
+      act(() => resizeCallback?.([], {} as ResizeObserver));
+      await fixture.flushFrame();
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "begin_terminal_activation")).toHaveLength(1);
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "ack_terminal_activation")).toHaveLength(1);
+      expect(mockTerminal).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+      await act(async () => {
+        fixture.acknowledgements.get(1)!.resolve(fixture.acknowledgement(1));
+      });
+      await waitFor(() => expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" }));
+    } finally {
+      await fixture.dispose();
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("retries pending recovery metrics without a bounds change", async () => {
+    const fixture = installRecoveryHandoffFixture();
+    try {
+      render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.registrations).toBe(1));
+      const fit = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1].value;
+      fit.proposeDimensions.mockReturnValue(undefined);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      await fixture.recover(1);
+      await fixture.flushFrame();
+      expect(fixture.acknowledgements.size).toBe(0);
+      fit.proposeDimensions.mockReturnValue({ cols: 80, rows: 24 });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(fixture.acknowledgements.has(1)).toBe(true);
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+      await act(async () => {
+        fixture.acknowledgements.get(1)!.resolve(fixture.acknowledgement(1));
+        await vi.advanceTimersByTimeAsync(0);
+      });
       expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
-    });
-    if (deferredRegistration) {
-      expect(mockInvoke).toHaveBeenCalledWith("report_terminal_presentation_viewport", expect.anything());
-    } else {
-      const fitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value;
-      expect(fitAddon.proposeDimensions).toHaveBeenCalled();
+      expect(mockTerminal).toHaveBeenCalledTimes(1);
+    } finally {
+      await fixture.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reveals a recovered mirror when its activation loses to another presentation", async () => {
+    const fixture = installRecoveryHandoffFixture();
+    try {
+      render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.registrations).toBe(1));
+      await fixture.recover(1);
+      await waitFor(() => expect(fixture.acknowledgements.has(1)).toBe(true));
+      await act(async () => {
+        fixture.acknowledgements.get(1)!.resolve(fixture.acknowledgement(1, "rejected", "other-pane"));
+      });
+      await fixture.flushFrame();
+      await waitFor(() => expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" }));
+      expect(fixture.registrations).toBe(2);
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "begin_terminal_activation")).toHaveLength(1);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("reveals a recovered presentation switched to read-only during its pending ACK", async () => {
+    const fixture = installRecoveryHandoffFixture();
+    try {
+      const view = render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.registrations).toBe(1));
+      await fixture.recover(1);
+      await waitFor(() => expect(fixture.acknowledgements.has(1)).toBe(true));
+      view.rerender(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark"
+        requestedInteraction="read_only" autoActivateWhenUnowned />);
+      await fixture.flushFrame();
+      await waitFor(() => expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" }));
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "ack_terminal_activation")).toHaveLength(1);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("resumes visible recovery after hiding during its viewport report", async () => {
+    const fixture = installRecoveryHandoffFixture();
+    const viewport = deferred<ReturnType<typeof modernRegistrationResult>["presentation"]>();
+    let viewportRequested = false;
+    try {
+      const view = render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.registrations).toBe(1));
+      const invoke = mockInvoke.getMockImplementation()!;
+      mockInvoke.mockImplementation(async (command: string, args?: Parameters<typeof invoke>[1]) => {
+        if (command === "report_terminal_presentation_viewport") {
+          viewportRequested = true;
+          return viewport.promise;
+        }
+        return invoke(command, args);
+      });
+      await fixture.recover(1);
+      await waitFor(() => expect(viewportRequested).toBe(true));
+      view.rerender(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark"
+        visibility="hidden" autoActivateWhenUnowned />);
+      await act(async () => {
+        viewport.resolve(modernRegistrationResult(fixture.presentationId, null).presentation);
+      });
+      view.rerender(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.acknowledgements.has(1)).toBe(true));
+      await fixture.flushFrame();
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+      await act(async () => {
+        fixture.acknowledgements.get(1)!.resolve(fixture.acknowledgement(1));
+      });
+      await waitFor(() => expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" }));
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "ack_terminal_activation")).toHaveLength(1);
+    } finally {
+      viewport.resolve(modernRegistrationResult(fixture.presentationId, null).presentation);
+      await fixture.dispose();
+    }
+  });
+
+  it("resumes a pending recovery when its renderer is replaced", async () => {
+    const fixture = installRecoveryHandoffFixture();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) { resizeCallback = callback; }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.registrations).toBe(1));
+      const oldFit = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1].value;
+      act(() => {
+        for (let index = 0; index < 24; index += 1) {
+          terminalRendererBudget.acquire("xterm", "recovery-other-" + index, () => undefined);
+        }
+      });
+      // A disposed addon's metrics cannot prepare a newly restored renderer.
+      oldFit.proposeDimensions.mockReturnValue(undefined);
+      await fixture.recover(1);
+      expect(fixture.acknowledgements.size).toBe(0);
+      act(() => {
+        terminalRendererBudget.release("xterm", "recovery-other-0");
+        resizeCallback?.([], {} as ResizeObserver);
+      });
+      await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(fixture.acknowledgements.has(1)).toBe(true));
+      await fixture.flushFrame();
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+      await act(async () => {
+        fixture.acknowledgements.get(1)!.resolve(fixture.acknowledgement(1));
+      });
+      await waitFor(() => expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" }));
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+      expect(consoleError).not.toHaveBeenCalledWith("Terminal renderer restore failed:", expect.anything());
+    } finally {
+      await fixture.dispose();
+      globalThis.ResizeObserver = originalResizeObserver;
+      consoleError.mockRestore();
+    }
+  });
+
+  it.each(["read_only", "mirror"] as const)("renders recovered %s presentations without acquiring runtime ownership", async (kind) => {
+    const fixture = installRecoveryHandoffFixture();
+    try {
+      render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark"
+        requestedInteraction={kind === "read_only" ? "read_only" : "interactive"} autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.registrations).toBe(1));
+      await fixture.recover(1, kind === "mirror" ? "other-pane" : null);
+      await waitFor(() => expect(fixture.registrations).toBe(2));
+      await fixture.flushFrame();
+      await waitFor(() => expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" }));
+      expect(mockInvoke).not.toHaveBeenCalledWith("begin_terminal_activation", expect.anything());
+      expect(mockInvoke).not.toHaveBeenCalledWith("ack_terminal_activation", expect.anything());
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("does not revive a disposed recovery when its pending ACK arrives", async () => {
+    const fixture = installRecoveryHandoffFixture();
+    try {
+      const view = render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(fixture.registrations).toBe(1));
+      await fixture.recover(1);
+      await waitFor(() => expect(fixture.acknowledgements.has(1)).toBe(true));
+      const oldHost = screen.getByTestId("agent-terminal-host");
+      view.unmount();
+      await act(async () => {
+        fixture.acknowledgements.get(1)!.resolve(fixture.acknowledgement(1));
+      });
+      await fixture.flushFrame();
+      expect(oldHost.isConnected).toBe(false);
+      expect(oldHost).toHaveStyle({ visibility: "hidden" });
+      expect(screen.queryByTestId("agent-terminal-host")).toBeNull();
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("keeps legacy protocol fallback renderable with automatic activation enabled", async () => {
+    const fixture = installRecoveryHandoffFixture("TerminalSessionProtocolUnavailable");
+    try {
+      render(<AgentTerminal sessionId="modern-agent" presentationId={fixture.presentationId} theme="dark" autoActivateWhenUnowned />);
+      await waitFor(() => expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" }));
+      expect(mockInvoke).not.toHaveBeenCalledWith("begin_terminal_activation", expect.anything());
+      expect(mockInvoke).not.toHaveBeenCalledWith("ack_terminal_activation", expect.anything());
+    } finally {
+      await fixture.dispose();
     }
   });
 

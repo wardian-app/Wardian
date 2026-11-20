@@ -598,3 +598,80 @@ test("automation monitor fits an adaptive activity card inside a narrow restored
   expect(geometry!.requiredContentFitsOwnWidth).toBe(true);
   expect(geometry!.documentScrollWidth).toBeLessThanOrEqual(geometry!.documentClientWidth + horizontalTolerance);
 });
+
+test("missed one-time schedules stay visible and can run now", async ({ page }) => {
+  const automationsSurface = makeWorkbenchSurface("offline-schedule", "automations");
+  const restoredDocument = makeWorkbenchDocument({
+    revision: 1,
+    root: { kind: "group", group_id: "group-monitor" },
+    groups: {
+      "group-monitor": {
+        group_id: "group-monitor",
+        surface_ids: [automationsSurface.surface_id],
+        active_surface_id: automationsSurface.surface_id,
+      },
+    },
+    surfaces: [automationsSurface],
+    active_group_id: "group-monitor",
+    shell: { left_sidebar_collapsed: true, right_sidebar_collapsed: true },
+  });
+  await installAutomationsIpcMock(page, blueprint, restoredDocument);
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+
+  await page.evaluate(async () => {
+    const { useRunStore } = await import("/src/features/automations/run/useRunStore.ts");
+    const { useSchedulesStore } = await import("/src/store/useSchedulesStore.ts");
+    useSchedulesStore.setState({
+      load: async () => undefined,
+      schedules: [{
+        id: "schedule-missed-one-time",
+        blueprint_id: "wf",
+        name: "Missed nightly report",
+        input: { date: "yesterday" },
+        bindings: { planner: "codex" },
+        assignments: {},
+        schedule: {
+          schedule_type: "one_time",
+          run_at: "2026-10-01T09:00:00-04:00",
+          active: true,
+          occurrence_count: 0,
+          end_condition: "after_occurrences",
+          max_occurrences: 2,
+        },
+        is_paused: false,
+        next_run_epoch_ms: null,
+        last_run_status: "missed",
+        last_run_epoch_ms: 1784304000000,
+      }],
+    });
+    useRunStore.setState({ loadRuns: async () => undefined, runs: [] });
+  });
+
+  const automationsPane = surfacePanel(page, "automations");
+  await automationsPane.getByRole("button", { name: /^monitor$/i }).click();
+  const monitor = automationsPane.getByTestId("automation-monitor");
+  await expect(monitor.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
+
+  const missedCard = monitor.getByTestId("automation-activity-row-wf");
+  await expect(missedCard).toBeVisible();
+  await expect(missedCard).toHaveAttribute("data-mode", "attention");
+  await expect(missedCard).toContainText("Missed");
+  const runNow = missedCard.getByRole("button", { name: "Run Missed nightly report now" });
+  await expect(runNow).toBeVisible();
+
+  const screenshotTimestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const screenshotDirectory = `e2e/screenshots/offline-schedules/${screenshotTimestamp}`;
+  fs.mkdirSync(screenshotDirectory, { recursive: true });
+  await missedCard.screenshot({ path: `${screenshotDirectory}/missed-schedule.png`, animations: "disabled" });
+
+  await runNow.click();
+  await expect.poll(async () => page.evaluate(() => (
+    (window as Window & {
+      __automationsInvokes?: Array<{ command: string; args?: Record<string, unknown> }>;
+    }).__automationsInvokes?.some((call) => (
+      call.command === "schedule_run_now" && call.args?.id === "schedule-missed-one-time"
+    )) ?? false
+  ))).toBe(true);
+});

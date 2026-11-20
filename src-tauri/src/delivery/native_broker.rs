@@ -26,6 +26,7 @@ use super::opencode_http::{
 use crate::providers::{CodexProvider, PiProvider, ProviderFactory};
 
 mod codex;
+pub(crate) use codex::CapturedCodexStop;
 
 #[cfg(test)]
 pub(crate) use codex::shared_error as codex_shared_error_for_test;
@@ -329,6 +330,7 @@ struct OpenCodeHttpLaunchState {
 enum SessionCommand {
     Submit {
         record: Box<NativeDeliveryRecord>,
+        client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
         reply: oneshot::Sender<Result<NativeDispatchReceipt, NativeBrokerError>>,
     },
     Cancel {
@@ -371,6 +373,31 @@ type CodexCreationRevisionMap =
 #[derive(Debug, Default)]
 struct CodexCreationRegistry {
     revisions: std::sync::Mutex<CodexCreationRevisionMap>,
+    stopping: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+}
+
+/// Keeps new preparations out while a retained stop owns the generation gate.
+/// Without this admission fence a new request could wait forever behind a
+/// failed stop instead of returning its retained-fence error.
+#[derive(Debug)]
+struct CodexStopAdmission {
+    stopping: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    agent_id: String,
+}
+
+impl Drop for CodexStopAdmission {
+    fn drop(&mut self) {
+        let mut stopping = self
+            .stopping
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(count) = stopping.get_mut(&self.agent_id) {
+            *count -= 1;
+            if *count == 0 {
+                stopping.remove(&self.agent_id);
+            }
+        }
+    }
 }
 
 /// Keeps its generation's revision alive until the detached creation worker ends.
@@ -381,12 +408,30 @@ struct CodexCreationRequest {
 }
 
 impl CodexCreationRegistry {
+    fn pause_for_stop(&self, agent_id: &str) -> Result<CodexStopAdmission, &'static str> {
+        let mut stopping = self
+            .stopping
+            .lock()
+            .map_err(|_| "Codex stop admission lock poisoned")?;
+        *stopping.entry(agent_id.to_owned()).or_default() += 1;
+        Ok(CodexStopAdmission {
+            stopping: self.stopping.clone(),
+            agent_id: agent_id.to_owned(),
+        })
+    }
     /// Capture before the creation request's first await or detached spawn.
     fn register(
         &self,
         agent_id: &str,
         generation: u64,
     ) -> Result<CodexCreationRequest, &'static str> {
+        let stopping = self
+            .stopping
+            .lock()
+            .map_err(|_| "Codex stop admission lock poisoned")?;
+        if stopping.contains_key(agent_id) {
+            return Err("Codex runtime is stopping; retained owner fence excludes preparation");
+        }
         let mut revisions = self
             .revisions
             .lock()
@@ -563,10 +608,11 @@ impl NativeDeliveryBroker {
         Ok(record)
     }
 
-    pub async fn dispatch(
+    pub(crate) async fn dispatch_with_client_authority(
         self: &Arc<Self>,
         spec: NativeSessionSpec,
         record: NativeDeliveryRecord,
+        client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
         if record.envelope.generation != spec.generation {
             let stale = self
@@ -597,15 +643,24 @@ impl NativeDeliveryBroker {
                 record.transport = "opencode_http".to_string();
                 wardian_core::db::upsert_native_delivery(&record).map_err(db_error)?;
             }
-            return self.dispatch_opencode_http(spec, record).await;
+            return self
+                .dispatch_opencode_http(spec, record, client_send_authority.as_ref())
+                .await;
         }
         if spec.provider == "pi" {
-            return self.dispatch_pi_tui(record, spec.generation).await;
+            return self
+                .dispatch_pi_tui(record, spec.generation, client_send_authority.as_ref())
+                .await;
         }
         let handle = self.ensure_session(spec).await?;
         if let Some(owner) = handle.shared_codex {
             return self
-                .dispatch_shared_codex(owner, record, handle.capabilities)
+                .dispatch_shared_codex(
+                    owner,
+                    record,
+                    handle.capabilities,
+                    client_send_authority.as_ref(),
+                )
                 .await;
         }
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -613,6 +668,7 @@ impl NativeDeliveryBroker {
             .tx
             .send(SessionCommand::Submit {
                 record: Box::new(record),
+                client_send_authority,
                 reply: reply_tx,
             })
             .await
@@ -636,6 +692,7 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         spec: NativeSessionSpec,
         record: NativeDeliveryRecord,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
         if record.envelope.operation != NativeMessageOperation::StartTurn {
             return Err(error(
@@ -711,10 +768,11 @@ impl NativeDeliveryBroker {
         );
         match registration
             .owner
-            .submit_once(
+            .submit_once_with_authority(
                 dispatching.envelope.generation,
                 registration.runtime_generation,
                 &prompt,
+                client_send_authority,
             )
             .await
         {
@@ -1274,19 +1332,47 @@ impl NativeDeliveryBroker {
                 false,
             )
         })?;
-        if context["kind"].as_str() != Some("task") {
+        let kind = context["kind"].as_str();
+        let reply_continuation = kind == Some("reply");
+        let informational_message = kind == Some("message");
+        if !matches!(kind, Some("task" | "reply" | "message")) {
             return Err(error(
                 NativeDeliveryErrorCode::UnsupportedOperation,
-                "OpenCode HTTP accepts task context only; information remains manual",
+                "OpenCode HTTP accepts canonical task, reply, or informational message context only",
                 false,
             ));
         }
+        let message_frame = serde_json::from_value::<
+            wardian_core::agent_messaging::AgentMessageContext,
+        >(context.clone())
+        .map_err(|_| {
+            error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "OpenCode message context was not a canonical message frame",
+                false,
+            )
+        })?;
         let recipient = context["recipient"].as_str().unwrap_or_default();
         let interaction_id = context["interaction_id"].as_str().unwrap_or_default();
+        let correlated = if reply_continuation {
+            context["parent_interaction_id"]
+                .as_str()
+                .is_some_and(|parent| {
+                    context["request_id"].as_str() == Some(parent)
+                        && context["reply_status"].as_str().is_some()
+                })
+        } else if informational_message {
+            context["request_id"].is_null()
+                && context["parent_interaction_id"].is_null()
+                && context["reply_status"].is_null()
+        } else {
+            context["request_id"].as_str() == Some(message_id)
+        };
         if recipient != target_agent_id
             || interaction_id.is_empty()
             || message_id.is_empty()
-            || context["request_id"].as_str() != Some(message_id)
+            || interaction_id != message_id
+            || !correlated
         {
             return Err(error(
                 NativeDeliveryErrorCode::UnsupportedOperation,
@@ -1294,6 +1380,7 @@ impl NativeDeliveryBroker {
                 false,
             ));
         }
+        let reply_frame = reply_continuation.then_some(&message_frame);
         let provenance = if let Some(sender) = context["sender"]
             .as_str()
             .map(str::trim)
@@ -1326,11 +1413,26 @@ impl NativeDeliveryBroker {
                 false,
             ));
         };
-        let prompt_text = format!(
-            "Wardian canonical task provenance: {}\n\n{}",
-            serde_json::to_string(&provenance).unwrap_or_else(|_| "{}".to_string()),
-            crate::control::message_with_structured_reply_instruction(body, message_id,)
-        );
+        let prompt_text = if reply_continuation {
+            wardian_core::agent_messaging::reply_continuation_prompt(
+                reply_frame.as_ref().expect("reply frame was validated"),
+            )
+        } else if informational_message {
+            wardian_core::agent_messaging::information_delivery_prompt(&message_frame)
+        } else {
+            let information =
+                wardian_core::agent_messaging::pending_information_prompt(&message_frame);
+            let information = if information.is_empty() {
+                String::new()
+            } else {
+                format!("{information}\n\n")
+            };
+            format!(
+                "{information}Wardian canonical task provenance: {}\n\n{}",
+                serde_json::to_string(&provenance).unwrap_or_else(|_| "{}".to_string()),
+                crate::control::message_with_structured_reply_instruction(body, message_id,)
+            )
+        };
         if let Err(error) = self
             .opencode_http_admission(target_agent_id, generation, config, workspace)
             .await
@@ -1581,13 +1683,24 @@ impl NativeDeliveryBroker {
                 false,
             )
         })?;
-        if context["kind"].as_str() != Some("task") {
+        let kind = context["kind"].as_str();
+        let reply_continuation = kind == Some("reply");
+        let informational_message = kind == Some("message");
+        if !matches!(kind, Some("task" | "reply" | "message")) {
             return Err(error(
                 NativeDeliveryErrorCode::UnsupportedOperation,
-                "Pi bridge accepts task context only; information remains manual",
+                "Pi bridge accepts canonical task, reply, or informational message context only",
                 false,
             ));
         }
+        let frame: wardian_core::agent_messaging::AgentMessageContext =
+            serde_json::from_value(context.clone()).map_err(|_| {
+                error(
+                    NativeDeliveryErrorCode::UnsupportedOperation,
+                    "Pi bridge message context was not a canonical message frame",
+                    false,
+                )
+            })?;
         let sender = pi_sender_id(&context).ok_or_else(|| {
             error(
                 NativeDeliveryErrorCode::UnsupportedOperation,
@@ -1597,7 +1710,26 @@ impl NativeDeliveryBroker {
         })?;
         let recipient = context["recipient"].as_str().unwrap_or_default();
         let interaction_id = context["interaction_id"].as_str().unwrap_or_default();
-        if recipient != target_agent_id || interaction_id.is_empty() || message_id.is_empty() {
+        let correlated = if reply_continuation {
+            context["parent_interaction_id"]
+                .as_str()
+                .is_some_and(|parent| {
+                    context["request_id"].as_str() == Some(parent)
+                        && context["reply_status"].as_str().is_some()
+                })
+        } else if informational_message {
+            context["request_id"].is_null()
+                && context["parent_interaction_id"].is_null()
+                && context["reply_status"].is_null()
+        } else {
+            context["request_id"].as_str() == Some(message_id)
+        };
+        if recipient != target_agent_id
+            || interaction_id != message_id
+            || interaction_id.is_empty()
+            || message_id.is_empty()
+            || !correlated
+        {
             return Err(error(
                 NativeDeliveryErrorCode::UnsupportedOperation,
                 "Pi bridge context does not match the claimed target",
@@ -1612,6 +1744,18 @@ impl NativeDeliveryBroker {
                 false,
             ));
         };
+        let body = if reply_continuation {
+            wardian_core::agent_messaging::reply_continuation_prompt(&frame)
+        } else if informational_message {
+            wardian_core::agent_messaging::information_delivery_prompt(&frame)
+        } else {
+            let information = wardian_core::agent_messaging::pending_information_prompt(&frame);
+            if information.is_empty() {
+                body.to_string()
+            } else {
+                format!("{information}\n\nWardian task:\n{body}")
+            }
+        };
         let envelope = NativeMessageEnvelope {
             interaction_id: interaction_id.to_string(),
             message_id: message_id.to_string(),
@@ -1624,7 +1768,9 @@ impl NativeDeliveryBroker {
             generation,
             operation: NativeMessageOperation::StartTurn,
             deadline_at: None,
-            body: body.to_string(),
+            // The bridge envelope carries canonical reply correlation out of
+            // band. Keep the provider-visible literal unchanged and bounded.
+            body,
         };
         registration
             .owner
@@ -1669,6 +1815,7 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         record: NativeDeliveryRecord,
         generation: u64,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
         let registration = self
             .pi_bridges
@@ -1703,7 +1850,7 @@ impl NativeDeliveryBroker {
             .await?;
         match registration
             .owner
-            .deliver(dispatching.envelope.clone())
+            .deliver_with_authority(dispatching.envelope.clone(), client_send_authority)
             .await
         {
             Ok(receipt) => {
@@ -1965,7 +2112,11 @@ async fn run_session_actor(
                 None => rx.recv().await,
             };
             match command {
-                Some(SessionCommand::Submit { record, reply }) => {
+                Some(SessionCommand::Submit {
+                    record,
+                    client_send_authority,
+                    reply,
+                }) => {
                     let current = match broker.get(&record.envelope.interaction_id) {
                         Ok(current) => current,
                         Err(failure) => {
@@ -2070,7 +2221,35 @@ async fn run_session_actor(
                         }
                     };
                     let request_id = protocol_request_id(&request);
-                    if let Err(failure) = write_json(&mut opened.stdin, &request).await {
+                    let permit = match client_send_authority {
+                        Some(authority) => match authority.acquire().await {
+                            Ok(permit) => Some(permit),
+                            Err(code) => {
+                                let failure = error(
+                                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                                    code,
+                                    false,
+                                );
+                                let _ = broker
+                                    .advance(
+                                        &dispatching.envelope.interaction_id,
+                                        NativeDeliveryPhase::FailedBeforeSubmit,
+                                        NativeEvidenceSource::WardianQueue,
+                                        None,
+                                        None,
+                                        Some(failure.message.clone()),
+                                        "client_authority_rejected",
+                                    )
+                                    .await;
+                                let _ = reply.send(Err(failure));
+                                continue;
+                            }
+                        },
+                        None => None,
+                    };
+                    let write_result = write_json(&mut opened.stdin, &request).await;
+                    drop(permit);
+                    if let Err(failure) = write_result {
                         let _ = broker
                             .advance(
                                 &dispatching.envelope.interaction_id,
@@ -2126,9 +2305,25 @@ async fn run_session_actor(
         tokio::select! {
             command = rx.recv() => {
                 match command {
-                    Some(SessionCommand::Submit { record, reply }) => {
+                    Some(SessionCommand::Submit {
+                        record,
+                        client_send_authority,
+                        reply,
+                    }) => {
                         if record.envelope.operation == NativeMessageOperation::StartTurn {
-                            pending.push_back(SessionCommand::Submit { record, reply });
+                            pending.push_back(SessionCommand::Submit {
+                                record,
+                                client_send_authority,
+                                reply,
+                            });
+                            continue;
+                        }
+                        if client_send_authority.is_some() {
+                            let _ = reply.send(Err(error(
+                                NativeDeliveryErrorCode::UnsupportedOperation,
+                                "paired-client authority cannot submit a native correction",
+                                false,
+                            )));
                             continue;
                         }
                         if !capabilities.invalidate_premise {
@@ -3561,6 +3756,17 @@ fn error(
 mod tests {
     use super::*;
 
+    impl NativeDeliveryBroker {
+        pub async fn dispatch(
+            self: &Arc<Self>,
+            spec: NativeSessionSpec,
+            record: NativeDeliveryRecord,
+        ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
+            self.dispatch_with_client_authority(spec, record, None)
+                .await
+        }
+    }
+
     struct NativeTestScriptGuard;
 
     impl Drop for NativeTestScriptGuard {
@@ -4339,6 +4545,7 @@ input.on('line', (line) => {
         command_tx
             .send(SessionCommand::Submit {
                 record: Box::new(first),
+                client_send_authority: None,
                 reply: reply_tx,
             })
             .await
@@ -4360,6 +4567,7 @@ input.on('line', (line) => {
         command_tx
             .send(SessionCommand::Submit {
                 record: Box::new(correction),
+                client_send_authority: None,
                 reply: reply_tx,
             })
             .await

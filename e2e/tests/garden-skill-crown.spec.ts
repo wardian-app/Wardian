@@ -225,7 +225,7 @@ test.describe("Garden skill crown", () => {
     expect(Object.keys(districts)).toContain("workspace:d:/trading/trident");
 
     await expect(garden.getByTestId("garden-selection-summary")).toContainText(
-      "Select to inspect",
+      "No selection",
     );
     await expect(garden.locator('[data-garden-object^="automation:"]')).toHaveCount(0);
     await garden.locator('[data-garden-object="agent:hw-01"]').press("Enter");

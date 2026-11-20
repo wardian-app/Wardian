@@ -57,7 +57,7 @@ test('legacy repeated initialize and completed IDs remain stateless across calle
   assert.equal(state.verifies, 8);
 });
 
-test('only explicit replay keys persist; fixed owner and non-waking operation preserved', async () => {
+test('only explicit replay keys persist; fixed owner and informational operation are preserved', async () => {
   const { handler, state } = fixture();
   const args = { target, message: 'hello' };
   const call = key => rpc('tools/call', { name: 'send_message', arguments: args, _meta: { ...meta, ...(key ? { 'wardian/request_key': key } : {}) } });

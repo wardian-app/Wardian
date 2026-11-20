@@ -4,8 +4,9 @@ use crate::delivery::native_broker::{
     log_opencode_dispatch_diagnostic, NativeBrokerError, NativeDeliveryAdmission,
     NativeSessionSpec, OpenCodeDispatchDiagnosticReason, OpenCodeDispatchDiagnosticStage,
 };
+use wardian_core::agent_messaging::AgentMessageContext;
 use wardian_core::conversation_lease::{ConversationLeaseOwner, PersistedConversationLeaseGuard};
-use wardian_core::native_transport::NativeDeliveryErrorCode;
+use wardian_core::native_transport::{NativeDeliveryErrorCode, NativeDeliveryPhase};
 mod completion;
 use completion::{
     bind_codex_task, observe_codex_task, publish_completion, spawn_codex_task_completion,
@@ -20,13 +21,18 @@ pub(super) fn spawn_information(app: &AppHandle, recipient: &str) {
     let recipient = recipient.to_owned();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
+        if let Err(error) =
+            super::dispatch_pending_wakeable_information(Some(&app), &state, &recipient).await
+        {
+            manager::log_debug(&format!("[WARDIAN] informational wake: {error}"));
+        }
         if let Err(error) = push_pending_information(&state, &recipient).await {
             manager::log_debug(&format!("[WARDIAN] information delivery: {error}"));
         }
     });
 }
 
-async fn settle(
+pub(super) async fn settle(
     state: &AppState,
     claim: &store::TaskClaim,
     result: Result<&str, bool>,
@@ -110,7 +116,7 @@ async fn settle_attached_task(
     settle(state, claim, result).await
 }
 
-/// No owner creation: unsupported legacy/embedded sessions retain receive.
+/// No owner creation: unsupported sessions keep information for the next managed turn.
 pub(super) async fn push_pending_information(
     state: &AppState,
     recipient: &str,
@@ -167,6 +173,114 @@ pub(super) async fn push_pending_information(
                 return Err(native_error(error, "native_push_unavailable"));
             }
         }
+    }
+}
+
+/// Continue a canonical task reply through the recipient's existing native
+/// owner. This path never binds a new task turn or observes another reply.
+pub(super) async fn dispatch_attached_reply(
+    state: &AppState,
+    info: &DeliveryTargetInfo,
+    claim: &store::TaskClaim,
+    context: &str,
+) -> Result<String, NativeBrokerError> {
+    let recipient = info.uuid.as_str();
+    let generation = claim.generation;
+    match info.provider.as_str() {
+        "codex" => state
+            .native_delivery
+            .codex_followup(recipient, generation, &claim.record.id, context)
+            .await
+            .map(|receipt| receipt.delivery_state),
+        "pi" => state
+            .native_delivery
+            .pi_followup(recipient, generation, &claim.record.id, context)
+            .await
+            .map(|receipt| receipt.delivery_state),
+        "opencode" => {
+            let frame: AgentMessageContext = serde_json::from_str(context).map_err(|_| {
+                native_broker_error(
+                    NativeDeliveryErrorCode::UnsupportedOperation,
+                    "OpenCode reply context was not canonical JSON",
+                    false,
+                )
+            })?;
+            let parent = claim.record.parent_interaction_id.clone();
+            let admitted = state
+                .native_delivery
+                .admit(NativeDeliveryAdmission {
+                    interaction_id: claim.record.id.clone(),
+                    message_id: claim.record.id.clone(),
+                    target_agent_id: recipient.to_owned(),
+                    sender_agent_id: claim.record.sender_session_id.clone(),
+                    provider: info.provider.clone(),
+                    generation,
+                    operation: wardian_core::native_transport::NativeMessageOperation::StartTurn,
+                    caller_idempotency_key: Some(claim.record.id.clone()),
+                    parent_interaction_id: parent,
+                    deadline_at: None,
+                    body: frame.body.clone(),
+                })
+                .await?;
+            if admitted.phase != NativeDeliveryPhase::Queued {
+                return Ok(match admitted.phase {
+                    NativeDeliveryPhase::FailedBeforeSubmit => "failed_before_submit",
+                    NativeDeliveryPhase::ProviderAccepted => "provider_accepted",
+                    NativeDeliveryPhase::TurnStarted => "provider_visible",
+                    NativeDeliveryPhase::Completed => "provider_completed",
+                    NativeDeliveryPhase::Queued => unreachable!(),
+                    NativeDeliveryPhase::Dispatching
+                    | NativeDeliveryPhase::SubmittedUnconfirmed
+                    | NativeDeliveryPhase::Failed
+                    | NativeDeliveryPhase::CancelRequested
+                    | NativeDeliveryPhase::Cancelled
+                    | NativeDeliveryPhase::Expired
+                    | NativeDeliveryPhase::StaleGeneration
+                    | NativeDeliveryPhase::Withdrawn
+                    | NativeDeliveryPhase::Superseded => "uncertain",
+                }
+                .to_owned());
+            }
+            state
+                .native_delivery
+                .opencode_http_followup(
+                    recipient,
+                    generation,
+                    &claim.record.id,
+                    context,
+                    &info.config,
+                    &info.cwd,
+                )
+                .await
+        }
+        _ => Err(native_broker_error(
+            NativeDeliveryErrorCode::UnsupportedProvider,
+            "No attached native continuation adapter exists for this provider",
+            false,
+        )),
+    }
+}
+
+/// Deliver a newly admitted informational message through the same exact
+/// provider continuation adapters while keeping its canonical Message kind.
+pub(super) async fn dispatch_attached_information(
+    state: &AppState,
+    info: &DeliveryTargetInfo,
+    claim: &store::TaskClaim,
+    context: &str,
+) -> Result<String, NativeBrokerError> {
+    dispatch_attached_reply(state, info, claim, context).await
+}
+
+fn native_broker_error(
+    code: NativeDeliveryErrorCode,
+    message: &str,
+    provider_boundary_crossed: bool,
+) -> NativeBrokerError {
+    NativeBrokerError {
+        code,
+        message: message.to_owned(),
+        provider_boundary_crossed,
     }
 }
 
@@ -302,6 +416,11 @@ pub(super) async fn dispatch_attached_task_with_request(
         }
         _ => return Ok(()),
     }
+    if info.provider == "codex" {
+        if let Err(error) = push_pending_information(state, &info.uuid).await {
+            manager::log_debug(&format!("[WARDIAN] pre-task information delivery: {error}"));
+        }
+    }
     let Some(claim) = state
         .interactions
         .claim_agent_task(&info.uuid, generation)
@@ -326,7 +445,14 @@ pub(super) async fn dispatch_attached_task_with_request(
             OpenCodeDispatchDiagnosticReason::ClaimAcquired,
         );
     }
-    let context = prepare_claim_context(state, &claim).await?;
+    let (context, information_claims) = prepare_claim_context_with_information(
+        state,
+        &claim,
+        &info.uuid,
+        generation,
+        &info.provider,
+    )
+    .await?;
     drop(lifecycle);
     // The actor revalidates this generation before writing. No lifecycle lock
     // is held while waiting for native protocol acknowledgement.
@@ -410,7 +536,14 @@ pub(super) async fn dispatch_attached_task_with_request(
                         OpenCodeDispatchDiagnosticStage::NativeAdmission,
                         OpenCodeDispatchDiagnosticReason::NativeRecordTerminal,
                     );
-                    settle_persisted_native_phase(state, &claim, record.phase).await?;
+                    let information = settle_information_claims(
+                        state,
+                        information_claims,
+                        native_phase_settlement(record.phase),
+                    )
+                    .await;
+                    let delivery = settle_persisted_native_phase(state, &claim, record.phase).await;
+                    delivery.and(information)?;
                     return Ok(());
                 }
                 Ok(_) => {
@@ -445,7 +578,7 @@ pub(super) async fn dispatch_attached_task_with_request(
         }
         _ => return Ok(()),
     };
-    settle_attached_task(
+    let delivery = settle_attached_task(
         state,
         &claim,
         result
@@ -454,7 +587,17 @@ pub(super) async fn dispatch_attached_task_with_request(
             .map_err(|error| error.provider_boundary_crossed),
         info.provider == "opencode",
     )
-    .await?;
+    .await;
+    let information = settle_information_claims(
+        state,
+        information_claims,
+        result
+            .as_ref()
+            .map(String::as_str)
+            .map_err(|error| error.provider_boundary_crossed),
+    )
+    .await;
+    delivery.and(information)?;
     result
         .map(|_| ())
         .map_err(|error| native_error(error, "native_followup_unavailable"))
@@ -573,7 +716,11 @@ pub(super) async fn selected_native_owner_for_dispatch(
     }
 }
 
-async fn codex_input_is_ready(state: &AppState, session_id: &str, generation: u64) -> bool {
+pub(super) async fn codex_input_is_ready(
+    state: &AppState,
+    session_id: &str,
+    generation: u64,
+) -> bool {
     let attachment_ready = state
         .agents
         .lock()
@@ -783,7 +930,11 @@ pub(super) async fn dispatch_background(
         match state.interactions.fail_agent_startup(&task).await {
             Ok(replied) => {
                 if let Some(app) = app {
-                    spawn_information(app, &replied.record.target_session_ids[0]);
+                    super::spawn_reply_continuation(
+                        app,
+                        &replied.record.target_session_ids[0],
+                        &replied.record.id,
+                    );
                 }
                 Ok(())
             }

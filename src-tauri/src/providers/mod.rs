@@ -1,5 +1,6 @@
 pub mod antigravity;
 pub mod chat_transcript;
+mod chat_turn_membership;
 pub mod claude;
 pub mod codex;
 pub mod codex_model_selection;

@@ -14,9 +14,11 @@ use wardian_core::models::git::{
 };
 
 mod cargo_worktree_config;
+mod worktree_creation;
 mod worktree_removal;
 pub(crate) use cargo_worktree_config::managed_worktree_cargo_target;
 use cargo_worktree_config::{remove_generated_cargo_config, write_cargo_worktree_config};
+pub(crate) use worktree_creation::{create_worktree_with_build_caches, primary_worktree_path};
 
 /// Run a git command in the given directory and return stdout as a String.
 ///
@@ -1251,30 +1253,6 @@ fn is_untracked_path(cwd: &str, path: &str) -> Result<bool, String> {
         .any(|line| line.starts_with("?? ") && parse_porcelain_path(&line[3..]) == path))
 }
 
-pub(crate) fn create_worktree_with_build_caches(
-    workspace_path: &Path,
-    worktree_path: &Path,
-    branch: &str,
-) -> Result<(), String> {
-    let workspace_path = absolute_existing_path(workspace_path)?;
-    let worktree_path = absolute_worktree_target_path(&workspace_path, worktree_path);
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    let workspace = path_to_git_arg(&workspace_path)?;
-    let worktree = path_to_git_arg(&worktree_path)?;
-    let branch_exists = local_branch_exists(&workspace, branch)?;
-    if branch_exists {
-        run_git(&workspace, &["worktree", "add", &worktree, branch])?;
-    } else {
-        run_git(&workspace, &["worktree", "add", &worktree, "-b", branch])?;
-    }
-
-    let worktree_path = absolute_existing_path(&worktree_path)?;
-    setup_worktree_build_caches(&worktree_path, &workspace_path)
-}
-
 fn local_branch_exists(workspace: &str, branch: &str) -> Result<bool, String> {
     let reference = format!("refs/heads/{branch}");
     Ok(!run_git_allowing_status(
@@ -1985,25 +1963,25 @@ dddddddddddddddddddddddddddddddddddddddd\x1f\x1ffeature/review\x1fInitial commit
     #[cfg(unix)]
     #[test]
     fn run_git_tries_next_candidate_when_lookup_is_missing() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().unwrap();
-        let fake_git = temp.path().join("git");
-        std::fs::write(&fake_git, "#!/bin/sh\necho git version fake\n").unwrap();
-
-        let mut permissions = std::fs::metadata(&fake_git).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fake_git, permissions).unwrap();
-
         let missing_git = temp.path().join("missing").join("git");
+        assert!(
+            !missing_git.exists(),
+            "missing Git candidate unexpectedly exists: {missing_git:?}"
+        );
+        let candidates = [missing_git, PathBuf::from("/bin/sh")];
         let output = run_git_with_candidates(
             temp.path().to_str().unwrap(),
-            &["--version"],
-            &[missing_git, fake_git],
+            &["-c", "printf '%s\\n' 'git version fake'"],
+            &candidates,
         )
-        .unwrap();
-
-        assert_eq!(output.trim(), "git version fake");
+        .unwrap_or_else(|error| {
+            panic!(
+                "Git fallback failed: candidates={candidates:?}, cwd={:?}, error={error}",
+                temp.path()
+            )
+        });
+        assert_eq!(output, "git version fake\n");
     }
 
     #[test]

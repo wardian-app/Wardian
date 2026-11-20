@@ -15,6 +15,8 @@ const SCHEMA_VERSION: i64 = 5;
 pub const DEFAULT_STALE_DAYS: i64 = 30;
 pub const MEMORY_BUDGET_POLICY_VERSION: u32 = 3;
 pub const MEMORY_CAPABILITY_ENV: &str = "WARDIAN_MEMORY_CAPABILITY";
+/// Maximum active records accepted by direct saves for one agent and exact scope.
+pub const ACTIVE_MEMORY_CAP: usize = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -401,7 +403,8 @@ impl MemoryStore {
         let idempotency_key = normalize_optional(request.idempotency_key.as_deref());
         let sources = normalize_sources(&request.sources)?;
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        // Serialize the count and insert so concurrent saves cannot exceed the cap.
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(mut existing) =
             idempotent_record(&transaction, actor, idempotency_key.as_deref())?
         {
@@ -419,6 +422,17 @@ impl MemoryStore {
             }
             transaction.commit()?;
             return self.attach_sources(existing);
+        }
+        let active_count: usize = transaction.query_row(
+            "SELECT COUNT(*) FROM memory_records
+             WHERE agent_id=?1 AND workspace IS ?2 AND status='active'",
+            params![agent_id, workspace],
+            |row| row.get(0),
+        )?;
+        if active_count >= ACTIVE_MEMORY_CAP {
+            return Err(MemoryError::Validation(format!(
+                "this scope has {active_count} active memories (cap {ACTIVE_MEMORY_CAP}); use wardian memory list, then update or remove an existing memory before saving another"
+            )));
         }
         let memory_id = Uuid::new_v4().to_string();
         let revision_id = Uuid::new_v4().to_string();
@@ -1989,6 +2003,158 @@ mod tests {
             sources: vec![],
             idempotency_key: None,
         }
+    }
+
+    #[test]
+    fn direct_save_cap_shares_kinds_but_isolates_agents_and_exact_scopes() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(directory.path().join("memory.db")).unwrap();
+        let actor = MemoryActor::agent("agent-a");
+        let mut replay = request("agent-a", Some("project/"), "A durable preference.");
+        replay.idempotency_key = Some("first-save".into());
+        let first = store.save(&actor, replay.clone()).unwrap();
+        for index in 1..ACTIVE_MEMORY_CAP {
+            let mut next = request("agent-a", Some("project"), &format!("Preference {index}."));
+            next.kind = MemoryKind::Current;
+            store.save(&actor, next).unwrap();
+        }
+        assert_eq!(
+            store.save(&actor, replay).unwrap().memory_id,
+            first.memory_id
+        );
+        let error = store
+            .save(
+                &actor,
+                request("agent-a", Some("project/"), "Another preference."),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("25 active memories (cap 25)"));
+        assert!(error.to_string().contains("update or remove"));
+        for (agent, workspace) in [
+            ("agent-a", None),
+            ("agent-a", Some("project/child")),
+            ("agent-b", Some("project")),
+        ] {
+            store
+                .save(
+                    &MemoryActor::Operator,
+                    request(agent, workspace, "A separate preference."),
+                )
+                .unwrap();
+        }
+        store
+            .update(
+                &actor,
+                UpdateMemoryRequest {
+                    memory_id: first.memory_id.clone(),
+                    text: "A refined preference.".into(),
+                    evidence_excerpt: "The user clarified it.".into(),
+                    sources: vec![],
+                    idempotency_key: None,
+                },
+            )
+            .unwrap();
+        store.remove(&actor, &first.memory_id).unwrap();
+        store
+            .save(
+                &actor,
+                request("agent-a", Some("project"), "A replacement preference."),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn legacy_scopes_above_cap_remain_readable_and_editable() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(directory.path().join("memory.db")).unwrap();
+        let actor = MemoryActor::agent("agent-a");
+        // Batch writers retain their existing policy, also representing pre-cap data.
+        store
+            .commit_batch(
+                &actor,
+                MemoryCommitBatch {
+                    agent_id: "agent-a".into(),
+                    workspace: None,
+                    idempotency_key: "legacy".into(),
+                    cursor: None,
+                    operations: (0..ACTIVE_MEMORY_CAP + 1)
+                        .map(|index| MemoryMutation::Save {
+                            kind: MemoryKind::Stable,
+                            text: format!("Legacy preference {index}."),
+                            evidence_excerpt: "An existing preference.".into(),
+                            sources: vec![],
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+        let records = store.list_active(&actor, "agent-a", None).unwrap();
+        assert_eq!(records.len(), ACTIVE_MEMORY_CAP + 1);
+        store
+            .update(
+                &actor,
+                UpdateMemoryRequest {
+                    memory_id: records[0].memory_id.clone(),
+                    text: "A clarified preference.".into(),
+                    evidence_excerpt: "The user clarified it.".into(),
+                    sources: vec![],
+                    idempotency_key: None,
+                },
+            )
+            .unwrap();
+        assert!(store
+            .save(&actor, request("agent-a", None, "Another preference."))
+            .is_err());
+        store.remove(&actor, &records[0].memory_id).unwrap();
+        assert!(store
+            .save(&actor, request("agent-a", None, "Another preference."))
+            .is_err());
+        store.remove(&actor, &records[1].memory_id).unwrap();
+        store
+            .save(&actor, request("agent-a", None, "Another preference."))
+            .unwrap();
+    }
+
+    #[test]
+    fn concurrent_direct_saves_cannot_overfill_the_last_slot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("memory.db");
+        let store = MemoryStore::open(&path).unwrap();
+        let actor = MemoryActor::agent("agent-a");
+        for index in 0..ACTIVE_MEMORY_CAP - 1 {
+            store
+                .save(
+                    &actor,
+                    request("agent-a", None, &format!("Preference {index}.")),
+                )
+                .unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|index| {
+                let store = MemoryStore::open(&path).unwrap();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.save(
+                        &MemoryActor::agent("agent-a"),
+                        request("agent-a", None, &format!("Last preference {index}.")),
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results
+            .iter()
+            .any(|result| matches!(result, Err(MemoryError::Validation(_)))));
+        assert_eq!(
+            store.list_active(&actor, "agent-a", None).unwrap().len(),
+            ACTIVE_MEMORY_CAP
+        );
     }
 
     fn brief_record(

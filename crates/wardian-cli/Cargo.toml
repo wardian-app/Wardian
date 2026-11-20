@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "wardian-cli"
 path = "src/main.rs"
@@ -26,8 +29,8 @@ fs2 = { workspace = true }
 tokio = { version = "1.49.0", features = ["io-util", "net", "rt", "time"] }
 wardian-core = { path = "../wardian-core" }
 
-[target.'cfg(windows)'.dependencies]
-win32job = "2.0.3"
-
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }

@@ -10,6 +10,14 @@ Use Inbox to review finished work, catch failed automation runs, read an importa
 
 Wardian records these items:
 
+- **Claude turn ended**: a supported native Claude mod observed the end of a
+  main-conversation turn after a uniquely matched user submission. The card
+  keeps the exact captured answer and shows **Outcome unverified** or **Turn
+  interrupted**. It does not assert that the task succeeded. This requires the
+  native bridge to load; disabled mods or ambiguous submission ownership leave
+  an explicit observation gap. These notices follow the agent notification
+  preferences and do not trigger successful-completion watches or automations.
+
 - **Work finished**: an agent or automation reached a terminal outcome. When an agent finishes a turn with an answer, Wardian creates one card that holds that answer. This works without the Wardian window open, and the card also reaches the mobile Inbox. Interactive Claude sessions are the exception: Claude Code does not report whether a turn really ended successfully, so Wardian creates no automatic completion card for them rather than guess. Wardian never turns generic Idle transitions, terminal output, provider control commands, interrupted or failed turns, or an unconfigured session ID into a completion card. If Wardian cannot identify the turn's final answer, it skips the automatic card.
 - **Important update**: an agent explicitly sends a concise user-facing update with `wardian notify update`. Use this for a material result, a significant limitation, or a change that affects the user's next decision.
 - **Approval request**: an agent explicitly sends a structured request with `wardian notify approval`. It names the proposed action, why it is risky, the available choices, and an expiry. Provider-native permission prompts remain provider-sourced **Action needed** items.

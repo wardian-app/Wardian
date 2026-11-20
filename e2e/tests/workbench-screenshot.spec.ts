@@ -10,6 +10,15 @@ import {
   type WorkbenchAgentFixture,
 } from "../fixtures/workbenchIpcMock";
 
+function publishedChatPage(events: unknown[]) {
+  return {
+    session_id: "agent-alpha", conversation_id: "conversation", generation: "generation",
+    source_epoch: null, revision: "revision", events, next_before: null,
+    unchanged: false, reset: false, progress: "ready", aliases: [], removed_ids: [],
+    detail: null, bytes_read: 0, records_decoded: 0,
+  };
+}
+
 const agents: WorkbenchAgentFixture[] = [
   {
     session_id: "agent-alpha",
@@ -219,7 +228,7 @@ test("renders chat attachment chips while hiding the provider launch screen", as
       durable_token: "chat-attachment-evidence-token-3",
     },
     responses: {
-      load_agent_chat_transcript: [
+      load_agent_chat_page: publishedChatPage([
         {
           id: "codex-launch",
           session_id: "agent-alpha",
@@ -258,7 +267,7 @@ test("renders chat attachment chips while hiding the provider launch screen", as
           sequence: 2,
           metadata: {},
         },
-      ],
+      ]),
       "plugin:dialog|open": ["C:/evidence/dashboard.png", "C:/evidence/notes.txt"],
       list_provider_model_catalog: {
         provider: "codex",
@@ -324,7 +333,7 @@ test("shows the actual command for a lifecycle-labelled tool call", async ({ pag
       durable_token: "chat-tool-call-one-line-token-7",
     },
     responses: {
-      load_agent_chat_transcript: [{
+      load_agent_chat_page: publishedChatPage([{
         id: "exec-call-1",
         session_id: "agent-alpha",
         provider: "codex",
@@ -342,7 +351,7 @@ test("shows the actual command for a lifecycle-labelled tool call", async ({ pag
         created_at: "2026-08-24T06:00:00.000Z",
         sequence: 1,
         metadata: { raw_type: "exec_command_begin" },
-      }],
+      }]),
       list_provider_model_catalog: {
         provider: "codex",
         version: "codex-cli 0.149.1",
@@ -620,13 +629,13 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
       durable_token: "copy-feedback-evidence-token-4",
     },
     responses: {
-      load_agent_chat_transcript: [{
+      load_agent_chat_page: publishedChatPage([{
         id: "copy-feedback-user-message",
         session_id: "agent-alpha",
         provider: "mock",
         kind: "message",
         role: "user",
-        text: "User request with enough text to wrap across several lines while the copy control appears and reports success.",
+        text: "User request with enough text to wrap across several lines while the copy control appears and reports success. ".repeat(3).trim(),
         title: null,
         status: null,
         turn_id: null,
@@ -644,7 +653,7 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
         provider: "mock",
         kind: "message",
         role: "assistant",
-        text: "Assistant response with enough text to wrap across several lines while the copy control appears and reports success.",
+        text: "Assistant response with enough text to wrap across several lines while the copy control appears and reports success. ".repeat(3).trim(),
         title: null,
         status: null,
         turn_id: null,
@@ -656,7 +665,7 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
         created_at: null,
         sequence: 2,
         metadata: {},
-      }],
+      }]),
       "plugin:clipboard-manager|write_text": null,
       list_provider_model_catalog: {
         provider: "codex",
@@ -678,14 +687,15 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
   const card = page.getByTestId("agent-card");
   const transcript = card.getByTestId("agent-chat-transcript");
   const transcriptWidthMetrics = await transcript.evaluate((element) => {
-    const probe = document.createElement("span");
-    probe.style.cssText = "position:absolute; width:1ch; height:0; overflow:hidden;";
-    element.append(probe);
-    const chWidth = probe.getBoundingClientRect().width;
-    probe.remove();
-    return { chWidth, maxWidth: Number.parseFloat(getComputedStyle(element).maxWidth) };
+    return {
+      remWidth: Number.parseFloat(getComputedStyle(element.ownerDocument.documentElement).fontSize),
+      maxWidth: Number.parseFloat(getComputedStyle(element).maxWidth),
+      width: element.getBoundingClientRect().width,
+    };
   });
-  expect(transcriptWidthMetrics.maxWidth).toBeCloseTo(transcriptWidthMetrics.chWidth * 76, 0);
+  // Wide tools use the transcript cap; readable message prose has its own cap.
+  expect(transcriptWidthMetrics.maxWidth).toBeCloseTo(transcriptWidthMetrics.remWidth * 72, 0);
+  expect(transcriptWidthMetrics.width).toBeLessThanOrEqual(transcriptWidthMetrics.maxWidth + 0.5);
   const rows = [
     card.getByLabel("assistant message"),
     card.getByLabel("user message"),
@@ -694,7 +704,22 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
   await expect(rows[1]).toBeVisible();
 
   for (const row of rows) {
+    const proseWidthMetrics = await row.locator(".chat-prose-block").first().evaluate((element) => {
+      const probe = element.ownerDocument.createElement("span");
+      probe.style.cssText = "position:absolute; width:100ch; height:0; overflow:hidden;";
+      element.append(probe);
+      const proseCap = probe.getBoundingClientRect().width;
+      probe.remove();
+      return {
+        proseCap,
+        maxWidth: Number.parseFloat(getComputedStyle(element).maxWidth),
+        width: element.getBoundingClientRect().width,
+      };
+    });
+    expect(proseWidthMetrics.maxWidth).toBeCloseTo(proseWidthMetrics.proseCap, 0);
+    expect(proseWidthMetrics.width).toBeLessThanOrEqual(proseWidthMetrics.maxWidth + 0.5);
     const baseline = await chatGeometry(row);
+    expect(new Set(baseline.textRects.map((rect) => rect.y)).size).toBeGreaterThan(1);
     await expectChatTextUnobscured(row, baseline);
 
     await row.hover();

@@ -1,11 +1,97 @@
 //! Codex's shared owner lives in the existing native sessions registry.
 use super::*;
 use crate::delivery::codex_shared::{
-    CodexSettingsUpdate, CodexSharedError, CodexSharedOwner, CodexSharedReceipt, CodexTuiAttachment,
+    CodexSettingsUpdate, CodexSharedError, CodexSharedOwner, CodexSharedReceipt, CodexThreadExit,
+    CodexTuiAttachment,
 };
 use std::time::Duration;
 
+/// Retain the exact owner and its creation gate through captured TUI shutdown.
+/// Dropping before runtime capture merely releases the gate; the registry still
+/// owns the live process. After capture the retained stop worker owns this token.
+pub(crate) struct CapturedCodexStop {
+    broker: Arc<NativeDeliveryBroker>,
+    agent_id: String,
+    generation: Option<u64>,
+    owner: Option<Arc<CodexSharedOwner>>,
+    _gate: tokio::sync::OwnedMutexGuard<()>,
+    _admission: CodexStopAdmission,
+}
+
+impl CapturedCodexStop {
+    pub(crate) async fn finish(
+        &self,
+        thread_id: Option<&str>,
+        tui_tree_exited: bool,
+    ) -> Result<Option<Arc<CodexThreadExit>>, NativeBrokerError> {
+        self.broker
+            .dispose_pi_generation(&self.agent_id, None)
+            .await?;
+        self.broker
+            .dispose_opencode_http(&self.agent_id, None)
+            .await?;
+        let current = self
+            .broker
+            .sessions
+            .lock()
+            .await
+            .get(&self.agent_id)
+            .cloned();
+        if let Some(owner) = &self.owner {
+            if !current
+                .as_ref()
+                .and_then(|handle| handle.shared_codex.as_ref())
+                .is_some_and(|current| Arc::ptr_eq(current, owner))
+            {
+                return Err(shared_error(CodexSharedError::uncertain(
+                    "captured Codex owner changed",
+                )));
+            }
+        }
+        let receipt = self
+            .broker
+            .stop_registered_owner_with_evidence(
+                &self.agent_id,
+                None,
+                self.generation,
+                thread_id,
+                tui_tree_exited,
+            )
+            .await?;
+        Ok(receipt)
+    }
+}
+
 impl NativeDeliveryBroker {
+    /// Reserve the current Codex owner without stopping or discarding it before
+    /// the roster's runtime and prior-session hold transfer into the stop fence.
+    pub(crate) async fn capture_codex_stop(
+        self: &Arc<Self>,
+        agent_id: &str,
+        generation: Option<u64>,
+    ) -> Result<CapturedCodexStop, NativeBrokerError> {
+        let admission = self
+            .codex_creations
+            .pause_for_stop(agent_id)
+            .map_err(|message| shared_error(CodexSharedError::unsupported(message)))?;
+        let gate = self.lock_owner_for_stop(agent_id, None).await?;
+        let handle = self.sessions.lock().await.get(agent_id).cloned();
+        if handle.as_ref().is_some_and(|handle| {
+            generation.is_some_and(|generation| generation != handle.generation)
+        }) {
+            return Err(shared_error(CodexSharedError::uncertain(
+                "Codex owner generation does not match captured TUI",
+            )));
+        }
+        Ok(CapturedCodexStop {
+            broker: self.clone(),
+            agent_id: agent_id.to_owned(),
+            generation,
+            owner: handle.and_then(|handle| handle.shared_codex),
+            _gate: gate,
+            _admission: admission,
+        })
+    }
     pub(super) async fn owner_gate(&self, agent_id: &str) -> Arc<Mutex<()>> {
         self.owner_gates
             .lock()
@@ -53,11 +139,27 @@ impl NativeDeliveryBroker {
         agent_id: &str,
         generation: Option<u64>,
     ) -> Result<(), NativeBrokerError> {
+        self.stop_registered_owner_with_evidence(agent_id, generation, None, None, false)
+            .await
+            .map(|_| ())
+    }
+
+    async fn stop_registered_owner_with_evidence(
+        &self,
+        agent_id: &str,
+        generation: Option<u64>,
+        captured_generation: Option<u64>,
+        thread_id: Option<&str>,
+        tui_tree_exited: bool,
+    ) -> Result<Option<Arc<CodexThreadExit>>, NativeBrokerError> {
         let handle = self.sessions.lock().await.get(agent_id).cloned();
-        let Some(handle) = handle else { return Ok(()) };
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
         if generation.is_some_and(|generation| generation != handle.generation) {
-            return Ok(());
+            return Ok(None);
         }
+        let mut receipt = None;
         if let Some(owner) = &handle.shared_codex {
             // Withdraw advertised capabilities before joining transport exit.
             let binding = NativeSessionBinding {
@@ -70,7 +172,15 @@ impl NativeDeliveryBroker {
                 observed_at: now(),
             };
             let _ = wardian_core::db::upsert_native_session_binding(&binding);
-            owner.shutdown().await.map_err(shared_error)?;
+            receipt = owner
+                .stop_after_tui(
+                    agent_id,
+                    captured_generation.unwrap_or(0),
+                    thread_id,
+                    tui_tree_exited,
+                )
+                .await
+                .map_err(shared_error)?;
         } else if let Some(mut stopped) = handle.stopped.clone() {
             let _ = handle.tx.send(SessionCommand::Shutdown).await;
             tokio::time::timeout(Duration::from_secs(30), async {
@@ -97,7 +207,7 @@ impl NativeDeliveryBroker {
             })??;
         }
         self.sessions.lock().await.remove(agent_id);
-        Ok(())
+        Ok(receipt)
     }
 
     /// Used by captured PTY incarnations; an old exit cannot dispose a replacement.
@@ -143,6 +253,14 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         spec: NativeSessionSpec,
     ) -> Result<Arc<CodexSharedOwner>, CodexSharedError> {
+        self.create_shared_codex_with_context(spec, None).await
+    }
+
+    async fn create_shared_codex_with_context(
+        self: &Arc<Self>,
+        spec: NativeSessionSpec,
+        codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+    ) -> Result<Arc<CodexSharedOwner>, CodexSharedError> {
         // Capture disposal revisions before the first await or detached spawn.
         let request = self
             .codex_creations
@@ -157,7 +275,7 @@ impl NativeDeliveryBroker {
             let agent_id = spec.target_agent_id.clone();
             let generation = spec.generation;
             let started = broker
-                .create_shared_codex_inner(spec, reply.closed(), request)
+                .create_shared_codex_inner(spec, codex_launch_context, reply.closed(), request)
                 .await;
             let created = started.as_ref().is_ok_and(|(_, created)| *created);
             if reply.send(started.map(|(owner, _)| owner)).is_err() && created {
@@ -172,6 +290,7 @@ impl NativeDeliveryBroker {
     async fn create_shared_codex_inner(
         &self,
         spec: NativeSessionSpec,
+        codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
         cancelled: impl std::future::Future<Output = ()>,
         request: CodexCreationRequest,
     ) -> Result<(Arc<CodexSharedOwner>, bool), CodexSharedError> {
@@ -269,7 +388,7 @@ impl NativeDeliveryBroker {
                     .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 return Err(CodexSharedError::unsupported("test owner-start sentinel"));
             }
-            CodexSharedOwner::start(&spec, cancellation).await
+            CodexSharedOwner::start(&spec, codex_launch_context, cancellation).await
         };
         let owner = match start.await {
             Ok(owner) => owner,
@@ -334,11 +453,16 @@ impl NativeDeliveryBroker {
     }
 
     /// Lifecycle-only launch; manager must have terminated the prior incarnation.
-    pub async fn prepare_codex_tui(
+    pub(crate) async fn prepare_codex_tui(
         self: &Arc<Self>,
         spec: NativeSessionSpec,
+        codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
     ) -> Result<CodexTuiAttachment, CodexSharedError> {
-        Ok(self.create_shared_codex(spec).await?.attachment.clone())
+        Ok(self
+            .create_shared_codex_with_context(spec, codex_launch_context)
+            .await?
+            .attachment
+            .clone())
     }
 
     /// Manager has started the captured PTY reader/responder. Keep this owner
@@ -686,6 +810,7 @@ impl NativeDeliveryBroker {
         &self,
         client: &crate::delivery::codex_shared::CodexSharedClient,
         record: &NativeDeliveryRecord,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<CodexSharedReceipt, NativeBrokerError> {
         let id = &record.envelope.interaction_id;
         self.advance(
@@ -702,7 +827,11 @@ impl NativeDeliveryBroker {
         // messages. Canonical v2 tasks use codex_followup/run_codex_background.
         // Keep envelope identity in broker evidence, not a peer tool-output frame.
         match client
-            .native_message(&record.envelope.message_id, &record.envelope.body)
+            .native_message_with_authority(
+                &record.envelope.message_id,
+                &record.envelope.body,
+                client_send_authority,
+            )
             .await
         {
             Ok(receipt) => Ok(receipt),
@@ -740,6 +869,7 @@ impl NativeDeliveryBroker {
         owner: Arc<CodexSharedOwner>,
         record: NativeDeliveryRecord,
         capabilities: NativeTransportCapabilities,
+        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
     ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
         if record.envelope.operation == NativeMessageOperation::InvalidatePremise {
             return Err(error(
@@ -750,7 +880,7 @@ impl NativeDeliveryBroker {
         }
         let id = record.envelope.interaction_id.clone();
         let accepted = self
-            .submit_shared_codex_input(&owner.client, &record)
+            .submit_shared_codex_input(&owner.client, &record, client_send_authority)
             .await?;
         let updated = self
             .advance(
@@ -925,6 +1055,7 @@ mod tests {
                                 ..Default::default()
                             },
                         },
+                        None,
                         std::future::pending(),
                         broker.codex_creations.register("late", 1).unwrap(),
                     )

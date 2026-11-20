@@ -1,10 +1,13 @@
-use crate::live;
+use crate::control_client::{self, ControlEndpointError};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io;
 use wardian_core::agent_messaging::{AgentMessagingRequest, AgentMessagingResponse};
 
-pub(super) trait Backend {
+pub(super) trait Backend: Send + 'static {
+    fn controller_mode(&self) -> bool {
+        false
+    }
     fn require_sender(&self) -> io::Result<()>;
     fn invoke(&mut self, request: AgentMessagingRequest) -> io::Result<Value>;
     fn identity_failure(&self) -> Value {
@@ -19,11 +22,11 @@ pub(super) struct Live;
 
 impl Backend for Live {
     fn require_sender(&self) -> io::Result<()> {
-        live::require_current_message_origin().map(|_| ())
+        control_client::require_current_message_origin().map(|_| ())
     }
 
     fn invoke(&mut self, request: AgentMessagingRequest) -> io::Result<Value> {
-        live::messaging::request(request)
+        control_client::messaging::request(request)
     }
 }
 
@@ -51,27 +54,21 @@ struct ReplyArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReceiveArgs {
-    cursor: Option<String>,
-    ack_cursor: Option<String>,
-    #[serde(default = "default_limit")]
-    limit: u32,
     #[serde(default)]
-    timeout_ms: u64,
+    cursor: Option<String>,
+    #[serde(default)]
+    ack_cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WaitArgs {
-    #[serde(default = "default_wait_timeout")]
-    timeout_ms: u64,
-}
-
-fn default_limit() -> u32 {
-    100
-}
-
-fn default_wait_timeout() -> u64 {
-    wardian_core::agent_messaging::MAX_WAIT_AGENT_TIMEOUT_MS
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 pub(super) fn call(
@@ -80,7 +77,7 @@ pub(super) fn call(
     idempotency_key: &str,
     backend: &mut impl Backend,
 ) -> Value {
-    let request = match parse(name, arguments, idempotency_key) {
+    let request = match parse(name, arguments, idempotency_key, backend.controller_mode()) {
         Ok(request) => request,
         Err(error) => return failure("invalid_arguments", &error),
     };
@@ -136,7 +133,12 @@ fn nonempty(value: &str) -> Result<(), String> {
     }
 }
 
-fn parse(name: &str, arguments: Value, key: &str) -> Result<AgentMessagingRequest, String> {
+fn parse(
+    name: &str,
+    arguments: Value,
+    key: &str,
+    controller_mode: bool,
+) -> Result<AgentMessagingRequest, String> {
     // These are the model-facing arguments. Admission keys and authenticated
     // origin are supplied by the adapter, never accepted from the model.
     if arguments
@@ -166,31 +168,10 @@ fn parse(name: &str, arguments: Value, key: &str) -> Result<AgentMessagingReques
                 }
             }
         }
-        "receive_messages" => {
-            let args: ReceiveArgs = decode(arguments)?;
-            if !(1..=100).contains(&args.limit) || args.timeout_ms > 60_000 {
-                return Err("Receive limit must be 1..100 and timeout_ms 0..60000.".into());
-            }
-            for cursor in [&args.cursor, &args.ack_cursor].into_iter().flatten() {
-                nonempty(cursor)?;
-            }
-            AgentMessagingRequest::ReceiveMessages {
-                cursor: args.cursor,
-                ack_cursor: args.ack_cursor,
-                limit: Some(args.limit),
-                timeout_ms: Some(args.timeout_ms),
-            }
-        }
-        "wait_agent" => {
-            let args: WaitArgs = decode(arguments)?;
-            if args.timeout_ms > wardian_core::agent_messaging::MAX_WAIT_AGENT_TIMEOUT_MS {
-                return Err("timeout_ms must be 0..60000.".into());
-            }
-            AgentMessagingRequest::WaitAgent {
-                timeout_ms: Some(args.timeout_ms),
-            }
-        }
         "reply" => {
+            if controller_mode {
+                return Err("Controllers cannot reply as managed workers.".into());
+            }
             let args: ReplyArgs = decode(arguments)?;
             nonempty(&args.request_id)?;
             nonempty(&args.message)?;
@@ -214,6 +195,21 @@ fn parse(name: &str, arguments: Value, key: &str) -> Result<AgentMessagingReques
             let _: Empty = decode(arguments)?;
             AgentMessagingRequest::ListAgents
         }
+        "receive_messages" if controller_mode => {
+            let args: ReceiveArgs = decode(arguments)?;
+            AgentMessagingRequest::ReceiveMessages {
+                cursor: args.cursor,
+                ack_cursor: args.ack_cursor,
+                limit: args.limit,
+                timeout_ms: args.timeout_ms,
+            }
+        }
+        "wait_agent" if controller_mode => {
+            let args: WaitArgs = decode(arguments)?;
+            AgentMessagingRequest::WaitAgent {
+                timeout_ms: args.timeout_ms,
+            }
+        }
         _ => return Err("Unknown tool.".into()),
     };
     Ok(request)
@@ -222,8 +218,8 @@ fn parse(name: &str, arguments: Value, key: &str) -> Result<AgentMessagingReques
 fn transport_error(error: io::Error) -> Value {
     let code = error
         .get_ref()
-        .and_then(|error| error.downcast_ref::<live::ControlEndpointError>())
-        .map(live::ControlEndpointError::code)
+        .and_then(|error| error.downcast_ref::<ControlEndpointError>())
+        .map(ControlEndpointError::code)
         .unwrap_or("control_transport_error");
     failure(code, "The operation failed or its receipt was lost. Delivery may be uncertain; do not replay automatically.")
 }
@@ -237,11 +233,13 @@ fn tool_result(value: Value, is_error: bool) -> Value {
 }
 
 /// External controller identity is explicit and never falls back to managed mode.
+#[derive(Clone)]
 pub(super) struct ControllerLive {
     token: wardian_core::control::ControllerSecret,
     owner: String,
     resource: String,
     request_key: Option<String>,
+    principal: wardian_core::controllers::ControllerPrincipal,
 }
 impl ControllerLive {
     pub(super) fn from_env() -> io::Result<Self> {
@@ -270,7 +268,12 @@ impl ControllerLive {
             owner,
             resource,
             request_key,
+            principal,
         })
+    }
+
+    pub(super) fn tool_catalog(&self) -> Vec<Value> {
+        super::definitions::controller_definitions(&self.principal)
     }
 }
 fn valid_controller_key(owner: &str, key: &str) -> bool {
@@ -283,6 +286,10 @@ fn valid_controller_key(owner: &str, key: &str) -> bool {
         })
 }
 impl Backend for ControllerLive {
+    fn controller_mode(&self) -> bool {
+        true
+    }
+
     fn identity_failure(&self) -> Value {
         failure("unauthorized_controller", "The owner-issued controller grant is invalid, expired, revoked or intended for another resource. No request was sent.")
     }
@@ -308,7 +315,11 @@ impl Backend for ControllerLive {
             }
             _ => {}
         }
-        live::messaging::controller_request(request, self.token.clone(), self.resource.clone())
+        control_client::messaging::controller_request(
+            request,
+            self.token.clone(),
+            self.resource.clone(),
+        )
     }
 }
 #[cfg(test)]

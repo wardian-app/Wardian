@@ -120,7 +120,7 @@ async fn resume_and_clear_transfer_exact_lifecycle_lease_to_spawn_gate() {
         replacement.resume_session = None;
         replacement.fresh_provider_session_id = Some("fresh-provider-session".to_string());
         let spawn_lease =
-            crate::manager::spawn::provider_spawn_lease_for_launch(&replacement, Some(lease))
+            crate::manager::spawn::provider_spawn_lease_for_startup(&replacement, Some(lease))
                 .expect("same fenced owner enters the provider spawn boundary");
         assert_eq!(spawn_lease.owner(), &owner);
         assert!(
@@ -160,9 +160,9 @@ async fn rotated_session_collision_blocks_inherited_spawn_at_launch_gate() {
     replacement.resume_session = None;
     replacement.fresh_provider_session_id = Some("fresh-session".into());
     let error =
-        crate::manager::spawn::provider_spawn_lease_for_launch(&replacement, Some(inherited))
+        crate::manager::spawn::provider_spawn_lease_for_startup(&replacement, Some(inherited))
             .expect_err("fresh identity is owned by another agent");
-    assert!(error.contains("saved conversation is leased"));
+    assert!(error.to_string().contains("saved conversation is leased"));
     assert!(wardian_core::conversation_lease::load_leases_checked()
         .expect("persisted lease")
         .iter()

@@ -266,7 +266,7 @@ function activityState(
   nextSchedule: AutomationSchedule | null,
   needsAttention: boolean,
 ): Pick<AutomationActivity, 'statusLabel' | 'tone' | 'section' | 'issue'> {
-  const scheduleIssue = schedules.find((schedule) => schedule.last_run_status === 'failed' || schedule.last_run_error)?.last_run_error
+  const scheduleIssue = schedules.find((schedule) => schedule.last_run_status === 'failed')?.last_run_error
     ?? (schedules.some((schedule) => schedule.last_run_status === 'failed') ? 'Last scheduled run failed' : null);
   if (activeRun?.status === 'awaiting_approval') {
     return { statusLabel: 'Awaiting approval', tone: 'warning', section: 'attention', issue: null };
@@ -282,6 +282,14 @@ function activityState(
       issue: `${workerAttentionCount} temporary worker${workerAttentionCount === 1 ? ' needs' : 's need'} attention`,
     };
   }
+  if (activeRun?.status !== 'running' && schedules.some((schedule) => schedule.last_run_status === 'missed')) {
+    return {
+      statusLabel: 'Missed',
+      tone: 'warning',
+      section: 'attention',
+      issue: null,
+    };
+  }
   if (needsAttention) {
     return {
       statusLabel: 'Failed',
@@ -293,11 +301,11 @@ function activityState(
   if (activeRun?.status === 'running') {
     return { statusLabel: 'Running', tone: 'active', section: 'running', issue: null };
   }
-  if (nextSchedule && !nextSchedule.is_paused && nextSchedule.next_run_epoch_ms) {
-    return { statusLabel: 'Scheduled', tone: 'accent', section: 'scheduled', issue: scheduleIssue };
-  }
   if (nextSchedule?.is_paused) {
     return { statusLabel: 'Paused', tone: 'warning', section: 'scheduled', issue: scheduleIssue };
+  }
+  if (nextSchedule && !nextSchedule.is_paused && nextSchedule.next_run_epoch_ms) {
+    return { statusLabel: 'Scheduled', tone: 'accent', section: 'scheduled', issue: scheduleIssue };
   }
   if (scheduleIssue) {
     return { statusLabel: 'Failed', tone: 'error', section: 'history', issue: scheduleIssue };

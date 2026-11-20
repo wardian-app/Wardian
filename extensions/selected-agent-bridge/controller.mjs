@@ -27,8 +27,8 @@ const PROPERTIES = {
 };
 const DESCRIPTIONS = {
   list_agents: 'Read selected agents with status provenance.',
-  send_message: 'Send non-waking information; receipt is admission, not model consumption.',
-  followup_task: 'Submit work, potentially waking its recipient. Returns a canonical request receipt; poll the controller mailbox for its result.',
+  send_message: 'Queue an informational message for the selected agent and wake it when its original conversation is idle and available. This creates no task or reply obligation; receipt is admission, not model consumption.',
+  followup_task: 'Queue work for the selected agent at its supported delivery boundary. Returns a canonical request receipt; read the controller mailbox for its terminal result.',
   interrupt_agent: 'Interrupt the selected agent current turn; not request-specific cancellation or process termination.',
   receive_messages: 'Read only this controller mailbox. Explicit ack_cursor is a separate granted mutation. Opaque cursors are controller-bound.',
   wait_agent: 'Wait for controller mailbox activity without reading or acknowledgement. Timeout does not cancel work.',

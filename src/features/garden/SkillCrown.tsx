@@ -12,6 +12,7 @@ import {
   type GardenSkillGlyph,
 } from "./skillGlyphs";
 import type { GardenTheme } from "./useGardenTheme";
+import { crownLabelId } from "./canvasLabels";
 
 /**
  * Mid lightness on purpose: it lets the monogram be painted in the *background*
@@ -23,6 +24,9 @@ function glyphColor(hue: number): string {
 }
 
 interface SkillCrownProps {
+  /** Carrier identity distinguishes repeated deployments of one library skill. */
+  agentId?: string;
+  visibleLabelIds?: ReadonlySet<string>;
   crown: readonly GardenSkillGlyph[];
   detail: GardenDetail;
   /** Camera scale enables smooth disclosure; omitted retains detail caps. */
@@ -44,6 +48,8 @@ interface SkillCrownProps {
  * it happened to fall back to a copy.
  */
 export const SkillCrown: React.FC<SkillCrownProps> = ({
+  agentId,
+  visibleLabelIds,
   crown,
   detail,
   scale,
@@ -144,7 +150,8 @@ export const SkillCrown: React.FC<SkillCrownProps> = ({
                 opacity={reveal?.monogramOpacity ?? 1}
               />}
             </Group>
-            {reveal && reveal.labelOpacity > 0 && scale !== undefined && <Text
+            {reveal && reveal.labelOpacity > 0 && scale !== undefined
+              && (!visibleLabelIds || (agentId !== undefined && visibleLabelIds.has(crownLabelId(agentId, glyph.entryRef)))) && <Text
               {...crownLabelLayout(positions[index], scale, crown.length)}
               text={glyph.label}
               fontFamily={theme.font}
@@ -159,7 +166,7 @@ export const SkillCrown: React.FC<SkillCrownProps> = ({
           </Group>
         );
       })}
-      {hidden > 0 && (
+      {hidden > 0 && (!visibleLabelIds || (agentId !== undefined && visibleLabelIds.has(crownLabelId(agentId, "")))) && (
         <Text
           text={`+${hidden}`}
           x={positions[positions.length - 1].x}
@@ -168,6 +175,9 @@ export const SkillCrown: React.FC<SkillCrownProps> = ({
           fontFamily={theme.font}
           fill={theme.labelMuted}
           width={GLYPH_RADIUS * 4}
+          height={theme.subLabelSize}
+          wrap="none"
+          ellipsis
           offsetX={GLYPH_RADIUS * 2}
           offsetY={5}
           align="center"

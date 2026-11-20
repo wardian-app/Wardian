@@ -2,6 +2,8 @@ import type {
   AuthChallengeResponse,
   AuthSessionResponse,
   AgentChatEvent,
+  AgentChatPage,
+  ChatReceiptFields,
   QueueItem,
   PairingSubmitResponse,
   RemoteAgentActionRequest,
@@ -16,16 +18,38 @@ import type {
   RemoteAutomationSummary,
   RemoteAutomationMonitorSnapshot,
 } from "../../types";
+import type { RemoteAttachment, RemoteAttachmentSubmission } from "../../types/remote";
 
-export interface RemoteAgentChatPage {
-  events: AgentChatEvent[];
-  has_older: boolean;
-  next_before: number | null;
-}
+export type RemoteAgentChatPage = AgentChatPage;
 
 const REMOTE_CSRF_HEADER_NAME = "x-wardian-csrf";
 const REMOTE_STATUS_STREAM_PATH = "/remote/api/status-stream";
 const REMOTE_REQUEST_TIMEOUT_MS = 15_000;
+const REMOTE_CHAT_READ_TIMEOUT_MS = 60_000;
+
+/** Only a failed fetch establishes transport loss; page application errors do not. */
+export class RemoteTransportError extends Error {
+  constructor(readonly cause: unknown) {
+    super("Remote transport failed");
+    this.name = "RemoteTransportError";
+  }
+}
+
+/** A Chat read deadline does not establish that the desktop is unreachable. */
+export class RemoteChatTimeoutError extends Error {
+  constructor() {
+    super("Chat history did not finish loading within 60 seconds. Retry to request it again; the desktop may still be loading it.");
+    this.name = "RemoteChatTimeoutError";
+  }
+}
+
+/** A failed successful response body leaves the desktop connection usable. */
+export class RemoteChatBodyError extends Error {
+  constructor() {
+    super("Chat could not be loaded. Retry when the desktop is available.");
+    this.name = "RemoteChatBodyError";
+  }
+}
 
 export class RemoteRequestError extends Error {
   constructor(
@@ -33,6 +57,7 @@ export class RemoteRequestError extends Error {
     readonly status: number,
     readonly code?: string,
     readonly detail?: string,
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "RemoteRequestError";
@@ -55,7 +80,7 @@ const normalizeHeaders = (headers?: HeadersInit): Record<string, string> => {
 const isReadOnlyRequest = (method: string) => method === "GET" || method === "HEAD";
 const isMutatingRequest = (method: string) => !isReadOnlyRequest(method);
 
-async function remoteJson<T>(path: string, init?: RequestInit): Promise<T> {
+async function remoteJson<T>(path: string, init?: RequestInit, chatRead = false): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const headers = {
     "Content-Type": "application/json",
@@ -63,8 +88,9 @@ async function remoteJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...(csrfNonce && isMutatingRequest(method) ? { [REMOTE_CSRF_HEADER_NAME]: csrfNonce } : {}),
   };
   const controller = new AbortController();
+  let timedOut = false;
   const timeout = isReadOnlyRequest(method)
-    ? setTimeout(() => controller.abort(), REMOTE_REQUEST_TIMEOUT_MS)
+    ? setTimeout(() => { timedOut = true; controller.abort(); }, chatRead ? REMOTE_CHAT_READ_TIMEOUT_MS : REMOTE_REQUEST_TIMEOUT_MS)
     : undefined;
   const requestSignal = init?.signal;
   const abortRequest = () => controller.abort(requestSignal?.reason);
@@ -83,6 +109,9 @@ async function remoteJson<T>(path: string, init?: RequestInit): Promise<T> {
       credentials: "same-origin",
       headers,
       signal: controller.signal,
+    }).catch((error: unknown) => {
+      if (!chatRead || controller.signal.aborted) throw error;
+      throw new RemoteTransportError(error);
     });
     if (!response.ok) {
       let code: string | undefined;
@@ -99,14 +128,35 @@ async function remoteJson<T>(path: string, init?: RequestInit): Promise<T> {
         response.status,
         code,
         detail,
+        retryAfterMilliseconds(response.headers.get("Retry-After")),
       );
     }
-    return response.json() as Promise<T>;
+    try {
+      return await response.json() as T;
+    } catch (error) {
+      // Headers already succeeded; preserve deadline and caller cancellation.
+      if (chatRead && !timedOut && !requestSignal?.aborted) throw new RemoteChatBodyError();
+      throw error;
+    }
+  } catch (error) {
+    // A received HTTP status survives failure to parse its optional body.
+    if (chatRead && timedOut && !(error instanceof RemoteRequestError)) throw new RemoteChatTimeoutError();
+    throw error;
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
     requestSignal?.removeEventListener("abort", abortRequest);
   }
 }
+
+function retryAfterMilliseconds(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, delay) : undefined;
+}
+
+const attachmentPath = (sessionId: string, uploadId: string) =>
+  `/remote/api/agents/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(uploadId)}`;
 
 export const remoteClient = {
   setCsrfNonce(nextNonce: string | null) {
@@ -168,22 +218,30 @@ export const remoteClient = {
       body: JSON.stringify({ action, item_id: itemId, choice }),
     });
   },
-  async loadAgentChat(sessionId: string) {
+  async loadAgentChat(sessionId: string, signal?: AbortSignal) {
     const result = await remoteJson<{ events: AgentChatEvent[] }>(
       `/remote/api/agents/${encodeURIComponent(sessionId)}/chat`,
+      { signal }, true,
     );
     return result.events;
   },
-  async loadAgentChatPage(sessionId: string, before?: number): Promise<RemoteAgentChatPage> {
-    const search = typeof before === "number" ? `?before=${encodeURIComponent(before)}` : "";
-    const result = await remoteJson<Partial<RemoteAgentChatPage>>(
-      `/remote/api/agents/${encodeURIComponent(sessionId)}/chat${search}`,
-    );
-    return {
-      events: result.events ?? [],
-      has_older: result.has_older ?? false,
-      next_before: result.next_before ?? null,
-    };
+  async loadAgentChatPage(
+    sessionId: string,
+    before?: string,
+    revision?: string,
+    detail?: string,
+    signal?: AbortSignal,
+    revalidateIds?: string[],
+    recentPreview = false,
+  ): Promise<RemoteAgentChatPage> {
+    const query = new URLSearchParams();
+    if (before) query.set("before", before);
+    if (revision) query.set("revision", revision);
+    if (detail) query.set("detail", detail);
+    if (revalidateIds?.length) query.set("revalidate_ids", JSON.stringify(revalidateIds));
+    if (!before && !detail && !revalidateIds?.length) query.set("limit", "8");
+    if (recentPreview && !before && !detail && !revalidateIds?.length) query.set("recent_preview", "true");
+    return remoteJson<RemoteAgentChatPage>(`/remote/api/agents/${encodeURIComponent(sessionId)}/chat${query.size ? `?${query}` : ""}`, { signal }, true);
   },
   async loadAgentTerminal(sessionId: string) {
     const result = await remoteJson<{ snapshot: RemoteTerminalSnapshot }>(
@@ -191,15 +249,68 @@ export const remoteClient = {
     );
     return result.snapshot;
   },
-  async sendPrompt(target: string, prompt: string, inputMode: RemoteAgentInputMode = "message", inboxItemId?: string) {
+  async sendPrompt(target: string, prompt: string, inputMode: RemoteAgentInputMode = "message", inboxItemId?: string,
+    attachments?: { attachment_ids: string[]; submission_id: string }) {
     const request: RemoteAgentActionRequest =
       inputMode === "command"
         ? { action: "send_prompt", target, prompt, input_mode: "command", ...(inboxItemId ? { inbox_item_id: inboxItemId } : {}) }
         : { action: "send_prompt", target, prompt, ...(inboxItemId ? { inbox_item_id: inboxItemId } : {}) };
-    await remoteJson<{ ok: true }>("/remote/api/agents/action", {
+    return remoteJson<{ ok: true } & ChatReceiptFields & Partial<Pick<RemoteAttachmentSubmission, "submission_id" | "state">>>("/remote/api/agents/action", {
       method: "POST",
-      body: JSON.stringify(request),
+      body: JSON.stringify({ ...request, ...attachments }),
+      ...(attachments ? { signal: AbortSignal.timeout(60_000) } : {}),
     });
+  },
+  /** Upload raw bytes; transfer completion remains validating until HTTP acceptance. */
+  uploadAttachment(sessionId: string, uploadId: string, file: File, mediaType: string,
+    signal: AbortSignal, onProgress: (percent: number) => void): Promise<RemoteAttachment> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const abort = () => xhr.abort();
+      const finish = () => signal.removeEventListener("abort", abort);
+      xhr.open("POST", attachmentPath(sessionId, uploadId));
+      xhr.withCredentials = true;
+      xhr.timeout = 60_000;
+      xhr.setRequestHeader("Content-Type", mediaType);
+      xhr.setRequestHeader("x-wardian-filename", encodeURIComponent(file.name));
+      if (csrfNonce) xhr.setRequestHeader(REMOTE_CSRF_HEADER_NAME, csrfNonce);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(Math.min(100, Math.round(event.loaded / event.total * 100)));
+      };
+      xhr.upload.onload = () => onProgress(100);
+      xhr.onload = () => {
+        finish();
+        if (xhr.status < 200 || xhr.status >= 300) {
+          let code: string | undefined;
+          try { const body = JSON.parse(xhr.responseText) as { code?: unknown }; if (typeof body.code === "string") code = body.code; } catch { /* Status remains authoritative. */ }
+          reject(new RemoteRequestError("Upload failed", xhr.status, code, undefined,
+            retryAfterMilliseconds(xhr.getResponseHeader("Retry-After"))));
+          return;
+        }
+        try {
+          const body = JSON.parse(xhr.responseText) as RemoteAttachment;
+          if (body.upload_id !== uploadId || typeof body.name !== "string" || typeof body.size_bytes !== "number"
+            || typeof body.media_type !== "string" || typeof body.expires_at !== "string") throw new Error("Invalid metadata");
+          resolve(body);
+        } catch { reject(new Error("Invalid upload response. Check status before retrying.")); }
+      };
+      xhr.onerror = xhr.ontimeout = () => { finish(); reject(new Error("Upload interrupted. Retry to check status.")); };
+      xhr.onabort = () => { finish(); reject(new DOMException("Upload cancelled", "AbortError")); };
+      if (signal.aborted) { reject(new DOMException("Upload cancelled", "AbortError")); return; }
+      signal.addEventListener("abort", abort, { once: true });
+      xhr.send(file);
+    });
+  },
+  getAttachment(sessionId: string, uploadId: string) {
+    return remoteJson<RemoteAttachment>(attachmentPath(sessionId, uploadId), { cache: "no-store" });
+  },
+  deleteAttachment(sessionId: string, uploadId: string) {
+    return remoteJson<unknown>(attachmentPath(sessionId, uploadId), { method: "DELETE" });
+  },
+  getAttachmentSubmission(sessionId: string, submissionId: string) {
+    return remoteJson<RemoteAttachmentSubmission>(
+      `/remote/api/agents/${encodeURIComponent(sessionId)}/attachment-submissions/${encodeURIComponent(submissionId)}`,
+      { cache: "no-store" });
   },
   async runAgentAction(action: string, target: string) {
     const request: RemoteAgentActionRequest = { action, target };

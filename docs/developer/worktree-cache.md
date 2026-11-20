@@ -8,6 +8,14 @@ target provider session. A harness subagent uses its coordinator's prepared
 checkout with an explicit working directory; creating a worktree does not
 require creating another permanent agent.
 
+Enabling again from a linked worktree resolves the primary Git checkout and
+creates a sibling under the same `<source-checkout>.wt/` directory. New branches
+start at the locally available remote default branch, falling back to local
+`main` or `master` for repositories without a remote default. Existing named
+branches retain their history. Existing nested worktrees are not moved.
+If no default can be resolved, enable reports an error instead of inheriting a
+feature branch's HEAD. Configure `origin/HEAD` for a custom default branch.
+
 Ephemeral baseline source exports can live in private temporary directories.
 They are unassigned measurement inputs, with no implementation branch,
 compiler output, or provider lifecycle. Preserve existing owners when changing

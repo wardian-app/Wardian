@@ -116,6 +116,7 @@ mod tests {
             schema_version: 1,
             enabled: true,
             canonical_origin: "https://wardian.example".into(),
+            client_origin_allowlist: Vec::new(),
             loopback_host: "127.0.0.1".into(),
             loopback_port: port,
             gateway_identity_public_key: "test".into(),

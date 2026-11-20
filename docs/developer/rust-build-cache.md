@@ -59,6 +59,9 @@ On **Windows x64**, explicitly download and verify the official release ZIP:
 npm run rust:cache:setup -- --install
 ```
 
+The Windows installer extracts the verified ZIP with the system `tar.exe`
+under `SystemRoot/System32`, independently of inherited PowerShell modules.
+
 The installer fetches the ZIP and its SHA-256 sidecar from the
 [official release](https://github.com/mozilla/sccache/releases/tag/v0.18.0), verifies
 the archive before extraction, and stores the executable in a unique private

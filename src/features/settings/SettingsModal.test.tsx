@@ -160,6 +160,7 @@ describe("SettingsModal", () => {
             schema_version: 1,
             enabled: true,
             canonical_origin: "https://wardian.tailnet.ts.net",
+            client_origin_allowlist: [],
             loopback_host: "127.0.0.1",
             loopback_port: 41241,
             gateway_identity_public_key: "pub",

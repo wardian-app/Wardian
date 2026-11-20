@@ -1,0 +1,174 @@
+{
+  "source_case": "producer-empty-large-r3",
+  "source_manifest_sha256": "8B80EFA0C116908C9AB0D474115039CDC4FC030231A50A16E65AACA58DBE6C20",
+  "closure_sha256": "A06D2B40ED9C6F9E15FC4884568553EF8331822A2FBC553EF0B76B6341C129A6",
+  "actual_case_exit": 1,
+  "actual_A_test_exit": 0,
+  "actual_B_test_exit": 101,
+  "pages": [
+    {
+      "label": "empty",
+      "request": {
+        "cursor": null,
+        "revision": null,
+        "detail_ref": null,
+        "revalidate_ids": null
+      },
+      "dto": {
+        "session_id": "agent-1",
+        "conversation_id": null,
+        "generation": "d2c2cebf-3aaf-4af6-8320-96f95c96bf63",
+        "source_epoch": "4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3",
+        "revision": "none.7715b4fd2c1b956f98f7ab2da2dcc6886af7c59c054449a9961b920f2923319e~26cf60493ce9fdf01fd0a88dcc74745344a4a9451bc36e15b57789ca03334070",
+        "events": [],
+        "next_before": null,
+        "unchanged": false,
+        "reset": false,
+        "progress": "no_admitted_rows",
+        "aliases": [],
+        "removed_ids": [],
+        "detail": null,
+        "bytes_read": 210559,
+        "records_decoded": 13
+      }
+    },
+    {
+      "label": "first-owned-after-empty-revision",
+      "request": {
+        "cursor": null,
+        "revision": "none.7715b4fd2c1b956f98f7ab2da2dcc6886af7c59c054449a9961b920f2923319e~26cf60493ce9fdf01fd0a88dcc74745344a4a9451bc36e15b57789ca03334070",
+        "detail_ref": null,
+        "revalidate_ids": null
+      },
+      "dto": {
+        "session_id": "agent-1",
+        "conversation_id": "conv_20261026213849905_d9a22b8e53544c4da2f9a37234254b30_agent-1",
+        "generation": "d2c2cebf-3aaf-4af6-8320-96f95c96bf63",
+        "source_epoch": "4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3",
+        "revision": "125fd821f72fccdda93d252cadf7468206452bb4c246154d6b8a90d759946bf7.64b4cb06a447491e1f1762194c012c92781f7b254d4e31969323f90bc02ae8ce~0842b00c32f1f0aacb496dc5e089985f5d396b541c73d8fbb411b0a1def8e4d2",
+        "events": [
+          {
+            "id": "source:agent-1:4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3:47:0cc702138fb527ead871e865c89c55610a48ba2410040daf038eef808fe94980:0",
+            "session_id": "agent-1",
+            "provider": "codex",
+            "kind": "message",
+            "role": "user",
+            "text": "first owned native header",
+            "title": null,
+            "status": null,
+            "turn_id": null,
+            "source": "event_msg",
+            "command": null,
+            "exit_code": null,
+            "path": null,
+            "language": null,
+            "created_at": null,
+            "sequence": 1,
+            "metadata": {
+              "input_origin": "human_input",
+              "input_purpose": "request",
+              "request_root_id": "agent-1:2",
+              "context_observation": "provider_native",
+              "provider_session_id": "one",
+              "log_path": "<redacted>",
+              "codex_display_text_sha256": "f7e1c79f5a7176dfea3f7fc3680369f204055d22bd552be2e53fba1255c9db47",
+              "codex_display_text_bytes": 25,
+              "chat_compatibility_legacy_id": "agent-1:provider_log:6cb7fc982e470e2f90e4b40d8daec6b6",
+              "chat_compatibility_source_sequence": 2,
+              "raw_type": "user_message",
+              "provider_log": true,
+              "chat_source_ref": "source:agent-1:4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3:47:0cc702138fb527ead871e865c89c55610a48ba2410040daf038eef808fe94980:0",
+              "chat_source_start": 47,
+              "chat_source_end": 140,
+              "chat_source_epoch": "4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3",
+              "chat_page_key": "00000000000000000000"
+            }
+          }
+        ],
+        "next_before": null,
+        "unchanged": false,
+        "reset": true,
+        "progress": "provisional",
+        "aliases": [
+          {
+            "observation_id": "source:agent-1:4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3:47:0cc702138fb527ead871e865c89c55610a48ba2410040daf038eef808fe94980:0",
+            "canonical_id": "source:agent-1:4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3:47:0cc702138fb527ead871e865c89c55610a48ba2410040daf038eef808fe94980:0"
+          }
+        ],
+        "removed_ids": [],
+        "detail": null,
+        "bytes_read": 173306,
+        "records_decoded": 16
+      }
+    },
+    {
+      "label": "first-owned-after-empty-fresh-none",
+      "request": {
+        "cursor": null,
+        "revision": null,
+        "detail_ref": null,
+        "revalidate_ids": null
+      },
+      "dto": {
+        "session_id": "agent-1",
+        "conversation_id": "conv_20261026213849905_d9a22b8e53544c4da2f9a37234254b30_agent-1",
+        "generation": "d2c2cebf-3aaf-4af6-8320-96f95c96bf63",
+        "source_epoch": "4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3",
+        "revision": "125fd821f72fccdda93d252cadf7468206452bb4c246154d6b8a90d759946bf7.64b4cb06a447491e1f1762194c012c92781f7b254d4e31969323f90bc02ae8ce~0842b00c32f1f0aacb496dc5e089985f5d396b541c73d8fbb411b0a1def8e4d2",
+        "events": [
+          {
+            "id": "source:agent-1:4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3:47:0cc702138fb527ead871e865c89c55610a48ba2410040daf038eef808fe94980:0",
+            "session_id": "agent-1",
+            "provider": "codex",
+            "kind": "message",
+            "role": "user",
+            "text": "first owned native header",
+            "title": null,
+            "status": null,
+            "turn_id": null,
+            "source": "event_msg",
+            "command": null,
+            "exit_code": null,
+            "path": null,
+            "language": null,
+            "created_at": null,
+            "sequence": 1,
+            "metadata": {
+              "input_origin": "human_input",
+              "input_purpose": "request",
+              "request_root_id": "agent-1:2",
+              "context_observation": "provider_native",
+              "provider_session_id": "one",
+              "log_path": "<redacted>",
+              "codex_display_text_sha256": "f7e1c79f5a7176dfea3f7fc3680369f204055d22bd552be2e53fba1255c9db47",
+              "codex_display_text_bytes": 25,
+              "chat_compatibility_legacy_id": "agent-1:provider_log:6cb7fc982e470e2f90e4b40d8daec6b6",
+              "chat_compatibility_source_sequence": 2,
+              "raw_type": "user_message",
+              "provider_log": true,
+              "chat_source_ref": "source:agent-1:4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3:47:0cc702138fb527ead871e865c89c55610a48ba2410040daf038eef808fe94980:0",
+              "chat_source_start": 47,
+              "chat_source_end": 140,
+              "chat_source_epoch": "4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3",
+              "chat_page_key": "00000000000000000000"
+            }
+          }
+        ],
+        "next_before": null,
+        "unchanged": false,
+        "reset": false,
+        "progress": "provisional",
+        "aliases": [
+          {
+            "observation_id": "source:agent-1:4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3:47:0cc702138fb527ead871e865c89c55610a48ba2410040daf038eef808fe94980:0",
+            "canonical_id": "source:agent-1:4e9d1239e0f5181550a5c0fafc45e9a026c805eb1c6fafe400ae4648159efbc3:47:0cc702138fb527ead871e865c89c55610a48ba2410040daf038eef808fe94980:0"
+          }
+        ],
+        "removed_ids": [],
+        "detail": null,
+        "bytes_read": 173306,
+        "records_decoded": 16
+      }
+    }
+  ]
+}

@@ -38,6 +38,7 @@ pub fn agent_roster_restored(state: State<'_, AppState>) -> bool {
 /// more event gives every window a refresh that sees the flag.
 pub(crate) fn mark_agent_roster_restored(app: &AppHandle) {
     if mark_restored(&app.state::<AppState>()) {
+        crate::spawn_operations::start(app.clone());
         let _ = app.emit("agents-updated", ());
     }
 }
@@ -58,13 +59,24 @@ pub(crate) fn saved_roster_absent(wardian_home: Option<&std::path::Path>) -> boo
     )
 }
 
+pub(crate) fn automation_startup_ready(
+    roster_restore_persisted: bool,
+    saved_roster_was_absent: bool,
+) -> bool {
+    roster_restore_persisted || saved_roster_was_absent
+}
+
 fn roster_restored(state: &AppState) -> bool {
     state.agent_roster_restored.load(Ordering::Acquire)
 }
 
 /// Sets the flag, returning whether this call was the one that set it.
 fn mark_restored(state: &AppState) -> bool {
-    !state.agent_roster_restored.swap(true, Ordering::AcqRel)
+    let first = !state.agent_roster_restored.swap(true, Ordering::AcqRel);
+    if first {
+        state.spawn_operation_slots.add_permits(2);
+    }
+    first
 }
 
 #[cfg(test)]
@@ -75,23 +87,30 @@ mod tests {
     fn roster_starts_incomplete_and_is_marked_complete_once() {
         let state = AppState::default();
         assert!(!roster_restored(&state));
+        assert_eq!(state.spawn_operation_slots.available_permits(), 0);
 
         assert!(mark_restored(&state), "first mark sets the flag");
         assert!(roster_restored(&state));
+        assert_eq!(state.spawn_operation_slots.available_permits(), 2);
 
         // Startup marks after pass 1 and again on the fallback path; the second
         // mark must not emit a redundant refresh.
         assert!(!mark_restored(&state), "a repeated mark is a no-op");
+        assert_eq!(state.spawn_operation_slots.available_permits(), 2);
         assert!(roster_restored(&state));
     }
 
     #[test]
     fn only_a_confirmed_absent_saved_roster_vouches_without_restoring() {
         let home = tempfile::tempdir().expect("temp home");
+        let saved_roster_was_absent = saved_roster_absent(Some(home.path()));
         assert!(
-            saved_roster_absent(Some(home.path())),
+            saved_roster_was_absent,
             "a home with no saved roster has nothing left to restore"
         );
+        assert!(automation_startup_ready(false, saved_roster_was_absent));
+        assert!(automation_startup_ready(true, false));
+        assert!(!automation_startup_ready(false, false));
 
         // A saved roster that startup failed to parse still records agents
         // that may exist; its failure must not authorize pruning them.
@@ -99,11 +118,19 @@ mod tests {
         std::fs::create_dir_all(&settings).expect("settings dir");
         std::fs::write(settings.join("state.json"), "not json").expect("malformed roster");
         assert!(!saved_roster_absent(Some(home.path())));
+        assert!(!automation_startup_ready(
+            false,
+            saved_roster_absent(Some(home.path()))
+        ));
 
         // An unreadable entry in place of the file is not an absence either.
         std::fs::remove_file(settings.join("state.json")).expect("remove roster");
         std::fs::create_dir(settings.join("state.json")).expect("unreadable roster");
         assert!(!saved_roster_absent(Some(home.path())));
+        assert!(!automation_startup_ready(
+            false,
+            saved_roster_absent(Some(home.path()))
+        ));
 
         assert!(
             !saved_roster_absent(None),

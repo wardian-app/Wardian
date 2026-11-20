@@ -33,6 +33,31 @@ function completionItem(sessionId: string, agentName: string, summary: string, e
   };
 }
 
+describe("native turn-ended persisted notices", () => {
+  beforeEach(() => { resetStore(); mockInvoke.mockResolvedValue([]); });
+
+  it("deduplicates without consuming the next prompt's live buffer", () => {
+    const item: QueueItem = {
+      ...completionItem("agent-1", "Example", "Outcome unverified\nExact answer", "turn-A"),
+      id: "agent-turn-ended:agent-1:launch:provider:turn-A",
+      type: "agent_turn_ended", turn_outcome: "unknown",
+    };
+    useQueueStore.setState({ _agentBuffers: { "agent-1": "New turn is already running" } });
+    useQueueStore.getState().applyPersistedAgentCompletion(item);
+    useQueueStore.getState().applyPersistedAgentCompletion(item);
+    expect(useQueueStore.getState().items).toEqual([item]);
+    expect(useQueueStore.getState()._agentBuffers["agent-1"]).toBe("New turn is already running");
+  });
+
+  it("ignores a dismissed replay", () => {
+    useQueueStore.getState().applyPersistedAgentCompletion({
+      ...completionItem("agent-1", "Example", "Old answer", "turn-A"),
+      type: "agent_turn_ended", dismissed: true,
+    });
+    expect(useQueueStore.getState().items).toEqual([]);
+  });
+});
+
 describe("useQueueStore - preferences", () => {
   beforeEach(() => {
     resetStore();

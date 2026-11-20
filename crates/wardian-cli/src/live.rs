@@ -1,20 +1,21 @@
-pub(crate) mod messaging;
-
-#[cfg(windows)]
-mod windows_pipe;
+use wardian_cli::control_client::{build_runtime, send_request};
+pub(crate) use wardian_cli::control_client::{
+    messaging, require_current_message_origin, ControlEndpointError,
+};
 
 use std::{
-    fmt, io,
+    fmt,
+    io::{self, Write},
     time::{Duration, Instant},
 };
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::browser::{
     BrowserActionResult, BrowserGetResult, BrowserScreenshotResult, BrowserSessionSummary,
     ConsoleEntry, PageSnapshot,
 };
 use wardian_core::control::{
-    AgentDoctorResponse, AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
+    AgentDoctorResponse, AgentListResponse, AgentResponse, AgentSpawnAdmissionResponse,
+    AgentSpawnOperationResponse, AgentUpdateResponse, AgentWatchResponse,
     AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary,
     AutomationRunResponse, ControlRequest, ConversationListResponse, ConversationShowResponse,
     InboxListResponse, InboxNotificationPayload, InboxNotificationResponse, MessageOrigin,
@@ -47,10 +48,16 @@ enum ControlOperation {
     AgentRename,
     AgentRestart,
     AgentNewSession,
+    AgentReleaseHold,
+    AgentAdoptArchive,
     AgentPause,
     AgentResume,
     AgentModels,
-    AgentSpawn,
+    AgentSpawnAsync,
+    AgentSpawnGet,
+    AgentSpawnWait {
+        requested: Duration,
+    },
     AgentUpdate,
     AgentClone,
     AgentWorktreeList,
@@ -65,6 +72,7 @@ enum ControlOperation {
     ArtifactReviewShow,
     WatchlistsChanged,
     TopologyMutate,
+    RemoteClientPairingOffer,
     AutomationRun,
     Delivery {
         requested: Duration,
@@ -85,51 +93,6 @@ enum ControlOperation {
         requested: Duration,
     },
 }
-
-#[derive(Debug)]
-pub struct ControlEndpointError {
-    code: String,
-    message: String,
-    details: Option<serde_json::Value>,
-}
-
-impl ControlEndpointError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            details: None,
-        }
-    }
-
-    pub fn with_details(
-        code: impl Into<String>,
-        message: impl Into<String>,
-        details: serde_json::Value,
-    ) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            details: Some(details),
-        }
-    }
-
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    pub fn details(&self) -> Option<&serde_json::Value> {
-        self.details.as_ref()
-    }
-}
-
-impl fmt::Display for ControlEndpointError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for ControlEndpointError {}
 
 #[derive(Debug)]
 pub struct WaitTimeoutError {
@@ -232,6 +195,18 @@ pub fn list_agents() -> io::Result<Vec<AgentIdentity>> {
     let response: AgentListResponse =
         serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(response.agents)
+}
+
+/// Ask the app to issue one offer; never retry or persist the returned secret.
+pub fn remote_client_pairing_offer(client_origin: &str) -> io::Result<serde_json::Value> {
+    let runtime = build_runtime()?;
+    timeout_block(
+        &runtime,
+        ControlOperation::RemoteClientPairingOffer,
+        send_request(ControlRequest::RemoteClientPairingOffer {
+            client_origin: client_origin.to_string(),
+        }),
+    )
 }
 
 /// Topology is the control plane's single writer: every mutation is
@@ -372,6 +347,44 @@ pub fn agent_new_session(target: &str) -> io::Result<()> {
     .map(|_| ())
 }
 
+/// Submit one explicit attestation; an older app rejection is terminal.
+pub fn agent_release_hold(
+    target: &str,
+    acquisition_id: &str,
+    operator_verified_exit: bool,
+) -> io::Result<wardian_core::control::AgentReleaseHoldResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentReleaseHold,
+        send_request(ControlRequest::AgentReleaseHold {
+            target: target.to_string(),
+            acquisition_id: acquisition_id.to_string(),
+            operator_verified_exit,
+            origin: require_current_message_origin().ok(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+/// Submit recorded approval once; retries retain the caller's authorization ID.
+pub fn agent_adopt_archive(
+    target: &str,
+    request: wardian_core::control::ArchiveAdoptionRequest,
+) -> io::Result<wardian_core::control::ArchiveAdoptionResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentAdoptArchive,
+        send_request(ControlRequest::AgentAdoptArchive {
+            target: target.to_string(),
+            request,
+            origin: require_current_message_origin().ok(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
 pub fn agent_resume(target: &str) -> io::Result<()> {
     let runtime = build_runtime()?;
     timeout_block(
@@ -384,30 +397,80 @@ pub fn agent_resume(target: &str) -> io::Result<()> {
     .map(|_| ())
 }
 
-pub fn agent_spawn(
-    provider: &str,
-    class: &str,
-    name: Option<&str>,
-    workspace: Option<&str>,
-    model: Option<&str>,
-    reasoning_effort: Option<&str>,
-) -> io::Result<AgentIdentity> {
+pub fn agent_spawn_admit(
+    operation_id: &str,
+    request: wardian_core::agent_spawn::AgentSpawnRequest,
+) -> io::Result<AgentSpawnAdmissionResponse> {
     let runtime = build_runtime()?;
     let value = timeout_block(
         &runtime,
-        ControlOperation::AgentSpawn,
-        send_request(ControlRequest::AgentSpawn {
-            provider: provider.to_string(),
-            class: class.to_string(),
-            name: name.map(str::to_string),
-            workspace: workspace.map(str::to_string),
-            model: model.map(str::to_string),
-            reasoning_effort: reasoning_effort.map(str::to_string),
+        ControlOperation::AgentSpawnAsync,
+        send_request(ControlRequest::AgentSpawnAsync {
+            operation_id: operation_id.to_string(),
+            request,
         }),
     )?;
-    let resp: AgentResponse =
-        serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
-    Ok(resp.agent)
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+pub fn agent_spawn_operation(operation_id: &str) -> io::Result<AgentSpawnOperationResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentSpawnGet,
+        send_request(ControlRequest::AgentSpawnOperationGet {
+            operation_id: operation_id.to_string(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+pub fn agent_spawn_wait(
+    operation_id: &str,
+    timeout: Duration,
+) -> io::Result<AgentSpawnOperationResponse> {
+    let runtime = build_runtime()?;
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentSpawnWait { requested: timeout },
+        send_request(ControlRequest::AgentSpawnOperationWait {
+            operation_id: operation_id.to_string(),
+            timeout_ms,
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+/// Persist the generated idempotency key before the request can reach the app.
+pub fn persist_spawn_submission_receipt(operation_id: &str) -> io::Result<()> {
+    let home = wardian_core::paths::wardian_home()
+        .ok_or_else(|| io::Error::other("could not resolve Wardian home for spawn receipt"))?;
+    let directory = home.join("spawn-submissions");
+    std::fs::create_dir_all(&directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let path = directory.join(format!("{operation_id}.json"));
+    let receipt = serde_json::json!({
+        "schema": 1,
+        "operation_id": operation_id,
+        "created_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    });
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    serde_json::to_writer(&mut file, &receipt)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    file.write_all(b"\n")?;
+    file.sync_all()
 }
 
 pub fn agent_models(provider: &str, force_refresh: bool) -> io::Result<serde_json::Value> {
@@ -651,15 +714,6 @@ pub fn automation_run(request: AutomationRunRequest) -> io::Result<AutomationRun
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
 }
 
-pub fn require_current_message_origin() -> io::Result<MessageOrigin> {
-    current_message_origin().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "WARDIAN_SESSION_ID environment variable is not set",
-        )
-    })
-}
-
 pub fn create_notification(
     notification: InboxNotificationPayload,
     origin: MessageOrigin,
@@ -838,14 +892,6 @@ pub fn wait_agent_until_next(
 // Private helpers
 // ---------------------------------------------------------------------------
 
-fn build_runtime() -> io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .map_err(|e| io::Error::other(e.to_string()))
-}
-
 fn timeout_block(
     runtime: &tokio::runtime::Runtime,
     operation: ControlOperation,
@@ -869,7 +915,7 @@ fn timeout_block(
 
 fn operation_timeout(operation: &ControlOperation) -> Duration {
     match operation {
-        ControlOperation::AgentList => CONTROL_TIMEOUT,
+        ControlOperation::AgentList | ControlOperation::AgentSpawnGet => CONTROL_TIMEOUT,
         ControlOperation::AgentDoctor => CONTROL_DIAGNOSTIC_TIMEOUT,
         ControlOperation::ConversationList
         | ControlOperation::ConversationShow
@@ -881,10 +927,12 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentRename
         | ControlOperation::AgentRestart
         | ControlOperation::AgentNewSession
+        | ControlOperation::AgentReleaseHold
+        | ControlOperation::AgentAdoptArchive
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
         | ControlOperation::AgentModels
-        | ControlOperation::AgentSpawn
+        | ControlOperation::AgentSpawnAsync
         | ControlOperation::AgentUpdate
         | ControlOperation::AgentClone
         | ControlOperation::AgentWorktreeEnable
@@ -893,8 +941,10 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AutomationRun
         | ControlOperation::ArtifactPresent
         | ControlOperation::NotifyCreate
-        | ControlOperation::TopologyMutate => CONTROL_MUTATION_TIMEOUT,
+        | ControlOperation::TopologyMutate
+        | ControlOperation::RemoteClientPairingOffer => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::Delivery { requested } => watch_timeout_for(*requested),
+        ControlOperation::AgentSpawnWait { requested } => watch_timeout_for(*requested),
         ControlOperation::AgentWorktreeList => CONTROL_GIT_DISCOVERY_TIMEOUT,
         ControlOperation::AgentWatch { requested, .. } => watch_timeout_for(*requested),
         ControlOperation::NotifyWait { requested } => watch_timeout_for(*requested),
@@ -1164,14 +1214,6 @@ pub fn browser_downloads(
     )
 }
 
-fn current_message_origin() -> Option<MessageOrigin> {
-    std::env::var("WARDIAN_SESSION_ID")
-        .ok()
-        .map(|session_id| session_id.trim().to_string())
-        .filter(|session_id| !session_id.is_empty())
-        .map(|session_id| MessageOrigin::WardianAgent { session_id })
-}
-
 struct WaitBudget {
     started_at: Instant,
     timeout: Duration,
@@ -1376,81 +1418,13 @@ fn wait_target_snapshot(target: &str, budget: &WaitBudget) -> io::Result<AgentId
         })
 }
 
-async fn send_request(req: ControlRequest) -> io::Result<serde_json::Value> {
-    #[cfg(windows)]
-    {
-        send_request_windows(req).await
-    }
-    #[cfg(unix)]
-    {
-        send_request_unix(req).await
-    }
-}
-
-#[cfg(windows)]
-async fn send_request_windows(req: ControlRequest) -> io::Result<serde_json::Value> {
-    let pipe_name = wardian_core::control::pipe_name()
-        .ok_or_else(|| io::Error::other("could not resolve Wardian control pipe"))?;
-    windows_pipe::send_request(&pipe_name, req).await
-}
-
-#[cfg(unix)]
-async fn send_request_unix(req: ControlRequest) -> io::Result<serde_json::Value> {
-    use tokio::net::UnixStream;
-
-    let socket_path = wardian_core::control::socket_path()
-        .ok_or_else(|| io::Error::other("could not resolve Wardian control socket"))?;
-    let mut stream = UnixStream::connect(socket_path).await?;
-    exchange_json(&mut stream, req).await
-}
-
-async fn exchange_json<T>(stream: &mut T, req: ControlRequest) -> io::Result<serde_json::Value>
-where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let request = serde_json::to_string(&req).map_err(|e| io::Error::other(e.to_string()))?;
-    stream.write_all(request.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.flush().await?;
-
-    let mut line = String::new();
-    let mut reader = BufReader::new(stream);
-    reader.read_line(&mut line).await?;
-
-    // Detect backend error envelope {"error": {...}}
-    let value: serde_json::Value =
-        serde_json::from_str(&line).map_err(|e| io::Error::other(e.to_string()))?;
-    if let Some(err) = value.get("error") {
-        let code = err
-            .get("code")
-            .and_then(|c| c.as_str())
-            .unwrap_or("request_failed");
-        let msg = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("unknown error");
-        let endpoint_error = err.get("details").cloned().map_or_else(
-            || ControlEndpointError::new(code, msg),
-            |details| ControlEndpointError::with_details(code, msg, details),
-        );
-        return Err(io::Error::other(endpoint_error));
-    }
-
-    Ok(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wardian_core::control::MessageOrigin;
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::test_env_lock()
-    }
 
     #[test]
     fn agent_mutations_use_longer_control_timeout() {
-        assert!(operation_timeout(&ControlOperation::AgentSpawn) > CONTROL_TIMEOUT);
+        assert!(operation_timeout(&ControlOperation::AgentSpawnAsync) > CONTROL_TIMEOUT);
         assert_eq!(
             operation_timeout(&ControlOperation::AgentNewSession),
             CONTROL_MUTATION_TIMEOUT
@@ -1464,6 +1438,70 @@ mod tests {
             CONTROL_MUTATION_TIMEOUT
         );
         assert!(operation_timeout(&ControlOperation::AgentClone) > CONTROL_TIMEOUT);
+    }
+
+    #[test]
+    fn release_hold_unsupported_endpoint_error_is_terminal() {
+        let runtime = build_runtime().unwrap();
+        let error = timeout_block(
+            &runtime,
+            ControlOperation::AgentReleaseHold,
+            std::future::ready(Err(io::Error::other(ControlEndpointError::new(
+                "bad_request",
+                "older desktop does not support agent_release_hold",
+            )))),
+        )
+        .unwrap_err();
+        let endpoint = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<ControlEndpointError>()
+            .unwrap();
+        assert_eq!(endpoint.code(), "bad_request");
+        assert!(
+            serde_json::from_value::<wardian_core::control::AgentReleaseHoldResponse>(
+                serde_json::json!({"schema":1, "ok":true}),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentReleaseHold),
+            CONTROL_MUTATION_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn archive_adoption_unsupported_endpoint_error_is_terminal() {
+        let runtime = build_runtime().unwrap();
+        let error = timeout_block(
+            &runtime,
+            ControlOperation::AgentAdoptArchive,
+            std::future::ready(Err(io::Error::other(ControlEndpointError::new(
+                "bad_request",
+                "older desktop does not support agent_adopt_archive",
+            )))),
+        )
+        .unwrap_err();
+        let endpoint = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<ControlEndpointError>()
+            .unwrap();
+        assert_eq!(endpoint.code(), "bad_request");
+        assert_eq!(
+            endpoint.to_string(),
+            "older desktop does not support agent_adopt_archive"
+        );
+        assert!(
+            serde_json::from_value::<wardian_core::control::ArchiveAdoptionResponse>(
+                serde_json::json!({"schema": 1, "ok": true}),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentAdoptArchive),
+            CONTROL_MUTATION_TIMEOUT
+        );
     }
 
     #[test]
@@ -1505,31 +1543,6 @@ mod tests {
             operation_timeout(&ControlOperation::Delivery { requested }),
             watch_timeout_for(requested)
         );
-    }
-
-    #[test]
-    fn current_message_origin_uses_wardian_session_id() {
-        let _guard = env_lock();
-        std::env::set_var("WARDIAN_SESSION_ID", "source-1");
-
-        assert_eq!(
-            current_message_origin(),
-            Some(MessageOrigin::WardianAgent {
-                session_id: "source-1".to_string()
-            })
-        );
-
-        std::env::remove_var("WARDIAN_SESSION_ID");
-    }
-
-    #[test]
-    fn current_message_origin_ignores_blank_session_id() {
-        let _guard = env_lock();
-        std::env::set_var("WARDIAN_SESSION_ID", "   ");
-
-        assert_eq!(current_message_origin(), None);
-
-        std::env::remove_var("WARDIAN_SESSION_ID");
     }
 
     #[test]
@@ -1888,40 +1901,5 @@ mod tests {
         .unwrap_err();
         assert_eq!(calls, 1);
         assert!(error.get_ref().unwrap().is::<WatchTimeoutError>());
-    }
-
-    #[test]
-    fn exchange_json_preserves_backend_error_details() {
-        let runtime = build_runtime().unwrap();
-        runtime.block_on(async {
-            let (mut client, mut server) = tokio::io::duplex(4096);
-            tokio::spawn(async move {
-            let mut line = String::new();
-            let mut reader = BufReader::new(&mut server);
-            reader.read_line(&mut line).await.unwrap();
-            let stream = reader.get_mut();
-            stream
-                .write_all(
-                    br#"{"schema":1,"error":{"code":"request_failed","message":"message delivery failed","details":{"delivery":[{"uuid":"agent-2","name":"CoderTwo","provider":"claude","runtime_state":"restored_without_sender","delivery_state":"failed","error":{"code":"no_input_channel","message":"missing sender"}}]}}}"#,
-                )
-                .await
-                .unwrap();
-            stream.write_all(b"\n").await.unwrap();
-            });
-
-            let error = exchange_json(&mut client, ControlRequest::AgentList)
-                .await
-                .unwrap_err();
-            let endpoint_error = error
-                .get_ref()
-                .and_then(|inner| inner.downcast_ref::<ControlEndpointError>())
-                .unwrap();
-
-            assert_eq!(endpoint_error.code(), "request_failed");
-            assert_eq!(
-                endpoint_error.details().unwrap()["delivery"][0]["runtime_state"],
-                "restored_without_sender"
-            );
-        });
     }
 }

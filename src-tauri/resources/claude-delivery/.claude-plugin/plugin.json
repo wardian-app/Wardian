@@ -1,0 +1,5 @@
+{
+  "name": "wardian",
+  "version": "0.1.0",
+  "description": "Delivers Wardian peer messages and task replies as queued prompts instead of terminal keystrokes."
+}

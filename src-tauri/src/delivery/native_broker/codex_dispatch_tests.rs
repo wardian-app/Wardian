@@ -141,7 +141,7 @@ async fn assert_shared_submission_failure(after_write: bool, fail_persistence: b
         if !after_write {
             client.close().await;
         }
-        let submission = broker.submit_shared_codex_input(&client, &record);
+        let submission = broker.submit_shared_codex_input(&client, &record, None);
         tokio::pin!(submission);
         let failure = match tokio::time::timeout(Duration::from_secs(5), async {
             tokio::select! {

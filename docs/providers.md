@@ -96,6 +96,12 @@ Wardian assigns fresh Claude session IDs up front and uses explicit resume flags
 
 Visible Claude agents run through Claude Code's interactive mode. Do not pass `--input-format stream-json` or `--output-format stream-json` to interactive launches; Claude Code treats those as print-mode flags. Wardian keeps stream-json output only for headless/bootstrap flows that also pass `--print`.
 
+Peer messages and task replies use the bundled Wardian delivery mod when it is
+ready. It queues prompts through Claude's API and preserves text being drafted
+in the terminal. If the mod is unavailable, Wardian uses terminal delivery and
+records the reason. A published delivery with no receipt remains "waiting on
+the Claude delivery mod"; Wardian does not replay an uncertain submission.
+
 Startup readiness requires a composer and its footer on the current terminal
 screen. A user-authored external `CLAUDE.md` import consent menu is `Action Needed`, not an
 idle composer. Queued prompts remain pending until the consent is resolved and
@@ -207,6 +213,16 @@ Resuming a Codex agent applies its selected model and reasoning effort. If only
 the effort is selected, Wardian keeps the conversation's recorded model when
 available, then falls back to the effective provider configuration and catalogue.
 This launch-time selection does not replace an unspecified model in agent settings.
+
+On Windows, a `workspace-write` session with no selected backend defaults to
+`unelevated`. Wardian captures the effective backend through the owned
+app-server's `config/read` and pins it in each background-thread request and the
+temporary TUI config overlay. Supported explicit backend and legacy selections
+are honored; a legacy-disabled selection that cannot be represented for
+`workspace-write` is rejected before thread loading. For `workspace-write`, if
+`prefer_mxc` leaves the backend conditional on runtime eligibility, startup is
+rejected before work; select an explicit backend or compatible policy. Wardian
+does not probe MXC availability.
 
 Codex currently limits the length of its local control-socket path. When a
 managed home is too deep, Wardian uses a private compact location and keeps

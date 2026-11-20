@@ -63,8 +63,28 @@ const AUDITED_SECURITY_PIN_TRANSITIONS = [
   // GHSA-82fw-gwwq-j7x9: keep Vitest and its coverage adapter on patched 4.1.
   { path: ["devDependencies", "vitest"], from: "^4.1.8", to: "^4.1.11" },
   { path: ["devDependencies", "@vitest/coverage-v8"], from: "^4.1.8", to: "^4.1.11" },
+  // GHSA-qxg6-89mg-rqv8 and GHSA-xp26-3454-mjgp are fixed in Vitest 4.1.12.
+  { path: ["devDependencies", "vitest"], from: "^4.1.11", to: "^4.1.12" },
+  { path: ["devDependencies", "@vitest/coverage-v8"], from: "^4.1.11", to: "^4.1.12" },
+  // GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472, and GHSA-xjj6-f33q-929c are fixed
+  // in undici 7.30.1.
+  { path: ["overrides", "undici"], from: "7.29.1", to: "7.30.1" },
   // GHSA-p98j-92pf-mc4p and GHSA-6688-9rhm-gjv2 fix in-place sanitization.
   { path: ["overrides", "dompurify"], from: "3.4.13", to: "3.4.16" },
+  // GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw, GHSA-587h-7wmj-h5pm,
+  // GHSA-9jrq-w75r-8gcw, and GHSA-rq7h-c2jc-7f22 affect Vite through 6.4.3.
+  { path: ["devDependencies", "vite"], from: "6.4.3", to: "6.4.5" },
+  { path: ["overrides", "vite"], from: "6.4.3", to: "6.4.5" },
+  // GHSA-cg2g-xh64-v4q7, GHSA-mrv2-3pqr-j5jr, and GHSA-c6gr-qvv4-5v3f
+  // are fixed in DOMPurify 3.4.17.
+  { path: ["overrides", "dompurify"], from: "3.4.16", to: "3.4.17" },
+  // Tauri requires the API's minor to match and updater bindings to match exactly.
+  { path: ["dependencies", "@tauri-apps/api"], from: "2.11.0", to: "2.12.0" },
+  {
+    path: ["dependencies", "@tauri-apps/plugin-updater"],
+    from: "^2.10.1",
+    to: "2.14.0",
+  },
 ];
 const TRACKED_FILE_LINES = [
   "src-tauri/src/commands/agent.rs",
