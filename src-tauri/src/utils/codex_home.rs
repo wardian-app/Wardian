@@ -255,6 +255,18 @@ pub(crate) fn resolve_managed_home(home: &Path, agent_id: &str) -> Result<PathBu
     }
 }
 
+/// Resolve an existing profile without creating or preparing the selected agent.
+pub(super) fn resolve_prepared_profile(
+    home: &Path,
+    agent_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    validate_agent_id(agent_id)?;
+    if !storage::exists(&home.join("agents").join(agent_id).join("habitat"))? {
+        return Ok(None);
+    }
+    resolve_managed_home(home, agent_id).map(Some)
+}
+
 fn layout(home: &Path, agent_id: &str) -> Result<(PathBuf, PathBuf, PathBuf), String> {
     let (home, agent) = agent_directory(home, agent_id)?;
     let habitat = agent.join("habitat");

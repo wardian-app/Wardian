@@ -16,6 +16,123 @@ pub(super) fn local_registration(servers: &Item) -> Option<(&'static str, Item)>
     servers.get(SERVER).map(|entry| (SERVER, entry.clone()))
 }
 
+/// A selected agent's MCP settings before upstream reconciliation can replace them.
+pub(crate) struct McpProfile {
+    servers: Vec<(String, Item)>,
+    messaging_removed: bool,
+}
+
+impl McpProfile {
+    pub(crate) fn load(wardian_home: &Path, profile_id: &str) -> Result<Option<Self>, String> {
+        let Some(home) = super::codex_home::resolve_prepared_profile(wardian_home, profile_id)?
+        else {
+            return Ok(None);
+        };
+        let path = home.join("config.toml");
+        reject_link(&path)?;
+        let config = read_optional(&path)?
+            .unwrap_or_default()
+            .parse::<DocumentMut>()
+            .map_err(|_| "Could not parse selected agent Codex config.toml")?;
+        let servers = config
+            .get("mcp_servers")
+            .map(|item| {
+                item.as_table_like()
+                    .ok_or("Selected agent Codex mcp_servers is not a table")
+                    .map(|table| {
+                        table
+                            .iter()
+                            .map(|(name, server)| (name.to_owned(), server.clone()))
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let record = home.join(RECORD);
+        reject_link(&record)?;
+        let messaging_removed = !servers.iter().any(|(name, _)| name == SERVER) && record.is_file();
+        Ok((!servers.is_empty() || messaging_removed).then_some(Self {
+            servers,
+            messaging_removed,
+        }))
+    }
+}
+
+/// Whether the launch keeps the selected agent's identity, uses a fresh run
+/// identity, or uses the shared bootstrap path without local messaging.
+#[derive(Clone, Copy)]
+pub(crate) enum ProfileTarget<'a> {
+    Resume,
+    Fresh {
+        wardian_home: &'a Path,
+        run_id: &'a str,
+    },
+    Bootstrap,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ProfileProjection<'a> {
+    pub profile: &'a McpProfile,
+    pub target: ProfileTarget<'a>,
+}
+
+impl ProfileProjection<'_> {
+    pub(super) fn inherits_messaging(&self) -> bool {
+        matches!(self.target, ProfileTarget::Fresh { .. })
+            && (self.profile.messaging_removed
+                || self.profile.servers.iter().any(|(name, _)| name == SERVER))
+    }
+
+    /// Restore complete source entries, including nested tool approval, env and
+    /// cwd. The two Wardian identity variables belong to the new run.
+    pub(super) fn apply(&self, config: &mut DocumentMut) -> Result<(), String> {
+        if config.get("mcp_servers").is_none() {
+            config["mcp_servers"] = Item::Table(Table::new());
+        }
+        let servers = config["mcp_servers"]
+            .as_table_like_mut()
+            .ok_or("Launch Codex mcp_servers is not a table")?;
+        if self.profile.messaging_removed || matches!(self.target, ProfileTarget::Bootstrap) {
+            servers.remove(SERVER);
+        }
+        for (name, server) in &self.profile.servers {
+            let mut server = server.clone();
+            if name == SERVER {
+                match self.target {
+                    ProfileTarget::Bootstrap => continue,
+                    ProfileTarget::Resume => {}
+                    ProfileTarget::Fresh {
+                        wardian_home,
+                        run_id,
+                    } => {
+                        if let Some(env) = server.get_mut("env").and_then(Item::as_table_like_mut) {
+                            if let Some(home) = env.get_mut("WARDIAN_HOME") {
+                                *home = value(path_text(wardian_home)?);
+                            }
+                            if let Some(session) = env.get_mut("WARDIAN_SESSION_ID") {
+                                *session = value(run_id);
+                            }
+                        }
+                    }
+                }
+            }
+            servers.insert(name, server);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn write_bootstrap_config(&self, destination: &Path) -> Result<(), String> {
+        let path = destination.join("config.toml");
+        reject_link(&path)?;
+        let mut config = read_optional(&path)?
+            .unwrap_or_default()
+            .parse::<DocumentMut>()
+            .map_err(|_| "Could not parse bootstrap Codex config.toml")?;
+        self.apply(&mut config)?;
+        atomic_replace(&path, config.to_string().as_bytes())
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     // No production environment override: isolate the real preparation path
@@ -248,7 +365,7 @@ fn reject_link(path: &Path) -> Result<(), String> {
     }
 }
 
-fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(super) fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().expect("managed file parent");
     // tempfile persists through Win32 APIs. Keep the existing parent's verbatim
     // spelling for both paths, including in executables without longPathAware.

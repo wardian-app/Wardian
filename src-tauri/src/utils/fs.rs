@@ -124,19 +124,53 @@ pub fn prepare_provider_habitat(
     class_name: &str,
     session_id: Option<&str>,
 ) -> Result<Option<std::path::PathBuf>, String> {
+    prepare_provider_habitat_with_profile(provider, workspace_root, class_name, session_id, None)
+}
+
+/// Prepare a launch habitat with an optional registered Codex MCP profile.
+pub(crate) fn prepare_provider_habitat_with_profile(
+    provider: &str,
+    workspace_root: &std::path::Path,
+    class_name: &str,
+    session_id: Option<&str>,
+    profile_id: Option<&str>,
+) -> Result<Option<std::path::PathBuf>, String> {
     let Some(session_id) = session_id.filter(|sid| !sid.trim().is_empty()) else {
         return Ok(None);
     };
 
     let habitat_root = prepare_habitat_workspace(workspace_root, class_name, session_id)?;
     if provider == "codex" {
+        use super::codex_messaging::{McpProfile, ProfileProjection, ProfileTarget};
         let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
         let _preparation = super::codex_home::acquire_preparation(&wardian_home, session_id)?;
-        ensure_codex_home_projection(&habitat_root, workspace_root, session_id)?;
-        if let super::codex_messaging::Registration::Unavailable(reason) =
-            super::codex_messaging::ensure_managed_messaging(&wardian_home, session_id)?
-        {
-            log_debug(&format!("[Wardian] Codex messaging unavailable: {reason}"));
+        let profile = profile_id
+            .map(|id| McpProfile::load(&wardian_home, id))
+            .transpose()?
+            .flatten();
+        let projection = profile.as_ref().map(|profile| ProfileProjection {
+            profile,
+            target: if profile_id == Some(session_id) {
+                ProfileTarget::Resume
+            } else {
+                ProfileTarget::Fresh {
+                    wardian_home: &wardian_home,
+                    run_id: session_id,
+                }
+            },
+        });
+        ensure_codex_home_projection_with_profile(
+            &habitat_root,
+            workspace_root,
+            session_id,
+            projection,
+        )?;
+        if !projection.is_some_and(|profile| profile.inherits_messaging()) {
+            if let super::codex_messaging::Registration::Unavailable(reason) =
+                super::codex_messaging::ensure_managed_messaging(&wardian_home, session_id)?
+            {
+                log_debug(&format!("[Wardian] Codex messaging unavailable: {reason}"));
+            }
         }
     }
 
@@ -617,6 +651,15 @@ pub(crate) fn ensure_codex_home_projection(
     workspace_root: &std::path::Path,
     agent_id: &str,
 ) -> Result<(), String> {
+    ensure_codex_home_projection_with_profile(habitat_root, workspace_root, agent_id, None)
+}
+
+fn ensure_codex_home_projection_with_profile(
+    habitat_root: &std::path::Path,
+    workspace_root: &std::path::Path,
+    agent_id: &str,
+    profile: Option<super::codex_messaging::ProfileProjection<'_>>,
+) -> Result<(), String> {
     let upstream = super::codex_home::resolve_upstream_home()?;
     let policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
     ensure_codex_home_projection_from_source(
@@ -625,7 +668,7 @@ pub(crate) fn ensure_codex_home_projection(
         agent_id,
         &upstream,
         &policy,
-        upstream.explicit,
+        profile,
     )
 }
 
@@ -664,6 +707,7 @@ pub(crate) fn sync_codex_agent_home_with_context(
         wardian_skills,
         context.upstream().explicit,
         Some(context),
+        None,
     )
     .map_err(|_| "Codex bootstrap source projection failed".to_string())
 }
@@ -674,16 +718,18 @@ fn ensure_codex_home_projection_from_source(
     agent_id: &str,
     upstream: &super::codex_home::UpstreamHome,
     policy: &crate::utils::CodexRuntimePolicy,
-    strict_projection: bool,
+    profile: Option<super::codex_messaging::ProfileProjection<'_>>,
 ) -> Result<(), String> {
     let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let projected_home = super::codex_home::resolve_managed_home(&wardian_home, agent_id)?;
     let wardian_skills = habitat_root.join(".agents").join("skills");
-    sync_codex_agent_home_with_policy(
+    sync_codex_agent_home_from_source(
         &upstream.path,
         &projected_home,
         &wardian_skills,
-        strict_projection,
+        upstream.explicit,
+        None,
+        profile,
     )?;
 
     if policy.trust_workspaces {
@@ -698,20 +744,12 @@ pub(crate) fn sync_codex_agent_home(
     projected_home: &std::path::Path,
     wardian_skills: &std::path::Path,
 ) -> Result<(), String> {
-    sync_codex_agent_home_with_policy(real_codex_home, projected_home, wardian_skills, false)
-}
-
-fn sync_codex_agent_home_with_policy(
-    real_codex_home: &std::path::Path,
-    projected_home: &std::path::Path,
-    wardian_skills: &std::path::Path,
-    strict_projection: bool,
-) -> Result<(), String> {
     sync_codex_agent_home_from_source(
         real_codex_home,
         projected_home,
         wardian_skills,
-        strict_projection,
+        false,
+        None,
         None,
     )
 }
@@ -722,6 +760,7 @@ fn sync_codex_agent_home_from_source(
     wardian_skills: &std::path::Path,
     strict_projection: bool,
     context: Option<&super::codex_home::CodexLaunchContext>,
+    profile: Option<super::codex_messaging::ProfileProjection<'_>>,
 ) -> Result<(), String> {
     if let Some(context) = context {
         context.revalidate()?;
@@ -805,6 +844,7 @@ fn sync_codex_agent_home_from_source(
             &projected_home.join("config.toml"),
             real_codex_home,
             projected_home,
+            profile,
         )?;
     } else {
         reconcile_codex_config(
@@ -812,6 +852,7 @@ fn sync_codex_agent_home_from_source(
             &projected_home.join("config.toml"),
             real_codex_home,
             projected_home,
+            profile,
         )?;
     }
 
@@ -1385,6 +1426,7 @@ fn reconcile_codex_config(
     agent_config_path: &std::path::Path,
     real_codex_home: &std::path::Path,
     projected_home: &std::path::Path,
+    profile: Option<super::codex_messaging::ProfileProjection<'_>>,
 ) -> Result<(), String> {
     let base_content = match std::fs::read_to_string(base_config_path) {
         Ok(content) => content,
@@ -1396,6 +1438,7 @@ fn reconcile_codex_config(
         agent_config_path,
         real_codex_home,
         projected_home,
+        profile,
     )
 }
 
@@ -1404,6 +1447,7 @@ fn reconcile_codex_config_contents(
     agent_config_path: &std::path::Path,
     real_codex_home: &std::path::Path,
     projected_home: &std::path::Path,
+    profile: Option<super::codex_messaging::ProfileProjection<'_>>,
 ) -> Result<(), String> {
     let agent_content = match std::fs::read_to_string(agent_config_path) {
         Ok(content) => content,
@@ -1449,6 +1493,16 @@ fn reconcile_codex_config_contents(
     } else {
         rendered
     };
+    if let Some(profile) = profile {
+        let mut document = rendered
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| "Could not parse reconciled Codex config.toml")?;
+        profile.apply(&mut document)?;
+        return super::codex_messaging::atomic_replace(
+            agent_config_path,
+            document.to_string().as_bytes(),
+        );
+    }
     std::fs::write(agent_config_path, rendered).map_err(|error| error.to_string())
 }
 
@@ -3070,6 +3124,7 @@ mod tests {
                         &agent_path,
                         &real_home,
                         &projected_home,
+                        None,
                     )
                     .unwrap();
                     let rendered = std::fs::read_to_string(&agent_path).unwrap();
@@ -3448,8 +3503,14 @@ mod tests {
 
             let mut previous = None;
             for _ in 0..2 {
-                super::reconcile_codex_config(&base_path, &agent_path, &real_home, &projected_home)
-                    .unwrap_or_else(|error| panic!("{name}: {error}"));
+                super::reconcile_codex_config(
+                    &base_path,
+                    &agent_path,
+                    &real_home,
+                    &projected_home,
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
                 let content = std::fs::read_to_string(&agent_path).unwrap();
                 if let Some(previous) = previous.replace(content.clone()) {
                     assert_eq!(content, previous, "{name}: sync must be idempotent");
@@ -3502,9 +3563,14 @@ mod tests {
         let invalid_config = "tui = 'invalid' # preserve\n";
         std::fs::write(&agent_path, invalid_config).unwrap();
 
-        let error =
-            super::reconcile_codex_config(&base_path, &agent_path, &real_home, &projected_home)
-                .expect_err("malformed tui must fail closed");
+        let error = super::reconcile_codex_config(
+            &base_path,
+            &agent_path,
+            &real_home,
+            &projected_home,
+            None,
+        )
+        .expect_err("malformed tui must fail closed");
         assert!(error.contains("[tui] is not a table"), "{error}");
         assert_eq!(
             std::fs::read_to_string(&agent_path).unwrap(),
