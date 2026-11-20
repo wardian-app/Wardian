@@ -357,7 +357,7 @@ function applyNativeWindowSizeFromOuterWindow() {
   });
 }
 
-/** Scrolls only the Agents surface viewport, never Dockview's pane wrapper. */
+/** Immediately centers an explicitly selected card within only its Agents viewport. */
 export function scrollAgentCardWithinOverview(
   agentId: string,
   ownerDocument: Document = document,
@@ -377,7 +377,7 @@ export function scrollAgentCardWithinOverview(
     Math.max(0, scrollRegion.scrollHeight - scrollRegion.clientHeight),
   ));
   if (typeof scrollRegion.scrollTo === "function") {
-    scrollRegion.scrollTo({ top, behavior: "smooth" });
+    scrollRegion.scrollTo({ top, behavior: "instant" });
   } else {
     scrollRegion.scrollTop = top;
   }

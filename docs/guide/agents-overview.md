@@ -12,6 +12,8 @@ Press `Ctrl+P` / `Cmd+P`, select a pane's **+** button, or use the empty-pane Ho
 
 The right roster controls which agents auxiliary tools target. It does not filter Agents automatically. Use **Filter agents** in the surface to narrow the visible cards by agent name, description, class, provider, or workspace.
 
+Selecting a roster row while Agents is active immediately centers that agent's card in the Agents viewport. The surrounding Workbench pane keeps its scroll position.
+
 ### Remember an Agent's Purpose
 
 Select one agent, open **Agent Configuration** from the left rail, and add an

@@ -362,42 +362,100 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
 }
 
 describe("Agents overview scroll ownership", () => {
-  it("centers a card by scrolling only the overview viewport", () => {
-    const pane = document.createElement("div");
-    const overview = document.createElement("div");
-    const card = document.createElement("div");
+  const bounds = (top: number, height: number): DOMRect => ({
+    x: 0, y: top, top, left: 0, right: 600, bottom: top + height,
+    width: 600, height, toJSON: () => ({}),
+  });
+  const fixture = ({ scrollTop, cardTop, scrollHeight, cardHeight = 80 }: {
+    scrollTop: number; cardTop: number; scrollHeight: number; cardHeight?: number;
+  }, ownerDocument = document) => {
+    const pane = ownerDocument.createElement("div");
+    const otherOverview = ownerDocument.createElement("div");
+    const overview = ownerDocument.createElement("div");
+    const card = ownerDocument.createElement("div");
+    otherOverview.dataset.testid = "agents-overview-container";
     overview.dataset.testid = "agents-overview-container";
     card.id = "agent-card-agent-far";
-    pane.append(overview);
+    pane.append(otherOverview, overview);
     overview.append(card);
-    document.body.append(pane);
-
+    ownerDocument.body.append(pane);
     pane.scrollTop = 37;
-    overview.scrollTop = 400;
+    pane.scrollTo = vi.fn();
+    pane.scrollIntoView = vi.fn();
+    card.scrollIntoView = vi.fn();
+    otherOverview.scrollTo = vi.fn();
+    overview.scrollTop = scrollTop;
+    overview.style.scrollBehavior = "smooth";
     Object.defineProperties(overview, {
       clientHeight: { value: 300, configurable: true },
-      scrollHeight: { value: 1_200, configurable: true },
+      scrollHeight: { value: scrollHeight, configurable: true },
     });
-    overview.getBoundingClientRect = () => ({
-      x: 0, y: 100, top: 100, left: 0, right: 600, bottom: 400,
-      width: 600, height: 300, toJSON: () => ({}),
-    });
-    card.getBoundingClientRect = () => ({
-      x: 0, y: 650, top: 650, left: 0, right: 600, bottom: 730,
-      width: 600, height: 80, toJSON: () => ({}),
-    });
-    const scrollTo = vi.fn();
-    overview.scrollTo = scrollTo;
+    overview.getBoundingClientRect = () => bounds(100, 300);
+    card.getBoundingClientRect = () => bounds(cardTop, cardHeight);
+    overview.scrollTo = vi.fn();
+    return { pane, otherOverview, overview, card };
+  };
 
-    expect(scrollAgentCardWithinOverview("agent-far")).toBe(true);
-    expect(scrollTo).toHaveBeenCalledWith({ top: 840, behavior: "smooth" });
-    expect(pane.scrollTop).toBe(37);
-
-    pane.remove();
+  it.each([
+    { selection: "a nearby visible card", scrollTop: 400, cardTop: 240, scrollHeight: 1_200, top: 430 },
+    { selection: "an offscreen card", scrollTop: 400, cardTop: 650, scrollHeight: 1_200, top: 840 },
+    { selection: "a distant card below", scrollTop: 0, cardTop: 5_000, scrollHeight: 8_000, top: 4_790 },
+    { selection: "a distant card above", scrollTop: 5_000, cardTop: -4_300, scrollHeight: 8_000, top: 490 },
+    { selection: "a card at the top edge", scrollTop: 0, cardTop: 100, scrollHeight: 1_200, top: 0 },
+    { selection: "a card at the bottom edge", scrollTop: 400, cardTop: 800, scrollHeight: 1_200, top: 900 },
+    { selection: "a card in a non-overflowing view", scrollTop: 0, cardTop: 150, scrollHeight: 200, top: 0 },
+    { selection: "a card taller than the viewport", scrollTop: 400, cardTop: 650, scrollHeight: 1_600, cardHeight: 600, top: 1_100 },
+  ])("immediately centers $selection using only its overview viewport", (scenario) => {
+    const { pane, otherOverview, overview, card } = fixture(scenario);
+    const pageScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    try {
+      expect(scrollAgentCardWithinOverview("agent-far")).toBe(true);
+      expect(overview.scrollTo).toHaveBeenCalledExactlyOnceWith({ top: scenario.top, behavior: "instant" });
+      expect(overview.style.scrollBehavior).toBe("smooth");
+      expect(pane.scrollTop).toBe(37);
+      expect(pane.scrollTo).not.toHaveBeenCalled();
+      expect(pane.scrollIntoView).not.toHaveBeenCalled();
+      expect(card.scrollIntoView).not.toHaveBeenCalled();
+      expect(otherOverview.scrollTo).not.toHaveBeenCalled();
+      expect(pageScroll).not.toHaveBeenCalled();
+    } finally {
+      pane.remove();
+      pageScroll.mockRestore();
+    }
   });
 
-  it("does nothing when the card is not owned by an Agents overview", () => {
-    expect(scrollAgentCardWithinOverview("missing-agent")).toBe(false);
+  it("clamps the scrollTop fallback within the supplied owner document", () => {
+    const ownerDocument = document.implementation.createHTMLDocument();
+    const { pane, otherOverview, overview, card } = fixture({
+      scrollTop: 400, cardTop: 800, scrollHeight: 1_200,
+    }, ownerDocument);
+    Object.defineProperty(overview, "scrollTo", { configurable: true, value: undefined });
+    try {
+      expect(scrollAgentCardWithinOverview("agent-far", ownerDocument)).toBe(true);
+      expect(overview.scrollTop).toBe(900);
+      expect(pane.scrollTop).toBe(37);
+      expect(pane.scrollTo).not.toHaveBeenCalled();
+      expect(card.scrollIntoView).not.toHaveBeenCalled();
+      expect(otherOverview.scrollTo).not.toHaveBeenCalled();
+    } finally { pane.remove(); }
+  });
+
+  it("does nothing for missing cards or cards outside any Agents overview", () => {
+    const { pane, overview, card } = fixture({ scrollTop: 400, cardTop: 650, scrollHeight: 1_200 });
+    pane.append(card);
+    const pageScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    try {
+      expect(scrollAgentCardWithinOverview("missing-agent")).toBe(false);
+      expect(scrollAgentCardWithinOverview("agent-far")).toBe(false);
+      expect(overview.scrollTo).not.toHaveBeenCalled();
+      expect(pane.scrollTo).not.toHaveBeenCalled();
+      expect(card.scrollIntoView).not.toHaveBeenCalled();
+      expect(pageScroll).not.toHaveBeenCalled();
+      expect(pane.scrollTop).toBe(37);
+    } finally {
+      pane.remove();
+      pageScroll.mockRestore();
+    }
   });
 });
 
@@ -2965,6 +3023,25 @@ describe("Agent Watchlist Sidebar", () => {
 
     await screen.findByTestId("agents-overview-surface");
 
+    const overview = screen.getByTestId("agents-overview-container");
+    const targetCard = document.getElementById("agent-card-agent-2");
+    if (!targetCard) throw new Error("Beta card not found");
+    Object.defineProperties(overview, {
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 8_000 },
+    });
+    overview.scrollTop = 0;
+    vi.spyOn(overview, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 100, top: 100, left: 0, right: 600, bottom: 400,
+      width: 600, height: 300, toJSON: () => ({}),
+    });
+    vi.spyOn(targetCard, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 5_000, top: 5_000, left: 0, right: 600, bottom: 5_080,
+      width: 600, height: 80, toJSON: () => ({}),
+    });
+    const revealScroll = vi.fn();
+    overview.scrollTo = revealScroll;
+
     const betaWatchlistRow = screen
       .getAllByText("Beta")
       .map((node) => node.closest("div.watchlist-row"))
@@ -2979,6 +3056,7 @@ describe("Agent Watchlist Sidebar", () => {
     });
     expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
     expect(document.getElementById("agent-card-agent-2")).toBeVisible();
+    await waitFor(() => expect(revealScroll).toHaveBeenCalledWith({ top: 4_790, behavior: "instant" }));
   });
 
   it("keeps command targets unchanged when a terminal receives focus", async () => {
