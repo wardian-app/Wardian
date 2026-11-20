@@ -1025,7 +1025,7 @@ fn rebuild_derived_projections_inner(
 /// Reads `sources.jsonl` only the first time an append needs it. Passing the
 /// read to `Option::get_or_insert` would evaluate it on every call and discard
 /// the result, re-parsing the whole file once per captured event.
-fn cached_source_rows<'a>(
+pub(super) fn cached_source_rows<'a>(
     cached: &'a mut Option<Vec<ConversationSourceRecord>>,
     path: &Path,
 ) -> io::Result<&'a mut Vec<ConversationSourceRecord>> {

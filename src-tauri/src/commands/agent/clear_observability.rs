@@ -11,6 +11,15 @@ use crate::manager;
 use crate::state::AppState;
 use tauri::{AppHandle, State};
 
+/// Closing capture precedes rollover, so the same conversation can be retried.
+pub(super) fn closing_capture_error(error: String) -> String {
+    format!(
+        "Failed to acquire the closing provider log: {error}\n\n\
+         Your current conversation is preserved. Retry New Session. \
+         If the error persists, report this capture error."
+    )
+}
+
 /// Claim on an agent's New Session. Dropping it frees the agent for the next one.
 struct ClearInFlight<'state> {
     state: &'state AppState,
@@ -103,6 +112,19 @@ pub(super) async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_capture_error_preserves_the_exact_cause_and_explains_recovery() {
+        let cause = "conversation archive append failed: conflicting source identity\n\
+                     source: provider-session; expected {old}, got {new}";
+        let message = closing_capture_error(cause.to_string());
+        assert!(message.starts_with(&format!(
+            "Failed to acquire the closing provider log: {cause}\n\n"
+        )));
+        assert!(message.contains("Your current conversation is preserved."));
+        assert!(message.contains("Retry New Session."));
+        assert!(message.contains("If the error persists, report this capture error."));
+    }
 
     #[test]
     fn a_second_new_session_for_the_same_agent_is_refused_until_the_first_ends() {

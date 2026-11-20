@@ -18,6 +18,7 @@ use wardian_core::conversations::{
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 
 pub(crate) mod adoption;
+mod antigravity_sources;
 mod chat_logical_index;
 pub(crate) mod chat_read;
 mod chat_read_store;
@@ -43,10 +44,10 @@ pub use records::{lifecycle_record, narrative_from_chat_event, narrative_from_de
 #[cfg(test)]
 use repair::matching_record_index;
 use repair::{
-    append_source_if_needed, coalesce_batch_observations, is_bound_native_delivery,
-    matching_event_index, matching_record_index_with_candidates, publish_recovered_observations,
-    rebuild_derived_projections, reconcile_codex_user_mirror_records,
-    recover_unlinked_observations, PendingChatPublication,
+    append_source_if_needed, cached_source_rows, coalesce_batch_observations,
+    is_bound_native_delivery, matching_event_index, matching_record_index_with_candidates,
+    publish_recovered_observations, rebuild_derived_projections,
+    reconcile_codex_user_mirror_records, recover_unlinked_observations, PendingChatPublication,
 };
 #[cfg(test)]
 use storage::new_conversation_id;
@@ -1288,6 +1289,35 @@ impl ConversationArchiveState {
                     record_seq,
                     existing_event_index.and_then(|index| existing_events.get(index)),
                 );
+                let legacy_id = format!("src_{record_seq}");
+                let source_record = if antigravity_sources::source_record(event).is_some()
+                    && existing_records[record_index]
+                        .source_refs
+                        .contains(&legacy_id)
+                {
+                    let archived = before_refresh_events.iter().find(|old| old.id == event.id);
+                    // A retained narrative can outlive a source publication.
+                    // Repair its legacy row from the durable native owner,
+                    // preserving its existing reference rather than adding one.
+                    let recovered = archived.and_then(|old| {
+                        records::fallback_source_record_from_chat_event(old, record_seq)
+                    });
+                    let published = cached_source_rows(&mut cached_sources, &sources_path)?
+                        .iter()
+                        .find(|source| source.source_id == legacy_id)
+                        .or(recovered.as_ref())
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("missing legacy Antigravity source owner: {legacy_id}"),
+                            )
+                        })?;
+                    Some(antigravity_sources::legacy_source_for_retry(
+                        event, archived, record_seq, published,
+                    )?)
+                } else {
+                    source_record
+                };
                 let mut record_changed = false;
                 record_changed |= refresh_codex_completion_narrative(
                     &mut existing_records[record_index],

@@ -173,6 +173,12 @@ fn new_session_preserves_backend_rejections_without_fallback_or_disk_mutation() 
     for (code, message) in [
         ("bad_request", "unknown variant agent_new_session"),
         ("request_failed", "conversation lifecycle lease is held"),
+        (
+            "request_failed",
+            "Failed to acquire the closing provider log: conversation archive append failed: conflicting source identity\n\n\
+             Your current conversation is preserved. Retry New Session. \
+             If the error persists, report this capture error.",
+        ),
         ("not_found", "agent not found: paused-agent"),
     ] {
         let home = TempDir::new().unwrap();
@@ -187,6 +193,9 @@ fn new_session_preserves_backend_rejections_without_fallback_or_disk_mutation() 
         );
         let output = command(home.path()).output().unwrap();
         assert!(!output.status.success());
+        if code == "request_failed" {
+            assert_eq!(output.status.code(), Some(1));
+        }
         assert!(output.stdout.is_empty());
         let error: Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(error["error"]["code"], code);
