@@ -485,7 +485,13 @@ fn persisted_opening_certification_is_head_bound_and_excludes_invalid_or_unsuppo
     }
     let original = index.clone();
     let owners = index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &events[1..], None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &events[1..],
+            None,
+            &mut SeekCache::default(),
+        )
         .unwrap()
         .unwrap();
     let known = owners.proven_openings().clone();
@@ -507,7 +513,13 @@ fn persisted_opening_certification_is_head_bound_and_excludes_invalid_or_unsuppo
     let mut forged = events[1].clone();
     forged.metadata["request_root_id"] = json!("forged-root");
     assert!(index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &[forged], None,)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &[forged],
+            None,
+            &mut SeekCache::default()
+        )
         .unwrap()
         .is_none());
     let mut partial = tool(6, true);
@@ -516,16 +528,23 @@ fn persisted_opening_certification_is_head_bound_and_excludes_invalid_or_unsuppo
         .observe(&mut writer, &scope(), &partial, "source:0006", None)
         .unwrap();
     assert!(index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &events[1..], None,)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &events[1..],
+            None,
+            &mut SeekCache::default()
+        )
         .unwrap()
         .is_none());
     assert_eq!(
         original
-            .preview_owners_with_previous(
+            .preview_owners_reusing_nodes(
                 &mut Store::new(temp.path()),
                 &scope(),
                 &events[1..],
                 None,
+                &mut SeekCache::default(),
             )
             .unwrap()
             .unwrap()
@@ -539,7 +558,13 @@ fn persisted_opening_certification_is_head_bound_and_excludes_invalid_or_unsuppo
         .observe(&mut writer, &scope(), &unsupported, "source:0007", None)
         .unwrap();
     assert!(other
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &events[1..], None,)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &events[1..],
+            None,
+            &mut SeekCache::default()
+        )
         .unwrap()
         .is_none());
     let mut inactive = Index::default();
@@ -547,15 +572,22 @@ fn persisted_opening_certification_is_head_bound_and_excludes_invalid_or_unsuppo
         .observe(&mut writer, &scope(), &events[1], "source:0002", None)
         .unwrap();
     assert!(inactive
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &events[1..2], None,)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &events[1..2],
+            None,
+            &mut SeekCache::default()
+        )
         .unwrap()
         .is_none());
     assert!(original
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &scope(),
             &vec![events[1].clone(); CHAT_PRESENTATION_MAX_ITEMS + 1],
             None,
+            &mut SeekCache::default(),
         )
         .unwrap()
         .is_none());
@@ -745,11 +777,12 @@ fn normalized_mirror_keeps_canonical_p1_owner_and_order_when_p2_displays_and_clo
         event.metadata["chat_provisional"] = json!(true);
     }
     let owners = index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &scope(),
             &running_events,
             None,
+            &mut SeekCache::default(),
         )
         .unwrap()
         .unwrap();
@@ -804,11 +837,12 @@ fn normalized_mirror_keeps_canonical_p1_owner_and_order_when_p2_displays_and_clo
     }
 
     let owners = index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &scope(),
             &canonical_events,
             None,
+            &mut SeekCache::default(),
         )
         .unwrap()
         .unwrap();
@@ -845,7 +879,13 @@ fn merged_preview_rejects_any_unresolved_member_and_missing_or_changed_physical_
     observe_rows(&mut partial, &mut writer, &events[3..4]);
     let page = vec![events[0].clone(), displayed.clone()];
     assert!(partial
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &page, None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &page,
+            None,
+            &mut SeekCache::default()
+        )
         .unwrap()
         .is_none());
     assert!(preview(
@@ -862,13 +902,25 @@ fn merged_preview_rejects_any_unresolved_member_and_missing_or_changed_physical_
     let mut complete = Index::default();
     observe_rows(&mut complete, &mut writer, &events[..4]);
     let owners = complete
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &page, None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &page,
+            None,
+            &mut SeekCache::default(),
+        )
         .unwrap()
         .unwrap();
     let mut changed = page.clone();
     changed[1].metadata["chat_display_member_ids"] = json!(["unresolved-physical", events[3].id]);
     assert!(complete
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &changed, None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &changed,
+            None,
+            &mut SeekCache::default()
+        )
         .unwrap()
         .is_none());
     assert!(preview(
@@ -886,11 +938,12 @@ fn merged_preview_rejects_any_unresolved_member_and_missing_or_changed_physical_
         missing[1].metadata.as_object_mut().unwrap().remove(field);
         assert!(
             complete
-                .preview_owners_with_previous(
+                .preview_owners_reusing_nodes(
                     &mut Store::new(temp.path()),
                     &scope(),
                     &missing,
-                    None
+                    None,
+                    &mut SeekCache::default(),
                 )
                 .unwrap()
                 .is_none(),
@@ -918,11 +971,12 @@ fn uncaptured_single_physical_rows_derive_keys_and_existing_calls_keep_their_per
     let mut index = Index::default();
     let request = prompt();
     let owners = index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &scope(),
             std::slice::from_ref(&request),
             None,
+            &mut SeekCache::default(),
         )
         .unwrap()
         .unwrap();
@@ -959,11 +1013,12 @@ fn uncaptured_single_physical_rows_derive_keys_and_existing_calls_keep_their_per
     result.sequence = Some(30_000);
     result.metadata["chat_provisional"] = json!(true);
     let owners = index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &scope(),
             std::slice::from_ref(&result),
             None,
+            &mut SeekCache::default(),
         )
         .unwrap()
         .unwrap();
@@ -1242,7 +1297,13 @@ fn full_normalized_running_window_reuses_eighty_observation_order_reads() {
 
     let mut ordinary_store = Store::new(temp.path());
     let ordinary = index
-        .preview_owners_with_previous(&mut ordinary_store, &native_scope, window, None)
+        .preview_owners_reusing_nodes(
+            &mut ordinary_store,
+            &native_scope,
+            window,
+            None,
+            &mut SeekCache::default(),
+        )
         .unwrap()
         .unwrap();
     let mut inline = window.to_vec();
@@ -1263,7 +1324,13 @@ fn full_normalized_running_window_reuses_eighty_observation_order_reads() {
     }
     let mut inline_store = Store::new(temp.path());
     let control = index
-        .preview_owners_with_previous(&mut inline_store, &native_scope, &inline, None)
+        .preview_owners_reusing_nodes(
+            &mut inline_store,
+            &native_scope,
+            &inline,
+            None,
+            &mut SeekCache::default(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(ordinary_store.objects, inline_store.objects);
@@ -1280,11 +1347,12 @@ fn full_normalized_running_window_reuses_eighty_observation_order_reads() {
     }
     let mut authenticated_store = Store::new(temp.path());
     let native = index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut authenticated_store,
             &native_scope,
             &authenticated,
             None,
+            &mut SeekCache::default(),
         )
         .unwrap()
         .unwrap();
@@ -1308,11 +1376,12 @@ fn full_normalized_running_window_reuses_eighty_observation_order_reads() {
     altered.metadata["chat_source_end"] =
         json!(altered.metadata["chat_source_end"].as_u64().unwrap() + 1);
     let fallback = index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &native_scope,
             std::slice::from_ref(&altered),
             None,
+            &mut SeekCache::default(),
         )
         .unwrap()
         .unwrap();
@@ -1330,13 +1399,25 @@ fn full_normalized_running_window_reuses_eighty_observation_order_reads() {
         ..scope()
     };
     assert!(index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &foreign, &authenticated, None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &foreign,
+            &authenticated,
+            None,
+            &mut SeekCache::default()
+        )
         .unwrap()
         .is_none());
     let mut forged = authenticated[0].clone();
     forged.metadata["chat_turn_item_key"] = json!("f".repeat(64));
     assert!(index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &native_scope, &[forged], None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &native_scope,
+            &[forged],
+            None,
+            &mut SeekCache::default()
+        )
         .unwrap()
         .is_none());
 
@@ -1387,11 +1468,12 @@ fn alias_and_inline_members_keep_their_existing_source_order_fallback() {
             .unwrap();
         assert!(resolved.source_order.is_none());
         let owners = index
-            .preview_owners_with_previous(
+            .preview_owners_reusing_nodes(
                 &mut Store::new(temp.path()),
                 &scope(),
                 std::slice::from_ref(&event),
                 None,
+                &mut SeekCache::default(),
             )
             .unwrap()
             .unwrap();
@@ -1430,7 +1512,13 @@ fn persisted_single_owner_order_survives_source_seed_sequence_reset() {
         event.metadata["chat_provisional"] = json!(true);
     }
     let owners = index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &seeded, None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &seeded,
+            None,
+            &mut SeekCache::default(),
+        )
         .unwrap()
         .unwrap();
     let preview = preview(
@@ -1460,7 +1548,13 @@ fn remembered_owner_preserves_a_running_turn_when_its_new_mirror_is_uncaptured()
     let mut index = Index::default();
     observe_rows(&mut index, &mut writer, &events[..3]);
     let owners = index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &events[..3], None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &events[..3],
+            None,
+            &mut SeekCache::default(),
+        )
         .unwrap()
         .unwrap();
     let before = preview(
@@ -1491,11 +1585,23 @@ fn remembered_owner_preserves_a_running_turn_when_its_new_mirror_is_uncaptured()
     let displayed = merged_mirror(&events);
     let page = vec![events[0].clone(), events[1].clone(), displayed.clone()];
     assert!(index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &page, None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &page,
+            None,
+            &mut SeekCache::default()
+        )
         .unwrap()
         .is_none());
     let next = index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &page, Some(&saved))
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &page,
+            Some(&saved),
+            &mut SeekCache::default(),
+        )
         .unwrap()
         .unwrap();
     let running = preview(
@@ -1568,7 +1674,13 @@ fn remembered_mirror_never_guesses_an_unknown_nonrepresentative_member() {
     let mut index = Index::default();
     observe_rows(&mut index, &mut writer, &events[..3]);
     let owners = index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &events[..3], None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &events[..3],
+            None,
+            &mut SeekCache::default(),
+        )
         .unwrap()
         .unwrap();
     let before = preview(
@@ -1590,22 +1702,24 @@ fn remembered_mirror_never_guesses_an_unknown_nonrepresentative_member() {
     displayed.metadata["chat_source_ref"] = json!(events[2].id);
     displayed.metadata["chat_display_physical_id"] = json!(events[2].id);
     assert!(index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &scope(),
             &[displayed],
-            Some(&saved)
+            Some(&saved),
+            &mut SeekCache::default(),
         )
         .unwrap()
         .is_none());
     let mut foreign = scope();
     foreign.source_epoch = Some("another-epoch");
     assert!(index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &foreign,
             &events[..3],
-            Some(&saved)
+            Some(&saved),
+            &mut SeekCache::default(),
         )
         .unwrap()
         .is_none());
@@ -1619,7 +1733,13 @@ fn owner_cache_remember_preserves_only_current_admitted_metadata() {
     let mut index = Index::default();
     observe_rows(&mut index, &mut writer, &events[..3]);
     let owners = index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &events[..3], None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &events[..3],
+            None,
+            &mut SeekCache::default(),
+        )
         .unwrap()
         .unwrap();
     let before = preview(
@@ -1672,7 +1792,12 @@ fn closed_turn_rejects_fresh_postterminal_physical_rows_and_preserves_replays() 
     let root = string(&events[0], "request_root_id").unwrap().to_owned();
     let roots = BTreeSet::from([root.clone(), "unproven-root".into()]);
     let closed = index
-        .closed_roots(&mut Store::new(temp.path()), &scope(), &roots)
+        .closed_roots_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &scope(),
+            &roots,
+            &mut SeekCache::default(),
+        )
         .unwrap();
     assert_eq!(closed.len(), 1);
     let cutoff = &closed[&root];
@@ -1758,12 +1883,13 @@ fn closed_turn_rejects_fresh_postterminal_physical_rows_and_preserves_replays() 
     closing.sequence = Some(u64::MAX);
     assert!(!Index::after_closed_source_order(&closing, cutoff));
     assert!(index
-        .closed_roots(
+        .closed_roots_reusing_nodes(
             &mut Store::new(temp.path()),
             &scope(),
             &BTreeSet::from_iter(
                 (0..=CHAT_PRESENTATION_MAX_ITEMS).map(|index| format!("root-{index}"))
-            )
+            ),
+            &mut SeekCache::default(),
         )
         .is_err());
 }
@@ -1788,10 +1914,11 @@ fn cold_receipt_on_prompt_still_allows_physical_members_before_its_terminal_boun
     let root = string(&events[0], "request_root_id").unwrap().to_owned();
     assert!(
         index
-            .closed_roots(
+            .closed_roots_reusing_nodes(
                 &mut Store::new(temp.path()),
                 &scope(),
-                &BTreeSet::from([root])
+                &BTreeSet::from([root]),
+                &mut SeekCache::default(),
             )
             .unwrap()
             .len()
@@ -1842,15 +1969,22 @@ fn remembered_source_opening_is_not_retracted_by_missing_canonical_activation_me
             .unwrap();
     }
     assert!(index
-        .preview_owners_with_previous(&mut Store::new(temp.path()), &inactive, &events[..3], None)
+        .preview_owners_reusing_nodes(
+            &mut Store::new(temp.path()),
+            &inactive,
+            &events[..3],
+            None,
+            &mut SeekCache::default()
+        )
         .unwrap()
         .is_none());
     let owners = index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &inactive,
             &events[..3],
             Some(&seed),
+            &mut SeekCache::default(),
         )
         .unwrap()
         .unwrap();
@@ -1899,20 +2033,22 @@ fn remembered_source_opening_is_not_retracted_by_missing_canonical_activation_me
         )
         .unwrap();
     assert!(index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &inactive,
             &events[..3],
             Some(&seed),
+            &mut SeekCache::default(),
         )
         .unwrap()
         .is_none());
     let retained = index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &inactive,
             &events[..3],
             Some(&saved),
+            &mut SeekCache::default(),
         )
         .unwrap()
         .unwrap();
@@ -1954,7 +2090,13 @@ fn certified_members_survive_a_broken_index_without_certifying_new_extensions() 
         let mut index = Index::default();
         observe_rows(&mut index, &mut writer, &admitted);
         let owners = index
-            .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &admitted, None)
+            .preview_owners_reusing_nodes(
+                &mut Store::new(temp.path()),
+                &scope(),
+                &admitted,
+                None,
+                &mut SeekCache::default(),
+            )
             .unwrap()
             .unwrap();
         let openings = owners.proven_openings().clone();
@@ -1986,15 +2128,22 @@ fn certified_members_survive_a_broken_index_without_certifying_new_extensions() 
         let snapshot = serde_json::to_vec(&index).unwrap();
 
         assert!(index
-            .preview_owners_with_previous(&mut Store::new(temp.path()), &scope(), &admitted, None)
+            .preview_owners_reusing_nodes(
+                &mut Store::new(temp.path()),
+                &scope(),
+                &admitted,
+                None,
+                &mut SeekCache::default()
+            )
             .unwrap()
             .is_none());
         let retained = index
-            .preview_owners_with_previous(
+            .preview_owners_reusing_nodes(
                 &mut Store::new(temp.path()),
                 &scope(),
                 &admitted,
                 Some(&saved),
+                &mut SeekCache::default(),
             )
             .unwrap()
             .unwrap();
@@ -2018,11 +2167,12 @@ fn certified_members_survive_a_broken_index_without_certifying_new_extensions() 
             result,
         ] {
             assert!(index
-                .preview_owners_with_previous(
+                .preview_owners_reusing_nodes(
                     &mut Store::new(temp.path()),
                     &scope(),
                     &[new],
                     Some(&saved),
+                    &mut SeekCache::default(),
                 )
                 .unwrap()
                 .is_none());
@@ -2034,11 +2184,12 @@ fn certified_members_survive_a_broken_index_without_certifying_new_extensions() 
             extension.metadata["chat_source_ref"],
         ]);
         assert!(index
-            .preview_owners_with_previous(
+            .preview_owners_reusing_nodes(
                 &mut Store::new(temp.path()),
                 &scope(),
                 &[merged],
                 Some(&saved),
+                &mut SeekCache::default(),
             )
             .unwrap()
             .is_none());
@@ -2063,11 +2214,12 @@ fn global_turn_order_is_loaded_even_for_an_uncaptured_suffix_and_survives_in_cac
         .unwrap();
     let later = event(9, AgentChatEventKind::Message);
     let owners = index
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &scope(),
             std::slice::from_ref(&later),
             None,
+            &mut SeekCache::default(),
         )
         .unwrap()
         .unwrap();
@@ -2093,11 +2245,12 @@ fn global_turn_order_is_loaded_even_for_an_uncaptured_suffix_and_survives_in_cac
         .unwrap();
     let next = event(10, AgentChatEventKind::Message);
     let owners = Index::default()
-        .preview_owners_with_previous(
+        .preview_owners_reusing_nodes(
             &mut Store::new(temp.path()),
             &scope(),
             std::slice::from_ref(&next),
             Some(&saved),
+            &mut SeekCache::default(),
         )
         .unwrap()
         .unwrap();

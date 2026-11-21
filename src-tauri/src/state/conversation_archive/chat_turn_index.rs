@@ -1081,13 +1081,15 @@ impl Index {
         Ok(Some(page))
     }
 
-    /// Return only requested roots' proven terminal source boundaries. The
-    /// source/range prefix remains comparable across normalization sequences.
-    pub(super) fn closed_roots(
+    /// Return only requested roots' proven terminal source boundaries, reusing
+    /// hash-validated immutable seek nodes from the caller's operation-local
+    /// cache. Store read limits and source-boundary qualification are unchanged.
+    pub(super) fn closed_roots_reusing_nodes(
         &self,
         store: &mut Store,
         scope: &Scope<'_>,
         roots: &BTreeSet<String>,
+        cache: &mut SeekCache,
     ) -> io::Result<BTreeMap<String, String>> {
         if roots.len() > CHAT_PRESENTATION_MAX_ITEMS {
             return Err(io::Error::new(
@@ -1103,10 +1105,9 @@ impl Index {
         if self.scope.as_ref().is_some_and(|known| known != &owner) {
             return Err(io::Error::other("foreign canonical turn index scope"));
         }
-        let mut cache = SeekCache::default();
         for root in roots.iter().filter(|root| bounded_id(root)) {
             let (_, turn_key) = turn_identity(&owner, scope.source_key, scope.source_epoch, root)?;
-            if let Some(turn) = lookup::<Turn>(store, &self.turns, &turn_key, &mut cache)? {
+            if let Some(turn) = lookup::<Turn>(store, &self.turns, &turn_key, cache)? {
                 if let Some(order) = turn.closed_source_order() {
                     closed.insert(root.clone(), order.into());
                 }
@@ -1129,12 +1130,15 @@ impl Index {
 
     /// Reuse only a previous producer-certified owner from this same source
     /// admission when a newly coalesced physical mirror has not been captured.
-    pub(super) fn preview_owners_with_previous(
+    /// The caller's operation-local cache reuses hash-validated immutable seek
+    /// nodes across turn lookups while preserving the Store's hard read limits.
+    pub(super) fn preview_owners_reusing_nodes(
         &self,
         store: &mut Store,
         scope: &Scope<'_>,
         events: &[AgentChatEvent],
         previous: Option<&PreviewOwners>,
+        cache: &mut SeekCache,
     ) -> io::Result<Option<PreviewOwners>> {
         if events.len() > CHAT_PRESENTATION_MAX_ITEMS || (self.version != 1 && !self.is_empty()) {
             return Ok(None);
@@ -1166,7 +1170,6 @@ impl Index {
             members: previous.map_or_else(BTreeMap::new, |previous| previous.members.clone()),
             ..PreviewOwners::default()
         };
-        let mut cache = SeekCache::default();
         let mut loaded = BTreeMap::new();
         let mut root_turns = BTreeMap::<String, Option<Turn>>::new();
         for event in events {
@@ -1182,7 +1185,7 @@ impl Index {
                 return Ok(None);
             };
             if !root_turns.contains_key(&derived.turn_key) {
-                let turn = lookup::<Turn>(store, &self.turns, &derived.turn_key, &mut cache)?;
+                let turn = lookup::<Turn>(store, &self.turns, &derived.turn_key, cache)?;
                 root_turns.insert(derived.turn_key.clone(), turn);
             }
             let turn = root_turns.get(&derived.turn_key).and_then(Option::as_ref);
@@ -1204,13 +1207,12 @@ impl Index {
                     .turn_orders
                     .insert(derived.turn_key.clone(), order.clone());
             }
-            let members = self.page_members(store, event, &mut cache)?;
+            let members = self.page_members(store, event, cache)?;
             let mut source_order = members
                 .as_ref()
                 .and_then(|members| members.source_order.clone());
             let (component, reused) = if let Some(PageMembers { members, .. }) = members {
-                let Some(component) = self.component(store, members, &mut cache, &mut loaded)?
-                else {
+                let Some(component) = self.component(store, members, cache, &mut loaded)? else {
                     return Ok(None);
                 };
                 (Some(component), false)
@@ -1218,7 +1220,7 @@ impl Index {
                 let component = if event.metadata.get("chat_display_member_ids").is_some() {
                     None
                 } else {
-                    lookup::<Item>(store, &self.items, &derived.item_key, &mut cache)?.map(|item| {
+                    lookup::<Item>(store, &self.items, &derived.item_key, cache)?.map(|item| {
                         Component {
                             kind: item.kind.clone(),
                             item,
@@ -1235,7 +1237,7 @@ impl Index {
                             scope,
                             event,
                             previous,
-                            &mut cache,
+                            cache,
                             &mut loaded,
                         )?,
                         true,
@@ -1312,12 +1314,9 @@ impl Index {
             }
             if source_order.is_none() {
                 for id in [event.id.as_str(), derived.physical] {
-                    if let Some(known) = lookup::<Observation>(
-                        store,
-                        &self.events,
-                        &digest(id.as_bytes()),
-                        &mut cache,
-                    )? {
+                    if let Some(known) =
+                        lookup::<Observation>(store, &self.events, &digest(id.as_bytes()), cache)?
+                    {
                         if !known.source_order.is_empty() {
                             source_order = Some(known.source_order);
                             break;
