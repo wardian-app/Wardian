@@ -3378,14 +3378,37 @@ pub(super) fn alias(
     let Some(reference) = store.get(&head.identities, &digest(source_ref.as_bytes()))? else {
         return Ok(None);
     };
-    let row: Row = store.read(&reference)?;
+    read_alias_row(store, head, source_ref, &reference)
+}
+
+fn alias_with_cache(
+    store: &mut Store,
+    head: &Head,
+    source_ref: &str,
+    cache: &mut SeekCache,
+) -> io::Result<Option<AgentChatEvent>> {
+    let Some(reference) =
+        store.get_reusing_nodes(&head.identities, &digest(source_ref.as_bytes()), cache)?
+    else {
+        return Ok(None);
+    };
+    read_alias_row(store, head, source_ref, &reference)
+}
+
+fn read_alias_row(
+    store: &mut Store,
+    head: &Head,
+    source_ref: &str,
+    reference: &str,
+) -> io::Result<Option<AgentChatEvent>> {
+    let row: Row = store.read(reference)?;
     if row.agent_id != head.agent_id
         || row.conversation_id != head.conversation_id
         || row.event.metadata["chat_source_ref"].as_str() != Some(source_ref)
     {
         return Err(io::Error::other("foreign chat alias"));
     }
-    Ok(Some(display_event(row, &reference)))
+    Ok(Some(display_event(row, reference)))
 }
 
 fn display_event(mut row: Row, reference: &str) -> AgentChatEvent {
@@ -5457,6 +5480,9 @@ fn read_with_recent_limit(
                 .any(|(live_id, completed_id)| id == live_id || id == completed_id)
         });
         let mut recent = seed.events;
+        // These aliases share one pinned Head. Reuse its validated seek nodes;
+        // every identity lookup and physical Row validation still runs.
+        let mut alias_nodes = SeekCache::default();
         // Resolve newest observations first. Budget exhaustion leaves an
         // explicit unresolved observation, never a text/time guess.
         for event in recent.iter_mut().rev() {
@@ -5475,7 +5501,9 @@ fn read_with_recent_limit(
                 local
             } else if store.objects < 380 {
                 if let Some(published) = &current_head {
-                    alias(&mut store, published, &event.id).ok().flatten()
+                    alias_with_cache(&mut store, published, &event.id, &mut alias_nodes)
+                        .ok()
+                        .flatten()
                 } else {
                     None
                 }
@@ -5501,6 +5529,7 @@ fn read_with_recent_limit(
                 *event = canonical;
             }
         }
+        drop(alias_nodes);
         apply_seed_commentary_pairs(&mut result.events, &seed_pairs);
         apply_seed_commentary_pairs(&mut recent, &seed_pairs);
         let stale_display_ids = result
