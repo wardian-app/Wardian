@@ -43,12 +43,13 @@ function fixture(t) {
   fs.writeFileSync(path.join(root, ".native-e2e-lock", "owner.json"), JSON.stringify({ runId: "peer-contract", pid: process.pid }));
   const agent = path.join(root, "agents", sessionId);
   fs.mkdirSync(agent, { recursive: true });
+  const workspace = path.join(root, "synthetic-chat-workspace"); fs.mkdirSync(workspace);
   const sourcePath = path.join(agent, "source.jsonl");
-  fs.writeFileSync(sourcePath, `${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionId } })}\n`
+  fs.writeFileSync(sourcePath, `${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionId, cwd: workspace } })}\n`
     + `${JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "Synthetic source remains stopped." } })}\n`);
   const codexHome = path.join(root, "c"); fs.mkdirSync(codexHome);
   const inputs = { root, sourcePath, sessionId, nativeSessionId, pythonExecutable, transport };
-  return { ...inputs, inputs, codexHome, cleanup };
+  return { ...inputs, inputs, codexHome, workspace, cleanup };
 }
 
 function initialize(protocol, client, tui = false) {
@@ -131,6 +132,40 @@ test("source mutation, same-content replacement and foreign native identity are 
   assert.throws(() => verifyChatPreviewPeerSource(staged.manifest), /identity_changed/);
 });
 
+test("workspace pin comes only from the literal source and refuses a later directory-link escape", async (t) => {
+  const f = fixture(t), external = fixture(t);
+  const staged = prepareChatPreviewCodexPeer({ ...f.inputs, workspace: external.workspace });
+  assert.equal(staged.manifest.workspace, f.workspace);
+  fs.renameSync(f.workspace, `${f.workspace}.original`);
+  fs.symlinkSync(external.workspace, f.workspace, process.platform === "win32" ? "junction" : "dir");
+  assert.throws(() => verifyChatPreviewPeerSource(staged.manifest), /peer_source_workspace_invalid/);
+  await assert.rejects(startChatPreviewCodexPeer({ manifest: staged.manifest, codexHome: f.codexHome }), /peer_source_workspace_invalid/);
+  assert.equal(fs.existsSync(path.join(f.codexHome, "app-server-control")), false);
+  assert.deepEqual(fs.readdirSync(external.workspace), []);
+});
+
+test("workspace admission rejects missing, relative, foreign and linked source cwd values", (t) => {
+  const external = fixture(t);
+  for (const kind of ["missing", "relative", "foreign", "linked"]) {
+    const f = fixture(t), linked = path.join(f.root, "workspace-link");
+    if (kind === "linked") fs.symlinkSync(external.workspace, linked, process.platform === "win32" ? "junction" : "dir");
+    const cwd = { missing: undefined, relative: "relative", foreign: external.workspace, linked }[kind];
+    fs.writeFileSync(f.sourcePath, JSON.stringify({ type: "session_meta", payload: { id: f.nativeSessionId, cwd } }) + "\n");
+    assert.throws(() => prepareChatPreviewCodexPeer(f.inputs), /peer_source_workspace_invalid/, kind);
+    assert.equal(fs.existsSync(path.join(f.root, "chat-preview-codex-peer-v1")), false);
+  }
+  assert.deepEqual(fs.readdirSync(external.workspace), []);
+});
+
+test("source workspace extraction requires a complete first record within 4096 bytes", (t) => {
+  const f = fixture(t);
+  fs.writeFileSync(f.sourcePath, JSON.stringify({ type: "session_meta", payload: {
+    id: f.nativeSessionId, cwd: f.workspace, padding: "x".repeat(4096),
+  } }) + "\n");
+  assert.throws(() => prepareChatPreviewCodexPeer(f.inputs), /peer_source_first_record_bound/);
+  assert.equal(fs.existsSync(path.join(f.root, "chat-preview-codex-peer-v1")), false);
+});
+
 test("external Codex homes are rejected before shared startup or any CLI transport role creates control state", async (t) => {
   const f = fixture(t), external = fixture(t), staged = prepareChatPreviewCodexPeer(f.inputs);
   const control = path.join(external.codexHome, "app-server-control");
@@ -210,7 +245,8 @@ test("CLI entry supplies the actual catalogue schema and rejects a foreign runti
   assert.throws(() => run(["exec", "do not run"]), /Command failed/);
 });
 
-test("real local AF_UNIX and raw WebSocket proxy perform the startup subset and leave the source unchanged", { timeout: 20_000 }, async (t) => {
+for (const ordinary of [false, true]) {
+test(`real local AF_UNIX and raw WebSocket proxy perform the startup subset (${ordinary ? "ordinary builder" : "bare resume"}) and leave the source unchanged`, { timeout: 20_000 }, async (t) => {
   const f = fixture(t), staged = prepareChatPreviewCodexPeer(f.inputs);
   const sourceBefore = { hash: digest(fs.readFileSync(f.sourcePath)), stat: fs.statSync(f.sourcePath, { bigint: true }) };
   const daemon = await startChatPreviewCodexPeer({ manifest: staged.manifest, codexHome: f.codexHome,
@@ -249,14 +285,45 @@ test("real local AF_UNIX and raw WebSocket proxy perform the startup subset and 
   assert.equal((await rpc("thread/unsubscribe", { threadId: f.nativeSessionId })).status, "unsubscribed");
   assert.deepEqual((await rpc("thread/loaded/list", { limit: 2 })).data, []);
   assert.ok(notifications.some((note) => note.method === "thread/closed"));
-  const tui = spawn(process.execPath, [staged.entryPath, "resume", f.nativeSessionId], { env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+  const tuiArgs = ordinary ? ["--sandbox", "workspace-write", "--ask-for-approval", "on-request", "--model", "fixture-model",
+    "resume", f.nativeSessionId, "--cd", f.workspace] : ["resume", f.nativeSessionId];
+  assert.equal(staged.manifest.workspace, f.workspace);
+  if (ordinary) {
+    const replace = (index, value) => tuiArgs.map((item, offset) => offset === index ? value : item);
+    const rejected = [
+      ["model", replace(5, "other-model")], ["native ID", replace(7, randomUUID())], ["workspace", replace(9, f.codexHome)],
+      ["sandbox", replace(1, "read-only")], ["approval", replace(3, "never")],
+      ["reorder", [...tuiArgs.slice(2, 4), ...tuiArgs.slice(0, 2), ...tuiArgs.slice(4)]],
+      ["duplicate", [...tuiArgs, "--model", "fixture-model"]], ["extra", [...tuiArgs, "--unknown"]],
+      ["prompt", [...tuiArgs, "unsent prompt"]], ["unknown command", replace(6, "exec")],
+      ["version suffix", [...tuiArgs, "--version"]], ["bare extra", ["resume", f.nativeSessionId, "prompt"]],
+      ["bare wrong ID", ["resume", randomUUID()]], ["version extra", ["--version", "unknown"]],
+    ];
+    for (const [label, args] of rejected) {
+      const invalid = spawn(process.execPath, [staged.entryPath, ...args], { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+      const invalidExit = once(invalid, "exit"); let error = "", output = "";
+      invalid.stderr.on("data", (bytes) => { error = (error + bytes.toString()).slice(-4096); });
+      invalid.stdout.on("data", (bytes) => { output = (output + bytes.toString()).slice(-4096); });
+      try {
+        const [code] = await bounded(invalidExit);
+        assert.equal(code, 1, label); assert.match(error, /peer_only_exact_resume/, label); assert.equal(output, "", label);
+      } finally {
+        if (invalid.exitCode === null) { invalid.kill(); await bounded(invalidExit); }
+      }
+    }
+    assert.deepEqual((await rpc("thread/loaded/list", { limit: 2 })).data, []);
+  }
+  const tui = spawn(process.execPath, [staged.entryPath, ...tuiArgs], { env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
   let tuiOutput = "", tuiError = "";
   tui.stdout.on("data", (b) => { tuiOutput += b.toString(); }); tui.stderr.on("data", (b) => { tuiError += b.toString(); });
   const tuiExit = once(tui, "exit");
   f.cleanup.push(async () => { tui.stdin.end(); await bounded(tuiExit); assert.equal(tuiOutput, ""); assert.equal(tuiError, ""); });
   let loaded;
   const deadline = Date.now() + 5000;
-  do { loaded = await rpc("thread/loaded/list", { limit: 2 }); if (!loaded.data.length) await delay(20); } while (!loaded.data.length && Date.now() < deadline);
+  do {
+    assert.equal(tui.exitCode, null, `TUI exited before attachment: ${tuiError}`);
+    loaded = await rpc("thread/loaded/list", { limit: 2 }); if (!loaded.data.length) await delay(20);
+  } while (!loaded.data.length && Date.now() < deadline);
   assert.deepEqual(loaded.data, [f.nativeSessionId]);
   assert.deepEqual(await rpc("thread/inject_items", { threadId: f.nativeSessionId,
     items: [{ type: "message", role: "developer", content: [{ type: "input_text", text: "Synthetic startup context" }] }] }), {});
@@ -269,3 +336,4 @@ test("real local AF_UNIX and raw WebSocket proxy perform the startup subset and 
   assert.deepEqual([after.dev, after.ino, after.size], [sourceBefore.stat.dev, sourceBefore.stat.ino, sourceBefore.stat.size]);
   assert.equal(digest(fs.readFileSync(f.sourcePath)), sourceBefore.hash);
 });
+}

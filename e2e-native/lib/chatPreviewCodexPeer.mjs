@@ -19,6 +19,27 @@ const require = createRequire(import.meta.url);
 const need = (ok, code) => { if (!ok) throw new Error(code); };
 const inside = (root, value) => { const p = path.relative(root, value); return p !== "" && !p.startsWith(`..${path.sep}`) && p !== ".." && !path.isAbsolute(p); };
 
+function sourceMetadata(bytes) {
+  const prefix = bytes.subarray(0, 4096);
+  const end = prefix.indexOf(10);
+  need(end > 0, "peer_source_first_record_bound");
+  return JSON.parse(prefix.subarray(0, end).toString("utf8"));
+}
+
+function ownedWorkspace(root, workspace) {
+  try {
+    need(typeof workspace === "string" && path.isAbsolute(workspace) && workspace === path.resolve(workspace)
+      && inside(root, workspace) && path.relative(root, fs.realpathSync(root)) === "", "peer_source_workspace_invalid");
+    let current = root;
+    for (const part of path.relative(root, workspace).split(path.sep)) {
+      current = path.join(current, part);
+      const stat = fs.lstatSync(current);
+      need(stat.isDirectory() && !stat.isSymbolicLink() && path.relative(current, fs.realpathSync(current)) === "", "peer_source_workspace_invalid");
+    }
+    return workspace;
+  } catch { throw new Error("peer_source_workspace_invalid"); }
+}
+
 /** Check the original source through an open handle; never repair or rewrite it. */
 export function verifyChatPreviewPeerSource(manifest) {
   const source = manifest.source;
@@ -32,8 +53,10 @@ export function verifyChatPreviewPeerSource(manifest) {
     const after = fs.fstatSync(fd, { bigint: true });
     need(before.dev === after.dev && before.ino === after.ino && before.size === after.size
       && before.mtimeNs === after.mtimeNs && hash(bytes) === source.sha256, "peer_source_bytes_changed");
-    const first = JSON.parse(bytes.subarray(0, bytes.indexOf(10)).toString("utf8"));
+    const first = sourceMetadata(bytes);
     need(first.type === "session_meta" && first.payload?.id === manifest.nativeSessionId, "peer_source_session_changed");
+    need(first.payload.cwd === manifest.workspace, "peer_source_workspace_changed");
+    ownedWorkspace(manifest.root, manifest.workspace);
     return true;
   } finally { fs.closeSync(fd); }
 }
@@ -55,13 +78,15 @@ export function prepareChatPreviewCodexPeer({ root, sourcePath, sessionId, nativ
   need(typeof model === "string" && model.length > 0 && model.length <= 256, "peer_invalid_model");
   const stat = fs.statSync(sourcePath, { bigint: true });
   need(stat.isFile() && stat.size > 0n && stat.size <= 64n * 1024n * 1024n, "peer_source_bound");
+  const sourceBytes = fs.readFileSync(sourcePath);
+  const workspace = ownedWorkspace(root, sourceMetadata(sourceBytes).payload?.cwd);
   const wsEntry = require.resolve("ws");
-  const manifest = { version: CHAT_PREVIEW_CODEX_PEER_VERSION, root, sessionId, nativeSessionId, model,
+  const manifest = { version: CHAT_PREVIEW_CODEX_PEER_VERSION, root, sessionId, nativeSessionId, model, workspace,
     peerSha256: hash(fs.readFileSync(MODULE)), nodeVersion: process.version, nodeSha256: hash(fs.readFileSync(process.execPath)),
     pythonExecutable, pythonSha256: hash(fs.readFileSync(pythonExecutable)), python, transport,
     transportPath: TRANSPORT, transportSha256: hash(fs.readFileSync(TRANSPORT)),
     wsEntry, wsSha256: hash(fs.readFileSync(wsEntry)),
-    source: { path: sourcePath, bytes: Number(stat.size), dev: String(stat.dev), ino: String(stat.ino), sha256: hash(fs.readFileSync(sourcePath)) } };
+    source: { path: sourcePath, bytes: Number(stat.size), dev: String(stat.dev), ino: String(stat.ino), sha256: hash(sourceBytes) } };
   verifyChatPreviewPeerSource(manifest);
   const directory = path.join(root, "chat-preview-codex-peer-v1");
   fs.mkdirSync(directory); // An existing peer is never silently replaced.
@@ -323,7 +348,7 @@ async function main(args) {
   const manifest = JSON.parse(fs.readFileSync(process.env[ENV], "utf8"));
   verifyRuntime(manifest);
   verifyChatPreviewPeerSource(manifest);
-  if (args.includes("--version")) { process.stdout.write("codex-cli 0.160.0 (Wardian synthetic fixture peer v1)\n"); return; }
+  if (args.length === 1 && args[0] === "--version") { process.stdout.write("codex-cli 0.160.0 (Wardian synthetic fixture peer v1)\n"); return; }
   if (args[0] === "debug" && args[1] === "models") {
     process.stdout.write(`${JSON.stringify({ models: [{ id: manifest.model, display_name: "Synthetic fixture model" }] })}\n`); return;
   }
@@ -341,7 +366,10 @@ async function main(args) {
     const peer = await startChatPreviewCodexPeer({ manifest, codexHome: home, args });
     process.once("SIGTERM", () => { void peer.close(); }); return;
   }
-  need(args[0] === "resume" && args[1] === manifest.nativeSessionId, "peer_only_exact_resume");
+  const ordinary = ["--sandbox", "workspace-write", "--ask-for-approval", "on-request", "--model", manifest.model,
+    "resume", manifest.nativeSessionId, "--cd", manifest.workspace];
+  const bare = args.length === 2 && args[0] === "resume" && args[1] === manifest.nativeSessionId;
+  need(bare || (args.length === ordinary.length && args.every((value, index) => value === ordinary[index])), "peer_only_exact_resume");
   await tui(manifest, socket);
 }
 

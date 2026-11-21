@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { readHomeLock, lockHolderAlive } from "./sessionHome.mjs";
+import { readHomeLock, lockHolderAlive, NATIVE_E2E_HOME_PREFIX } from "./sessionHome.mjs";
 import { freezeArtifact } from "./frozenArtifacts.mjs";
 
 export const CHAT_PREVIEW_BUDGET_MS = 1_000;
@@ -16,6 +16,60 @@ const uuid = (value) => typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4
 
 function need(condition, code, message = code) {
   if (!condition) throw Object.assign(new Error(message), { code });
+}
+
+/** Both frozen products use this in-home compact layout and a strict 108-byte socket capacity. */
+export function chatPreviewSocketPath(home, pathApi = path) {
+  const socket = pathApi.join(home, "c", "12345678", "h", "app-server-control", "app-server-control.sock");
+  const bytes = Buffer.byteLength(socket);
+  need(bytes < 108, "chat_preview_socket_path_too_long");
+  return { socket, bytes };
+}
+
+/** Keep the normal resolver's safe prefix; sibling case suffixes avoid duplicating that long prefix. */
+export function chatPreviewHomePaths({ baseHome, runId }, pathApi = path) {
+  need(/^[a-f0-9]{16}$/.test(runId), "invalid_chat_preview_run_id");
+  need(pathApi.isAbsolute(baseHome) && pathApi.basename(baseHome) === `${NATIVE_E2E_HOME_PREFIX}${runId}`, "invalid_chat_preview_base_home");
+  const cases = [["desktop", "pending", "d-p"], ["remote", "pending", "r-p"],
+    ["desktop", "qualified", "d-q"], ["remote", "qualified", "r-q"]].map(([surface, mode, code]) => {
+    const home = `${baseHome}-${code}`;
+    return { surface, mode, code, home, ...chatPreviewSocketPath(home, pathApi) };
+  });
+  return { baseHome, runId, cases };
+}
+
+/** Refuse every existing entry, including links/files, before the maintained preparation can reset it. */
+export function assertFreshChatPreviewHome(home, exists = (target) => Boolean(fs.lstatSync(target, { throwIfNoEntry: false }))) {
+  need(!exists(home), "chat_preview_home_collision");
+}
+
+/** The supervisor's existing HOME scope may carry only the exact default for a supplied run, never a custom home. */
+export function assertChatPreviewHomeBinding(explicitHome, suppliedRunId, defaultHome) {
+  if (explicitHome === undefined) return;
+  need(/^[a-f0-9]{16}$/.test(suppliedRunId ?? "") && explicitHome === defaultHome, "chat_preview_nondefault_home_override");
+}
+
+/** Adopt only the live parent's matching claim on an otherwise empty, plain default base. Read-only. */
+export function assertPreclaimedChatPreviewBase(home, runId, io = { ...fs, readHomeLock, lockHolderAlive }) {
+  need(/^[a-f0-9]{16}$/.test(runId), "invalid_chat_preview_run_id");
+  const plain = (target, directory) => {
+    const stat = io.lstatSync(target);
+    need(!stat.isSymbolicLink() && (directory ? stat.isDirectory() : stat.isFile())
+      && io.realpathSync(target) === path.resolve(target), "chat_preview_invalid_parent_claim");
+    if (!directory) need(stat.size <= 4_096, "chat_preview_invalid_parent_claim");
+  };
+  plain(home, true);
+  const rootEntries = io.readdirSync(home);
+  need(rootEntries.length === 1 && rootEntries[0] === ".native-e2e-lock", "chat_preview_dirty_parent_base");
+  const lockPath = path.join(home, ".native-e2e-lock");
+  plain(lockPath, true);
+  const lockEntries = io.readdirSync(lockPath);
+  need(lockEntries.length === 1 && lockEntries[0] === "owner.json", "chat_preview_invalid_parent_claim");
+  plain(path.join(lockPath, "owner.json"), false);
+  const owner = io.readHomeLock(home);
+  need(owner?.runId === runId && Number.isSafeInteger(owner.pid) && owner.pid > 0
+    && io.lockHolderAlive(owner.pid), "chat_preview_invalid_parent_claim");
+  return owner;
 }
 
 /** Preserve the existing whole-suite execution allowance, with separate preparation time for each surface/mode home. */

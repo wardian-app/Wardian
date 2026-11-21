@@ -1118,8 +1118,28 @@ requires fresh trusted input and frames, with at most three attempts in the same
 absolute five-second probe window. No deadline or initial clock is reset.
 
 Before App startup, the runner checks a predeclared fixture-generation fingerprint
-and literal byte count for each surface/mode. UUID-length owned roots and identical
-workspace path encoding lengths prevent per-turn `cwd` size bias. Literal source
+and literal byte count for each surface/mode. Fresh fixed-width 16-hex run IDs use
+the ordinary default home resolver. Case homes are siblings with the fixed
+three-byte suffixes `d-p`, `r-p`, `d-q`, `r-q`, retaining each home's required
+`wardian-e2e-native-*` prefix and all ownership fences. Native agent/session IDs
+remain UUID36. A cohort parent supplies the same existing WARDIAN_E2E_RUN_ID after
+claiming the absent default base with acquireHomeLock before Node spawn. The child
+accepts that base only with a matching live readable lock on an otherwise empty
+plain root; sibling cases remain absent. The earlier literal no-HOME assumption
+was incompatible with the maintained supervisor's receipt scope. Its existing
+WARDIAN_E2E_NATIVE_HOME is accepted only with the supplied valid 16-hex run ID
+and a literal value exactly equal to defaultNativeE2EHome for that run, followed
+by the live lock-only/plain-base check before preparation. Foreign, missing-run,
+malformed, dirty, dead or mismatched explicit homes still fail. There is no
+preload, new environment namespace or supervisor-guard change. The
+parent retains its lease through the matching joined/active-zero Job receipt and
+then releases it with releaseHomeLock. Standalone absence of a supplied run ID
+keeps the existing fresh-base path. Pin one new owned short TEMP/TMP container for both sources; with
+a seven-byte ASCII Windows root, all four compact sockets are 103 bytes, below
+the strict 108-byte capacity. Reject a longer socket or any existing base/case
+home before preparation; never reset a collision or resample its run ID. This
+preflight creates no home or reservation. Equal workspace path encoding lengths
+prevent per-turn `cwd` size bias. Literal source
 hashes and identities remain unmodified. A mismatch fails before the click, with
 no post-run exclusion or source normalization. Preparation remains bounded to
 180 seconds per home. Independent process/home/profile cold and same-process warm
