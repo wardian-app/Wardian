@@ -231,7 +231,14 @@ pub(super) fn build(
         .iter()
         .filter_map(|event| request_root(event).map(str::to_owned))
         .collect();
-    let mut closed = build.head.turns.closed_roots(build.store, &scope, &roots)?;
+    // One snapshot can contain many unqualified turns. Reuse immutable seek
+    // nodes across their lookups instead of spending the read budget on repeats.
+    let mut seeks = SeekCache::default();
+    let mut closed =
+        build
+            .head
+            .turns
+            .closed_roots_reusing_nodes(build.store, &scope, &roots, &mut seeks)?;
     for (root, known) in &build.previous.roots {
         if let Some(order) = &known.closed_order {
             closed.entry(root.clone()).or_insert_with(|| order.clone());
@@ -422,11 +429,12 @@ pub(super) fn build(
                 }
             }
             if projected.is_none() {
-                if let Some(owners) = build.head.turns.preview_owners_with_previous(
+                if let Some(owners) = build.head.turns.preview_owners_reusing_nodes(
                     build.store,
                     &scope,
                     &group,
                     previous_owners,
+                    &mut seeks,
                 )? {
                     let active = build.running
                         && !terminal_seen
@@ -460,11 +468,12 @@ pub(super) fn build(
                             .as_str()
                             .is_some_and(|id| known.members.contains(id))
                 });
-                if let Some(owners) = build.head.turns.preview_owners_with_previous(
+                if let Some(owners) = build.head.turns.preview_owners_reusing_nodes(
                     build.store,
                     &scope,
                     &group,
                     previous_owners,
+                    &mut seeks,
                 )? {
                     let openings = build
                         .openings

@@ -206,7 +206,13 @@ impl Fixture {
             .collect();
         self.head
             .turns
-            .preview_owners_with_previous(&mut self.store, &scope(), &qualified, previous)
+            .preview_owners_reusing_nodes(
+                &mut self.store,
+                &scope(),
+                &qualified,
+                previous,
+                &mut SeekCache::default(),
+            )
             .unwrap()
             .expect("same-source certified members have owners")
             .remember(&scope(), ADMISSION, value)
@@ -535,6 +541,341 @@ fn stored_complete_commentary_target_survives_an_unresolved_native_terminal() {
         .iter()
         .any(|reference| reference.event_id == terminal.id));
     assert!(result.0.validate().is_ok());
+}
+
+#[test]
+fn eighty_native_rows_over_many_new_turns_fit_the_shared_projection_read_budget() {
+    use crate::providers::chat_transcript::{
+        normalize_chat_lines_with_state, TranscriptNormalizationState,
+    };
+    use crate::state::conversation_archive::chat_logical_index::{
+        Admission, Index as LogicalIndex,
+    };
+    use crate::state::conversation_archive::chat_read_store::{READ_BYTES, READ_OBJECTS};
+    use std::io::Write;
+    use wardian_core::models::chat_presentation::CHAT_PRESENTATION_MAX_ITEMS;
+
+    fn source_rows(
+        raw: Vec<serde_json::Value>,
+        state: &mut TranscriptNormalizationState,
+        file: &mut std::fs::File,
+        path: &str,
+        offset: &mut u64,
+        epoch: &str,
+    ) -> Vec<AgentChatEvent> {
+        let mut events = Vec::new();
+        for value in raw {
+            let line = value.to_string();
+            writeln!(file, "{line}").unwrap();
+            let start = *offset;
+            *offset += line.len() as u64 + 1;
+            for (ordinal, mut event) in normalize_chat_lines_with_state(
+                scope().agent_id,
+                "codex",
+                [line.clone()],
+                state,
+                true,
+                false,
+            )
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            {
+                event.id = format!(
+                    "source:{}:{epoch}:{start}:{}:{ordinal}",
+                    scope().agent_id,
+                    digest(line.as_bytes())
+                );
+                event.metadata["chat_source_ref"] = json!(event.id);
+                event.metadata["chat_source_start"] = json!(start);
+                event.metadata["chat_source_end"] = json!(*offset);
+                event.metadata["chat_source_epoch"] = json!(epoch);
+                event.metadata["provider_log"] = json!(true);
+                event.metadata["provider_session_id"] = json!("synthetic-session");
+                event.metadata["log_path"] = json!(path);
+                event.metadata["conversation_archive_id"] = json!(scope().conversation_id);
+                events.push(super::header(&event));
+            }
+        }
+        events
+    }
+
+    let mut fixture = Fixture::new();
+    let epoch = digest(b"synthetic-native-source-epoch");
+    fixture.head.source_epoch = Some(epoch.clone());
+    fixture.head.progress = "ready".into();
+    let path = fixture._temp.path().join("native-projection-budget.jsonl");
+    let mut file = std::fs::File::create(&path).unwrap();
+    let path = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let mut normalization = TranscriptNormalizationState::default();
+    let mut offset = 0;
+    assert!(source_rows(
+        vec![json!({"type":"session_meta","payload":{"id":"synthetic-session"}})],
+        &mut normalization,
+        &mut file,
+        &path,
+        &mut offset,
+        &epoch,
+    )
+    .is_empty());
+    let capture_scope = Scope {
+        source_epoch: Some(&epoch),
+        can_activate: true,
+        ..scope()
+    };
+    let mut canonical_rows = 0;
+    let mut captured_roots = BTreeSet::new();
+    let mut canonical_target = Vec::new();
+    for turn in 0..128 {
+        let root = format!("captured-root-{turn}");
+        let provider_turn = format!("captured-provider-{turn}");
+        let mut raw = vec![
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":provider_turn}}),
+            json!({"type":"turn_context","payload":{"turn_id":provider_turn}}),
+            json!({"type":"response_item","payload":{"type":"message","id":root,"role":"user","content":[{"type":"input_text","text":format!("Synthetic request {turn}")}],"internal_chat_message_metadata_passthrough":{"turn_id":provider_turn,"content_item_kinds":["user.text"]}}}),
+        ];
+        // Three narrative rows per turn plus fifteen extra rows match the
+        // canonical depth of the runtime failure without large body payloads.
+        for step in 0..if turn == 127 { 16 } else { 1 } {
+            raw.push(json!({"type":"event_msg","payload":{"type":"agent_message","turn_id":provider_turn,"phase":"commentary","message":format!("Synthetic progress {turn}/{step}")}}));
+        }
+        raw.extend([
+            json!({"type":"response_item","payload":{"type":"message","id":format!("captured-answer-{turn}"),"role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":format!("Synthetic answer {turn}")}],"internal_chat_message_metadata_passthrough":{"turn_id":provider_turn}}}),
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":provider_turn}}),
+        ]);
+        let events = source_rows(
+            raw,
+            &mut normalization,
+            &mut file,
+            &path,
+            &mut offset,
+            &epoch,
+        );
+        let terminal = events
+            .iter()
+            .find(|event| event.metadata["raw_type"] == "task_complete")
+            .unwrap();
+        assert_eq!(terminal.metadata["chat_turn_membership_complete"], true);
+        let mut captured: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == AgentChatEventKind::Message)
+            .cloned()
+            .collect();
+        let request = captured
+            .iter_mut()
+            .find(|event| event.role == Some(AgentChatRole::User))
+            .unwrap();
+        request.metadata["_wardian_turn_closure"] = json!({
+            "version":1,"source_key":capture_scope.source_key,"source_epoch":epoch,
+            "provider":"codex","adapter":"codex_bracket_v1","provider_turn_id":provider_turn,
+            "request_root_id":root,"source_ref":terminal.id,
+            "start":terminal.metadata["chat_source_start"],"end":terminal.metadata["chat_source_end"],
+            "sequence":terminal.sequence,"status":"succeeded","complete":true,"partial":false,
+        });
+        let mut writer = Store::writer(fixture._temp.path());
+        for event in &captured {
+            assert!(fixture
+                .head
+                .turns
+                .observe(
+                    &mut writer,
+                    &capture_scope,
+                    event,
+                    &presentation_order(event).unwrap(),
+                    None,
+                )
+                .unwrap()
+                .is_some());
+        }
+        canonical_rows += captured.len();
+        captured_roots.insert(root);
+        if turn == 0 {
+            canonical_target = captured;
+        }
+    }
+    assert_eq!(canonical_rows, 399);
+    fixture.head.row_count = canonical_rows;
+    fixture.head.recent_start = fixture.head.row_count - 80;
+    let mut closing = BTreeMap::new();
+    let captured: Vec<_> = captured_roots.iter().cloned().collect();
+    for roots in captured.chunks(CHAT_PRESENTATION_MAX_ITEMS) {
+        closing.extend(
+            fixture
+                .head
+                .turns
+                .closed_roots_reusing_nodes(
+                    &mut Store::new(fixture._temp.path()),
+                    &capture_scope,
+                    &roots.iter().cloned().collect(),
+                    &mut SeekCache::default(),
+                )
+                .unwrap(),
+        );
+    }
+    assert_eq!(closing.len(), 128);
+    assert_eq!(
+        closing.keys().cloned().collect::<BTreeSet<_>>(),
+        captured_roots
+    );
+    let canonical = fixture
+        .head
+        .turns
+        .continuation_page(&mut Store::new(fixture._temp.path()), &canonical_target)
+        .unwrap()
+        .unwrap();
+    assert_eq!(canonical.turns.len(), 1);
+    assert!(canonical.turns[0].membership_complete);
+    assert_eq!(canonical.turns[0].status, ChatTurnStatus::Completed);
+    assert!(canonical
+        .items
+        .iter()
+        .all(|item| item.provenance == ChatItemProvenance::Canonical));
+
+    let mut pending = Vec::new();
+    for turn in 0..20 {
+        let root = format!("pending-root-{turn}");
+        let provider_turn = format!("pending-provider-{turn}");
+        let answer = format!("Synthetic pending answer {turn}");
+        pending.extend(source_rows(
+            vec![
+                json!({"type":"event_msg","payload":{"type":"task_started","turn_id":provider_turn}}),
+                json!({"type":"turn_context","payload":{"turn_id":provider_turn}}),
+                json!({"type":"response_item","payload":{"type":"message","id":root,"role":"user","content":[{"type":"input_text","text":format!("Synthetic pending request {turn}")}],"internal_chat_message_metadata_passthrough":{"turn_id":provider_turn,"content_item_kinds":["user.text"]}}}),
+                json!({"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":answer,"internal_chat_message_metadata_passthrough":{"turn_id":provider_turn}}}),
+                json!({"type":"response_item","payload":{"type":"message","id":format!("pending-answer-{turn}"),"role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":answer}],"internal_chat_message_metadata_passthrough":{"turn_id":provider_turn}}}),
+                json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":provider_turn}}),
+            ],
+            &mut normalization,
+            &mut file,
+            &path,
+            &mut offset,
+            &epoch,
+        ));
+    }
+    file.flush().unwrap();
+    let mut context = crate::state::conversation_archive::ConversationArchiveContext::for_agent_id(
+        scope().agent_id,
+        "codex",
+    );
+    context.provider_source_key = scope().source_key.map(str::to_owned);
+    context.provider_session_ids = vec!["synthetic-session".into()];
+    let admission = Admission {
+        context: &context,
+        conversation: Some(scope().conversation_id),
+        epoch: &epoch,
+        admission: ADMISSION,
+        path: &path,
+        watermark: offset,
+        sequence_trusted: false,
+    };
+    let mut logical = LogicalIndex::default();
+    let mut relations = BTreeMap::new();
+    let mut rows = Vec::new();
+    let mut writer = Store::writer(fixture._temp.path());
+    for event in pending {
+        let row = writer.put(&event).unwrap();
+        for (changed, relation) in logical
+            .observe(&mut writer, &admission, &event, &row)
+            .unwrap()
+        {
+            relations.insert(changed, relation);
+        }
+        rows.push((row, event));
+    }
+    let mut events = Vec::new();
+    for (row, mut event) in rows {
+        if let Some(Some(relation)) = relations.get(&row) {
+            if relation.members.first() != Some(&event.id) {
+                continue;
+            }
+            event.metadata["chat_display_physical_id"] = json!(event.id);
+            event.id.clone_from(&relation.id);
+            event.metadata["chat_display_member_ids"] = json!(relation.members);
+        }
+        event.metadata["chat_provisional"] = json!(true);
+        events.push(event);
+    }
+    assert_eq!(
+        events.len(),
+        80,
+        "twenty native start/prompt/answer/closure groups"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.metadata["chat_display_member_ids"].is_array())
+            .count(),
+        20
+    );
+    let roots_by_provider: BTreeMap<_, _> = events
+        .iter()
+        .filter(|event| event.role == Some(AgentChatRole::User))
+        .map(|event| {
+            (
+                native_turn(event).unwrap().to_owned(),
+                request_root(event).unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(roots_by_provider.len(), 20);
+    for event in &mut events {
+        // Resolve pre-prompt lifecycle ownership only by the exact native ID,
+        // as the producer does before selecting any per-turn representation.
+        if event.metadata["raw_type"] == "task_started" && request_root(event).is_none() {
+            event.metadata["request_root_id"] =
+                json!(roots_by_provider[native_turn(event).unwrap()]);
+        }
+        assert!(
+            crate::state::conversation_archive::chat_source_index::valid_source_id(
+                scope().agent_id,
+                event.metadata["chat_source_ref"].as_str().unwrap(),
+            )
+        );
+        assert_ne!(event.metadata["chat_turn_membership_partial"], true);
+    }
+    let original = serde_json::to_value(&events).unwrap();
+    let original_head = serde_json::to_value(&fixture.head).unwrap();
+    let mut reader = Store::new(fixture._temp.path());
+    let projected = build(
+        Build {
+            store: &mut reader,
+            head: &fixture.head,
+            head_ref: "synthetic-head",
+            admission: ADMISSION,
+            running: false,
+            openings: &BTreeSet::new(),
+            previous: &State::default(),
+            owners: None,
+            canonical: None,
+            bound: false,
+        },
+        &mut events,
+    )
+    .unwrap_or_else(|error| {
+        panic!("honest native fallback must fit the existing read budget: {error}; objects={} bytes={}", reader.objects, reader.bytes)
+    });
+    eprintln!(
+        "native projection read budget: objects={} bytes={}",
+        reader.objects, reader.bytes
+    );
+    assert!(
+        projected.is_none(),
+        "uncaptured mirror components remain legacy"
+    );
+    assert_eq!(serde_json::to_value(&events).unwrap(), original);
+    assert!(reader.objects <= READ_OBJECTS);
+    assert!(reader.bytes <= READ_BYTES);
+    assert_eq!(serde_json::to_value(&fixture.head).unwrap(), original_head);
+    let after = fixture
+        .head
+        .turns
+        .continuation_page(&mut Store::new(fixture._temp.path()), &canonical_target)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after, canonical,
+        "legacy fallback cannot rewrite closed canonical turns"
+    );
 }
 
 #[test]

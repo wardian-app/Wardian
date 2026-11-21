@@ -1040,7 +1040,7 @@ fn native_source_index_generation_preserves_canonical_preview_binding_and_proven
         .expect("owned appended prompt establishes its request root");
     let closed = canonical
         .turns
-        .closed_roots(
+        .closed_roots_reusing_nodes(
             &mut canonical_reader,
             &super::super::chat_turn_index::Scope {
                 agent_id: &canonical.agent_id,
@@ -1050,6 +1050,7 @@ fn native_source_index_generation_preserves_canonical_preview_binding_and_proven
                 can_activate: false,
             },
             &BTreeSet::from([root.to_owned()]),
+            &mut SeekCache::default(),
         )
         .unwrap();
     assert!(
