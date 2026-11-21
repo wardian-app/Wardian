@@ -2526,6 +2526,8 @@ describe("RemoteMobileApp", () => {
 
   it("refreshes remote chat on repeated active status frames", async () => {
     let chatCalls = 0;
+    let completeRefreshBody: (() => void) | undefined;
+    const chatReads = vi.spyOn(remoteClient, "loadAgentChatPage");
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
         return Promise.resolve(
@@ -2561,35 +2563,42 @@ describe("RemoteMobileApp", () => {
       }
       if (new URL(url, "http://wardian.test").pathname === "/remote/api/agents/agent-1/chat") {
         chatCalls += 1;
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              ...chatPageFields,
-              events: [
-                {
-                  id: `agent-1:${chatCalls}`,
-                  session_id: "agent-1",
-                  provider: "codex",
-                  kind: "message",
-                  role: "assistant",
-                  text: chatCalls === 1 ? "Initial active message." : "New active message.",
-                  title: null,
-                  status: null,
-                  turn_id: "turn-1",
-                  source: "provider_log",
-                  command: null,
-                  exit_code: null,
-                  path: null,
-                  language: null,
-                  created_at: "2026-05-21T08:00:00.000Z",
-                  sequence: chatCalls,
-                  metadata: {},
-                },
-              ],
-            }),
-            { status: 200 },
-          ),
-        );
+        const body = JSON.stringify({
+          ...chatPageFields,
+          events: [
+            {
+              id: `agent-1:${chatCalls}`,
+              session_id: "agent-1",
+              provider: "codex",
+              kind: "message",
+              role: "assistant",
+              text: chatCalls === 1 ? "Initial active message." : "New active message.",
+              title: null,
+              status: null,
+              turn_id: "turn-1",
+              source: "provider_log",
+              command: null,
+              exit_code: null,
+              path: null,
+              language: null,
+              created_at: "2026-05-21T08:00:00.000Z",
+              sequence: chatCalls,
+              metadata: {},
+            },
+          ],
+        });
+        const responseBody = chatCalls === 2
+          ? new ReadableStream<Uint8Array>({
+            start(controller) {
+              completeRefreshBody = () => {
+                completeRefreshBody = undefined;
+                controller.enqueue(new TextEncoder().encode(body));
+                controller.close();
+              };
+            },
+          })
+          : body;
+        return Promise.resolve(new Response(responseBody, { status: 200 }));
       }
       if (url === "/remote/api/automations") {
         return Promise.resolve(new Response(JSON.stringify({ automations: [] }), { status: 200 }));
@@ -2604,41 +2613,72 @@ describe("RemoteMobileApp", () => {
       return Promise.resolve(new Response("{}", { status: 404 }));
     });
 
-    render(<RemoteMobileApp />);
-
-    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
-    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
-    expect(await screen.findByText("Initial active message.")).toBeVisible();
-    expect(chatCalls).toBe(1);
-
-    const statusSocket = await waitFor(() => {
-      const socket = MockWebSocket.instances.find((candidate) => candidate.url.includes("/remote/api/status-stream"));
-      expect(socket).toBeDefined();
-      return socket!;
-    });
-    act(() => {
-      statusSocket.emit("open");
-      statusSocket.emit("message", {
-        data: JSON.stringify({
-          type: "agent_status",
-          agents: [
-            {
-              session_id: "agent-1",
-              session_name: "Coder",
-              agent_class: "Coder",
-              provider: "codex",
-              workspace: "<absolute-workspace-path>",
-              status: "Processing...",
-              latest_text: null,
-            },
-          ],
-        }),
+    const view = render(<RemoteMobileApp />);
+    try {
+      await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+      await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+      expect(await screen.findByText("Initial active message.")).toBeVisible();
+      expect(chatCalls).toBe(1);
+      const statusSocket = await waitFor(() => {
+        const socket = MockWebSocket.instances.find((candidate) => candidate.url.includes("/remote/api/status-stream"));
+        expect(socket).toBeDefined();
+        return socket!;
       });
-    });
 
-    await waitFor(() => expect(chatCalls).toBeGreaterThanOrEqual(2), { timeout: 10_000 });
-    expect(await screen.findByText("New active message.", {}, { timeout: 10_000 })).toBeVisible();
-    expect(chatCalls).toBeGreaterThanOrEqual(2);
+      // Navigation may load views asynchronously; only the status-refresh phase needs a clock.
+      vi.useFakeTimers({ shouldClearNativeTimers: true });
+      act(() => {
+        statusSocket.emit("open");
+        statusSocket.emit("message", {
+          data: JSON.stringify({
+            type: "agent_status",
+            agents: [
+              {
+                session_id: "agent-1",
+                session_name: "Coder",
+                agent_class: "Coder",
+                provider: "codex",
+                workspace: "<absolute-workspace-path>",
+                status: "Processing...",
+                latest_text: null,
+              },
+            ],
+          }),
+        });
+      });
+
+      // The remaining hint throttle is at most 750ms, regardless of navigation duration.
+      expect(chatCalls).toBe(1);
+      expect(screen.queryByText("New active message.")).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+      expect(chatCalls).toBe(2);
+      expect(chatReads).toHaveBeenCalledTimes(2);
+      expect(chatReads.mock.calls[1]?.slice(0, 3)).toEqual(["agent-1", undefined, "fixture-revision"]);
+      // The hint bounds admission, not HTTP body completion. Keep the current
+      // scoped window visible until this exact physical read settles.
+      expect(screen.getByText("Initial active message.")).toBeVisible();
+      expect(screen.queryByText("New active message.")).toBeNull();
+      expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual(["agent-1:1"]);
+      const refreshRead = chatReads.mock.results[1];
+      if (refreshRead?.type !== "return") throw new Error("Expected the admitted refresh read promise");
+      expect(completeRefreshBody).toBeDefined();
+      await act(async () => {
+        completeRefreshBody?.();
+        await refreshRead.value;
+      });
+      expect(screen.getByText("New active message.")).toBeVisible();
+      expect(chatCalls).toBe(2);
+      expect(chatReads).toHaveBeenCalledTimes(2);
+      expect(useRemoteStore.getState().chatPage).toMatchObject({
+        session_id: "agent-1", conversation_id: "fixture-conversation", generation: "fixture-generation",
+      });
+    } finally {
+      await act(async () => {
+        completeRefreshBody?.();
+        view.unmount();
+      });
+      vi.useRealTimers();
+    }
   });
 
   it("maps touch drag gestures in the terminal pane to xterm scrollback", async () => {
