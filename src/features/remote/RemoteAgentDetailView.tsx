@@ -1069,7 +1069,13 @@ function ChatPane({
   useChatHandoffAnchor(scrollRef, presentationScope, JSON.stringify(rows.map((row) => [row.kind, chatTranscriptRowKey(row)])));
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
   return (
-    <section className="chat-transcript-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`} ref={scrollRef} onScroll={() => {
+    <section className="chat-transcript-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}
+      data-chat-page-scope={scopeReady && presentationPage?.session_id === agent.session_id
+        ? JSON.stringify({ session: presentationPage.session_id,
+          conversation: presentationPage.conversation_id, generation: presentationPage.generation,
+          epoch: presentationPage.source_epoch, revision: presentationPage.revision,
+          admission: presentationPage.recent_admission ?? null }) : undefined}
+      ref={scrollRef} onScroll={() => {
       const scroll = scrollRef.current;
       if (!scroll || prepend.current) return;
       if (scroll.scrollTop <= 160 && hasOlder && !loadingOlder) { void loadOlder(); return; }

@@ -19,7 +19,7 @@ import {
 } from "../lib/chatPreviewTiming.mjs";
 
 const fixture = { sessionId: "owned-agent", provider: "codex", body: "A uniquely completed synthetic answer.", name: "Synthetic Agent",
-  synthetic: true, targetTurn: "synthetic-completed-unit", targetMessageId: "answer-128" };
+  synthetic: true, sourceKey: "native-source", targetTurn: "synthetic-completed-unit", targetMessageId: "answer-128" };
 
 test("setup watchdog adds one 180-second preparation allowance per surface/mode without changing the UI budget", () => {
   assert.equal(CHAT_PREVIEW_SEED_TIMEOUT_MS, 180_000); assert.equal(CHAT_PREVIEW_BUDGET_MS, 1_000);
@@ -38,6 +38,21 @@ function page({ preview = false, provider = "codex", complete = true, body = fix
       items: [{ turn_key: "committed-turn", kind: "answer", provenance: "canonical", evidence: { kind: "source" }, event_refs: ["canonical-id"] }] } } };
 }
 
+function presentedPreview() {
+  const dto = page({ preview: true });
+  Object.assign(dto, { conversation_id: "conversation", generation: "generation", source_epoch: "source-epoch" });
+  dto.events[0].metadata = { chat_provisional: true, chat_source_ref: "source-record", chat_source_epoch: "source-epoch" };
+  dto.presentation = { version: 1, payload: {
+    preview_bridge: { canonical_head: "a".repeat(64), admission_id: dto.recent_admission },
+    turns: [{ turn_key: "presented-turn", membership_complete: true, status: "completed" }],
+    items: [{ item_key: "presented-answer", turn_key: "presented-turn", kind: "answer", provenance: "provisional",
+      admission_id: dto.recent_admission,
+      evidence: { kind: "source", source_key: "native-source", source_epoch: "source-epoch", record_key: "source-record" },
+      event_refs: [dto.events[0].id] }],
+  } };
+  return dto;
+}
+
 function browser({ surface = "remote", disclosure = false, modeNeedsToggle = false, body = fixture.body, captureDetails = false } = {}) {
   const observedFixture = { ...fixture, body };
   let time = 10; let ordinal = 0;
@@ -45,7 +60,7 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
   const rect = { top: 0, left: 0, bottom: 400, right: 400, width: 400, height: 400 };
   const element = (attributes = {}) => ({ isConnected: true, hidden: false, inert: false, parentElement: null,
     attributes, getAttribute(key) { return this.attributes[key] ?? null; }, getBoundingClientRect: () => rect });
-  const host = element({ "data-agent-grid-card-id": fixture.sessionId }); const scroll = element(); const row = element(); const content = element(); const committed = element();
+  const host = element({ "data-agent-grid-card-id": fixture.sessionId }); const scroll = element(); const row = element(); const content = element(); const committed = element(); const anchor = element();
   const panel = element({ "data-surface-id": "overview" }); const workbench = element();
   const tab = element({ id: "tab", "aria-controls": "tabpanel", "data-surface-id": "overview" });
   const tabpanel = element({ "aria-labelledby": "tab" });
@@ -62,8 +77,10 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
   content.textContent = body;
   Object.defineProperty(content, "outerHTML", { get: () => `<div class="chat-message-content">${content.textContent}</div>` });
   content.contains = (node) => node === content;
-  let canonical = false;
-  content.closest = (selector) => selector === "[data-chat-row-key]" ? row : canonical ? committed : null;
+  let shared = false;
+  content.closest = (selector) => selector === "[data-chat-row-key]" ? row
+    : selector === "[data-chat-anchor-key]" ? shared ? anchor : null
+      : selector === '[data-testid="chat-committed-turn"]' && shared ? committed : null;
   committed.attributes["data-turn-key"] = "committed-turn";
   const document = { visibilityState: "visible", activeElement: null, querySelectorAll: () => [host], getElementById: () => tabpanel,
     createRange: () => ({ selectNodeContents() {}, getClientRects: () => [rect] }),
@@ -80,14 +97,17 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
     cancelAnimationFrame: (id) => frames.delete(id), setTimeout, clearTimeout, TextEncoder });
   vm.runInContext(chatPreviewObserverScript({ ...observedFixture, surface, probe: "probe", captureDetails }), context);
   const api = window.__chatPreviewTiming;
-  const adopt = (dto, marker = true) => {
+  const adopt = (dto, marker = true, rendered = dto) => {
     const receipt = chatTimingReceipt(dto, observedFixture);
-    canonical = !dto.recent_admission;
+    // Both provisional and canonical presentations use the real shared renderer.
+    shared = Boolean(rendered.presentation?.payload?.turns.length);
     scroll.attributes["data-chat-page-scope"] = marker ? JSON.stringify(receipt.scope) : undefined;
-    row.attributes["data-chat-row-key"] = canonical ? "committed-turn" : "preview-id";
+    row.attributes["data-chat-row-key"] = shared ? rendered.presentation.payload.turns[0].turn_key : "preview-id";
+    committed.attributes["data-turn-key"] = row.attributes["data-chat-row-key"];
+    anchor.attributes["data-chat-anchor-key"] = rendered.events[0].metadata.chat_display_key ?? rendered.events[0].id;
     api.receive(receipt, captureDetails ? chatTimingCandidateDetails(dto, observedFixture) : null);
   };
-  return { api, adopt, input, content, document, listeners, tab, scroll, workButton,
+  return { api, adopt, input, content, document, listeners, tab, scroll, workButton, row, committed, anchor,
     async deliver(dto) { requests++; await callback({ sessionId: fixture.sessionId }, Promise.resolve(dto)); },
     async reject(error) { requests++; await callback({ sessionId: fixture.sessionId }, Promise.reject(error)); },
     click(trusted = true) {
@@ -143,6 +163,199 @@ test("native response qualification excludes Mock, preview and incomplete member
   assert.equal(chatTimingReceipt(page({ provider: "mock" }), mock).targets[0].qualifiedTurn, null);
   assert.throws(() => chatTimingReceipt({ ...page(), session_id: "foreign" }, fixture), /foreign_or_unbounded_page/);
   assert.throws(() => chatTimingReceipt({ ...page(), generation: null }, fixture), /invalid_page_scope/);
+});
+
+test("an admitted provisional source answer in the shared renderer is readable and usable without canonical qualification", () => {
+  const b = browser(); const dto = presentedPreview();
+  b.api.arm("bound-preview"); b.click(); b.api.noteRequest(); b.adopt(dto);
+  b.advance(2); assert.equal(b.api.snapshot().phase.readableAt, null);
+  b.advance(); assert.ok(b.api.snapshot().phase.readableAt);
+  assert.ok(b.api.snapshot().phase.previewAt); assert.equal(b.api.snapshot().phase.qualifiedAt, null);
+  assert.equal(chatTimingReceipt(dto, fixture).targets[0].qualifiedTurn, null);
+  const plan = b.api.prepareInteraction(); assert.equal(plan.kind, "input");
+  b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(3);
+  const state = b.api.snapshot();
+  const result = assertChatTimingSample(state, { requireQualified: false, requireTransition: false });
+  assert.equal(result.renderer_at_readable, "PROVISIONAL_SHARED_TURN_DOM");
+  assert.equal(state.phase.readable.presented_answer.provenance, "provisional");
+  assert.equal(state.phase.readable.canonical_qualified, false);
+  assert.equal(state.phase.qualifiedAt, null); b.api.dispose();
+});
+
+test("the presented answer receipt binds literal producer refs separately from canonical qualification", () => {
+  const dto = presentedPreview(); dto.events[0].metadata.chat_display_key = "explicit-display-key";
+  assert.deepEqual(chatTimingReceipt(dto, fixture).targets[0].presentedAnswer, {
+    turnKey: "presented-turn", itemKey: "presented-answer", eventRef: "preview-id", displayKey: "explicit-display-key",
+    canonicalHead: "a".repeat(64),
+    provenance: "provisional", evidence: { kind: "source", source_key: "native-source", source_epoch: "source-epoch", record_key: "source-record" },
+  });
+  assert.equal(chatTimingReceipt(dto, fixture).targets[0].qualifiedTurn, null);
+  assert.equal(chatTimingReceipt(page(), fixture).targets[0].qualifiedTurn, "committed-turn");
+});
+
+test("presented binding rejects unsupported, optimistic, foreign-ref and wrong source evidence", () => {
+  const invalid = {
+    provider: (p) => { p.events[0].provider = "mock"; },
+    optimistic: (p) => { p.events[0].metadata.optimistic = true; },
+    nonprovisional: (p) => { p.events[0].metadata.chat_provisional = false; },
+    missingAdmission: (p) => { p.recent_admission = null; },
+    missingConversation: (p) => { p.conversation_id = null; },
+    missingGeneration: (p) => { p.generation = null; },
+    missingEpoch: (p) => { p.source_epoch = null; },
+    foreignRef: (p) => { p.presentation.payload.items[0].event_refs = ["another-event"]; },
+    wrongKind: (p) => { p.presentation.payload.items[0].kind = "prompt"; },
+    wrongProvenance: (p) => { p.presentation.payload.items[0].provenance = "canonical"; },
+    wrongEvidence: (p) => { p.presentation.payload.items[0].evidence.kind = "inferred"; },
+    wrongSourceEpoch: (p) => { p.presentation.payload.items[0].evidence.source_epoch = "other-epoch"; },
+    wrongEventEpoch: (p) => { p.events[0].metadata.chat_source_epoch = "other-epoch"; },
+    wrongRecord: (p) => { p.presentation.payload.items[0].evidence.record_key = "other-record"; },
+    missingSource: (p) => { p.presentation.payload.items[0].evidence.source_key = ""; },
+    foreignSource: (p) => { p.presentation.payload.items[0].evidence.source_key = "another-native-source"; },
+    missingNativeRef: (p) => { delete p.events[0].metadata.chat_source_ref; },
+    missingTurn: (p) => { p.presentation.payload.turns = []; },
+  };
+  for (const [name, change] of Object.entries(invalid)) {
+    const dto = presentedPreview(); change(dto);
+    const b = browser(); b.api.arm(name); b.click(); b.api.noteRequest(); b.adopt(dto, true, presentedPreview()); b.advance(5);
+    assert.equal(b.api.snapshot().phase.readableAt, null, name);
+    assert.equal(b.api.snapshot().phase.qualifiedAt, null, name); b.api.dispose();
+  }
+});
+
+test("presented admission requires the matching producer bridge and provisional item admission", () => {
+  const invalid = {
+    missingBridge: (p) => { delete p.presentation.payload.preview_bridge; },
+    missingBridgeAdmission: (p) => { delete p.presentation.payload.preview_bridge.admission_id; },
+    wrongBridgeAdmission: (p) => { p.presentation.payload.preview_bridge.admission_id = "foreign-admission"; },
+    missingItemAdmission: (p) => { delete p.presentation.payload.items[0].admission_id; },
+    wrongItemAdmission: (p) => { p.presentation.payload.items[0].admission_id = "foreign-admission"; },
+    missingHead: (p) => { delete p.presentation.payload.preview_bridge.canonical_head; },
+    invalidHead: (p) => { p.presentation.payload.preview_bridge.canonical_head = "not-a-head-reference"; },
+  };
+  for (const [name, change] of Object.entries(invalid)) {
+    const dto = presentedPreview(); change(dto);
+    assert.equal(chatTimingReceipt(dto, fixture).targets[0].presentedAnswer, null, name);
+    const b = browser(); b.api.arm(name); b.click(); b.api.noteRequest(); b.adopt(dto, true, presentedPreview()); b.advance(5);
+    assert.equal(b.api.snapshot().phase.readableAt, null, name);
+    assert.equal(b.api.snapshot().phase.previewAt, null, name);
+    assert.equal(b.api.snapshot().phase.qualifiedAt, null, name); b.api.dispose();
+  }
+});
+
+test("presented binding rejects ambiguous items, turns, refs, targets and display keys", () => {
+  const invalid = {
+    duplicateItem: (p) => { p.presentation.payload.items.push(structuredClone(p.presentation.payload.items[0])); },
+    repeatedRef: (p) => { p.presentation.payload.items[0].event_refs.push(p.events[0].id); },
+    extraRef: (p) => { p.presentation.payload.items[0].event_refs.push("another-event"); },
+    otherItemOwner: (p) => { p.presentation.payload.items.push({ ...p.presentation.payload.items[0], item_key: "other-item", kind: "prompt" }); },
+    repeatedItemKey: (p) => { p.presentation.payload.items.push({ ...p.presentation.payload.items[0], event_refs: ["other-event"] }); },
+    duplicateTurn: (p) => { p.presentation.payload.turns.push(structuredClone(p.presentation.payload.turns[0])); },
+    duplicateTarget: (p) => { p.events.push({ ...p.events[0], id: "other-target" }); },
+    duplicateDisplayKey: (p) => { p.events.push({ ...p.events[0], text: "different body" }); },
+  };
+  for (const [name, change] of Object.entries(invalid)) {
+    const dto = presentedPreview(); change(dto);
+    const b = browser(); b.api.arm(name); b.click(); b.api.noteRequest(); b.adopt(dto); b.advance(5);
+    assert.equal(b.api.snapshot().phase.readableAt, null, name); b.api.dispose();
+  }
+});
+
+test("a shared preview requires its literal DOM anchor and turn, never equal text or legacy identity alone", () => {
+  const invalid = {
+    wrongAnchor: (b) => { b.anchor.attributes["data-chat-anchor-key"] = "wrong-event"; },
+    missingAnchor: (b) => { delete b.anchor.attributes["data-chat-anchor-key"]; },
+    wrongRow: (b) => { b.row.attributes["data-chat-row-key"] = "wrong-turn"; },
+    wrongTurn: (b) => { b.committed.attributes["data-turn-key"] = "wrong-turn"; },
+    forgedLegacyIdentity: (b) => { b.row.attributes["data-chat-row-identity"] = JSON.stringify({ id: "preview-id" }); b.anchor.attributes["data-chat-anchor-key"] = "wrong-event"; },
+    displayKeyIsNotEventId: (b) => { b.anchor.attributes["data-chat-anchor-key"] = "preview-id"; },
+  };
+  for (const [name, change] of Object.entries(invalid)) {
+    const dto = presentedPreview(); dto.events[0].metadata.chat_display_key = "explicit-display-key";
+    const b = browser(); b.api.arm(name); b.click(); b.api.noteRequest(); b.adopt(dto); change(b); b.advance(5);
+    assert.equal(b.api.snapshot().phase.readableAt, null, name); b.api.dispose();
+  }
+});
+
+test("presented recognition fails closed for missing or unequal session C G E A and revision markers", () => {
+  for (const field of [null, "session", "conversation", "generation", "epoch", "admission", "revision"]) {
+    for (const missing of [false, true]) {
+      const b = browser(); b.api.arm(`${field}-${missing}`); b.click(); b.api.noteRequest(); b.adopt(presentedPreview());
+      const scope = JSON.parse(b.scroll.attributes["data-chat-page-scope"]);
+      if (field === null) delete b.scroll.attributes["data-chat-page-scope"];
+      else { if (missing) delete scope[field]; else scope[field] = "different"; b.scroll.attributes["data-chat-page-scope"] = JSON.stringify(scope); }
+      b.advance(5); assert.equal(b.api.snapshot().phase.readableAt, null, `${field}-${missing}`); b.api.dispose();
+    }
+  }
+});
+
+test("a later same-scope invalid binding cannot reuse an older valid presented receipt", () => {
+  const b = browser(); const dto = presentedPreview(); b.api.arm("replaced-proof"); b.click(); b.api.noteRequest(); b.adopt(dto);
+  b.advance(2); const invalid = structuredClone(dto); invalid.presentation.payload.items[0].evidence.record_key = "wrong-record";
+  b.adopt(invalid); b.advance(5);
+  assert.equal(b.api.snapshot().phase.readableAt, null); assert.equal(b.api.snapshot().phase.previewAt, null); b.api.dispose();
+});
+
+test("a revision replacement between frames resets the presented proof and stamps only the new exact scope", () => {
+  const b = browser(); const dto = presentedPreview(); b.api.arm("revision"); b.click(); b.api.noteRequest(); b.adopt(dto); b.advance(2);
+  dto.revision = "replacement-revision"; b.adopt(dto); b.advance();
+  assert.equal(b.api.snapshot().phase.readableAt, null); b.advance(3);
+  assert.equal(b.api.snapshot().phase.readable.scope.revision, "replacement-revision");
+  assert.equal(b.api.snapshot().phase.qualifiedAt, null); b.api.dispose();
+});
+
+test("a producer bridge head replacement between frames resets the presented binding", () => {
+  const b = browser(); const dto = presentedPreview(); b.api.arm("bridge-head"); b.click(); b.api.noteRequest(); b.adopt(dto); b.advance(2);
+  dto.presentation.payload.preview_bridge.canonical_head = "b".repeat(64); b.adopt(dto); b.advance();
+  assert.equal(b.api.snapshot().phase.readableAt, null); b.advance(3);
+  assert.equal(b.api.snapshot().phase.readable.presented_answer.canonicalHead, "b".repeat(64));
+  assert.equal(b.api.snapshot().phase.qualifiedAt, null); b.api.dispose();
+});
+
+test("an out-of-revision marker cannot borrow the previous presented proof", () => {
+  const b = browser(); b.api.arm("stale"); b.click(); b.api.noteRequest(); b.adopt(presentedPreview()); b.advance(2);
+  const scope = JSON.parse(b.scroll.attributes["data-chat-page-scope"]); scope.revision = "unobserved-revision";
+  b.scroll.attributes["data-chat-page-scope"] = JSON.stringify(scope); b.advance(5);
+  assert.equal(b.api.snapshot().phase.readableAt, null); assert.equal(b.api.snapshot().phase.previewAt, null); b.api.dispose();
+});
+
+test("scope and anchor replacements between frames cannot complete the presented witness", () => {
+  for (const field of ["session", "conversation", "generation", "epoch", "admission", "anchor", "turn"]) {
+    const b = browser(); b.api.arm(field); b.click(); b.api.noteRequest(); b.adopt(presentedPreview()); b.advance(2);
+    if (field === "anchor") b.anchor.attributes["data-chat-anchor-key"] = "different-anchor";
+    else if (field === "turn") b.committed.attributes["data-turn-key"] = "different-turn";
+    else {
+      const scope = JSON.parse(b.scroll.attributes["data-chat-page-scope"]); scope[field] = "different";
+      b.scroll.attributes["data-chat-page-scope"] = JSON.stringify(scope);
+    }
+    b.advance(5); assert.equal(b.api.snapshot().phase.readableAt, null, field);
+    assert.equal(b.api.snapshot().phase.previewAt, null, field); b.api.dispose();
+  }
+});
+
+test("a presented proof replaced after readable cannot complete the original trusted interaction", () => {
+  const b = browser(); const dto = presentedPreview(); b.api.arm("stale-interaction"); b.click(); b.api.noteRequest(); b.adopt(dto); b.advance(3);
+  b.api.prepareInteraction(); dto.revision = "replacement-revision"; b.adopt(dto);
+  b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(5);
+  assert.equal(b.api.snapshot().phase.usableAt, null); b.api.dispose();
+});
+
+test("admitted provisional shared rendering supports trusted wheel and a later separate canonical qualification", () => {
+  const b = browser(); b.input.disabled = true; b.api.arm("shared-to-canonical"); b.click(); b.api.noteRequest(); b.adopt(presentedPreview()); b.advance(3);
+  assert.equal(b.api.prepareInteraction().kind, "wheel"); b.wheelEvent(); b.advance(3);
+  assert.equal(b.api.snapshot().phase.usableAt, null);
+  b.scroll.scrollTop += 8; b.advance(3); assert.ok(b.api.snapshot().phase.usableAt);
+  assert.equal(b.api.snapshot().phase.qualifiedAt, null); b.adopt(page()); b.advance(3);
+  const result = assertChatTimingSample(b.api.snapshot()); assert.equal(result.transition, "OBSERVED");
+  assert.equal(result.renderer_at_readable, "PROVISIONAL_SHARED_TURN_DOM"); b.api.dispose();
+});
+
+test("desktop provisional shared diagnostics retain literal anchor and presented binding without claiming canonical", () => {
+  const b = browser({ surface: "desktop", captureDetails: true }); b.api.arm("desktop-bound"); b.click(); b.api.noteRequest(); b.adopt(presentedPreview()); b.advance(3);
+  const state = b.api.snapshot(), diagnostic = state.candidate_diagnostic;
+  assert.ok(state.phase.readableAt); assert.equal(state.phase.readable.admitted, true);
+  assert.equal(diagnostic.dom.bodies[0].anchor_key, "preview-id");
+  assert.equal(diagnostic.dom.candidate_presented_answer.provenance, "provisional");
+  assert.equal(diagnostic.dom.candidate_qualified, false); b.api.dispose();
 });
 
 test("bounded diagnostics retain the full explicit typed-final candidate and its producer evidence without unrelated content", () => {

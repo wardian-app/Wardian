@@ -240,7 +240,7 @@ export function seedNativePreviewSource({ harness, fixture, executable, mode = "
     receipt_sha256: sha256(fs.readFileSync(receiptFile)) };
 }
 
-/** Reduce a real response without retaining transcript text or assuming preview/canonical IDs are equal. */
+/** Reduce a real response; provisional source presentation never grants canonical qualification. */
 export function chatTimingReceipt(page, fixture) {
   if (!(page?.session_id === fixture.sessionId && Array.isArray(page.events) && page.events.length <= 640)) {
     throw new Error("foreign_or_unbounded_page");
@@ -268,8 +268,32 @@ export function chatTimingReceipt(page, fixture) {
         candidate.membership_complete === true && candidate.status === "completed"
         && items.some((item) => item.turn_key === candidate.turn_key && item.kind === "answer"
           && item.provenance === "canonical" && item.evidence?.kind === "source" && item.event_refs?.includes(event.id)));
+      // Presentation is separate from canonical qualification. Admit only one
+      // literal source-backed answer binding; the DOM must prove its own scope.
+      const key = event.metadata?.chat_display_key ?? event.id;
+      const presented = ["codex", "claude"].includes(event.provider) && event.metadata?.chat_provisional === true
+        && event.metadata?.optimistic !== true && targets.length === 1
+        && id(page.recent_admission) && id(page.conversation_id) && id(page.generation) && id(page.source_epoch)
+        && value?.preview_bridge?.admission_id === page.recent_admission
+        && typeof value.preview_bridge.canonical_head === "string" && /^[0-9a-f]{64}$/i.test(value.preview_bridge.canonical_head)
+        && id(event.id) && id(key) && id(event.metadata?.chat_source_ref)
+        && event.metadata?.chat_source_epoch === page.source_epoch
+        && page.events.filter((row) => (row.metadata?.chat_display_key ?? row.id) === key).length === 1
+        && items.filter((item) => Array.isArray(item.event_refs) && item.event_refs.includes(event.id)).length === 1
+        ? items.filter((item) => id(item.item_key) && id(item.turn_key) && item.kind === "answer"
+          && item.provenance === "provisional" && item.admission_id === page.recent_admission && item.evidence?.kind === "source"
+          && id(fixture.sourceKey) && item.evidence.source_key === fixture.sourceKey && item.evidence.source_epoch === page.source_epoch
+          && item.evidence.record_key === event.metadata.chat_source_ref
+          && Array.isArray(item.event_refs) && item.event_refs.length === 1 && item.event_refs[0] === event.id
+          && turns.filter((candidate) => candidate.turn_key === item.turn_key).length === 1) : [];
+      const answer = presented.length === 1 && items.filter((item) => item.item_key === presented[0].item_key).length === 1
+        ? presented[0] : null;
       return { id: event.id, key: event.metadata?.chat_display_key ?? event.id,
         members: event.metadata?.chat_display_member_ids ?? null, qualifiedTurn: turn?.turn_key ?? null,
+        presentedAnswer: answer ? { turnKey: answer.turn_key, itemKey: answer.item_key, eventRef: event.id,
+          canonicalHead: value.preview_bridge.canonical_head,
+          displayKey: key, provenance: answer.provenance, evidence: { kind: "source", source_key: answer.evidence.source_key,
+            source_epoch: answer.evidence.source_epoch, record_key: answer.evidence.record_key } } : null,
         source_flags: { provisional: event.metadata?.chat_provisional ?? null, adapter: event.metadata?.chat_turn_adapter ?? null,
           provider_turn: event.metadata?.provider_turn_id ?? null, request_root: event.metadata?.request_root_id ?? null } };
     }) };
@@ -410,16 +434,28 @@ export function installChatPreviewTiming(config) {
     const identity = parse(row?.getAttribute("data-chat-row-identity"));
     const committed = node.closest('[data-testid="chat-committed-turn"]');
     const turnKey = committed?.getAttribute("data-turn-key") ?? null;
+    const anchor = node.closest("[data-chat-anchor-key]");
+    const anchorKey = anchor?.getAttribute("data-chat-anchor-key") ?? null;
+    // A replacement response in this exact scope must not borrow an older binding.
+    const latestScoped = scope && state.receipts.findLast((item) => scopeKey(item.scope) === scopeKey(scope));
+    const presentedMatch = (target, receipt) => Boolean(scope?.session === config.sessionId && receipt === latestScoped
+      && turnKey && key === turnKey && target.presentedAnswer?.turnKey === turnKey
+      && target.presentedAnswer.eventRef === target.id && anchorKey === target.key
+      && target.presentedAnswer.displayKey === anchorKey);
+    const matches = (target, receipt) => turnKey
+      ? target.qualifiedTurn === turnKey || presentedMatch(target, receipt)
+      : target.key === key || (identity && (identity.id === target.id || identity.members?.includes(target.id)));
     const receipt = state.receipts.findLast((item) => (!scope || scopeKey(item.scope) === scopeKey(scope))
-      && item.targets.some((target) => target.key === key || (turnKey && target.qualifiedTurn === turnKey)
-        || (identity && (identity.id === target.id || identity.members?.includes(target.id)))));
-    const target = receipt?.targets.find((item) => item.key === key || (turnKey && item.qualifiedTurn === turnKey)
-      || (identity && (identity.id === item.id || identity.members?.includes(item.id))));
+      && item.targets.filter((target) => matches(target, item)).length === 1);
+    const target = receipt?.targets.find((item) => matches(item, receipt));
+    const presentedAnswer = target && presentedMatch(target, receipt) ? target.presentedAnswer : null;
+    const presentedBinding = presentedAnswer ? JSON.stringify([scopeKey(receipt.scope), target.id, presentedAnswer]) : null;
     const admitted = Boolean(scope && scope.session === config.sessionId && receipt && scopeKey(scope) === scopeKey(receipt.scope));
     return { host, scroll, node, row, committed, scope: scopeKey(scope), receipt, target, key, turnKey, admitted,
+      anchor: presentedAnswer ? anchor : null, anchorKey: presentedAnswer ? anchorKey : null, presentedAnswer, presentedBinding,
       qualified: Boolean(receipt && turnKey && target?.qualifiedTurn === turnKey) };
   };
-  const same = (left, right) => Boolean(left && right && ["host", "scroll", "node", "row", "committed", "scope", "key", "turnKey", "admitted", "qualified"]
+  const same = (left, right) => Boolean(left && right && ["host", "scroll", "node", "row", "committed", "scope", "key", "turnKey", "admitted", "qualified", "anchor", "anchorKey", "presentedBinding"]
     .every((key) => left[key] === right[key]));
   const captureDiagnostic = (reason, wait = null) => {
     if (!config.captureDetails) return null;
@@ -435,6 +471,7 @@ export function installChatPreviewTiming(config) {
         const current = candidate();
         dom = { status: "FULL_SYNTHETIC_TARGETS_ONLY", owned_container: Boolean(host), matching_body_count: bodies.length,
           candidate_present: Boolean(current), candidate_event_id: current?.target?.id ?? null, candidate_qualified: current?.qualified ?? false,
+          candidate_presented_answer: current?.presentedAnswer ?? null,
           consumer_scope_marker: scroll?.getAttribute("data-chat-page-scope") ?? null,
           bodies: bodies.map((node) => {
             const row = node.closest("[data-chat-row-key]"); const committed = node.closest('[data-testid="chat-committed-turn"]');
@@ -442,6 +479,7 @@ export function installChatPreviewTiming(config) {
             return { text: node.textContent, outer_html: node.outerHTML, visible: visible(node),
               rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
               row_key: row?.getAttribute("data-chat-row-key") ?? null, row_identity: row?.getAttribute("data-chat-row-identity") ?? null,
+              anchor_key: node.closest("[data-chat-anchor-key]")?.getAttribute("data-chat-anchor-key") ?? null,
               committed_turn: committed?.getAttribute("data-turn-key") ?? null };
           }) };
         const bytes = new TextEncoder().encode(JSON.stringify(dom)).byteLength;
@@ -470,10 +508,12 @@ export function installChatPreviewTiming(config) {
         if (field === "readableAt") {
           painted = body;
           current.readable = { admitted: body.admitted, row_key: body.key, scope: body.receipt?.scope ?? null,
-            committed_turn: body.turnKey, real_response_observed: Boolean(body.receipt) };
+            committed_turn: body.turnKey, real_response_observed: Boolean(body.receipt),
+            presented_answer: body.presentedAnswer, canonical_qualified: body.qualified };
         }
         if (field === "usableAt") current.usable_subject = { row_key: body.key, response_scope: body.receipt?.scope ?? null,
-          consumer_scope_admitted: body.admitted, committed_turn: body.turnKey };
+          consumer_scope_admitted: body.admitted, committed_turn: body.turnKey,
+          presented_answer: body.presentedAnswer, canonical_qualified: body.qualified };
         if (field === "previewAt") current.preview_scope = body.receipt.scope;
         if (field === "qualifiedAt") {
           current.qualified_turn = body.turnKey;
@@ -493,7 +533,7 @@ export function installChatPreviewTiming(config) {
         const body = candidate();
         if (body) {
           if (body.receipt) stamp("readableAt", body);
-          if (body.receipt && body.receipt.scope.admission !== null && !body.turnKey) stamp("previewAt", body);
+          if (body.receipt && body.receipt.scope.admission !== null && (!body.turnKey || body.presentedAnswer)) stamp("previewAt", body);
           if (body.qualified) stamp("qualifiedAt", body);
           if (painted && same(painted, body) && validInteraction(body)) stamp("usableAt", body);
         }
@@ -664,7 +704,8 @@ export function assertChatTimingSample(snapshot, { requireTransition = true, req
   return { readable_ms: phase.readableAt - phase.clickAt, usable_ms: phase.usableAt - phase.clickAt,
     usability_probe: phase.interaction,
     evidence_level: phase.readable?.admitted ? "ADMITTED_UI" : qualified ? "QUALIFIED_RENDERER_DOM_CONSUMER_SCOPE_UNPROVEN" : "UI_ONLY_ADMISSION_UNPROVEN",
-    renderer_at_readable: phase.readable?.committed_turn ? "COMMITTED_TURN_DOM" : "LEGACY_OR_RECENT_PREVIEW",
+    renderer_at_readable: phase.readable?.presented_answer ? "PROVISIONAL_SHARED_TURN_DOM"
+      : phase.readable?.committed_turn ? "COMMITTED_TURN_DOM" : "LEGACY_OR_RECENT_PREVIEW",
     qualified_ms: qualified ? phase.qualifiedAt - phase.clickAt : null,
     preview_to_qualified_ms: transition ? phase.qualifiedAt - phase.previewAt : null,
     transition: transition ? "OBSERVED" : qualified ? "CANONICAL_FIRST_NO_TRANSITION_SAMPLE" : "UNOBSERVED" };
