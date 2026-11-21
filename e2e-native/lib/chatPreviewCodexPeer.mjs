@@ -106,7 +106,7 @@ export function createChatPreviewCodexProtocol({ nativeSessionId, codexHome, mod
         need(clients.size < 4 && !clients.has(client), "peer_client_bound_or_reinitialized");
         const tui = params.clientInfo?.name === "wardian-preview-fixture-tui";
         clients.set(client, { tui, initialized: false });
-        return { result: { userAgent: "wardian-fixture/0.160.0", codexHome } };
+        return { result: { userAgent: "wardian/0.160.0 (Wardian synthetic fixture peer v1)", codexHome } };
       }
       const state = clients.get(client);
       need(state, "peer_initialize_required");
