@@ -2,6 +2,141 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn positive_value_reuse_preserves_typed_fields_and_charges_failed_reads() {
+    #[derive(Deserialize)]
+    struct OwnerOnly {
+        owner: String,
+    }
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct WithOrder {
+        owner: String,
+        source_order: String,
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let writer = Store::writer(temp.path());
+    let reference = writer
+        .put(&json!({ "owner": "synthetic-owner", "source_order": "0001" }))
+        .unwrap();
+    let mut reader = Store::new(temp.path());
+    let mut cache = SeekCache::default();
+    let narrow: OwnerOnly = reader.read_reusing_values(&reference, &mut cache).unwrap();
+    assert_eq!(narrow.owner, "synthetic-owner");
+    let spent = (reader.objects, reader.bytes);
+    let full: WithOrder = reader.read_reusing_values(&reference, &mut cache).unwrap();
+    assert_eq!(
+        full.source_order, "0001",
+        "the first typed view must not discard fields"
+    );
+    assert_eq!((reader.objects, reader.bytes), spent);
+
+    let invalid = writer.put(&json!({ "owner": false })).unwrap();
+    assert!(reader
+        .read_reusing_values::<OwnerOnly>(&invalid, &mut cache)
+        .is_err());
+    assert_eq!(reader.objects, spent.0 + 1);
+    assert!(!cache.values.contains_key(&invalid));
+    reader
+        .read_reusing_values::<serde_json::Value>(&invalid, &mut cache)
+        .unwrap();
+    assert_eq!(reader.objects, spent.0 + 2);
+
+    let bytes = fs::read(temp.path().join(&reference)).unwrap();
+    fs::write(temp.path().join(&reference), b"changed").unwrap();
+    let mut fresh = SeekCache::default();
+    let before = (reader.objects, reader.bytes);
+    assert!(reader
+        .read_reusing_values::<WithOrder>(&reference, &mut fresh)
+        .is_err());
+    assert_eq!((reader.objects, reader.bytes), (before.0 + 1, before.1 + 7));
+    assert!(fresh.values.is_empty());
+    fs::write(temp.path().join(&reference), bytes).unwrap();
+    reader
+        .read_reusing_values::<WithOrder>(&reference, &mut fresh)
+        .unwrap();
+    assert_eq!(reader.objects, before.0 + 2);
+
+    let missing = "f".repeat(64);
+    let before = reader.objects;
+    for _ in 0..2 {
+        assert!(reader
+            .read_reusing_values::<WithOrder>(&missing, &mut fresh)
+            .is_err());
+    }
+    assert_eq!(reader.objects, before + 2);
+    assert!(!fresh.values.contains_key(&missing));
+}
+
+#[test]
+fn positive_values_and_nodes_share_the_existing_cache_caps() {
+    let temp = tempfile::tempdir().unwrap();
+    // The existing writer allowance lets this test reach the cache's separate
+    // bounds without renewing a normal reader's hard physical-read allowance.
+    let mut store = Store::writer(temp.path());
+    let first = store.put(&"value-0").unwrap();
+    let root = store.insert(&None, "key", &first).unwrap();
+    let mut cache = SeekCache::default();
+    assert_eq!(
+        store
+            .get_reusing_nodes(&Some(root.clone()), "key", &mut cache)
+            .unwrap(),
+        Some(first)
+    );
+    let mut last = String::new();
+    for index in 0..READ_OBJECTS {
+        let value = format!("value-{index}");
+        last = store.put(&value).unwrap();
+        assert_eq!(
+            store
+                .read_reusing_values::<String>(&last, &mut cache)
+                .unwrap(),
+            value
+        );
+    }
+    assert_eq!(
+        (cache.nodes.len(), cache.values.len()),
+        (1, READ_OBJECTS - 1)
+    );
+    let spent = store.objects;
+    store
+        .read_reusing_values::<String>(&last, &mut cache)
+        .unwrap();
+    assert_eq!(
+        store.objects,
+        spent + 1,
+        "overflowed values are not retained"
+    );
+    assert!(cache.bytes <= READ_BYTES);
+
+    let mut byte_cache = SeekCache::default();
+    store
+        .get_reusing_nodes(&Some(root), "key", &mut byte_cache)
+        .unwrap();
+    for index in 0..=READ_BYTES / (OBJECT_BYTES - 128) {
+        let value = format!("{index}:{}", "x".repeat(OBJECT_BYTES - 128));
+        last = store.put(&value).unwrap();
+        assert_eq!(
+            store
+                .read_reusing_values::<String>(&last, &mut byte_cache)
+                .unwrap(),
+            value
+        );
+        assert!(byte_cache.bytes <= READ_BYTES);
+    }
+    assert_eq!(byte_cache.nodes.len(), 1);
+    assert!(
+        byte_cache.values.len() < READ_OBJECTS - 1,
+        "the byte cap binds first"
+    );
+    let retained = (byte_cache.values.len(), byte_cache.bytes);
+    let spent = store.objects;
+    store
+        .read_reusing_values::<String>(&last, &mut byte_cache)
+        .unwrap();
+    assert_eq!(store.objects, spent + 1);
+    assert_eq!((byte_cache.values.len(), byte_cache.bytes), retained);
+}
+
+#[test]
 fn optional_metadata_allowance_keeps_failed_reads_charged() {
     let temp = tempfile::tempdir().unwrap();
     let writer = Store::writer(temp.path());

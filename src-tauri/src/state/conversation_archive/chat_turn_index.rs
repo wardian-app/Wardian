@@ -1570,7 +1570,7 @@ impl Index {
                 else {
                     return Ok(None);
                 };
-                let item: Item = store.read(&reference)?;
+                let item: Item = store.read_reusing_values(&reference, cache)?;
                 loaded.insert(member.item_key.clone(), (reference, item));
             }
             let Some((reference, item)) = loaded.get(&member.item_key) else {
@@ -1686,7 +1686,7 @@ fn lookup<T: DeserializeOwned>(
 ) -> io::Result<Option<T>> {
     store
         .get_reusing_nodes(root, key, cache)?
-        .map(|reference| store.read(&reference))
+        .map(|reference| store.read_reusing_values(&reference, cache))
         .transpose()
 }
 

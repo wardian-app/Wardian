@@ -1875,7 +1875,7 @@ fn certified_unphased_and_final_mirrors_keep_the_earliest_answer_owner_across_ol
     let mut reversed = certificate.members;
     reversed.reverse();
     refresh.metadata["chat_display_member_ids"] = json!(reversed);
-    let older = page(&restored, temp.path(), &[refresh], true);
+    let older = page(&restored, temp.path(), &[refresh.clone()], true);
     assert_eq!(older.items.len(), 1);
     assert_eq!(older.items[0].item_key, owner);
     assert_eq!(older.items[0].order_key, order);
@@ -1884,6 +1884,42 @@ fn certified_unphased_and_final_mirrors_keep_the_earliest_answer_owner_across_ol
     assert_eq!(older.turns[0].answer_item_keys.len(), 1);
     assert!(older.turns[0].answer_recorded);
     assert_eq!(serde_json::to_vec(&restored).unwrap(), snapshot);
+
+    // Replay the same positive logical certificate within one read operation.
+    // Immutable values already hash-validated here need no second file read.
+    let mut reader = Store::new(temp.path());
+    let mut cache = SeekCache::default();
+    let events = [refresh];
+    let owners = restored
+        .preview_owners_reusing_nodes(&mut reader, &scope, &events, None, &mut cache)
+        .unwrap()
+        .expect("the earliest physical mirror retains its certified answer owner");
+    assert_eq!(owners.rows[&events[0].id].item.membership.item_key, owner);
+    assert_eq!(
+        owners.source,
+        Some((
+            scope.source_key.unwrap().to_owned(),
+            scope.source_epoch.unwrap().to_owned(),
+        ))
+    );
+    let objects = reader.objects;
+    let bytes = reader.bytes;
+    let replay = restored
+        .preview_owners_reusing_nodes(&mut reader, &scope, &events, None, &mut cache)
+        .unwrap()
+        .expect("the identical positive certificate remains qualified");
+    assert_eq!(
+        serde_json::to_vec(&replay).unwrap(),
+        serde_json::to_vec(&owners).unwrap()
+    );
+    assert_eq!(serde_json::to_vec(&restored).unwrap(), snapshot);
+    assert!(reader.objects <= READ_OBJECTS && reader.bytes <= READ_BYTES);
+    assert_eq!(
+        reader.objects - objects,
+        0,
+        "replaying positive values must not reopen immutable objects (additional bytes: {})",
+        reader.bytes - bytes
+    );
 }
 
 #[test]
