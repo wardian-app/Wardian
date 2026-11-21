@@ -23,6 +23,7 @@ import { startRemoteClientTlsFixture } from "../lib/remoteClientTlsFixture.mjs";
 import { prepareChatPreviewCodexPeer } from "../lib/chatPreviewCodexPeer.mjs";
 import {
   CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, chatPreviewWatchdogMs,
+  CHAT_PREVIEW_METHOD_REVISION, chatPreviewSurfaceCases,
   chatPreviewHomePaths, assertFreshChatPreviewHome, assertPreclaimedChatPreviewBase, assertChatPreviewHomeBinding,
   STOPPED_SOURCE_CAPABILITY, stageSyntheticStoppedSource, prepareSyntheticProviderHomes, verifySyntheticSourceProjection,
   CHAT_PREVIEW_FIXTURE_LIFECYCLE, observeChatPreviewAutoRestore, closeChatPreviewFixtureSession,
@@ -36,6 +37,7 @@ import {
 
 const enabled = process.env.WARDIAN_E2E_CHAT_PREVIEW_TIMING === "1";
 const diagnostic = process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC === "1";
+const desktopPendingDiagnostic = process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC_DESKTOP_PENDING === "1";
 const requestedFixtureModes = (process.env.WARDIAN_CHAT_PREVIEW_FIXTURES ?? "pending,qualified").split(",");
 // Invalid selectors retain the maximum watchdog until the existing preflight reports them.
 const watchdogMs = chatPreviewWatchdogMs(requestedFixtureModes.length === 1 ? 1 : 2);
@@ -220,6 +222,7 @@ async function measureRemote(page, fixture, label, report, save, options, afterU
 test("real desktop and native-gateway PWA preview-to-qualified opening timing", { skip: !enabled, timeout: watchdogMs }, async () => {
   assert.equal(process.env.WARDIAN_NATIVE_SKIP_BUILD, "1", "Use the prebuilt fast runner; this benchmark never builds");
   assert.ok(process.env.WARDIAN_NATIVE_APP && process.env.WARDIAN_NATIVE_CLI, "Explicit frozen app and paired CLI are required");
+  const selectedSurfaceCases = chatPreviewSurfaceCases(requestedFixtureModes, diagnostic, desktopPendingDiagnostic, process.env.WARDIAN_CHAT_PREVIEW_SOURCE_ROLE);
   // Fixed-width fresh IDs and case suffixes preserve byte equality without exceeding the in-home socket limit.
   const suppliedRunId = process.env.WARDIAN_E2E_RUN_ID;
   const runId = suppliedRunId ?? randomBytes(8).toString("hex");
@@ -239,7 +242,8 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
   const file = path.join(base.isolatedHome, "artifacts", "chat-preview-identity", "result.json");
   process.stdout.write(`[chat-preview-timing] evidence: ${file}\n`);
   const report = { schema_version: 2, ruler_version: CHAT_PREVIEW_RULER_VERSION, outcome_protocol_version: 1,
-    method_revision: "v8-typed-outcome-provenance-before-first-cohort", status: "RUNNING", cases: [], surfaces: [],
+    method_revision: CHAT_PREVIEW_METHOD_REVISION, status: "RUNNING", cases: [], surfaces: [],
+    ...(diagnostic ? { diagnostic_only: true, accepted_metrics: null, M1: null, M2: null } : {}),
     coordinator_claim: { run_id: runId, home: homes.baseHome, owner_pid: base.homeLock.pid,
       origin: suppliedRunId === undefined ? "standalone_fresh" : "live_parent_preclaim" },
     deadlines: { seed_setup_ms: CHAT_PREVIEW_SEED_TIMEOUT_MS, outer_watchdog_ms: watchdogMs,
@@ -300,7 +304,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
     const pendingPadding = Number(process.env.WARDIAN_CHAT_PREVIEW_PENDING_PADDING ?? 1_024);
     assert.ok(Number.isSafeInteger(pendingTurns) && pendingTurns >= 12_000 && pendingTurns <= 20_000, "Pending history must contain 12000..20000 turns");
     report.fixture_modes = modes;
-    for (const { surface, mode } of modes.flatMap((mode) => ["desktop", "remote"].map((surface) => ({ mode, surface })))) {
+    for (const { surface, mode } of selectedSurfaceCases) {
       const harness = { ...base, isolatedHome: homes.cases.find((item) => item.surface === surface && item.mode === mode).home, homeLock: undefined,
         appPath: base.frozenArtifacts.app.path, sharedCliPath: base.frozenArtifacts.cli.path, ownsGeneratedHome: false };
       assertFreshChatPreviewHome(harness.isolatedHome);
@@ -431,7 +435,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
           return surface === "desktop" ? measureDesktop(session.driver, fixture, label, report, save, options, afterUsable)
             : measureRemote(page, fixture, label, report, save, options, afterUsable);
         };
-        const openings = diagnostic ? ["diagnostic-first-chat", ...(process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC_WARM === "1"
+        const openings = diagnostic ? ["diagnostic-first-chat", ...(desktopPendingDiagnostic || process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC_WARM === "1"
           ? ["diagnostic-same-process-warm-reopen"] : [])] : ["cold-process-first-chat", "same-process-warm-reopen"];
         for (const [index, temperature] of openings.entries()) {
           if (index === 1) {

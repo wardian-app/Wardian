@@ -14,6 +14,7 @@ import { acquireHomeLock } from "../lib/sessionHome.mjs";
 import { createWindowsSupervisorPlan } from "../../scripts/native-e2e-runner.mjs";
 import {
   CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, CHAT_PREVIEW_RULER_VERSION, chatPreviewWatchdogMs,
+  CHAT_PREVIEW_METHOD_REVISION, chatPreviewSurfaceCases, retainChatTimingReport,
   chatPreviewHomePaths, chatPreviewSocketPath, assertFreshChatPreviewHome, assertPreclaimedChatPreviewBase, assertChatPreviewHomeBinding,
   syntheticCodexSource, stageSyntheticStoppedSource, prepareSyntheticProviderHomes, verifySyntheticSourceProjection,
   CHAT_PREVIEW_FIXTURE_LIFECYCLE, observeChatPreviewAutoRestore, pauseChatPreviewFixture, closeChatPreviewFixtureSession,
@@ -1807,6 +1808,159 @@ test("failed measurements persist partial endpoints and never publish successful
   assert.equal(retained.cases[0].status, "FAILED"); assert.equal(retained.cases[0].metrics, null);
   assert.equal(retained.cases[0].observation.phase.readableAt, 20);
   assert.equal(retained.cases[0].error.code, "native_input_failed");
+});
+
+test("v9 diagnostic selection is explicitly baseline Desktop pending and preserves the normal case list", () => {
+  assert.equal(CHAT_PREVIEW_METHOD_REVISION, "v9-retention-selector-diagnostics");
+  assert.deepEqual(chatPreviewSurfaceCases(["pending"], true, true, "baseline"), [{ mode: "pending", surface: "desktop" }]);
+  assert.equal(chatPreviewSurfaceCases(["pending", "qualified"], false, false, "candidate").length, 4);
+  for (const [modes, diagnostic, role] of [[["pending"], false, "baseline"], [["pending"], true, "candidate"], [["qualified"], true, "baseline"], [["pending", "qualified"], true, "baseline"]]) {
+    assert.throws(() => chatPreviewSurfaceCases(modes, diagnostic, true, role), { code: "invalid_desktop_pending_diagnostic" });
+  }
+});
+
+test("diagnostic case operations never publish accepted metrics on success or failure", async () => {
+  const report = { timing_qualification: "DIAGNOSTIC_ONLY_NOT_BENCHMARK", cases: [] };
+  await recordChatTimingCase(report, "diagnostic", async () => ({ diagnostic_endpoint: "observed" }), async () => ({ phase: {} }), async () => {});
+  const original = new Error("unhealthy diagnostic");
+  await assert.rejects(recordChatTimingCase(report, "failed-diagnostic", async () => { throw original; }, async () => ({ phase: {} }), async () => {}), (error) => error === original);
+  for (const record of report.cases) {
+    assert.equal(record.metrics, null); assert.equal(record.accepted_metrics, null);
+    assert.equal(record.M1, null); assert.equal(record.M2, null); assert.equal(record.diagnostic_only, true);
+  }
+});
+
+test("retention keeps raw failures and immediate predecessors, compact verdict facts and literal phase IDs", () => {
+  const observation = { phase: { label: "case", readable: { native_backing_ids: ["literal-owned-id"] } },
+    phases: [{ label: "duplicate history" }], receipts: [{ aliases: [{ observation_id: "literal-old", canonical_id: "literal-new" }] }],
+    faults: ["negative fact"], fatal_error_count: 1, raw_error_count: 1, busy_retry_overflow_count: 2,
+    busy_retries: [{ recovered_at: null }], diagnostics: { transcript_error_visible: true }, disposed: true, raw_detail: "raw-only" };
+  const report = { cases: [0, 1, 2].map((index) => ({ label: String(index), status: index === 2 ? "FAILED" : "OBSERVED_UI_ENDPOINTS", metrics: null,
+    ...(index === 2 ? { error: { code: "missing_current_healthy_view" } } : {}), observation: structuredClone(observation) })) };
+  const before = JSON.stringify(report), retained = retainChatTimingReport(report);
+  assert.equal(JSON.stringify(report), before, "storage must not mutate verdict objects or provenance");
+  assert.equal(retained.cases[0].observation.retention.kind, "passing_summary");
+  assert.equal(retained.cases[0].observation.raw_detail, undefined);
+  assert.deepEqual(retained.cases[0].observation.receipts, [{}]);
+  assert.equal(retained.cases[0].observation.phase_count, observation.phases.length);
+  assert.deepEqual(retained.cases[0].observation.phase.readable.native_backing_ids, ["literal-owned-id"]);
+  for (const key of ["faults", "fatal_error_count", "raw_error_count", "busy_retry_overflow_count", "busy_retries", "diagnostics", "disposed"]) {
+    assert.deepEqual(retained.cases[0].observation[key], observation[key]);
+  }
+  for (const index of [1, 2]) {
+    const saved = retained.cases[index].observation;
+    assert.equal(saved.retention.kind, "full_failure_or_predecessor");
+    assert.deepEqual(saved.receipts, observation.receipts); assert.equal(saved.raw_detail, "raw-only");
+    assert.equal(saved.phases, undefined); assert.deepEqual(saved.phase, observation.phase);
+    assert.equal(saved.retention.raw_sha256, createHash("sha256").update(JSON.stringify(observation)).digest("hex"));
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(retained)), retained);
+});
+
+test("retained passing receipt facts replay the unchanged opening assertion with phase metadata only", () => {
+  const b = browser({ rulerVersion: 8 });
+  // An unmeasured prior phase makes the current receipt's real phase index nonzero.
+  b.api.arm("prior-unmeasured"); b.click(); b.advance(2);
+  const snapshot = v8Opening(b), options = { sourceRole: "baseline" };
+  const expected = assertChatOpeningSample(snapshot, options);
+  const report = { cases: [{ label: "storage-replay", status: "OBSERVED_UI_ENDPOINTS", metrics: expected, observation: snapshot }] };
+  const retained = JSON.parse(JSON.stringify(retainChatTimingReport(report))).cases[0].observation;
+  assert.equal(retained.retention.kind, "passing_summary");
+  assert.equal(retained.phase_count, snapshot.phases.length); assert.equal(retained.phase_count, 2);
+  assert.equal(retained.first_phase_click_at, snapshot.phases[0].clickAt);
+  assert.deepEqual(retained.calls, JSON.parse(JSON.stringify(snapshot.calls.map(({ at, last_at }) => ({ at, last_at })))));
+  for (const [index, receipt] of retained.receipts.entries()) {
+    assert.deepEqual(receipt.last_request, JSON.parse(JSON.stringify(snapshot.receipts[index].last_request)));
+    assert.equal(receipt.first_sequence, snapshot.receipts[index].first_sequence);
+    assert.equal(receipt.last_sequence, snapshot.receipts[index].last_sequence);
+    assert.equal(receipt.nativeOpening.verified, snapshot.receipts[index].nativeOpening.verified);
+    assert.deepEqual(receipt.nativeOpening.backing_ids, JSON.parse(JSON.stringify(snapshot.receipts[index].nativeOpening.backing_ids)));
+    assert.equal(receipt.aliases, undefined); assert.equal(receipt.targets, undefined); assert.equal(receipt.nativeOpening.window_ids, undefined);
+  }
+  const phases = Array(retained.phase_count).fill(null);
+  phases[0] = { clickAt: retained.first_phase_click_at };
+  const replay = { ...retained, phases };
+  assert.deepEqual(assertChatOpeningSample(replay, options), expected);
+  for (const change of [
+    (value) => { value.receipts[0].nativeOpening.backing_ids = ["wrong-literal-id"]; },
+    (value) => { value.receipts[0].last_request.owned_request = false; },
+    (value) => { value.receipts[0].last_request.phase_index = 0; },
+  ]) {
+    const invalid = structuredClone(replay); change(invalid);
+    assert.throws(() => assertChatOpeningSample(invalid, options), { code: "missing_current_native_request_receipt" });
+  }
+  b.api.dispose();
+});
+
+test("retention overflow reports exact bytes, preserves failed raw evidence and leaves prior file intact", (t) => {
+  const harness = tempHome(t), file = path.join(harness.isolatedHome, "result.json");
+  writeChatTimingReport(file, { cases: [] }); const prior = fs.readFileSync(file);
+  const report = { cases: [{ status: "FAILED", metrics: null, error: { code: "actual_failure" }, observation: { raw_failure_evidence: "x".repeat(512 * 1024) } }] };
+  const expected = Buffer.byteLength(JSON.stringify(retainChatTimingReport(report)) + "\n");
+  assert.throws(() => writeChatTimingReport(file, report), (error) => error.code === "chat_timing_report_retention_exceeded"
+    && error.message.includes(`measured_bytes=${expected}, limit_bytes=524288`));
+  assert.deepEqual(fs.readFileSync(file), prior);
+  assert.equal(retainChatTimingReport(report).cases[0].observation.raw_failure_evidence.length, 512 * 1024);
+});
+
+const retainedMain1Path = process.env.WARDIAN_CHAT_PREVIEW_RETAINED_MAIN1;
+test("real retained Main1 corpus preserves failed receipts and identities; remaining overflow is explicit", { skip: !retainedMain1Path && "provide the private synthetic Main1 report" }, (t) => {
+  const bytes = fs.readFileSync(retainedMain1Path);
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), "f0ceb8930e4a94ed9e594d20998fc44e5ab14de80758cedf4f611386062e7fbe");
+  const actual = JSON.parse(bytes), original = JSON.stringify(actual);
+  assert.equal(actual.cases[0].status, "FAILED"); assert.equal(actual.cases[0].metrics, null);
+  assert.equal(actual.cases[0].error.code, "missing_current_healthy_view");
+  const harness = tempHome(t), file = path.join(harness.isolatedHome, "result.json");
+  writeChatTimingReport(file, actual);
+  const storedBytes = fs.readFileSync(file), stored = JSON.parse(storedBytes);
+  assert.ok(storedBytes.length <= 512 * 1024);
+  assert.deepEqual(stored.cases[0].observation.receipts, actual.cases[0].observation.receipts);
+  assert.deepEqual(stored.cases[0].observation.phase, actual.cases[0].observation.phase);
+  assert.deepEqual(stored.cases[0].error, actual.cases[0].error); assert.equal(stored.cases[0].metrics, null);
+  assert.equal(stored.cases[0].observation.receipts.length, 10);
+  // A storage-only duplicate of failed raw data is not a measured warm observation or a passing sample.
+  const overflow = structuredClone(actual); overflow.cases.push(structuredClone(actual.cases[0]));
+  const measured = Buffer.byteLength(JSON.stringify(retainChatTimingReport(overflow)) + "\n");
+  assert.ok(measured > 512 * 1024);
+  assert.throws(() => writeChatTimingReport(file, overflow), (error) => error.message.includes(`measured_bytes=${measured}`));
+  assert.deepEqual(fs.readFileSync(file), storedBytes); assert.equal(JSON.stringify(actual), original);
+});
+
+test("selector diagnostics use the actual single visible scroll even when the first scroll is hidden", () => {
+  const b = browser({ rulerVersion: 8 }), host = b.document.querySelectorAll()[0], original = host.querySelectorAll;
+  const hidden = { ...b.scroll, hidden: true };
+  host.querySelectorAll = (selector) => selector === ".chat-transcript-scroll" ? [hidden, b.scroll] : original(selector);
+  b.api.arm("visible-scroll"); b.click();
+  const diagnostic = b.api.snapshot().phase.selector_diagnostics.last;
+  assert.equal(diagnostic.reason, "selected"); assert.equal(diagnostic.scroll_candidates, 2); assert.equal(diagnostic.visible_scrolls, 1);
+  assert.equal(diagnostic.exact_visible_bodies, 1); assert.equal(diagnostic.range_intersects, true);
+  assert.ok(!JSON.stringify(diagnostic).includes(fixture.body)); b.api.dispose();
+});
+
+test("selector diagnostics distinguish unavailable host, ambiguous visible scroll and exact body rejection", () => {
+  for (const reason of ["owned_host_unavailable", "visible_scroll_count", "exact_visible_body_count"]) {
+    const b = browser({ rulerVersion: 8 }), host = b.document.querySelectorAll()[0], original = host.querySelectorAll;
+    b.api.arm(reason); b.click();
+    if (reason === "owned_host_unavailable") b.document.querySelectorAll = () => [];
+    if (reason === "visible_scroll_count") host.querySelectorAll = (selector) => selector === ".chat-transcript-scroll" ? [b.scroll, b.scroll] : original(selector);
+    if (reason === "exact_visible_body_count") b.content.textContent = "different synthetic narrative";
+    const snapshot = b.api.snapshot(), diagnostic = snapshot.phase.selector_diagnostics;
+    assert.equal(diagnostic.last.reason, reason); assert.ok(diagnostic.reasons[reason] > 0);
+    assert.ok(diagnostic.first_failure); assert.ok(diagnostic.last_failure);
+    for (let index = 0; index < 100; index++) b.api.snapshot();
+    const bounded = b.api.snapshot().phase.selector_diagnostics;
+    assert.ok(bounded.calls >= 100); assert.ok(Buffer.byteLength(JSON.stringify(bounded)) < 4096);
+    assert.equal(snapshot.phase.readableAt, null); assert.equal(snapshot.health.current_native, false); b.api.dispose();
+  }
+});
+
+test("selector diagnostics retain the range-intersection failure without changing body or granting frames", () => {
+  const b = browser({ rulerVersion: 8 }); b.api.arm("range"); b.click();
+  b.document.createRange = () => ({ selectNodeContents() {}, getClientRects: () => [{ top: 700, bottom: 800, left: 0, right: 400 }] });
+  const before = b.content.textContent, snapshot = b.api.snapshot();
+  assert.equal(snapshot.phase.selector_diagnostics.last.reason, "range_intersection_missing");
+  assert.equal(snapshot.phase.selector_diagnostics.last.exact_visible_bodies, 1);
+  assert.equal(snapshot.phase.readableAt, null); assert.equal(b.content.textContent, before); b.api.dispose();
 });
 
 test("report write failure retains the original measurement error in an aggregate", async () => {
