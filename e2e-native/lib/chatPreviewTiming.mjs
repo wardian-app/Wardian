@@ -23,6 +23,35 @@ export function chatPreviewWatchdogMs(fixtureModeCount = 2) {
   return CHAT_PREVIEW_EXECUTION_ALLOWANCE_MS + fixtureModeCount * 2 * CHAT_PREVIEW_SEED_TIMEOUT_MS;
 }
 
+/** Drive at most three newly painted subjects within one five-second probe window.
+ * Adapter actions must use the real automation input APIs; this helper never injects events.
+ */
+export async function driveChatPreviewProbe({ next, isCurrent, act, release, now = () => performance.now() }) {
+  const deadline = now() + 5_000;
+  const dispatched = new Set();
+  while (now() < deadline) {
+    const plan = await next(Math.max(1, deadline - now()));
+    let failure;
+    let complete = false;
+    try {
+      need(plan && typeof plan.kind === "string", "invalid_probe_plan");
+      need(plan.kind !== "failed", plan.code ?? "probe_failed");
+      complete = plan.kind === "complete";
+      if (!complete && await isCurrent(plan)) {
+        need(["input", "wheel"].includes(plan.kind) && Number.isSafeInteger(plan.attempt)
+          && plan.attempt >= 1 && plan.attempt <= 3 && !dispatched.has(plan.attempt), "invalid_or_repeated_probe_attempt");
+        need(now() < deadline, "probe_deadline_exceeded");
+        dispatched.add(plan.attempt); await act(plan);
+      }
+    } catch (error) { failure = error; }
+    try { await release?.(plan); }
+    catch (error) { failure = failure ? new AggregateError([failure, error], "Probe and handle cleanup failed", { cause: failure }) : error; }
+    if (failure) throw failure;
+    if (complete) return;
+  }
+  need(false, "probe_deadline_exceeded");
+}
+
 /** Raw Codex grammar only: no Chat DTO, archive identity or renderer proof is manufactured. */
 export function syntheticCodexSource({ workspace, turns = 12_000, padding = 1_024, nativeSessionId = randomUUID() }) {
   need(typeof workspace === "string" && path.isAbsolute(workspace), "invalid_workspace");
@@ -392,14 +421,18 @@ export function installChatPreviewTiming(config) {
   const state = { surface: config.surface, phase: null, phases: [], receipts: [], calls: [], faults: [], disposed: false,
     raw_request_count: 0, coalesced_request_count: 0, request_overflow_count: 0,
     raw_receipt_count: 0, coalesced_receipt_count: 0, receipt_overflow_count: 0,
-    raw_error_count: 0, error_overflow_count: 0, rejected_scopes: [], rejected_scope_bytes: 0,
-    rejected_scope_overflow_count: 0, rejected_scope_overflow_bytes: 0 };
+    raw_error_count: 0, fatal_error_count: 0, error_overflow_count: 0, rejected_scopes: [], rejected_scope_bytes: 0,
+    rejected_scope_overflow_count: 0, rejected_scope_overflow_bytes: 0,
+    busy_retries: [], busy_retry_bytes: 0, busy_retry_overflow_count: 0, busy_retry_overflow_bytes: 0 };
   const callIndex = new Map(); const receiptIndex = new Map();
   let phase;
   let subscription;
   let frameId;
   let painted;
+  let firstPainted;
+  let paintedFrames;
   let interaction;
+  let proofEpoch = 0;
   let latestApiCandidate = null;
   let latestApiAt = null;
   let openingDiagnostic = null;
@@ -410,6 +443,26 @@ export function installChatPreviewTiming(config) {
   };
   const fail = (error, context = {}) => {
     state.raw_error_count++;
+    const message = typeof error === "string" ? error : error?.message;
+    if (message === "chat source temporarily busy" && config.surface === "desktop"
+      && context.operation === "load_agent_chat_page" && context.owned_request === true && Number.isSafeInteger(context.request_sequence)
+      && Number.isFinite(context.request_at) && Number.isSafeInteger(context.phase_index) && context.phase_index >= 0
+      && typeof context.phase_label === "string"
+      && state.phases[context.phase_index]?.label === context.phase_label) {
+      const entry = { request_sequence: context.request_sequence, request_at: context.request_at,
+        operation: context.operation, purpose: context.purpose, phase_index: context.phase_index, phase_label: context.phase_label,
+        rejected_at: now(), requests_at_rejection: state.raw_request_count, recovered_at: null,
+        recovery_request_sequence: null, recovery_receipt_sequence: null, recovery_frames: null };
+      const bytes = new TextEncoder().encode(JSON.stringify([...state.busy_retries, entry])).byteLength;
+      if (state.busy_retries.length < 8 && bytes <= 8_192) {
+        state.busy_retries.push(entry); state.busy_retry_bytes = bytes;
+        if (phase) phase.retry_qualified_fence = state.busy_retries.length;
+        invalidateProbe("busy_retry"); return;
+      }
+      state.busy_retry_overflow_count++;
+      state.busy_retry_overflow_bytes += new TextEncoder().encode(JSON.stringify(entry)).byteLength;
+    }
+    state.fatal_error_count++;
     config.recordRejection?.(state, error, { ...context, at: now(), clock_basis: "browser:performance.now" });
     if (state.faults.length < 8) state.faults.push(String(error?.message ?? error).slice(0, 256));
     else state.error_overflow_count++;
@@ -423,7 +476,7 @@ export function installChatPreviewTiming(config) {
       previous.count++; previous.last_at = at; previous.last_sequence = sequence;
       state[`coalesced_${kind}_count`]++;
       list.splice(list.indexOf(previous), 1); list.push(previous);
-      return;
+      return previous;
     }
     if (list.length >= 128) {
       state[`${kind}_overflow_count`]++;
@@ -431,6 +484,7 @@ export function installChatPreviewTiming(config) {
     }
     const entry = { ...JSON.parse(key), at, last_at: at, count: 1, first_sequence: sequence, last_sequence: sequence };
     index.set(key, entry); list.push(entry);
+    return entry;
   };
   const readable = (node) => {
     if (!node?.isConnected || document.visibilityState !== "visible") return false;
@@ -513,12 +567,56 @@ export function installChatPreviewTiming(config) {
     const presentedAnswer = target && presentedMatch(target, receipt) ? target.presentedAnswer : null;
     const presentedBinding = presentedAnswer ? JSON.stringify([scopeKey(receipt.scope), target.id, presentedAnswer]) : null;
     const admitted = Boolean(scope && scope.session === config.sessionId && receipt && scopeKey(scope) === scopeKey(receipt.scope));
-    return { host, scroll, node, row, committed, scope: scopeKey(scope), receipt, target, key, turnKey, admitted, controlSequence,
+    const transcriptError = [...scroll.querySelectorAll(':scope > [role="alert"]')].some(visible);
+    return { host, scroll, node, row, committed, scope: scopeKey(scope), receipt, target, key, turnKey, admitted, controlSequence, transcriptError,
       anchor: presentedAnswer ? anchor : null, anchorKey: presentedAnswer ? anchorKey : null, presentedAnswer, presentedBinding,
       qualified: Boolean(receipt && turnKey && target?.qualifiedTurn === turnKey) };
   };
   const same = (left, right) => Boolean(left && right && ["host", "scroll", "node", "row", "committed", "scope", "key", "turnKey", "admitted", "qualified", "anchor", "anchorKey", "presentedBinding", "controlSequence"]
     .every((key) => left[key] === right[key]));
+  const pendingBusy = () => state.busy_retries.filter((entry) => entry.recovered_at === null);
+  const afterRetryRequest = (body) => Boolean(body?.receipt?.last_request && state.busy_retries.every((entry) =>
+    body.receipt.last_request.sequence > entry.requests_at_rejection && body.receipt.last_request.at > entry.rejected_at));
+  const canRecoverBusy = (body) => Boolean(!state.busy_retry_overflow_count && body?.admitted && body.target && !body.transcriptError
+    && body.receipt?.last_request && pendingBusy().every((entry) =>
+      body.receipt.last_request.sequence > entry.requests_at_rejection && body.receipt.last_request.at > entry.rejected_at));
+  const updateProbeEvidence = (entry, change) => {
+    if (!phase?.probe || !entry) return;
+    const next = { ...entry, ...change };
+    const bytes = new TextEncoder().encode(JSON.stringify(phase.probe.attempts.map((item) => item === entry ? next : item))).byteLength;
+    if (bytes > 4_096) {
+      phase.probe.evidence_overflow_count++; phase.probe.error = "probe_evidence_bound_exceeded"; return;
+    }
+    Object.assign(entry, change); phase.probe.evidence_bytes = bytes;
+  };
+  // An epoch only cancels local frame callbacks. It never supplies source identity.
+  const invalidateProbe = (reason) => {
+    if (interaction) updateProbeEvidence(interaction.evidence, { invalidated_at: now(), invalidation: reason });
+    painted = null; interaction = null; proofEpoch++;
+    if (phase) {
+      for (const key of Object.keys(phase.checking)) phase.checking[key] = false;
+      if (phase.usableAt === null && phase.probe.attempts.length >= 3) phase.probe.error = "probe_attempts_exhausted";
+    }
+  };
+  const recoverBusy = (body, frames) => {
+    if (!pendingBusy().length || !canRecoverBusy(body)) return;
+    const recovered = state.busy_retries.map((entry) => entry.recovered_at !== null ? entry : { ...entry, recovered_at: frames[1], recovery_frames: frames,
+      recovery_request_sequence: body.receipt.last_request.sequence, recovery_receipt_sequence: body.receipt.last_sequence,
+      recovery_phase_index: state.phases.indexOf(phase) });
+    const bytes = new TextEncoder().encode(JSON.stringify(recovered)).byteLength;
+    if (bytes > 8_192) {
+      state.busy_retry_overflow_count++; state.busy_retry_overflow_bytes += bytes;
+      fail(new Error("busy_retry_evidence_bound_exceeded")); return;
+    }
+    state.busy_retries = recovered; state.busy_retry_bytes = bytes;
+    if (body.qualified) qualifyAfterRetry(body, frames);
+  };
+  const qualifyAfterRetry = (body, frames) => {
+    if (!phase.retry_qualified_fence || !body.admitted || !body.qualified || !afterRetryRequest(body)) return;
+    phase.qualified_after_retry = { retry_fence: phase.retry_qualified_fence, at: frames[1], frames,
+      admitted: true, turn_key: body.turnKey, response_scope: body.receipt.scope,
+      request_sequence: body.receipt.last_request.sequence, receipt_sequence: body.receipt.last_sequence };
+  };
   const captureDiagnostic = (reason, wait = null) => {
     if (!config.captureDetails) return null;
     const at = now();
@@ -555,53 +653,98 @@ export function installChatPreviewTiming(config) {
     }
   };
   const stamp = (field, body) => {
-    const refresh = phase && field === "readableAt" && phase.readableAt !== null && phase.usableAt === null && painted === null;
+    if (field === "qualifiedAt" && phase?.retry_qualified_fence && (!body.admitted || !afterRetryRequest(body))) return;
+    const refresh = phase && ((field === "readableAt" && phase.readableAt !== null && painted === null
+      && (phase.usableAt === null || pendingBusy().length > 0))
+      || (field === "qualifiedAt" && phase.retry_qualified_fence
+        && phase.qualified_after_retry?.retry_fence !== phase.retry_qualified_fence && body.admitted && afterRetryRequest(body)));
     if (!phase || (phase[field] !== null && !refresh) || phase.checking[field]) return;
     const current = phase;
+    const epoch = proofEpoch;
     phase.checking[field] = true;
     requestAnimationFrame(() => {
+      if (epoch !== proofEpoch) return;
       const first = now();
-      if (state.disposed || phase !== current || !same(body, candidate())) { current.checking[field] = false; return; }
+      const currentBody = candidate();
+      const firstInteraction = field !== "usableAt" || validInteraction(currentBody, "frame_one");
+      if (state.disposed || phase !== current || !same(body, currentBody) || currentBody.transcriptError
+        || !firstInteraction || (pendingBusy().length && (field !== "readableAt" || !canRecoverBusy(currentBody)))) { current.checking[field] = false; return; }
       requestAnimationFrame(() => {
+        if (epoch !== proofEpoch) return;
         current.checking[field] = false;
-        if (state.disposed || phase !== current || !same(body, candidate())) return;
-        if (field === "usableAt" && !validInteraction(body)) return;
+        const finalBody = candidate();
+        const finalInteraction = field !== "usableAt" || validInteraction(finalBody, "frame_two");
+        if (state.disposed || phase !== current || !same(body, finalBody) || finalBody.transcriptError
+          || !finalInteraction || (pendingBusy().length && (field !== "readableAt" || !canRecoverBusy(finalBody)))) return;
         const firstObservation = current[field] === null;
         const at = now();
         if (firstObservation) { current[field] = at; current.frames[field] = [first, at]; }
         if (field === "readableAt") {
           painted = body;
+          paintedFrames = [first, at];
+          if (firstObservation) firstPainted = body;
           const proof = { admitted: body.admitted, row_key: body.key, scope: body.receipt?.scope ?? null,
             committed_turn: body.turnKey, real_response_observed: Boolean(body.receipt),
             presented_answer: body.presentedAnswer, canonical_qualified: body.qualified };
           if (firstObservation) current.readable = proof;
-          else current.readable_after_control = { ...proof, frames: [first, at], control_sequence: body.controlSequence };
+          else if (pendingBusy().length) current.readable_after_retry = { ...proof, frames: [first, at] };
+          else if (body.controlSequence) current.readable_after_control = { ...proof, frames: [first, at], control_sequence: body.controlSequence };
+          else current.readable_after_replacement = { ...proof, frames: [first, at] };
+          recoverBusy(finalBody, [first, at]);
         }
         if (field === "usableAt") current.usable_subject = { row_key: body.key, response_scope: body.receipt?.scope ?? null,
           consumer_scope_admitted: body.admitted, committed_turn: body.turnKey,
           presented_answer: body.presentedAnswer, canonical_qualified: body.qualified };
         if (field === "previewAt") current.preview_scope = body.receipt.scope;
         if (field === "qualifiedAt") {
-          current.qualified_turn = body.turnKey;
-          current.qualified_consumer_scope_admitted = body.admitted;
-          current.qualified_response_scope = body.receipt.scope;
+          if (firstObservation) {
+            current.qualified_turn = body.turnKey;
+            current.qualified_consumer_scope_admitted = body.admitted;
+            current.qualified_response_scope = body.receipt.scope;
+          }
+          qualifyAfterRetry(body, [first, at]);
         }
       });
     });
   };
-  const validInteraction = (body) => interaction?.phase === phase && interaction.received && same(interaction.body, body)
-    && (interaction.kind === "input" ? interaction.node.value === config.probe && document.activeElement === interaction.node
-      : interaction.node.scrollTop !== interaction.before);
+  const validInteraction = (body, stage = "sample") => {
+    if (!interaction) return false;
+    const check = { at: now(), stage, candidate: Boolean(body), same_subject: same(interaction.body, body),
+      same_paint: same(painted, body), received: interaction.received, connected: interaction.node.isConnected,
+      control_visible: visible(interaction.node),
+      admitted: body?.admitted === true, transcript_error: body?.transcriptError === true, pending_retry: pendingBusy().length > 0,
+      before: interaction.kind === "wheel" ? interaction.before : null,
+      scroll_top: interaction.kind === "wheel" ? interaction.node.scrollTop : null,
+      input_matches: interaction.kind === "input" ? interaction.node.value === config.probe : null,
+      input_focused: interaction.kind === "input" ? document.activeElement === interaction.node : null };
+    const signature = JSON.stringify({ ...check, at: null });
+    if (signature !== interaction.lastCheck) {
+      updateProbeEvidence(interaction.evidence, { last_check: check }); interaction.lastCheck = signature;
+    }
+    if (stage === "frame_one" || stage === "frame_two") updateProbeEvidence(interaction.evidence, { [stage]: check.at });
+    return interaction.phase === phase && interaction.received && check.same_subject && check.same_paint
+      && check.connected && check.control_visible && !check.transcript_error && !check.pending_retry
+      && !phase.probe.error && (!phase.retry_qualified_fence || afterRetryRequest(body)) && now() < phase.probe.deadline_at
+      && (interaction.kind === "input" ? check.input_matches && check.input_focused : check.scroll_top !== check.before);
+  };
   const sample = () => {
     if (state.disposed) return;
     try {
       if (phase?.clickAt !== null && phase) {
         const body = candidate();
+        if (phase.usableAt === null && ((painted && (!same(painted, body) || body?.transcriptError))
+          || (interaction && !same(interaction.body, body)))) {
+          validInteraction(body, "invalidated"); invalidateProbe(body?.transcriptError ? "transcript_error" : "subject_replaced");
+        }
         if (body) {
+          if (body.transcriptError || (pendingBusy().length && !canRecoverBusy(body))) {
+            frameId = requestAnimationFrame(sample); return;
+          }
           if (body.receipt) stamp("readableAt", body);
+          if (pendingBusy().length) { frameId = requestAnimationFrame(sample); return; }
           if (body.receipt && body.receipt.scope.admission !== null && (!body.turnKey || body.presentedAnswer)) stamp("previewAt", body);
           if (body.qualified) stamp("qualifiedAt", body);
-          if (painted && same(painted, body) && validInteraction(body)) stamp("usableAt", body);
+          if (validInteraction(body)) stamp("usableAt", body);
         }
       }
     } catch (error) { fail(error); }
@@ -615,15 +758,20 @@ export function installChatPreviewTiming(config) {
   };
   const input = (event) => {
     if (!event.isTrusted || !phase || !painted || event.target !== interaction?.node || interaction?.kind !== "input"
-      || event.target.value !== config.probe) return;
-    interaction.received = true;
+      || event.target.value !== config.probe || !same(interaction.body, candidate()) || pendingBusy().length
+      || candidate()?.transcriptError) return;
+    interaction.received = true; interaction.dispatched = true;
     phase.trustedInteractionAt = now(); phase.interaction = "input";
+    updateProbeEvidence(interaction.evidence, { trusted_at: phase.trustedInteractionAt, trusted: true });
   };
   const wheel = (event) => {
     if (!event.isTrusted || !phase || !painted || interaction?.kind !== "wheel"
-      || !(interaction.node === event.target || interaction.node.contains(event.target))) return;
-    interaction.received = true;
+      || !(interaction.node === event.target || interaction.node.contains(event.target))
+      || !same(interaction.body, candidate()) || pendingBusy().length || candidate()?.transcriptError) return;
+    interaction.received = true; interaction.dispatched = true;
     phase.trustedInteractionAt = now(); phase.interaction = "wheel";
+    updateProbeEvidence(interaction.evidence, { trusted_at: phase.trustedInteractionAt, trusted: true,
+      event_delta_y: Number.isFinite(event.deltaY) ? event.deltaY : null, scroll_at_event: interaction.node.scrollTop });
   };
   document.addEventListener("click", clicked, true);
   document.addEventListener("input", input, true);
@@ -631,12 +779,14 @@ export function installChatPreviewTiming(config) {
   const noteCandidateDetails = (details) => {
     if (!state.disposed && config.captureDetails) { latestApiCandidate = details; latestApiAt = now(); }
   };
-  const receive = (receipt, details = null) => {
+  const receive = (receipt, details = null, request = null) => {
     if (state.disposed) return;
     if (details !== null) noteCandidateDetails(details);
     try {
-      record(state.receipts, receiptIndex, receipt, "receipt");
-      if (receipt.control === "unscoped_reset") { painted = null; interaction = null; }
+      const entry = record(state.receipts, receiptIndex, receipt, "receipt");
+      if (request) entry.last_request = { sequence: request.request_sequence, at: request.request_at,
+        phase_index: request.phase_index, operation: request.operation };
+      if (receipt.control === "unscoped_reset") invalidateProbe("unscoped_reset");
     }
     catch (error) { fail(error); }
   };
@@ -652,14 +802,16 @@ export function installChatPreviewTiming(config) {
       try {
         noteRequest({ session: args.sessionId, args });
         const request = { request_sequence: state.raw_request_count, request_at: state.calls.at(-1)?.last_at,
-          args: state.calls.at(-1)?.args };
+          args: state.calls.at(-1)?.args, phase_index: state.phases.indexOf(phase), phase_label: phase?.label,
+          owned_request: args.sessionId === config.sessionId, operation: "load_agent_chat_page",
+          purpose: args.detailRef != null ? "detail" : args.cursor != null ? "older" : args.recentPreview === true ? "recent_preview" : "page" };
         return promise.then((page) => {
           try {
             if (config.captureDetails) noteCandidateDetails(config.inspect(page, config));
-            receive(config.reduce(page, config));
+            receive(config.reduce(page, config), null, request);
           }
           catch (error) { fail(error, request); }
-        }, (error) => fail(error));
+        }, (error) => fail(error, request));
       } catch (error) { fail(error); }
     } });
     if (!subscription.active) throw new Error("Chat observation subscription rejected");
@@ -675,9 +827,10 @@ export function installChatPreviewTiming(config) {
     noteRequest,
     arm(label) {
       if (state.disposed || phase?.checking && Object.values(phase.checking).some(Boolean)) throw new Error("observer not idle");
-      painted = null; interaction = null; openingDiagnostic = null;
+      painted = null; firstPainted = null; paintedFrames = null; interaction = null; openingDiagnostic = null; proofEpoch++;
       phase = { label, clickAt: null, readableAt: null, usableAt: null, previewAt: null, qualifiedAt: null,
-        trustedInteractionAt: null, interaction: null, frames: {}, checking: {} };
+        trustedInteractionAt: null, interaction: null, frames: {}, checking: {},
+        probe: { limit: 3, deadline_at: null, attempts: [], evidence_bytes: 0, evidence_overflow_count: 0, error: null } };
       boundedPush(state.phases, phase, 4); state.phase = phase;
     },
     wait(field, timeoutMs) {
@@ -704,27 +857,52 @@ export function installChatPreviewTiming(config) {
             if (!state.disposed && phase === current) openingDiagnostic = captureDiagnostic("observer_invalidated", { field, deadline_at: deadline });
             settled = true; clearTimeout(timeout); clearTimeout(evidence); reject(new Error("timing observation invalidated")); return;
           }
-          if (Number.isFinite(current?.[field])) { settled = true; clearTimeout(timeout); clearTimeout(evidence); resolve(current[field]); return; }
+          const currentQualification = field !== "qualifiedAt" || !current?.retry_qualified_fence
+            || current.qualified_after_retry?.retry_fence === current.retry_qualified_fence;
+          if (Number.isFinite(current?.[field]) && currentQualification && pendingBusy().length === 0 && !candidate()?.transcriptError) {
+            settled = true; clearTimeout(timeout); clearTimeout(evidence); resolve(current[field]); return;
+          }
           requestAnimationFrame(check);
         };
         check();
       });
     },
     prepareInteraction() {
+      if (!phase) return null;
+      phase.probe.deadline_at ??= now() + 5_000;
       const body = candidate();
-      if (!painted || !body?.receipt || interaction?.received) return null;
+      if (pendingBusy().length || body?.transcriptError) return null;
+      if (Number.isFinite(phase.usableAt)) return { kind: "complete" };
+      if (now() >= phase.probe.deadline_at) phase.probe.error ??= "probe_deadline_exceeded";
+      if (phase.probe.error) return { kind: "failed", code: phase.probe.error };
+      if (painted && !same(painted, body)) invalidateProbe("subject_replaced");
+      if (!painted || !body?.receipt || !same(painted, body)) return null;
+      if (phase.retry_qualified_fence && !afterRetryRequest(body)) return null;
+      if (interaction) return interaction.dispatched || interaction.received ? null : interaction.plan;
       const controls = [...body.host.querySelectorAll("textarea")].filter((node) => visible(node) && !node.disabled && !node.readOnly && node.value === "");
-      if (controls.length === 1) {
-        phase.probe_uses_later_render = !same(painted, body); painted = body;
-        interaction = { phase, body, node: controls[0], kind: "input", received: false };
-        return { kind: "input", node: controls[0] };
-      }
-      if (body.scroll.scrollHeight > body.scroll.clientHeight) {
-        phase.probe_uses_later_render = !same(painted, body); painted = body;
-        interaction = { phase, body, node: body.scroll, kind: "wheel", before: body.scroll.scrollTop, received: false };
-        return { kind: "wheel", node: body.scroll, delta: body.scroll.scrollTop > 0 ? -4 : 4 };
-      }
-      return null;
+      const kind = controls.length === 1 ? "input" : body.scroll.scrollHeight > body.scroll.clientHeight ? "wheel" : null;
+      if (!kind) return null;
+      if (phase.probe.attempts.length >= 3) return { kind: "failed", code: phase.probe.error = "probe_attempts_exhausted" };
+      const node = kind === "input" ? controls[0] : body.scroll;
+      const delta = kind === "wheel" ? body.scroll.scrollTop > 0 ? -4 : 4 : null;
+      const evidence = { attempt: phase.probe.attempts.length + 1, prepared_at: now(), kind, paint_frames: paintedFrames,
+        received_after_replacement: !same(firstPainted, body), control_sequence: body.controlSequence,
+        receipt_sequence: body.receipt.last_sequence, before: kind === "wheel" ? node.scrollTop : null,
+        height: kind === "wheel" ? node.clientHeight : null, extent: kind === "wheel" ? node.scrollHeight : null,
+        delta, trusted_at: null, trusted: false };
+      phase.probe.attempts.push(evidence); updateProbeEvidence(evidence, {});
+      phase.probe_uses_later_render = evidence.received_after_replacement;
+      const plan = { kind, node, attempt: evidence.attempt, ...(kind === "wheel" ? { delta } : {}) };
+      interaction = { phase, body, node, kind, before: node.scrollTop, received: false, dispatched: false, evidence, plan };
+      return plan;
+    },
+    isInteractionCurrent(attempt) {
+      const body = candidate();
+      if (interaction && !same(interaction.body, body)) invalidateProbe("subject_replaced_before_dispatch");
+      const valid = interaction?.evidence.attempt === attempt && !interaction.dispatched && !interaction.received
+        && same(painted, body) && !body?.transcriptError && !pendingBusy().length && now() < phase.probe.deadline_at;
+      if (valid) interaction.dispatched = true;
+      return Boolean(valid);
     },
     snapshot() {
       const host = container();
@@ -732,7 +910,8 @@ export function installChatPreviewTiming(config) {
       return JSON.parse(JSON.stringify({ ...state, subscription: subscription?.status() ?? null,
         candidate_diagnostic: openingDiagnostic ?? captureDiagnostic("snapshot"),
         diagnostics: { owned_container: Boolean(host), mode_titles: host ? [...host.querySelectorAll('button[title="Switch to Chat"], button[title="Switch to Terminal"]')]
-          .map((node) => node.getAttribute("title")) : [], scroll: scroll ? { height: scroll.clientHeight, extent: scroll.scrollHeight, top: scroll.scrollTop,
+          .map((node) => node.getAttribute("title")) : [], transcript_error_visible: scroll ? [...scroll.querySelectorAll(':scope > [role="alert"]')].some(visible) : false,
+        scroll: scroll ? { height: scroll.clientHeight, extent: scroll.scrollHeight, top: scroll.scrollTop,
           scope_marker: scroll.getAttribute("data-chat-page-scope") } : null } }));
     },
     dispose() {
@@ -755,6 +934,14 @@ export function assertChatTimingSample(snapshot, { requireTransition = true, req
   requireAdmitted = true, budgetMs = CHAT_PREVIEW_BUDGET_MS } = {}) {
   const phase = snapshot?.phase;
   need(phase && snapshot.faults.length === 0 && !snapshot.disposed, "observer_fault");
+  need(!phase.probe?.error && !phase.probe?.evidence_overflow_count, "probe_invalidated");
+  need(!snapshot.busy_retry_overflow_count && (snapshot.busy_retries ?? []).every((entry) => Number.isFinite(entry.recovered_at))
+    && !snapshot.diagnostics?.transcript_error_visible, "unresolved_chat_retry");
+  if (requireQualified && phase.retry_qualified_fence) {
+    const proof = phase.qualified_after_retry;
+    need(proof?.retry_fence === phase.retry_qualified_fence && proof.admitted === true
+      && proof.frames?.length === 2 && proof.frames[1] === proof.at, "missing_current_retry_qualification");
+  }
   if (snapshot.surface === "desktop") need(snapshot.subscription?.active && snapshot.subscription.fault_count === 0, "inactive_page_subscription");
   need(Number.isFinite(phase.clickAt), "missing_trusted_click");
   need(snapshot.calls.length > 0 && snapshot.receipts.length > 0, "missing_real_page_observation");
