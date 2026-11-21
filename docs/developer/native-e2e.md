@@ -1017,7 +1017,7 @@ canonical frame proof. Recovery qualification is recorded separately; old
 qualification cannot satisfy that gate. No late recovery input or renewed probe
 deadline is required to preserve an already healthy first usability witness.
 
-The `chat-preview-identity-native` opening case also recognizes a source-backed
+The historical V7 `chat-preview-identity-native` opening ruler also recognized a source-backed
 answer in the provisional shared renderer. It requires one unambiguous producer
 item/event-reference binding, the literal answer anchor and turn key in the DOM,
 and matching consumer session, conversation, generation, epoch, admission and
@@ -1028,6 +1028,112 @@ requires the existing non-provisional, completed canonical answer. A
 preview-to-qualified interval can describe capture promotion in place and does
 not by itself prove a source-representation switch or anchor preservation.
 Those behaviors need their separate regression evidence.
+
+### V8 native Chat opening and qualified handoff
+
+V8 separates the first usable opening (M1) from producer-qualified handoff (M2).
+Historical V7 freezes, failed cohorts and null accepted metrics remain unchanged.
+The same V8 ruler runs against normal release main and candidate artifacts. Each
+artifact uses its own compiled producer fixture seeder and persisted schema. Raw
+source generation, counts, padding and successful body are common; producer IDs
+and source record ordinals remain opaque across versions.
+
+M1 starts at the trusted normal Roster click and includes an ordinary Switch to
+Chat action when needed. It requires a current-phase owned native page response,
+literal native backing IDs and source/body evidence, separately visible recent
+narrative in the selected agent view, and trusted unsent composer input followed
+by two stable animation frames. The exact probe is
+`synthetic-unsent-timing-probe` (29 characters); Enter is never sent. M1 is strictly
+under 1,000 ms. API-only responses, spinners, empty resets, hidden/foreign views,
+stale requests and synthetic input receive no credit. Wire evidence and visible
+content are separate observations. Body text never assigns a DOM ID or alias.
+Main Remote lacks consumer scope/row DOM markers; V8 neither adds nor infers them.
+Existing markers, when present, must agree with the actual current response.
+
+Both sources use the supported native Codex PATH/resume lifecycle with the quiet
+synthetic protocol peer. The composer must really be enabled. Roster online state
+or a successful resume command alone does not prove native-owner readiness; the
+separate fixture-readiness diagnostic must establish it before measurement. No
+DOM/status/config enablement, Mock substitution or wheel probe can satisfy V8 M1.
+The peer tests synthetic startup and unsent input only, not real Codex inference
+or delivery. Pin its corrected JS/transport, interpreter and dependency hashes.
+
+M2 retains the stronger consumer scope, producer-issued admission, turn/item,
+event-reference and source-evidence checks across two fresh frames. Provisional
+items require matching page, bridge and item admissions and an exact answer anchor.
+Both provisional and canonical items must match the owned fixture source key and
+the independently captured native-identity epoch. Page, event metadata and item
+epoch agreement alone cannot establish ownership. The epoch is the digest of the
+serialized native identity, not the source-content hash. A record key must be the
+literal physical source reference or explicit producer physical-owner identity.
+A merged display representative may keep another physical owner only through
+its exact bounded producer member certificate. Without that physical witness or
+certificate, the returned event ID grants no owner evidence: it may be a logical
+display ID. Text and derived canonical keys never establish that relation.
+Canonical completion is reported separately; provisional paint never becomes
+canonical credit. The runner observes for 30 seconds from the original click on
+both sources. M2 has no one-second SLO. Candidate handoff is required; absent main
+support is reported `N/A_LEGACY_UNSUPPORTED`, never manufactured qualification.
+The Legacy-to-bound producer source switch is counted separately from a same-item
+provisional-to-canonical in-place replacement. At most one of each is allowed;
+promotion inside the shared renderer is not a second source switch. The ruler
+tracks literal item, turn and source identities and provenance, complete returned
+aliases/window order, bounded frame geometry and real disclosure expansion state.
+It can request the real disclosure for an already shared provisional opening.
+Eight awareness hints are not an 80-row membership proof. Missing anchor/expansion
+witnesses, changed bound identity, regression, repeat promotion, blank or mixed
+frames, extra reflows or exhausted bounds leave continuity unproven. A genuinely
+canonical first frame is labeled `CANONICAL_FIRST_FRAME`, with no handoff or
+expansion-preservation claim. Zero observed changes in a provisional shared view
+do not automatically prove continuity.
+
+An ordinary M1 readable timeout, input timeout or exhausted fixed probe window
+retains its failure and null accepted metric. Passive M2 observation continues
+until the original click plus 30 seconds, without new input, another opening or a
+new deadline. Its separate component result remains available even when M1 fails.
+No M2 frame or transition after that absolute cutoff receives credit. Authority,
+setup and fatal observer failures still trigger immediate owned cleanup.
+
+Controls fence old receipts and in-flight frames. A later exact current response
+needs fresh health frames. Busy recovery preserves a properly healthy first M1
+timestamp but cannot bypass current health or fresh M2 proof. Subject replacement
+requires fresh trusted input and frames, with at most three attempts in the same
+absolute five-second probe window. No deadline or initial clock is reset.
+
+Before App startup, the runner checks a predeclared fixture-generation fingerprint
+and literal byte count for each surface/mode. UUID-length owned roots and identical
+workspace path encoding lengths prevent per-turn `cwd` size bias. Literal source
+hashes and identities remain unmodified. A mismatch fails before the click, with
+no post-run exclusion or source normalization. Preparation remains bounded to
+180 seconds per home. Independent process/home/profile cold and same-process warm
+reopen definitions remain; fixture write/hash/read warms the OS filesystem cache.
+
+The comparison protocol predeclares three complete cycles per source in order
+Main1, PR3-1, PR3-2, Main2, Main3, PR3-3. Each has eight pending/qualified ×
+desktop/authenticated Remote × cold/warm openings (48 M1 observations). Freeze
+both normal release pairs, source-specific seeders and the common V8 ruler before
+the first opening. Preserve every setup failure, null accepted metric and outlier;
+never union subsets from old cohorts or adapt the counts, order or gates.
+For each label, use only all three main observations to calculate its usable-time
+range and the median of their six observed readable/usable RAF-pair intervals.
+The empirical noise band is the larger of those two values. After all six cycles,
+report candidate-minus-main median, both raw ranges and every individual miss.
+Candidate must satisfy the absolute M1 target and not exceed main beyond that
+band. Main misses remain separate preexisting observations. This low-N empirical
+guard supplies neither a confidence interval nor a speedup claim. A failed
+fixture, authority, observer or cleanup gate stops later cycles under the frozen
+plan; ordinary measured M1 misses remain in the fixed comparison, never retried.
+
+Runner configuration adds `WARDIAN_CHAT_PREVIEW_SOURCE_ROLE=baseline|candidate`,
+`WARDIAN_CHAT_PREVIEW_FIXTURE_SHAPES=<absolute-json-file>`,
+`WARDIAN_CHAT_PREVIEW_PEER_PYTHON=<pinned-python-executable>` and an explicit
+`WARDIAN_CHAT_PREVIEW_PEER_TRANSPORT`. The shapes JSON maps `desktop-pending`,
+`remote-pending`, `desktop-qualified` and `remote-qualified` to
+`{generation_sha256, source_bytes}`. Existing explicit frozen app/CLI, artifact
+manifest, source-specific seeder and skip-build settings remain required. This
+configuration is not permission to launch a measurement. DOM software-frame
+witnesses do not prove physical scanout; maintained cleanup retains the existing
+limited supervisor-closure statement. CPU/job/disk snapshots are context only.
 
 Readable timing retains the independent full raw assistant body/hash in the RPC
 proof. Before App startup, the existing Markdown parser prepares a bounded

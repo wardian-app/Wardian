@@ -7,6 +7,7 @@ import { readHomeLock, lockHolderAlive } from "./sessionHome.mjs";
 import { freezeArtifact } from "./frozenArtifacts.mjs";
 
 export const CHAT_PREVIEW_BUDGET_MS = 1_000;
+export const CHAT_PREVIEW_RULER_VERSION = 8;
 export const CHAT_PREVIEW_SEED_TIMEOUT_MS = 180_000;
 const CHAT_PREVIEW_EXECUTION_ALLOWANCE_MS = 480_000;
 export const STOPPED_SOURCE_CAPABILITY = "Provide WARDIAN_CHAT_PREVIEW_SEED_EXE for the compiled backend fixture test. It must acquire an owned stopped Codex source through the real acquisition/archive owner, retaining native identity, continuity, normalizer and policy in pending conversation-capture.json and publishing a valid Head. This harness never manufactures capture or projection state.";
@@ -59,8 +60,8 @@ export function syntheticCodexSource({ workspace, turns = 12_000, padding = 1_02
   need(Number.isSafeInteger(padding) && padding >= 128 && padding <= 2_048, "invalid_padding");
   need(uuid(nativeSessionId), "invalid_native_session");
   const targetTurn = `synthetic-completed-${nativeSessionId}`;
-  // A stopped source keeps its real disabled composer. Paragraphs make the same
-  // answer scrollable on mobile, including when work details are collapsed.
+  // The raw stopped source is independent of the later supported resume lifecycle.
+  // Paragraphs keep the same successful answer readable in both native surfaces.
   const paragraphs = [`Synthetic completed assistant answer for ${nativeSessionId}.`,
     ...Array.from({ length: 8 }, (_, index) => `Synthetic result paragraph ${index + 1}. The completed task produced its verified synthetic output.`)];
   const ending = "\n\nAll fixture operations succeeded.";
@@ -93,8 +94,19 @@ export function syntheticCodexSource({ workspace, turns = 12_000, padding = 1_02
   }
   const bytes = Buffer.from(rows.map((row) => JSON.stringify({ timestamp: stamp, ...row })).join("\n") + "\n");
   need(bytes.length <= 64 * 1024 * 1024, "source_byte_bound");
+  const generation = { history_turns: turns, actual_turns: turns + 1, padding, records: rows.length, source_bytes: bytes.length,
+    workspace_utf8_bytes: Buffer.byteLength(workspace), workspace_json_bytes: Buffer.byteLength(JSON.stringify(workspace)),
+    native_session_characters: nativeSessionId.length, body_ascii_bytes: Buffer.byteLength(body, "ascii"), body_paragraphs: paragraphs.length + 1 };
   return { bytes, provider: "codex", nativeSessionId, targetTurn, targetMessageId: `answer-${turns}`, body, sourceSha256: sha256(bytes),
-    bodySha256: sha256(body), turns: turns + 1, records: rows.length };
+    bodySha256: sha256(body), turns: turns + 1, records: rows.length, generation, generationSha256: sha256(JSON.stringify(generation)) };
+}
+
+/** Reject fixture-size/configuration bias before App startup; literal source hashes remain independent evidence. */
+export function assertChatFixtureShape(fixture, expected) {
+  need(expected && expected.generation_sha256 === fixture.generationSha256
+    && expected.source_bytes === fixture.sourceBytes, "fixture_generation_mismatch_before_clock");
+  return { generation: fixture.generation, generation_sha256: fixture.generationSha256,
+    literal_source_sha256: fixture.sourceSha256, source_bytes: fixture.sourceBytes };
 }
 
 function ownedHome(harness) {
@@ -269,7 +281,98 @@ export function seedNativePreviewSource({ harness, fixture, executable, mode = "
     receipt_sha256: sha256(fs.readFileSync(receiptFile)) };
 }
 
-/** Reduce a real response; provisional source presentation never grants canonical qualification. */
+/** Native wire evidence is separate from visible content; these IDs never identify a DOM row. */
+export function chatTimingNativeEvidence(page, fixture) {
+  const literal = (value) => typeof value === "string" && value.trim().length > 0
+    && new TextEncoder().encode(value).length <= 512;
+  const epoch = typeof page?.source_epoch === "string" && page.source_epoch.length > 0 ? page.source_epoch : null;
+  const window = Array.isArray(page?.events) ? page.events.filter((event) => event.metadata?.optimistic !== true) : [];
+  const windowValid = page?.session_id === fixture.sessionId && window.length <= 80 && new Set(window.map((event) => event.id)).size === window.length
+    && window.every((event) => event.session_id === fixture.sessionId && event.provider === fixture.provider && literal(event.id));
+  const rows = page?.session_id === fixture.sessionId && epoch && epoch === fixture.sourceEpoch && Array.isArray(page.events)
+    ? page.events.filter((event) => event.session_id === fixture.sessionId && event.provider === fixture.provider
+      && ["codex", "claude"].includes(event.provider) && event.kind === "message" && event.role === "assistant"
+      && event.metadata?.optimistic !== true && literal(event.id) && literal(event.metadata?.chat_source_ref)
+      && event.metadata?.chat_source_epoch === epoch && event.text === fixture.body) : [];
+  const ids = [...new Set(rows.map((event) => event.id))];
+  const verified = windowValid && ids.length > 0 && ids.length <= 8;
+  return { verified, session: page?.session_id ?? null, provider: fixture.provider, source_epoch: epoch,
+    backing_ids: verified ? ids : [], source_body_verified: verified,
+    source_refs: verified ? [...new Set(rows.map((event) => event.metadata.chat_source_ref))] : [],
+    window_ids: windowValid ? window.map((event) => event.id) : [], window_verified: windowValid,
+    dom_identity_binding: "NOT_CLAIMED", ordinal_or_canonical_key_inference: false };
+}
+
+/** Check a whole observed window using only returned literal IDs/aliases, never the awareness hint subset. */
+export function chatTimingHandoffEvidence(before, after) {
+  const prior = before?.nativeOpening;
+  const next = after?.nativeOpening;
+  const result = { verified: false, reason: "missing_window", before_count: prior?.window_ids?.length ?? 0,
+    after_count: next?.window_ids?.length ?? 0, mapped_count: 0, producer_alias_count: after?.aliases?.length ?? 0,
+    source_order_preserved: false, same_admission: before?.scope?.admission === after?.scope?.admission };
+  if (!prior?.verified || !prior.window_verified || !next?.window_verified) return result;
+  if (before.scope.session !== after.scope.session || before.scope.epoch !== after.scope.epoch
+    || !result.same_admission) return { ...result, reason: "source_or_admission_changed" };
+  const aliases = new Map();
+  for (const pair of after.aliases ?? []) {
+    if (aliases.has(pair.observation_id) && aliases.get(pair.observation_id) !== pair.canonical_id) {
+      return { ...result, reason: "ambiguous_producer_alias" };
+    }
+    aliases.set(pair.observation_id, pair.canonical_id);
+  }
+  const positions = prior.window_ids.map((id) => next.window_ids.indexOf(aliases.get(id) ?? id));
+  result.mapped_count = positions.filter((position) => position >= 0).length;
+  if (result.mapped_count !== prior.window_ids.length) return { ...result, reason: "incomplete_window_aliases" };
+  result.source_order_preserved = positions.every((position, index) => index === 0 || position >= positions[index - 1]);
+  return { ...result, verified: result.source_order_preserved, reason: result.source_order_preserved ? null : "source_order_changed" };
+}
+
+/** Bounded software-frame continuity evidence; no sample creates source or renderer identity. */
+export function recordChatContinuity(state, sample) {
+  if (state.closed) return;
+  state.raw_frames++;
+  state.in_place_replacements ??= 0; state.invalid_replacements ??= 0;
+  if (sample.transcript_error) state.error_frames = (state.error_frames ?? 0) + 1;
+  if (sample.content_count === 0) state.blank_frames++;
+  if (sample.content_count > 1 || sample.mixed_source_rows > 0) state.mixed_frames++;
+  const previous = state.last;
+  const representation = sample.representation;
+  const prior = previous?.representation;
+  const bound = (value) => ["provisional", "canonical"].includes(value?.kind);
+  const identity = (value) => bound(value) && ["item_key", "turn_key", "source_key", "source_epoch", "record_key"]
+    .every((key) => typeof value[key] === "string" && value[key].length > 0)
+    ? JSON.stringify([value.item_key, value.turn_key, value.source_key, value.source_epoch, value.record_key]) : null;
+  state.opening_representation ??= representation?.kind ?? "unknown";
+  if (!representation || (bound(representation) && !identity(representation))) state.invalid_replacements++;
+  const switched = prior?.kind === "legacy" && bound(representation);
+  const promoted = prior?.kind === "provisional" && representation?.kind === "canonical";
+  if (switched) { state.source_switches++; state.source_switch_at ??= sample.at; }
+  if (promoted) { state.in_place_replacements++; state.in_place_replacement_at ??= sample.at; }
+  if (previous && ((bound(prior) && (!bound(representation) || identity(prior) !== identity(representation)))
+    || (prior?.kind === "canonical" && representation?.kind !== "canonical"))) state.invalid_replacements++;
+  if (previous && !switched && !promoted && previous.geometry !== sample.geometry && !sample.disclosure_active) state.extra_reflows++;
+  if (switched || promoted) {
+    const anchor = previous.anchor_bound && sample.anchor_bound && sample.qualified
+      && Math.abs(previous.anchor_top - sample.anchor_top) <= 1;
+    const expansion = state.disclosure_requested && state.disclosure_confirmed
+      && sample.expansion_bound && sample.expanded === state.expected_expanded;
+    state.anchor_preserved = state.anchor_preserved !== false && Boolean(anchor);
+    state.expansion_preserved = state.expansion_preserved !== false && Boolean(expansion);
+  }
+  if (state.disclosure_requested && representation?.kind !== "canonical" && sample.expansion_bound && sample.expanded === state.expected_expanded) {
+    state.disclosure_frames++; if (state.disclosure_frames >= 2) state.disclosure_confirmed = true;
+  }
+  state.last = sample;
+  const key = JSON.stringify({ ...sample, at: null });
+  const last = state.samples.at(-1);
+  if (last?.key === key) { last.count++; last.last_at = sample.at; state.coalesced_frames++; return; }
+  const entry = { ...sample, key, count: 1, last_at: sample.at };
+  const bytes = new TextEncoder().encode(JSON.stringify([...state.samples, entry])).byteLength;
+  if (state.samples.length >= 64 || bytes > 16_384) { state.overflow_count++; return; }
+  state.samples.push(entry); state.bytes = bytes;
+}
+
+/** Reduce a real response; native opening evidence never grants presentation or canonical authority. */
 export function chatTimingReceipt(page, fixture) {
   if (!(page?.session_id === fixture.sessionId && Array.isArray(page.events) && page.events.length <= 640)) {
     throw new Error("foreign_or_unbounded_page");
@@ -279,6 +382,7 @@ export function chatTimingReceipt(page, fixture) {
   const absentOrNull = (key) => !Object.hasOwn(page, key) || page[key] === null;
   const absentOrFalse = (key) => !Object.hasOwn(page, key) || page[key] === false;
   const emptyList = (key) => !Object.hasOwn(page, key) || (Array.isArray(page[key]) && page[key].length === 0);
+  const nativeOpening = chatTimingNativeEvidence(page, fixture);
   const unscoped = page.conversation_id === null && page.generation === null && page.source_epoch === null;
   const control = unscoped && id(page.revision) && page.events.length === 0 && page.reset === true && page.unchanged === false
     && typeof page.progress === "string" && absentOrNull("recent_admission")
@@ -305,27 +409,52 @@ export function chatTimingReceipt(page, fixture) {
   if (control) return { control: "unscoped_reset", scope: { session: page.session_id, conversation: null, generation: null,
     epoch: null, revision: page.revision, admission: null }, progress: page.progress,
   presentation: { version: null, turns: 0, items: 0, target_turns: [] }, targets: [] };
-  if (!id(page.revision) || !nullable(page.source_epoch) || (page.recent_admission != null
+  const retention = page.events.length === 0 && page.unchanged === true && page.reset === false
+    && absentOrNull("presentation") && absentOrNull("detail") && emptyList("aliases") && emptyList("removed_ids") && emptyList("revalidated_ids");
+  const sourceLegacy = (nativeOpening.verified || retention) && page.conversation_id === null && page.generation === null
+    && id(page.source_epoch) && absentOrNull("presentation") && absentOrNull("detail")
+    && (page.recent_admission == null || id(page.recent_admission));
+  if (!id(page.revision) || !nullable(page.source_epoch) || (!sourceLegacy && (page.recent_admission != null
     ? !id(page.recent_admission) || !nullable(page.conversation_id) || !nullable(page.generation)
-    : !id(page.conversation_id) || !id(page.generation))) throw rejectScope();
+    : !id(page.conversation_id) || !id(page.generation)))) throw rejectScope();
   const targets = page.events.filter((event) => event.session_id === fixture.sessionId && event.provider === fixture.provider
     && event.kind === "message" && event.role === "assistant" && event.text === fixture.body);
   const value = page.presentation?.version === 1 ? page.presentation.payload : null;
   const items = value?.items ?? [];
   const turns = value?.turns ?? [];
+  const aliases = page.aliases ?? [];
+  if (!Array.isArray(aliases) || aliases.length > 640 || aliases.some((pair) => !id(pair.observation_id) || !id(pair.canonical_id))) {
+    throw new Error("invalid_or_unbounded_producer_aliases");
+  }
   return { scope: { session: page.session_id, conversation: page.conversation_id, generation: page.generation,
-    epoch: page.source_epoch, revision: page.revision, admission: page.recent_admission ?? null }, progress: page.progress,
+    epoch: page.source_epoch, revision: page.revision, admission: page.recent_admission ?? null }, progress: page.progress, nativeOpening, aliases,
+    retains_exact_scope: retention,
     presentation: { version: page.presentation?.version ?? null, turns: turns.length, items: items.length,
       target_turns: turns.filter((turn) => items.some((item) => item.turn_key === turn.turn_key
         && item.event_refs?.some((ref) => targets.some((event) => event.id === ref)))).slice(0, 8)
         .map((turn) => ({ key: turn.turn_key, status: turn.status, membership_complete: turn.membership_complete })) },
     targets: targets.map((event) => {
+      const sourceEvidence = (item) => {
+        const evidence = item.evidence;
+        const metadata = event.metadata ?? {};
+        const physical = typeof metadata.chat_source_ref === "string" && metadata.chat_source_ref.length > 0
+          ? metadata.chat_source_ref : metadata.chat_display_physical_id ?? null;
+        const members = metadata.chat_display_member_ids;
+        const certified = Array.isArray(members) && members.length > 0 && members.length <= 2
+          && members.every(id) && new Set(members).size === members.length && (physical === null || members.includes(physical));
+        return evidence?.kind === "source" && id(fixture.sourceKey) && evidence.source_key === fixture.sourceKey
+          && id(fixture.sourceEpoch) && page.source_epoch === fixture.sourceEpoch
+          && metadata.chat_source_epoch === fixture.sourceEpoch && evidence.source_epoch === fixture.sourceEpoch
+          && id(evidence.record_key) && (members === undefined || certified)
+          && ((id(physical) && evidence.record_key === physical) || (certified && members.includes(evidence.record_key)));
+      };
       // A producer envelope is only a candidate. Qualification additionally requires the actual committed DOM.
       const turn = ["codex", "claude"].includes(event.provider) && event.metadata?.chat_provisional !== true
         && event.metadata?.optimistic !== true && turns.find((candidate) =>
         candidate.membership_complete === true && candidate.status === "completed"
-        && items.some((item) => item.turn_key === candidate.turn_key && item.kind === "answer"
-          && item.provenance === "canonical" && item.evidence?.kind === "source" && item.event_refs?.includes(event.id)));
+        && turns.filter((known) => known.turn_key === candidate.turn_key).length === 1
+        && items.filter((item) => item.turn_key === candidate.turn_key && item.kind === "answer"
+          && item.provenance === "canonical" && sourceEvidence(item) && item.event_refs?.filter((ref) => ref === event.id).length === 1).length === 1);
       // Presentation is separate from canonical qualification. Admit only one
       // literal source-backed answer binding; the DOM must prove its own scope.
       const key = event.metadata?.chat_display_key ?? event.id;
@@ -340,14 +469,20 @@ export function chatTimingReceipt(page, fixture) {
         && items.filter((item) => Array.isArray(item.event_refs) && item.event_refs.includes(event.id)).length === 1
         ? items.filter((item) => id(item.item_key) && id(item.turn_key) && item.kind === "answer"
           && item.provenance === "provisional" && item.admission_id === page.recent_admission && item.evidence?.kind === "source"
-          && id(fixture.sourceKey) && item.evidence.source_key === fixture.sourceKey && item.evidence.source_epoch === page.source_epoch
-          && item.evidence.record_key === event.metadata.chat_source_ref
+          && sourceEvidence(item)
           && Array.isArray(item.event_refs) && item.event_refs.length === 1 && item.event_refs[0] === event.id
           && turns.filter((candidate) => candidate.turn_key === item.turn_key).length === 1) : [];
       const answer = presented.length === 1 && items.filter((item) => item.item_key === presented[0].item_key).length === 1
         ? presented[0] : null;
+      const canonicalItems = turn ? items.filter((item) => item.turn_key === turn.turn_key && item.kind === "answer"
+        && item.provenance === "canonical" && item.evidence?.kind === "source" && item.event_refs?.includes(event.id)
+        && sourceEvidence(item)) : [];
+      const canonicalAnswer = canonicalItems.length === 1 && id(canonicalItems[0].item_key)
+        && items.filter((item) => item.item_key === canonicalItems[0].item_key).length === 1 ? canonicalItems[0] : null;
       return { id: event.id, key: event.metadata?.chat_display_key ?? event.id,
         members: event.metadata?.chat_display_member_ids ?? null, qualifiedTurn: turn?.turn_key ?? null,
+        qualifiedAnswer: canonicalAnswer ? { turnKey: turn.turn_key, itemKey: canonicalAnswer.item_key,
+          eventRef: event.id, provenance: "canonical", evidence: canonicalAnswer.evidence } : null,
         presentedAnswer: answer ? { turnKey: answer.turn_key, itemKey: answer.item_key, eventRef: event.id,
           canonicalHead: value.preview_bridge.canonical_head,
           displayKey: key, provenance: answer.provenance, evidence: { kind: "source", source_key: answer.evidence.source_key,
@@ -368,7 +503,8 @@ export function recordRejectedChatScope(target, error, context = {}) {
     ? context.clock_basis : "unknown", observed_at: Number.isFinite(context.at) ? context.at : null,
   request: { sequence: Number.isSafeInteger(context.request_sequence) ? context.request_sequence : null,
     at: Number.isFinite(context.request_at) ? context.request_at : null, purpose: "chat_page",
-    association: Number.isSafeInteger(context.request_sequence) ? "same_onRequest_promise" : "unknown",
+    association: Number.isSafeInteger(context.request_sequence)
+      ? context.request_association === "same_Playwright_Request" ? "same_Playwright_Request" : "same_onRequest_promise" : "unknown",
     args_available: Boolean(args), recent_preview: args ? args.recentPreview === true : null,
     revision_present: Boolean(args && Object.hasOwn(args, "revision")),
     revision_type: revision === null ? "null" : typeof revision,
@@ -414,11 +550,13 @@ export function chatTimingCandidateDetails(page, fixture) {
 /**
  * Passive DOM observer, serialized unchanged into native WebView2 or independent Chromium.
  * Remote responses enter through a Playwright response listener; no fetch/invoke is replaced.
- * Missing admitted-scope markers produce UI-only partials, never qualified timing claims.
+ * V8 common M1 does not infer DOM identity; M2 always requires admitted-scope markers.
  */
 export function installChatPreviewTiming(config) {
   if (window.__chatPreviewTiming) throw new Error("timing observer already installed");
-  const state = { surface: config.surface, phase: null, phases: [], receipts: [], calls: [], faults: [], disposed: false,
+  const openingV8 = config.rulerVersion === 8;
+  const state = { ruler_version: openingV8 ? 8 : 7, source_key: config.sourceKey, source_epoch: config.sourceEpoch,
+    prewarmed_request_observed: false, surface: config.surface, phase: null, phases: [], receipts: [], calls: [], faults: [], disposed: false,
     raw_request_count: 0, coalesced_request_count: 0, request_overflow_count: 0,
     raw_receipt_count: 0, coalesced_receipt_count: 0, receipt_overflow_count: 0,
     raw_error_count: 0, fatal_error_count: 0, error_overflow_count: 0, rejected_scopes: [], rejected_scope_bytes: 0,
@@ -432,6 +570,9 @@ export function installChatPreviewTiming(config) {
   let firstPainted;
   let paintedFrames;
   let interaction;
+  let openingReceipt = null;
+  let continuityControl = null;
+  let continuityAnchors = [];
   let proofEpoch = 0;
   let latestApiCandidate = null;
   let latestApiAt = null;
@@ -469,8 +610,8 @@ export function installChatPreviewTiming(config) {
   };
   // Coalesce only the entire observed payload, never merely its scope or body.
   // Move a repeated payload to the tail so findLast still observes current data.
-  const record = (list, index, payload, kind) => {
-    const sequence = ++state[`raw_${kind}_count`]; const at = now();
+  const record = (list, index, payload, kind, at = now()) => {
+    const sequence = ++state[`raw_${kind}_count`];
     const key = JSON.stringify(payload); const previous = index.get(key);
     if (previous) {
       previous.count++; previous.last_at = at; previous.last_sequence = sequence;
@@ -524,7 +665,7 @@ export function installChatPreviewTiming(config) {
   };
   const parse = (value) => { try { return JSON.parse(value); } catch { return null; } };
   const scopeKey = (scope) => scope && JSON.stringify([scope.session, scope.conversation, scope.generation, scope.epoch, scope.revision, scope.admission ?? null]);
-  const candidate = () => {
+  const contentView = () => {
     const host = container();
     const scrolls = host ? [...host.querySelectorAll(".chat-transcript-scroll")].filter(visible) : [];
     if (scrolls.length !== 1) return null;
@@ -550,34 +691,114 @@ export function installChatPreviewTiming(config) {
     const anchorKey = anchor?.getAttribute("data-chat-anchor-key") ?? null;
     const controlSequence = state.receipts.reduce((latest, item) => item.control === "unscoped_reset"
       ? Math.max(latest, item.last_sequence) : latest, 0);
+    const transcriptError = [...scroll.querySelectorAll(':scope > [role="alert"]')].some(visible);
+    return { host, scroll, node, row, key, identity, committed, turnKey, anchor, anchorKey, scope, controlSequence, transcriptError };
+  };
+  const presentedCandidate = () => {
+    const view = contentView();
+    if (!view) return null;
+    const { host, scroll, node, row, key, identity, committed, turnKey, anchor, anchorKey, scope, controlSequence, transcriptError } = view;
+    if (openingV8 && (!scope || scopeKey(state.receipts.at(-1)?.scope) !== scopeKey(scope))) return null;
     const eligible = (item) => !item.control && item.last_sequence > controlSequence
+      && (!openingV8 || (item.last_request?.owned_request === true
+        && ["page", "recent_preview"].includes(item.last_request.purpose)
+        && item.last_request.phase_index === state.phases.indexOf(phase) && item.last_request.at >= phase.clickAt))
       && (!controlSequence || (scope?.session === config.sessionId && scopeKey(item.scope) === scopeKey(scope)));
     // A replacement response in this exact scope must not borrow an older binding.
-    const latestScoped = scope && state.receipts.findLast((item) => eligible(item) && scopeKey(item.scope) === scopeKey(scope));
+    const latestScoped = scope && state.receipts.findLast((item) => eligible(item) && (!openingV8 || !item.retains_exact_scope)
+      && scopeKey(item.scope) === scopeKey(scope));
     const presentedMatch = (target, receipt) => Boolean(scope?.session === config.sessionId && receipt === latestScoped
       && turnKey && key === turnKey && target.presentedAnswer?.turnKey === turnKey
       && target.presentedAnswer.eventRef === target.id && anchorKey === target.key
       && target.presentedAnswer.displayKey === anchorKey);
+    const canonicalMatch = (target) => target.qualifiedTurn === turnKey && (!openingV8
+      || (target.qualifiedAnswer?.turnKey === turnKey && target.qualifiedAnswer.eventRef === target.id
+        && anchorKey === target.key && key === turnKey));
     const matches = (target, receipt) => turnKey
-      ? target.qualifiedTurn === turnKey || presentedMatch(target, receipt)
+      ? canonicalMatch(target) || presentedMatch(target, receipt)
       : target.key === key || (identity && (identity.id === target.id || identity.members?.includes(target.id)));
     const receipt = state.receipts.findLast((item) => eligible(item) && (!scope || scopeKey(item.scope) === scopeKey(scope))
       && item.targets.filter((target) => matches(target, item)).length === 1);
     const target = receipt?.targets.find((item) => matches(item, receipt));
     const presentedAnswer = target && presentedMatch(target, receipt) ? target.presentedAnswer : null;
-    const presentedBinding = presentedAnswer ? JSON.stringify([scopeKey(receipt.scope), target.id, presentedAnswer]) : null;
+    const binding = presentedAnswer ?? (openingV8 && target?.qualifiedAnswer);
+    const presentedBinding = binding ? JSON.stringify([scopeKey(receipt.scope), target.id, binding]) : null;
     const admitted = Boolean(scope && scope.session === config.sessionId && receipt && scopeKey(scope) === scopeKey(receipt.scope));
-    const transcriptError = [...scroll.querySelectorAll(':scope > [role="alert"]')].some(visible);
     return { host, scroll, node, row, committed, scope: scopeKey(scope), receipt, target, key, turnKey, admitted, controlSequence, transcriptError,
-      anchor: presentedAnswer ? anchor : null, anchorKey: presentedAnswer ? anchorKey : null, presentedAnswer, presentedBinding,
+      anchor: binding ? anchor : null, anchorKey: binding ? anchorKey : null, presentedAnswer, presentedBinding,
       qualified: Boolean(receipt && turnKey && target?.qualifiedTurn === turnKey) };
+  };
+  const nativeOpeningCandidate = () => {
+    const view = contentView();
+    if (!view || !phase || !Number.isFinite(phase.clickAt)) return null;
+    const latest = state.receipts.at(-1);
+    const receipt = latest?.retains_exact_scope ? state.receipts.findLast((item) => !item.control && item.nativeOpening?.verified
+      && item.last_sequence > view.controlSequence && item.last_request?.phase_index === state.phases.indexOf(phase)
+      && scopeKey(item.scope) === scopeKey(latest.scope)) : latest;
+    if (!receipt || receipt.control || receipt.last_sequence <= view.controlSequence || !receipt.nativeOpening?.verified
+      || receipt.last_request?.owned_request !== true || receipt.last_request.phase_index !== state.phases.indexOf(phase) || receipt.last_request.at < phase.clickAt
+      || !["page", "recent_preview"].includes(receipt.last_request.purpose)
+      || receipt.scope.session !== config.sessionId || (view.scope && scopeKey(view.scope) !== scopeKey(receipt.scope))) return null;
+    // Content and wire native IDs coexist in this owned view. No DOM-to-ID binding is claimed.
+    return { ...view, scope: scopeKey(receipt.scope), receipt, target: null, admitted: false, qualified: false,
+      presentedAnswer: null, presentedBinding: JSON.stringify(receipt.nativeOpening), nativeOpening: receipt.nativeOpening };
+  };
+  const candidate = () => openingV8 ? nativeOpeningCandidate() : presentedCandidate();
+  const literalControl = (view, ids) => {
+    const choices = [...view.host.querySelectorAll('button[aria-expanded][data-chat-anchor-keys]')].filter(visible)
+      .filter((button) => {
+        const keys = parse(button.getAttribute("data-chat-anchor-keys"));
+        return Array.isArray(keys) && keys.some((key) => ids.includes(key));
+      });
+    return choices.at(-1) ?? null;
+  };
+  const continuitySample = (body, qualified) => {
+    const c = phase?.continuity;
+    if (!openingV8 || !c || c.closed || !Number.isFinite(phase.clickAt)) return;
+    if (now() > phase.clickAt + 30_000) { c.closed = true; return; }
+    if (!c.started && !body && !qualified?.admitted) return;
+    c.started = true;
+    const view = body ?? contentView();
+    if (!view) { config.continuity(c, { at: now(), content_count: 0, renderer: "missing", mixed_source_rows: 0 }); return; }
+    const rect = view.node.getBoundingClientRect();
+    const ids = [...new Set([...(openingReceipt?.nativeOpening?.window_ids ?? []),
+      ...(body?.receipt?.nativeOpening?.window_ids ?? [])])];
+    const aliases = new Map((qualified?.receipt?.aliases ?? []).map((pair) => [pair.observation_id, pair.canonical_id]));
+    const wanted = continuityAnchors.map((id) => aliases.get(id) ?? id);
+    const control = continuityControl?.isConnected ? continuityControl : wanted.length ? literalControl(view, wanted) : null;
+    const keys = parse(control?.getAttribute("data-chat-anchor-keys"));
+    const expansionBound = wanted.length > 0 && Array.isArray(keys) && wanted.every((id) => keys.includes(id));
+    const visibleBodies = [...view.scroll.querySelectorAll(".chat-message-content")].filter((node) => visible(node)
+      && node.textContent === config.body.split("\n\n").join("\n"));
+    const legacyRows = [...view.scroll.querySelectorAll("[data-chat-row-identity]")].filter(visible)
+      .filter((row) => {
+        const identity = parse(row.getAttribute("data-chat-row-identity"));
+        return !row.querySelector('[data-testid="chat-committed-turn"]')
+          && (ids.includes(identity?.id) || identity?.members?.some((id) => ids.includes(id)));
+      });
+    const bound = view.identity && body?.nativeOpening?.backing_ids.some((id) => view.identity.id === id || view.identity.members?.includes(id));
+    const item = qualified?.admitted ? qualified.presentedAnswer ?? qualified.target?.qualifiedAnswer : null;
+    const representation = item ? { kind: item.provenance, item_key: item.itemKey, turn_key: item.turnKey,
+      source_key: item.evidence.source_key, source_epoch: item.evidence.source_epoch, record_key: item.evidence.record_key }
+      : !view.committed && body?.nativeOpening?.verified ? { kind: "legacy", source_epoch: body.nativeOpening.source_epoch,
+        backing_ids: body.nativeOpening.backing_ids } : { kind: "unknown" };
+    config.continuity(c, { at: now(), content_count: visibleBodies.length, renderer: view.committed ? "shared" : "legacy",
+      representation,
+      qualified: Boolean(qualified?.admitted && (qualified.presentedAnswer || qualified.target?.qualifiedAnswer)),
+      transcript_error: view.transcriptError === true,
+      mixed_source_rows: view.committed ? legacyRows.length : 0, anchor_bound: Boolean(bound || (item && qualified.anchorKey === qualified.target.key)),
+      anchor_top: +rect.top.toFixed(3), geometry: JSON.stringify([rect.top, rect.left, rect.width, rect.height, view.scroll.scrollTop]),
+      expanded: control?.getAttribute("aria-expanded") ?? null, expansion_bound: expansionBound,
+      disclosure_active: c.disclosure_requested && !c.disclosure_confirmed });
   };
   const same = (left, right) => Boolean(left && right && ["host", "scroll", "node", "row", "committed", "scope", "key", "turnKey", "admitted", "qualified", "anchor", "anchorKey", "presentedBinding", "controlSequence"]
     .every((key) => left[key] === right[key]));
   const pendingBusy = () => state.busy_retries.filter((entry) => entry.recovered_at === null);
   const afterRetryRequest = (body) => Boolean(body?.receipt?.last_request && state.busy_retries.every((entry) =>
     body.receipt.last_request.sequence > entry.requests_at_rejection && body.receipt.last_request.at > entry.rejected_at));
-  const canRecoverBusy = (body) => Boolean(!state.busy_retry_overflow_count && body?.admitted && body.target && !body.transcriptError
+  const canRecoverBusy = (body) => Boolean(!state.busy_retry_overflow_count
+    && (openingV8 ? body?.nativeOpening?.verified || (body?.admitted && (body.presentedAnswer || body.target?.qualifiedAnswer))
+      : body?.admitted && body.target) && !body.transcriptError
     && body.receipt?.last_request && pendingBusy().every((entry) =>
       body.receipt.last_request.sequence > entry.requests_at_rejection && body.receipt.last_request.at > entry.rejected_at));
   const updateProbeEvidence = (entry, change) => {
@@ -593,6 +814,7 @@ export function installChatPreviewTiming(config) {
   const invalidateProbe = (reason) => {
     if (interaction) updateProbeEvidence(interaction.evidence, { invalidated_at: now(), invalidation: reason });
     painted = null; interaction = null; proofEpoch++;
+    if (openingV8 && reason === "unscoped_reset") openingReceipt = null;
     if (phase) {
       for (const key of Object.keys(phase.checking)) phase.checking[key] = false;
       if (phase.usableAt === null && phase.probe.attempts.length >= 3) phase.probe.error = "probe_attempts_exhausted";
@@ -652,12 +874,20 @@ export function installChatPreviewTiming(config) {
         error: String(error?.message ?? error).slice(0, 256) };
     }
   };
+  const stampCandidate = (field) => openingV8 && ["qualifiedAt", "projectionAt", "healthAt"].includes(field) ? presentedCandidate() : candidate();
   const stamp = (field, body) => {
-    if (field === "qualifiedAt" && phase?.retry_qualified_fence && (!body.admitted || !afterRetryRequest(body))) return;
+    if (openingV8 && ["projectionAt", "qualifiedAt", "healthAt"].includes(field) && now() > phase?.clickAt + 30_000) return;
+    if (field === "projectionAt" && openingV8 && !openingReceipt) return;
+    if (["qualifiedAt", "projectionAt"].includes(field) && phase?.retry_qualified_fence && (!body.admitted || !afterRetryRequest(body))) return;
     const refresh = phase && ((field === "readableAt" && phase.readableAt !== null && painted === null
-      && (phase.usableAt === null || pendingBusy().length > 0))
+      && (phase.usableAt === null || pendingBusy().length > 0 || (openingV8 && body.controlSequence > 0)))
       || (field === "qualifiedAt" && phase.retry_qualified_fence
-        && phase.qualified_after_retry?.retry_fence !== phase.retry_qualified_fence && body.admitted && afterRetryRequest(body)));
+        && phase.qualified_after_retry?.retry_fence !== phase.retry_qualified_fence && body.admitted && afterRetryRequest(body))
+      || (field === "projectionAt" && phase.retry_qualified_fence
+        && phase.projection_after_retry?.retry_fence !== phase.retry_qualified_fence && body.admitted && afterRetryRequest(body))
+      || (openingV8 && phase.control_fence && ["projectionAt", "qualifiedAt"].includes(field)
+        && phase[`${field}_after_control`]?.control_fence !== phase.control_fence)
+      || (field === "healthAt" && pendingBusy().length > 0));
     if (!phase || (phase[field] !== null && !refresh) || phase.checking[field]) return;
     const current = phase;
     const epoch = proofEpoch;
@@ -665,27 +895,33 @@ export function installChatPreviewTiming(config) {
     requestAnimationFrame(() => {
       if (epoch !== proofEpoch) return;
       const first = now();
-      const currentBody = candidate();
+      const currentBody = stampCandidate(field);
       const firstInteraction = field !== "usableAt" || validInteraction(currentBody, "frame_one");
       if (state.disposed || phase !== current || !same(body, currentBody) || currentBody.transcriptError
-        || !firstInteraction || (pendingBusy().length && (field !== "readableAt" || !canRecoverBusy(currentBody)))) { current.checking[field] = false; return; }
+        || !firstInteraction || (pendingBusy().length && (!["readableAt", "healthAt"].includes(field) || !canRecoverBusy(currentBody)))) { current.checking[field] = false; return; }
       requestAnimationFrame(() => {
         if (epoch !== proofEpoch) return;
         current.checking[field] = false;
-        const finalBody = candidate();
+        const finalBody = stampCandidate(field);
         const finalInteraction = field !== "usableAt" || validInteraction(finalBody, "frame_two");
         if (state.disposed || phase !== current || !same(body, finalBody) || finalBody.transcriptError
-          || !finalInteraction || (pendingBusy().length && (field !== "readableAt" || !canRecoverBusy(finalBody)))) return;
+          || !finalInteraction || (pendingBusy().length && (!["readableAt", "healthAt"].includes(field) || !canRecoverBusy(finalBody)))) return;
         const firstObservation = current[field] === null;
         const at = now();
+        if (openingV8 && ["projectionAt", "qualifiedAt", "healthAt"].includes(field) && at > current.clickAt + 30_000) return;
         if (firstObservation) { current[field] = at; current.frames[field] = [first, at]; }
         if (field === "readableAt") {
           painted = body;
           paintedFrames = [first, at];
           if (firstObservation) firstPainted = body;
+          if (openingV8 && !openingReceipt) openingReceipt = body.receipt;
           const proof = { admitted: body.admitted, row_key: body.key, scope: body.receipt?.scope ?? null,
             committed_turn: body.turnKey, real_response_observed: Boolean(body.receipt),
-            presented_answer: body.presentedAnswer, canonical_qualified: body.qualified };
+            presented_answer: body.presentedAnswer, canonical_qualified: body.qualified,
+            ...(openingV8 ? { native_backing_ids: body.nativeOpening.backing_ids, source_refs: body.nativeOpening.source_refs,
+              source_epoch: body.nativeOpening.source_epoch, source_body_verified: true, native_receipt_sequence: body.receipt.last_sequence,
+              dom_identity_binding: "NOT_CLAIMED", producer_scope: body.receipt.scope, visible_content: true,
+              renderer: body.committed ? "shared" : "legacy" } : {}) };
           if (firstObservation) current.readable = proof;
           else if (pendingBusy().length) current.readable_after_retry = { ...proof, frames: [first, at] };
           else if (body.controlSequence) current.readable_after_control = { ...proof, frames: [first, at], control_sequence: body.controlSequence };
@@ -696,6 +932,16 @@ export function installChatPreviewTiming(config) {
           consumer_scope_admitted: body.admitted, committed_turn: body.turnKey,
           presented_answer: body.presentedAnswer, canonical_qualified: body.qualified };
         if (field === "previewAt") current.preview_scope = body.receipt.scope;
+        if (field === "healthAt") recoverBusy(body, [first, at]);
+        if (field === "projectionAt") {
+          const item = body.presentedAnswer ?? body.target?.qualifiedAnswer;
+          const proof = { at, frames: [first, at], admitted: body.admitted, turn_key: body.turnKey,
+            item, response_scope: body.receipt.scope, handoff: config.handoff(openingReceipt, body.receipt),
+            request_sequence: body.receipt.last_request?.sequence ?? null, receipt_sequence: body.receipt.last_sequence };
+          if (firstObservation) current.projection_proof = proof;
+          if (current.retry_qualified_fence) current.projection_after_retry = { ...proof, retry_fence: current.retry_qualified_fence };
+          if (current.control_fence) current.projectionAt_after_control = { ...proof, control_fence: current.control_fence };
+        }
         if (field === "qualifiedAt") {
           if (firstObservation) {
             current.qualified_turn = body.turnKey;
@@ -703,6 +949,8 @@ export function installChatPreviewTiming(config) {
             current.qualified_response_scope = body.receipt.scope;
           }
           qualifyAfterRetry(body, [first, at]);
+          if (openingV8 && current.control_fence) current.qualifiedAt_after_control = { at, frames: [first, at],
+            control_fence: current.control_fence, admitted: body.admitted, turn_key: body.turnKey, response_scope: body.receipt.scope };
         }
       });
     });
@@ -732,6 +980,8 @@ export function installChatPreviewTiming(config) {
     try {
       if (phase?.clickAt !== null && phase) {
         const body = candidate();
+        const projected = openingV8 ? presentedCandidate() : null;
+        if (openingV8) continuitySample(body, projected);
         if (phase.usableAt === null && ((painted && (!same(painted, body) || body?.transcriptError))
           || (interaction && !same(interaction.body, body)))) {
           validInteraction(body, "invalidated"); invalidateProbe(body?.transcriptError ? "transcript_error" : "subject_replaced");
@@ -742,15 +992,31 @@ export function installChatPreviewTiming(config) {
           }
           if (body.receipt) stamp("readableAt", body);
           if (pendingBusy().length) { frameId = requestAnimationFrame(sample); return; }
-          if (body.receipt && body.receipt.scope.admission !== null && (!body.turnKey || body.presentedAnswer)) stamp("previewAt", body);
-          if (body.qualified) stamp("qualifiedAt", body);
+          if (!openingV8 && body.receipt && body.receipt.scope.admission !== null && (!body.turnKey || body.presentedAnswer)) stamp("previewAt", body);
+          if (!openingV8 && body.qualified) stamp("qualifiedAt", body);
           if (validInteraction(body)) stamp("usableAt", body);
+        }
+        if (openingV8) {
+          const qualified = projected;
+          if (qualified?.admitted && !qualified.transcriptError && (qualified.presentedAnswer || qualified.target?.qualifiedAnswer)) {
+            if (pendingBusy().length && canRecoverBusy(qualified)) stamp("healthAt", qualified);
+            else if (!pendingBusy().length) {
+              stamp("projectionAt", qualified);
+              if (qualified.qualified) stamp("qualifiedAt", qualified);
+            }
+          }
         }
       }
     } catch (error) { fail(error); }
     frameId = requestAnimationFrame(sample);
   };
   const clicked = (event) => {
+    if (openingV8 && event.isTrusted && phase && continuityControl && event.target?.closest("button") === continuityControl) {
+      phase.continuity.disclosure_requested = true;
+      phase.continuity.expected_expanded = continuityControl.getAttribute("aria-expanded") === "true" ? "false" : "true";
+      phase.continuity.disclosure_trusted_at = now();
+      return;
+    }
     if (!event.isTrusted || !phase || phase.clickAt !== null) return;
     const button = event.target?.closest("[aria-label]");
     const label = config.surface === "desktop" ? `Agent ${config.name}` : `Open ${config.name} details`;
@@ -783,16 +1049,37 @@ export function installChatPreviewTiming(config) {
     if (state.disposed) return;
     if (details !== null) noteCandidateDetails(details);
     try {
+      if (request?.request_epoch_ms !== undefined) {
+        const at = request.request_epoch_ms - performance.timeOrigin;
+        if (!Number.isFinite(at) || at < 0 || at > now() + 1) throw new Error("unknown_request_clock_association");
+        const index = state.phases.findLastIndex((item) => Number.isFinite(item.clickAt) && item.clickAt <= at);
+        request = { ...request, request_at: at, phase_index: index, phase_label: state.phases[index]?.label };
+      }
+      if (openingV8 && request && request.phase_index < 0) state.prewarmed_request_observed = true;
       const entry = record(state.receipts, receiptIndex, receipt, "receipt");
       if (request) entry.last_request = { sequence: request.request_sequence, at: request.request_at,
-        phase_index: request.phase_index, operation: request.operation };
-      if (receipt.control === "unscoped_reset") invalidateProbe("unscoped_reset");
+        phase_index: request.phase_index, operation: request.operation, purpose: request.purpose, owned_request: request.owned_request,
+        clock_basis: request.request_epoch_ms === undefined ? "browser:performance.now" : "Playwright request startTime minus browser performance.timeOrigin" };
+      if (receipt.control === "unscoped_reset") {
+        if (openingV8 && phase) phase.control_fence = entry.last_sequence;
+        invalidateProbe("unscoped_reset");
+      }
     }
     catch (error) { fail(error); }
   };
   const noteRequest = (details = {}) => {
     if (state.disposed) return;
-    try { record(state.calls, callIndex, { session: config.sessionId, ...details }, "request"); }
+    try {
+      const { request_epoch_ms: requestEpoch, ...payload } = details;
+      const at = requestEpoch === undefined ? now() : requestEpoch - performance.timeOrigin;
+      if (!Number.isFinite(at) || at < 0 || at > now() + 1) throw new Error("unknown_request_clock_association");
+      const entry = record(state.calls, callIndex, { session: config.sessionId, ...payload }, "request", at);
+      const index = state.phases.findLastIndex((item) => Number.isFinite(item.clickAt) && item.clickAt <= at);
+      return { request_sequence: state.raw_request_count, request_at: at, args: entry.args,
+        phase_index: index, phase_label: state.phases[index]?.label,
+        owned_request: entry.session === config.sessionId, operation: "load_agent_chat_page",
+        purpose: details.purpose ?? (entry.args?.detailRef != null ? "detail" : entry.args?.cursor != null ? "older" : "page") };
+    }
     catch (error) { fail(error); }
   };
   if (config.surface === "desktop") {
@@ -827,14 +1114,19 @@ export function installChatPreviewTiming(config) {
     noteRequest,
     arm(label) {
       if (state.disposed || phase?.checking && Object.values(phase.checking).some(Boolean)) throw new Error("observer not idle");
-      painted = null; firstPainted = null; paintedFrames = null; interaction = null; openingDiagnostic = null; proofEpoch++;
+      painted = null; firstPainted = null; paintedFrames = null; interaction = null; openingReceipt = null; continuityControl = null;
+      continuityAnchors = []; openingDiagnostic = null; proofEpoch++;
       phase = { label, clickAt: null, readableAt: null, usableAt: null, previewAt: null, qualifiedAt: null,
+        projectionAt: null, projection_proof: null, healthAt: null,
+        continuity: { samples: [], raw_frames: 0, coalesced_frames: 0, blank_frames: 0, mixed_frames: 0,
+          source_switches: 0, in_place_replacements: 0, invalid_replacements: 0, extra_reflows: 0, overflow_count: 0, bytes: 0, disclosure_requested: false,
+          disclosure_frames: 0, disclosure_confirmed: false, anchor_preserved: null, expansion_preserved: null, closed: false },
         trustedInteractionAt: null, interaction: null, frames: {}, checking: {},
         probe: { limit: 3, deadline_at: null, attempts: [], evidence_bytes: 0, evidence_overflow_count: 0, error: null } };
       boundedPush(state.phases, phase, 4); state.phase = phase;
     },
     wait(field, timeoutMs) {
-      if (!["readableAt", "usableAt", "qualifiedAt"].includes(field) || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      if (!["readableAt", "usableAt", "qualifiedAt", "projectionAt"].includes(field) || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
         return Promise.reject(new Error("invalid timing wait"));
       }
       const current = phase;
@@ -857,9 +1149,13 @@ export function installChatPreviewTiming(config) {
             if (!state.disposed && phase === current) openingDiagnostic = captureDiagnostic("observer_invalidated", { field, deadline_at: deadline });
             settled = true; clearTimeout(timeout); clearTimeout(evidence); reject(new Error("timing observation invalidated")); return;
           }
-          const currentQualification = field !== "qualifiedAt" || !current?.retry_qualified_fence
-            || current.qualified_after_retry?.retry_fence === current.retry_qualified_fence;
-          if (Number.isFinite(current?.[field]) && currentQualification && pendingBusy().length === 0 && !candidate()?.transcriptError) {
+          const currentQualification = !current?.retry_qualified_fence || (field === "qualifiedAt"
+            ? current.qualified_after_retry?.retry_fence === current.retry_qualified_fence
+            : field !== "projectionAt" || current.projection_after_retry?.retry_fence === current.retry_qualified_fence);
+          const currentControl = !openingV8 || !current?.control_fence || !["projectionAt", "qualifiedAt"].includes(field)
+            || current[`${field}_after_control`]?.control_fence === current.control_fence;
+          if (Number.isFinite(current?.[field]) && currentQualification && currentControl && pendingBusy().length === 0
+            && (!openingV8 || candidate()) && !candidate()?.transcriptError) {
             settled = true; clearTimeout(timeout); clearTimeout(evidence); resolve(current[field]); return;
           }
           requestAnimationFrame(check);
@@ -880,7 +1176,7 @@ export function installChatPreviewTiming(config) {
       if (phase.retry_qualified_fence && !afterRetryRequest(body)) return null;
       if (interaction) return interaction.dispatched || interaction.received ? null : interaction.plan;
       const controls = [...body.host.querySelectorAll("textarea")].filter((node) => visible(node) && !node.disabled && !node.readOnly && node.value === "");
-      const kind = controls.length === 1 ? "input" : body.scroll.scrollHeight > body.scroll.clientHeight ? "wheel" : null;
+      const kind = controls.length === 1 ? "input" : !openingV8 && body.scroll.scrollHeight > body.scroll.clientHeight ? "wheel" : null;
       if (!kind) return null;
       if (phase.probe.attempts.length >= 3) return { kind: "failed", code: phase.probe.error = "probe_attempts_exhausted" };
       const node = kind === "input" ? controls[0] : body.scroll;
@@ -896,6 +1192,35 @@ export function installChatPreviewTiming(config) {
       interaction = { phase, body, node, kind, before: node.scrollTop, received: false, dispatched: false, evidence, plan };
       return plan;
     },
+    prepareExpansion() {
+      const body = candidate();
+      const strong = openingV8 ? presentedCandidate() : null;
+      if (!openingV8 || !body || !Number.isFinite(phase?.usableAt)
+        || (body.committed && !strong?.presentedAnswer)) return null;
+      const control = literalControl(body, body.receipt.nativeOpening.window_ids);
+      if (!control) return null;
+      continuityControl = control; continuityAnchors = parse(control.getAttribute("data-chat-anchor-keys"));
+      return { node: control, literal_anchors: continuityAnchors };
+    },
+    finishObservation(durationMs = 30_000) {
+      if (!openingV8 || !phase || !Number.isFinite(phase.clickAt) || durationMs !== 30_000) return Promise.reject(new Error("invalid observation window"));
+      const current = phase;
+      return new Promise((resolve, reject) => {
+        let frame;
+        const check = () => {
+          if (state.disposed || phase !== current || state.faults.length || state.prewarmed_request_observed
+            || state.request_overflow_count || state.receipt_overflow_count || state.busy_retry_overflow_count) {
+            clearTimeout(timer); cancelAnimationFrame(frame); reject(new Error("timing observation invalidated")); return;
+          }
+          if (now() >= current.clickAt + durationMs) {
+            clearTimeout(timer); cancelAnimationFrame(frame); current.continuity.closed = true; resolve(); return;
+          }
+          frame = requestAnimationFrame(check);
+        };
+        const timer = setTimeout(check, Math.max(0, current.clickAt + durationMs - now()));
+        check();
+      });
+    },
     isInteractionCurrent(attempt) {
       const body = candidate();
       if (interaction && !same(interaction.body, body)) invalidateProbe("subject_replaced_before_dispatch");
@@ -907,7 +1232,10 @@ export function installChatPreviewTiming(config) {
     snapshot() {
       const host = container();
       const scroll = host?.querySelector(".chat-transcript-scroll");
+      const strong = openingV8 ? presentedCandidate() : null;
       return JSON.parse(JSON.stringify({ ...state, subscription: subscription?.status() ?? null,
+        health: openingV8 ? { current_native: Boolean(nativeOpeningCandidate()),
+          current_projection: Boolean(strong?.admitted && (strong.presentedAnswer || strong.target?.qualifiedAnswer)) } : null,
         candidate_diagnostic: openingDiagnostic ?? captureDiagnostic("snapshot"),
         diagnostics: { owned_container: Boolean(host), mode_titles: host ? [...host.querySelectorAll('button[title="Switch to Chat"], button[title="Switch to Terminal"]')]
           .map((node) => node.getAttribute("title")) : [], transcript_error_visible: scroll ? [...scroll.querySelectorAll(':scope > [role="alert"]')].some(visible) : false,
@@ -926,7 +1254,7 @@ export function installChatPreviewTiming(config) {
 /** Compile functions at the automation script boundary, without page eval or changes to product loaders. */
 export function chatPreviewObserverScript(config) {
   const serialized = JSON.stringify(config);
-  return `const reduce = (${chatTimingReceipt.toString()});\nconst inspect = (${chatTimingCandidateDetails.toString()});\nconst recordRejection = (${recordRejectedChatScope.toString()});\n(${installChatPreviewTiming.toString()})({ ...${serialized}, reduce, inspect, recordRejection });`;
+  return `const chatTimingNativeEvidence = (${chatTimingNativeEvidence.toString()});\nconst handoff = (${chatTimingHandoffEvidence.toString()});\nconst continuity = (${recordChatContinuity.toString()});\nconst reduce = (${chatTimingReceipt.toString()});\nconst inspect = (${chatTimingCandidateDetails.toString()});\nconst recordRejection = (${recordRejectedChatScope.toString()});\n(${installChatPreviewTiming.toString()})({ ...${serialized}, reduce, inspect, recordRejection, handoff, continuity });`;
 }
 
 /** Reject UI-only, stale, API-only, canonical-first and incomplete samples explicitly. */
@@ -967,6 +1295,119 @@ export function assertChatTimingSample(snapshot, { requireTransition = true, req
     qualified_ms: qualified ? phase.qualifiedAt - phase.clickAt : null,
     preview_to_qualified_ms: transition ? phase.qualifiedAt - phase.previewAt : null,
     transition: transition ? "OBSERVED" : qualified ? "CANONICAL_FIRST_NO_TRANSITION_SAMPLE" : "UNOBSERVED" };
+}
+
+/** V8 M1 uses the common wire/content/input floor. M2 alone consumes admitted renderer authority. */
+export function assertChatOpeningSample(snapshot, { sourceRole = "candidate", requireProjection = sourceRole === "candidate",
+  requireCanonical = false, requireStableHandoff = true, budgetMs = CHAT_PREVIEW_BUDGET_MS } = {}) {
+  const p = snapshot?.phase;
+  need(snapshot?.ruler_version === 8 && p && !snapshot.disposed && snapshot.faults.length === 0, "v8_observer_fault");
+  need(["baseline", "candidate"].includes(sourceRole), "invalid_source_role");
+  need(!snapshot.prewarmed_request_observed && Number.isFinite(p.clickAt) && snapshot.calls.length > 0
+    && snapshot.receipts.length > 0 && snapshot.calls.every((call) => call.at >= snapshot.phases[0].clickAt
+      && call.last_at >= snapshot.phases[0].clickAt), "chat_prewarmed_or_unobserved");
+  need(!p.probe?.error && !p.probe?.evidence_overflow_count && !snapshot.busy_retry_overflow_count
+    && (snapshot.busy_retries ?? []).every((entry) => Number.isFinite(entry.recovered_at))
+    && snapshot.fatal_error_count === 0 && snapshot.raw_error_count === (snapshot.busy_retries?.length ?? 0)
+    && !snapshot.error_overflow_count && !snapshot.request_overflow_count && !snapshot.receipt_overflow_count
+    && !snapshot.diagnostics?.transcript_error_visible, "unhealthy_opening");
+  if (snapshot.surface === "desktop") need(snapshot.subscription?.active && snapshot.subscription.fault_count === 0, "inactive_page_subscription");
+  const frames = (field) => Number.isFinite(p[field]) && p[field] >= p.clickAt && p.frames[field]?.length === 2
+    && p.frames[field][0] <= p.frames[field][1] && p.frames[field][1] === p[field];
+  need(frames("readableAt") && frames("usableAt"), "missing_m1_frames");
+  need(p.readable?.visible_content === true && p.readable.source_body_verified === true
+    && p.readable.native_backing_ids?.length > 0 && p.readable.native_backing_ids.length <= 8
+    && p.readable.dom_identity_binding === "NOT_CLAIMED", "missing_native_wire_and_content_floor");
+  need(snapshot.receipts.some((receipt) => receipt.nativeOpening?.verified && receipt.last_request?.owned_request === true
+    && receipt.last_request.phase_index === snapshot.phases.length - 1 && receipt.last_request.at >= p.clickAt
+    && receipt.first_sequence <= p.readable.native_receipt_sequence && receipt.last_sequence >= p.readable.native_receipt_sequence
+    && JSON.stringify(receipt.nativeOpening.backing_ids) === JSON.stringify(p.readable.native_backing_ids)), "missing_current_native_request_receipt");
+  need(p.interaction === "input" && Number.isFinite(p.trustedInteractionAt) && p.trustedInteractionAt >= p.readableAt
+    && p.usableAt >= p.trustedInteractionAt, "missing_trusted_composer_input");
+  need(snapshot.health?.current_native || snapshot.health?.current_projection, "missing_current_healthy_view");
+  if (p.control_fence) need(p.readable_after_control?.control_sequence === p.control_fence
+    && p.readable_after_control.frames?.length === 2
+    || p.projectionAt_after_control?.control_fence === p.control_fence, "missing_fresh_post_control_health");
+  need(p.readableAt - p.clickAt < budgetMs && p.usableAt - p.clickAt < budgetMs, "chat_open_budget_exceeded");
+  return { ruler_version: 8, m1: { readable_ms: p.readableAt - p.clickAt, usable_ms: p.usableAt - p.clickAt,
+    readable_frame_interval_ms: p.frames.readableAt[1] - p.frames.readableAt[0],
+    usable_frame_interval_ms: p.frames.usableAt[1] - p.frames.usableAt[0],
+    probe: "trusted_composer_input", renderer: p.readable.renderer,
+    evidence: "OWNED_NATIVE_WIRE_PLUS_SEPARATE_VISIBLE_CONTENT", dom_identity_binding: "NOT_CLAIMED" },
+    m2: assertChatHandoffSample(snapshot, { sourceRole, requireProjection, requireCanonical, requireStableHandoff }) };
+}
+
+/** Independent M2 adjudication: an ordinary missing M1/input witness grants no M2 authority. */
+export function assertChatHandoffSample(snapshot, { sourceRole = "candidate", requireProjection = sourceRole === "candidate",
+  requireCanonical = false, requireStableHandoff = true } = {}) {
+  const p = snapshot?.phase;
+  need(snapshot?.ruler_version === 8 && p && Number.isFinite(p.clickAt) && !snapshot.disposed
+    && snapshot.faults.length === 0 && !snapshot.prewarmed_request_observed && !snapshot.fatal_error_count && !snapshot.request_overflow_count
+    && !snapshot.receipt_overflow_count && !snapshot.busy_retry_overflow_count
+    && (snapshot.busy_retries ?? []).every((entry) => Number.isFinite(entry.recovered_at))
+    && !snapshot.diagnostics?.transcript_error_visible, "unhealthy_m2_observation");
+  if (snapshot.surface === "desktop") need(snapshot.subscription?.active && snapshot.subscription.fault_count === 0, "inactive_page_subscription");
+  const frames = (field) => Number.isFinite(p[field]) && p.frames[field]?.length === 2
+    && p.frames[field][0] >= p.clickAt && p.frames[field][0] <= p.frames[field][1]
+    && p.frames[field][1] === p[field] && p[field] <= p.clickAt + 30_000;
+  const proof = p.projection_proof;
+  const qualified = frames("projectionAt") && proof?.admitted === true && proof.item?.itemKey && proof.item.turnKey === proof.turn_key
+    && ["provisional", "canonical"].includes(proof.item.provenance) && proof.item.evidence?.kind === "source"
+    && proof.item.evidence.source_key === snapshot.source_key && proof.item.evidence.source_epoch === snapshot.source_epoch
+    && proof.response_scope.epoch === snapshot.source_epoch && proof.handoff?.verified === true;
+  const c = p.continuity;
+  const changes = (c?.source_switches ?? 0) + (c?.in_place_replacements ?? 0);
+  const canonicalFirst = c?.opening_representation === "canonical" && changes === 0;
+  const stable = c && !c.overflow_count && !c.invalid_replacements && c.blank_frames === 0 && c.mixed_frames === 0 && !c.error_frames
+    && c.source_switches <= 1 && c.in_place_replacements <= 1 && c.extra_reflows === 0
+    && (canonicalFirst || (changes > 0 && c.anchor_preserved === true && c.disclosure_requested && c.expansion_preserved === true));
+  if (requireProjection) {
+    need(qualified, "missing_qualified_handoff");
+    if (requireStableHandoff) need(stable, "unproven_handoff_continuity");
+    if (p.retry_qualified_fence) need(p.projection_after_retry?.retry_fence === p.retry_qualified_fence, "missing_current_retry_projection");
+    if (p.control_fence) need(p.projectionAt_after_control?.control_fence === p.control_fence, "missing_current_control_projection");
+  }
+  if (requireCanonical) {
+    need(frames("qualifiedAt") && p.qualified_consumer_scope_admitted === true && p.qualified_turn, "missing_canonical_qualification");
+    if (p.retry_qualified_fence) need(p.qualified_after_retry?.retry_fence === p.retry_qualified_fence, "missing_current_retry_qualification");
+    if (p.control_fence) need(p.qualifiedAt_after_control?.control_fence === p.control_fence, "missing_current_control_qualification");
+  }
+  return { status: qualified ? canonicalFirst ? "QUALIFIED_FIRST_FRAME" : changes > 0 ? "QUALIFIED_HANDOFF" : "QUALIFIED_PRESENTATION"
+    : sourceRole === "baseline" ? "N/A_LEGACY_UNSUPPORTED" : "UNPROVEN",
+    open_to_qualified_handoff_ms: qualified ? p.projectionAt - p.clickAt : null,
+    observed_projection_ms: frames("projectionAt") ? p.projectionAt - p.clickAt : null,
+    unproven_reason: qualified ? null : proof?.handoff?.reason ?? "missing_strong_renderer_proof",
+    provenance: qualified ? proof.item.provenance : null, canonical_qualified_ms: frames("qualifiedAt") ? p.qualifiedAt - p.clickAt : null,
+    source_switches: c?.source_switches ?? 0, in_place_replacements: c?.in_place_replacements ?? 0,
+    source_switch_ms: Number.isFinite(c?.source_switch_at) ? c.source_switch_at - p.clickAt : null,
+    in_place_replacement_ms: Number.isFinite(c?.in_place_replacement_at) ? c.in_place_replacement_at - p.clickAt : null,
+    continuity: stable ? canonicalFirst ? "CANONICAL_FIRST_FRAME" : "PROVED" : "UNPROVEN", no_admission_time_SLO: true };
+}
+
+/** Ordinary M1 misses keep their failure and the original passive M2 window; no retry or new clock. */
+export async function observeChatOpening({ measureM1, observeM2, snapshot, record, options }) {
+  let miss;
+  try { await measureM1(); }
+  catch (error) {
+    const current = await snapshot();
+    if (!["chat_readable_timeout", "chat_input_timeout", "probe_deadline_exceeded", "probe_attempts_exhausted", "chat_open_budget_exceeded"].includes(error.code)
+      || !Number.isFinite(current?.phase?.clickAt) || current.disposed || current.faults?.length || current.fatal_error_count
+      || current.prewarmed_request_observed || current.request_overflow_count || current.receipt_overflow_count || current.busy_retry_overflow_count
+      || (current.surface === "desktop" && (!current.subscription?.active || current.subscription.fault_count))
+      || current.phase.probe?.evidence_overflow_count) throw error;
+    miss = error; record.m1_error = { code: error.code, message: String(error.message).slice(0, 256) };
+  }
+  try { await observeM2(); }
+  catch (error) { throw miss ? new AggregateError([miss, error], "M1 miss and passive observation failed", { cause: miss }) : error; }
+  const current = await snapshot();
+  record.m2_observed = assertChatHandoffSample(current, { ...options, requireProjection: false, requireCanonical: false, requireStableHandoff: false });
+  let handoffError;
+  try { assertChatHandoffSample(current, options); }
+  catch (error) { handoffError = error; record.m2_error = { code: error.code, message: String(error.message).slice(0, 256) }; }
+  if (miss && handoffError) throw new AggregateError([miss, handoffError], "M1 and independent M2 failed", { cause: miss });
+  if (miss) throw miss;
+  if (handoffError) throw handoffError;
+  return current;
 }
 
 /** Retain partial evidence before propagating the original failure; never turn a failed case into a timing. */

@@ -12,7 +12,7 @@ import path from "node:path";
 import net from "node:net";
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { By } from "selenium-webdriver";
 import { chromium } from "@playwright/test";
@@ -20,12 +20,13 @@ import { createNativeHarness, assertNativePreflight, prepareIsolatedHome, startN
 import { closeConformanceSession } from "../lib/conformance-cleanup.mjs";
 import { releaseHomeLock } from "../lib/sessionHome.mjs";
 import { startRemoteClientTlsFixture } from "../lib/remoteClientTlsFixture.mjs";
+import { prepareChatPreviewCodexPeer } from "../lib/chatPreviewCodexPeer.mjs";
 import {
   CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, chatPreviewWatchdogMs,
   STOPPED_SOURCE_CAPABILITY, stageSyntheticStoppedSource, verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   trustedClickWithPendingCapture,
-  chatTimingReceipt, chatTimingCandidateDetails, chatPreviewObserverScript, assertChatTimingSample, recordChatTimingCase, writeChatTimingReport,
-  recordRejectedChatScope, driveChatPreviewProbe,
+  chatTimingReceipt, chatTimingCandidateDetails, chatPreviewObserverScript, recordChatTimingCase, writeChatTimingReport,
+  recordRejectedChatScope, driveChatPreviewProbe, assertChatOpeningSample, assertChatFixtureShape, CHAT_PREVIEW_RULER_VERSION, observeChatOpening,
 } from "../lib/chatPreviewTiming.mjs";
 
 const enabled = process.env.WARDIAN_E2E_CHAT_PREVIEW_TIMING === "1";
@@ -36,10 +37,8 @@ const watchdogMs = chatPreviewWatchdogMs(requestedFixtureModes.length === 1 ? 1 
 const probe = "synthetic-unsent-timing-probe";
 
 function endpointResult(snapshot, options) {
-  const result = assertChatTimingSample(snapshot, options);
-  // Concurrent-build diagnostics prove the ruler and product path, not a budget.
-  return diagnostic ? { diagnostic_only: true, readable: true, usable: true, usability_probe: result.usability_probe,
-    evidence_level: result.evidence_level, renderer_at_readable: result.renderer_at_readable, transition: result.transition } : result;
+  const result = assertChatOpeningSample(snapshot, options);
+  return diagnostic ? { ...result, diagnostic_only: true, accepted_samples: 0 } : result;
 }
 
 async function eventually(operation, timeoutMs = 15_000) {
@@ -60,9 +59,9 @@ async function freePort() {
   return port;
 }
 
-async function startOwnedSession(harness, fixture) {
+async function startOwnedSession(harness, fixture, peer) {
   const overrides = { CODEX_HOME: path.join(fixture.providerHome, ".codex"), CLAUDE_CONFIG_DIR: path.join(fixture.providerHome, ".claude"),
-    WARDIAN_NATIVE_SESSION_START_ATTEMPTS: "1" };
+    WARDIAN_NATIVE_SESSION_START_ATTEMPTS: "1", ...peer.environment };
   fs.mkdirSync(overrides.CODEX_HOME); fs.mkdirSync(overrides.CLAUDE_CONFIG_DIR);
   const previous = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
   Object.assign(process.env, overrides);
@@ -79,7 +78,8 @@ async function desktopEndpoint(driver, field, timeoutMs) {
     window.__chatPreviewTiming.wait(name, timeout).then(() => done({ ok: true }),
       (error) => done({ ok: false, error: String(error.message) }));
   }, field, timeoutMs);
-  assert.ok(result.ok, result.error);
+  if (!result.ok) throw Object.assign(new Error(result.error), { code: result.error === `timing endpoint ${field} timed out`
+    ? "chat_readable_timeout" : "chat_observer_error" });
 }
 
 async function closeDesktopChat(driver, fixture) {
@@ -105,24 +105,37 @@ async function measureDesktop(driver, fixture, label, report, save, options, aft
     const pending = report.cases.at(-1).capture = {};
     await trustedClickWithPendingCapture(options.pendingFixture, () => roster.click(), pending);
     process.stdout.write(`[chat-preview-timing] trusted click active: ${label}\n`);
-    const mode = await driver.wait(() => driver.executeScript(() => window.__chatPreviewTiming.modeControl()), 5_000);
-    report.cases.at(-1).activation = { normal_chat_toggle_required: mode.needsToggle, clock_origin: "trusted_roster_click" };
-    if (mode.needsToggle) await mode.node.click();
-    // Normal mode activation remains inside the original trusted Roster clock.
-    await desktopEndpoint(driver, "readableAt", 5_000);
-    await driveChatPreviewProbe({
-      next: (remaining) => driver.wait(() => driver.executeScript(() => window.__chatPreviewTiming.prepareInteraction()),
-        remaining, "No safe owned control appeared before the original interaction deadline", 25),
-      isCurrent: (plan) => driver.executeScript((attempt) => window.__chatPreviewTiming.isInteractionCurrent(attempt), plan.attempt),
-      act: async (plan) => {
-        assert.ok(plan.node, "No safe owned control for the current painted body");
-        if (plan.kind === "input") await plan.node.sendKeys(probe);
-        else await driver.actions({ async: true }).scroll(0, 0, 0, plan.delta, plan.node).perform();
-      },
-    });
-    await afterUsable?.();
-    if (options.requireQualified) await desktopEndpoint(driver, "qualifiedAt", 30_000);
-    return endpointResult(await driver.executeScript(() => window.__chatPreviewTiming.snapshot()), options);
+    const final = await observeChatOpening({ record: report.cases.at(-1), options,
+      snapshot: () => driver.executeScript(() => window.__chatPreviewTiming.snapshot()), measureM1: async () => {
+        const mode = await driver.wait(() => driver.executeScript(() => window.__chatPreviewTiming.modeControl()), 5_000);
+        report.cases.at(-1).activation = { normal_chat_toggle_required: mode.needsToggle, clock_origin: "trusted_roster_click" };
+        if (mode.needsToggle) await mode.node.click();
+        // Normal mode activation remains inside the original trusted Roster clock.
+        await desktopEndpoint(driver, "readableAt", 5_000);
+        await driveChatPreviewProbe({
+          next: async (remaining) => {
+            try { return await driver.wait(() => driver.executeScript(() => window.__chatPreviewTiming.prepareInteraction()),
+              remaining, "No safe owned control appeared before the original interaction deadline", 25); }
+            catch (error) { if (error.name === "TimeoutError") error.code = "chat_input_timeout"; throw error; }
+          },
+          isCurrent: (plan) => driver.executeScript((attempt) => window.__chatPreviewTiming.isInteractionCurrent(attempt), plan.attempt),
+          act: async (plan) => {
+            assert.ok(plan.node, "No safe owned control for the current painted body");
+            assert.equal(plan.kind, "input", "V8 M1 requires the genuine enabled composer");
+            await plan.node.sendKeys(probe);
+          },
+        });
+        report.cases.at(-1).m1_observed = assertChatOpeningSample(await driver.executeScript(() => window.__chatPreviewTiming.snapshot()),
+          { ...options, requireProjection: false, requireCanonical: false, budgetMs: Number.MAX_SAFE_INTEGER }).m1;
+        await afterUsable?.();
+        const expansion = await driver.executeScript(() => window.__chatPreviewTiming.prepareExpansion());
+        if (expansion) await expansion.node.click();
+      }, observeM2: async () => {
+        const result = await driver.executeAsyncScript((done) => window.__chatPreviewTiming.finishObservation(30_000)
+          .then(() => done({ ok: true }), (error) => done({ ok: false, error: String(error.message) })));
+        assert.ok(result.ok, result.error);
+      } });
+    return endpointResult(final, options);
   }, () => driver.executeScript(() => window.__chatPreviewTiming.snapshot()), save);
 }
 
@@ -154,51 +167,67 @@ async function measureRemote(page, fixture, label, report, save, options, afterU
     await trustedClickWithPendingCapture(options.pendingFixture,
       () => page.getByRole("button", { name: `Open ${fixture.name} details`, exact: true }).click(), pending);
     process.stdout.write(`[chat-preview-timing] trusted click active: ${label}\n`);
-    await page.evaluate(() => window.__chatPreviewTiming.wait("readableAt", 5_000));
-    await driveChatPreviewProbe({
-      next: async (remaining) => {
-        const handle = await page.waitForFunction(() => window.__chatPreviewTiming.prepareInteraction(), null, { timeout: remaining, polling: "raf" });
+    const final = await observeChatOpening({ record: report.cases.at(-1), options,
+      snapshot: () => page.evaluate(() => window.__chatPreviewTiming.snapshot()), measureM1: async () => {
+        const readable = await page.evaluate(() => window.__chatPreviewTiming.wait("readableAt", 5_000).then(() => null, (error) => String(error.message)));
+        if (readable) throw Object.assign(new Error(readable), { code: readable === "timing endpoint readableAt timed out"
+          ? "chat_readable_timeout" : "chat_observer_error" });
+        await driveChatPreviewProbe({
+          next: async (remaining) => {
+            let handle;
+            try { handle = await page.waitForFunction(() => window.__chatPreviewTiming.prepareInteraction(), null, { timeout: remaining, polling: "raf" }); }
+            catch (error) { if (error.name === "TimeoutError") error.code = "chat_input_timeout"; throw error; }
+            try {
+              const kind = await (await handle.getProperty("kind")).jsonValue();
+              if (kind === "complete") return { kind, handle };
+              if (kind === "failed") return { kind, handle, code: await (await handle.getProperty("code")).jsonValue() };
+              return { kind, handle, node: (await handle.getProperty("node")).asElement(),
+                attempt: await (await handle.getProperty("attempt")).jsonValue(),
+                delta: kind === "wheel" ? await (await handle.getProperty("delta")).jsonValue() : null };
+            } catch (error) {
+              const failures = [error];
+              try { await handle.dispose(); }
+              catch (cleanupError) { failures.push(cleanupError); }
+              if (failures.length > 1) throw new AggregateError(failures, "Probe plan and handle cleanup failed", { cause: error });
+              throw error;
+            }
+          },
+          isCurrent: (plan) => page.evaluate((attempt) => window.__chatPreviewTiming.isInteractionCurrent(attempt), plan.attempt),
+          act: async (plan) => {
+            assert.ok(plan.node, "No safe owned PWA control for the current painted body");
+            assert.equal(plan.kind, "input", "V8 M1 requires the genuine enabled composer");
+            await plan.node.type(probe);
+          },
+          release: (plan) => plan.handle.dispose(),
+        });
+        report.cases.at(-1).m1_observed = assertChatOpeningSample(await page.evaluate(() => window.__chatPreviewTiming.snapshot()),
+          { ...options, requireProjection: false, requireCanonical: false, budgetMs: Number.MAX_SAFE_INTEGER }).m1;
+        await afterUsable?.();
+        const expansion = await page.evaluateHandle(() => window.__chatPreviewTiming.prepareExpansion());
         try {
-          const kind = await (await handle.getProperty("kind")).jsonValue();
-          if (kind === "complete") return { kind, handle };
-          if (kind === "failed") return { kind, handle, code: await (await handle.getProperty("code")).jsonValue() };
-          return { kind, handle, node: (await handle.getProperty("node")).asElement(),
-            attempt: await (await handle.getProperty("attempt")).jsonValue(),
-            delta: kind === "wheel" ? await (await handle.getProperty("delta")).jsonValue() : null };
-        } catch (error) {
-          const failures = [error];
-          try { await handle.dispose(); }
-          catch (cleanupError) { failures.push(cleanupError); }
-          if (failures.length > 1) throw new AggregateError(failures, "Probe plan and handle cleanup failed", { cause: error });
-          throw error;
-        }
-      },
-      isCurrent: (plan) => page.evaluate((attempt) => window.__chatPreviewTiming.isInteractionCurrent(attempt), plan.attempt),
-      act: async (plan) => {
-        assert.ok(plan.node, "No safe owned PWA control for the current painted body");
-        if (plan.kind === "input") await plan.node.type(probe);
-        else {
-          const bounds = await plan.node.boundingBox(); assert.ok(bounds);
-          await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
-          await page.mouse.wheel(0, plan.delta);
-        }
-      },
-      release: (plan) => plan.handle.dispose(),
-    });
-    await afterUsable?.();
-    if (options.requireQualified) await page.evaluate(() => window.__chatPreviewTiming.wait("qualifiedAt", 30_000));
-    return endpointResult(await page.evaluate(() => window.__chatPreviewTiming.snapshot()), options);
+          if (!await page.evaluate((value) => value === null, expansion)) {
+            const node = (await expansion.getProperty("node")).asElement(); assert.ok(node); await node.click();
+          }
+        } finally { await expansion.dispose(); }
+      }, observeM2: () => page.evaluate(() => window.__chatPreviewTiming.finishObservation(30_000)) });
+    return endpointResult(final, options);
   }, () => page.evaluate(() => window.__chatPreviewTiming.snapshot()), save);
 }
 
 test("real desktop and native-gateway PWA preview-to-qualified opening timing", { skip: !enabled, timeout: watchdogMs }, async () => {
   assert.equal(process.env.WARDIAN_NATIVE_SKIP_BUILD, "1", "Use the prebuilt fast runner; this benchmark never builds");
   assert.ok(process.env.WARDIAN_NATIVE_APP && process.env.WARDIAN_NATIVE_CLI, "Explicit frozen app and paired CLI are required");
-  const base = await createNativeHarness();
+  // Equal-length UUID roots prevent per-turn cwd length from biasing paired raw sources.
+  assert.ok(!process.env.WARDIAN_E2E_NATIVE_HOME, "V8 uses fresh equal-length default homes, not an inherited explicit home");
+  const priorRunId = process.env.WARDIAN_E2E_RUN_ID;
+  process.env.WARDIAN_E2E_RUN_ID = randomUUID();
+  let base;
+  try { base = await createNativeHarness(); }
+  finally { if (priorRunId === undefined) delete process.env.WARDIAN_E2E_RUN_ID; else process.env.WARDIAN_E2E_RUN_ID = priorRunId; }
   prepareIsolatedHome(base);
   const file = path.join(base.isolatedHome, "artifacts", "chat-preview-identity", "result.json");
   process.stdout.write(`[chat-preview-timing] evidence: ${file}\n`);
-  const report = { schema_version: 1, status: "RUNNING", cases: [], surfaces: [],
+  const report = { schema_version: 2, ruler_version: CHAT_PREVIEW_RULER_VERSION, status: "RUNNING", cases: [], surfaces: [],
     deadlines: { seed_setup_ms: CHAT_PREVIEW_SEED_TIMEOUT_MS, outer_watchdog_ms: watchdogMs,
       opening_budget_ms: CHAT_PREVIEW_BUDGET_MS, qualified_wait_ms: 30_000 },
     timing_qualification: diagnostic ? "DIAGNOSTIC_ONLY_NOT_BENCHMARK" : "ISOLATED_BENCHMARK_ATTEMPT",
@@ -206,24 +235,36 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
     cache: "Independent backend process/home and browser profile per surface; OS filesystem cache warmed by fixture generation/hash/read. Remote pairing warms shell/SW, not Chat detail.",
     limits: ["two-animation-frame DOM witnesses, not physical display scanout", "native supervisor closure is not a full caller birth/EOF/Job-empty qualification receipt",
       "page-loader request observation begins after the desktop shell; earlier startup IPC is unobserved",
-      "Missing data-chat-page-scope leaves consumer admission unproven; qualified renderer DOM still requires actual source-backed turn and response identity"],
+      "M1 native wire evidence and visible content are separate; no DOM-to-backing-ID binding is claimed",
+      "M2 requires actual page scope, turn/item/source identities; missing main Remote markers never gain inferred identity",
+      "Synthetic peer startup does not establish real Codex behavior; native owner readiness requires separate lifecycle validation"],
   };
   const save = () => writeChatTimingReport(file, report);
   const failures = [];
   let taskFailure;
   try {
+    const sourceRole = process.env.WARDIAN_CHAT_PREVIEW_SOURCE_ROLE;
+    assert.ok(["baseline", "candidate"].includes(sourceRole), "V8 requires explicit baseline/candidate role");
+    report.source_role = sourceRole;
+    const shapesPath = process.env.WARDIAN_CHAT_PREVIEW_FIXTURE_SHAPES;
+    assert.ok(shapesPath && path.isAbsolute(shapesPath) && fs.statSync(shapesPath).size <= 32_768, "Predeclared bounded common fixture shapes required");
+    const fixtureShapes = JSON.parse(fs.readFileSync(shapesPath, "utf8"));
+    report.fixture_shapes_sha256 = createHash("sha256").update(fs.readFileSync(shapesPath)).digest("hex");
+    const pythonExecutable = process.env.WARDIAN_CHAT_PREVIEW_PEER_PYTHON;
+    const peerTransport = process.env.WARDIAN_CHAT_PREVIEW_PEER_TRANSPORT;
+    assert.ok(pythonExecutable && peerTransport, "Pinned peer Python and explicit transport required");
     assertNativePreflight(base);
     report.driver_artifacts = { native_webdriver_sha256: createHash("sha256").update(fs.readFileSync(base.nativeDriverPath)).digest("hex"),
       tauri_driver_sha256: createHash("sha256").update(fs.readFileSync(base.tauriDriverPath)).digest("hex") };
     const manifestPath = process.env.WARDIAN_CHAT_PREVIEW_ARTIFACT_MANIFEST;
-    if (manifestPath) {
-      assert.ok(path.isAbsolute(manifestPath) && fs.statSync(manifestPath).size <= 64 * 1_024, "Bounded absolute artifact manifest required");
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-      assert.equal(manifest.frozen.app.sha256, report.artifact.app_sha256, "Runtime app does not match the frozen source manifest");
-      assert.equal(manifest.frozen.cli.sha256, report.artifact.cli_sha256, "Runtime CLI does not match the frozen source manifest");
-      report.artifact.source_commit = manifest.sourceCommit;
-      report.artifact.profile = manifest.profile;
-    }
+    assert.ok(manifestPath, "V8 requires an explicit frozen artifact manifest");
+    assert.ok(path.isAbsolute(manifestPath) && fs.statSync(manifestPath).size <= 64 * 1_024, "Bounded absolute artifact manifest required");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    assert.equal(manifest.frozen.app.sha256, report.artifact.app_sha256, "Runtime app does not match the frozen source manifest");
+    assert.equal(manifest.frozen.cli.sha256, report.artifact.cli_sha256, "Runtime CLI does not match the frozen source manifest");
+    report.artifact.source_commit = manifest.sourceCommit;
+    report.artifact.profile = manifest.profile;
+    assert.equal(manifest.profile, "release", "V8 comparison uses normal release pairs only");
     report.harness_source_sha256 = createHash("sha256").update(fs.readFileSync(new URL(import.meta.url)))
       .update(fs.readFileSync(new URL("../lib/chatPreviewTiming.mjs", import.meta.url))).digest("hex");
     const adapterPath = process.env.WARDIAN_CHAT_PREVIEW_SEED_MODULE;
@@ -260,9 +301,14 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         assert.ok(mode !== "pending" || fixture.sourceBytes >= 4 * 1024 * 1024, "Pending fixture must retain a genuine large source");
         detail.fixture = { history_turns: mode === "qualified" ? 128 : pendingTurns, padding: mode === "qualified" ? 128 : pendingPadding,
           records: fixture.records, source_bytes: fixture.sourceBytes };
+        detail.fixture_shape = assertChatFixtureShape(fixture, fixtureShapes[`${surface}-${mode}`]);
         detail.source = verifySyntheticSource(fixture);
         detail.seed_receipt = await adapter.seedStoppedChatPreviewSource({ harness, fixture, mode });
-        if (mode === "pending") detail.seed_capture = pendingCaptureWitness(fixture);
+        const peer = prepareChatPreviewCodexPeer({ root: harness.isolatedHome, sourcePath: fixture.sourcePath,
+          sessionId: fixture.sessionId, nativeSessionId: fixture.nativeSessionId, pythonExecutable, transport: peerTransport });
+        detail.peer = peer.manifest;
+        detail.seed_capture = pendingCaptureWitness(fixture, { requirePending: mode === "pending" });
+        fixture.sourceEpoch = detail.seed_capture.native_identity_sha256;
         let gatewayPort;
         if (surface === "remote") {
           const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: base.repoRoot, encoding: "utf8" }).trim();
@@ -278,7 +324,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
           detail.tls = { certificate_sha256: tls.ready.certificate_sha256, pwa_websocket_forwarding: true };
         }
         startupAttempted = true;
-        session = await startOwnedSession(harness, fixture);
+        session = await startOwnedSession(harness, fixture, peer);
         await waitForAppShell(session.driver, 30_000);
         // Leave transport headroom for the observer's 30-second qualification deadline.
         await session.driver.manage().setTimeouts({ script: 40_000 });
@@ -286,9 +332,15 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         detail.restored_agent = agent ? { provider: agent.provider, is_off: agent.is_off, session_name: agent.session_name, synthetic: true } : null;
         assert.ok(agent?.provider === "codex" && agent.is_off === true && agent.session_name === fixture.name,
           "The real native roster must restore the owned stopped Codex agent");
+        await invokeTauri(session.driver, "resume_agent", { sessionId: fixture.sessionId });
+        detail.online_agent = await eventually(async () => {
+          const current = (await invokeTauri(session.driver, "list_agents")).find((item) => item.session_id === fixture.sessionId);
+          return current?.provider === "codex" && current.is_off === false ? { provider: current.provider, is_off: current.is_off,
+            native_owner_readiness: "UNPROVEN_BY_ROSTER_ALONE" } : null;
+        });
         const observerConfig = { surface, sessionId: fixture.sessionId, provider: fixture.provider, name: fixture.name, body: fixture.body, probe,
-          synthetic: fixture.synthetic, sourceKey: fixture.sourceKey, targetTurn: fixture.targetTurn,
-          targetMessageId: fixture.targetMessageId, captureDetails: diagnostic };
+          synthetic: fixture.synthetic, sourceKey: fixture.sourceKey, sourceEpoch: fixture.sourceEpoch, targetTurn: fixture.targetTurn,
+          targetMessageId: fixture.targetMessageId, captureDetails: diagnostic, rulerVersion: CHAT_PREVIEW_RULER_VERSION };
         if (surface === "desktop") {
           await session.driver.executeScript(chatPreviewObserverScript(observerConfig));
         } else {
@@ -307,23 +359,37 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
           const observe = (operation) => {
             const task = operation().catch((error) => { if (observing) detail.errors.push(String(error.message).slice(0, 256)); })
               .finally(() => pendingObservations.delete(task));
-            pendingObservations.add(task);
+            pendingObservations.add(task); return task;
           };
           const chatPath = `/remote/api/agents/${fixture.sessionId}/chat`;
+          const contexts = new WeakMap();
           page.on("request", (request) => {
             const url = new URL(request.url());
-            if (url.pathname === chatPath) observe(() => page.evaluate((details) => window.__chatPreviewTiming.noteRequest(details),
-              { method: request.method(), path: url.pathname, query: url.search }));
+            if (url.pathname === chatPath) {
+              const context = page.evaluate((details) => window.__chatPreviewTiming.noteRequest(details),
+                { session: fixture.sessionId, method: request.method(), path: url.pathname, query: url.search,
+                  purpose: url.searchParams.has("detail") ? "detail" : url.searchParams.has("before") ? "older"
+                    : url.searchParams.get("recent_preview") === "true" ? "recent_preview" : "page" });
+              contexts.set(request, context); observe(() => context);
+            }
           });
           page.on("response", (response) => {
-            if (new URL(response.url()).pathname === chatPath && response.ok()) observe(async () => {
+            if (new URL(response.url()).pathname === chatPath) observe(async () => {
+              const request = response.request();
+              const context = await contexts.get(request);
+              assert.ok(context && request.timing().startTime >= 0, "Actual Remote Request association/startTime unavailable");
+              const requestContext = { ...context, request_epoch_ms: request.timing().startTime };
+              assert.ok(response.ok(), `remote_chat_http_${response.status()}`);
               const dto = await response.json();
               const details = diagnostic ? chatTimingCandidateDetails(dto, fixture) : null;
               let receipt; let receiptFailure;
               try { receipt = chatTimingReceipt(dto, fixture); }
               catch (error) {
                 receiptFailure = error;
-                recordRejectedChatScope(detail, error, { at: performance.now(), clock_basis: "node:performance.now" });
+                recordRejectedChatScope(detail, error, { at: performance.now(), clock_basis: "node:performance.now",
+                  request_sequence: requestContext.request_sequence, request_association: "same_Playwright_Request",
+                  // Browser dispatch at is unavailable here without a second browser round trip.
+                  request_at: null });
               }
               if (receiptFailure) {
                 let diagnosticFailure;
@@ -333,7 +399,8 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
                   "API receipt rejection and diagnostic retention failed", { cause: receiptFailure });
                 throw receiptFailure;
               }
-              await page.evaluate((value) => window.__chatPreviewTiming.receive(value.receipt, value.details), { receipt, details });
+              await page.evaluate((value) => window.__chatPreviewTiming.receive(value.receipt, value.details, value.requestContext),
+                { receipt, details, requestContext });
             });
           });
           page.on("websocket", (socket) => {
@@ -343,11 +410,10 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         }
         await adapter.beforeColdOpen?.({ harness, fixture, session, mode });
         if (mode === "pending") detail.cold_open_capture = pendingCaptureWitness(fixture);
-        const measure = (label, cold) => {
-          const options = { requireQualified: mode === "qualified", requireAdmitted: true,
+        const measure = (label) => {
+          const options = { sourceRole, requireProjection: sourceRole === "candidate", requireCanonical: sourceRole === "candidate" && mode === "qualified",
             pendingFixture: mode === "pending" ? fixture : null,
-            ...(diagnostic ? { budgetMs: Number.MAX_SAFE_INTEGER } : {}),
-            requireTransition: !diagnostic && mode === "qualified" && cold && process.env.WARDIAN_CHAT_PREVIEW_REQUIRE_TRANSITION === "1" };
+            ...(diagnostic ? { budgetMs: Number.MAX_SAFE_INTEGER } : {}) };
           const afterUsable = () => adapter.afterUsable?.({ harness, fixture, session, mode, surface, label });
           return surface === "desktop" ? measureDesktop(session.driver, fixture, label, report, save, options, afterUsable)
             : measureRemote(page, fixture, label, report, save, options, afterUsable);
@@ -359,7 +425,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
             if (surface === "desktop") await closeDesktopChat(session.driver, fixture);
             else await page.getByRole("button", { name: "Back to remote agents", exact: true }).click();
           }
-          try { await measure(`${surface}-${mode}-${temperature}`, index === 0); }
+          try { await measure(`${surface}-${mode}-${temperature}`); }
           catch (error) { failures.push(error); detail.errors.push({ code: error.code ?? "error", message: String(error.message).slice(0, 512) }); }
         }
         if (surface === "remote") assert.ok(detail.websocket.status_frames_received > 0, "No real forwarded PWA status-stream frame observed");
