@@ -247,9 +247,38 @@ export function chatTimingReceipt(page, fixture) {
   }
   const id = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 1_024;
   const nullable = (value) => value === null || id(value);
+  const absentOrNull = (key) => !Object.hasOwn(page, key) || page[key] === null;
+  const absentOrFalse = (key) => !Object.hasOwn(page, key) || page[key] === false;
+  const emptyList = (key) => !Object.hasOwn(page, key) || (Array.isArray(page[key]) && page[key].length === 0);
+  const unscoped = page.conversation_id === null && page.generation === null && page.source_epoch === null;
+  const control = unscoped && id(page.revision) && page.events.length === 0 && page.reset === true && page.unchanged === false
+    && typeof page.progress === "string" && absentOrNull("recent_admission")
+    && ["presentation", "detail", "next_before", "cursor", "revalidated_ids"].every(absentOrNull)
+    && ["older_page", "has_more", "archive_read_ready"].every(absentOrFalse)
+    && ["aliases", "removed_ids"].every(emptyList);
+  const rejectScope = () => {
+    const describe = (key) => {
+      if (!Object.hasOwn(page, key)) return { present: false };
+      const value = page[key];
+      return { present: true, type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value,
+        is_null: value === null, valid_id: id(value),
+        ...(typeof value === "string" ? { string_length: value.length, nonblank: value.trim().length > 0 } : {}),
+        ...(typeof value === "boolean" ? { boolean: value } : {}),
+        ...(Array.isArray(value) ? { count: value.length } : {}) };
+    };
+    const error = new Error("invalid_page_scope");
+    error.rejected_scope = { version: 1, matching_session: page.session_id === fixture.sessionId,
+      fields: Object.fromEntries(["session_id", "revision", "conversation_id", "generation", "source_epoch", "recent_admission", "progress"].map((key) => [key, describe(key)])),
+      flags_and_counts: Object.fromEntries(["events", "reset", "unchanged", "presentation", "detail", "next_before", "cursor",
+        "older_page", "has_more", "archive_read_ready", "revalidated_ids", "aliases", "removed_ids"].map((key) => [key, describe(key)])) };
+    return error;
+  };
+  if (control) return { control: "unscoped_reset", scope: { session: page.session_id, conversation: null, generation: null,
+    epoch: null, revision: page.revision, admission: null }, progress: page.progress,
+  presentation: { version: null, turns: 0, items: 0, target_turns: [] }, targets: [] };
   if (!id(page.revision) || !nullable(page.source_epoch) || (page.recent_admission != null
     ? !id(page.recent_admission) || !nullable(page.conversation_id) || !nullable(page.generation)
-    : !id(page.conversation_id) || !id(page.generation))) throw new Error("invalid_page_scope");
+    : !id(page.conversation_id) || !id(page.generation))) throw rejectScope();
   const targets = page.events.filter((event) => event.session_id === fixture.sessionId && event.provider === fixture.provider
     && event.kind === "message" && event.role === "assistant" && event.text === fixture.body);
   const value = page.presentation?.version === 1 ? page.presentation.payload : null;
@@ -299,6 +328,33 @@ export function chatTimingReceipt(page, fixture) {
     }) };
 }
 
+/** Failure-only structural evidence. Never retain scope values, request IDs or transcript/backing content. */
+export function recordRejectedChatScope(target, error, context = {}) {
+  if (error?.message !== "invalid_page_scope" || !error.rejected_scope) return;
+  target.rejected_scopes ??= []; target.rejected_scope_bytes ??= 0;
+  target.rejected_scope_overflow_count ??= 0; target.rejected_scope_overflow_bytes ??= 0;
+  const args = context.args;
+  const revision = args?.revision;
+  const entry = { ...error.rejected_scope, clock_basis: ["browser:performance.now", "node:performance.now"].includes(context.clock_basis)
+    ? context.clock_basis : "unknown", observed_at: Number.isFinite(context.at) ? context.at : null,
+  request: { sequence: Number.isSafeInteger(context.request_sequence) ? context.request_sequence : null,
+    at: Number.isFinite(context.request_at) ? context.request_at : null, purpose: "chat_page",
+    association: Number.isSafeInteger(context.request_sequence) ? "same_onRequest_promise" : "unknown",
+    args_available: Boolean(args), recent_preview: args ? args.recentPreview === true : null,
+    revision_present: Boolean(args && Object.hasOwn(args, "revision")),
+    revision_type: revision === null ? "null" : typeof revision,
+    revision_length: typeof revision === "string" ? revision.length : null,
+    revision_nonblank: typeof revision === "string" ? revision.trim().length > 0 : null,
+    backing_hints_present: Boolean(args && Object.hasOwn(args, "previewBackingIds")),
+    backing_hint_count: Array.isArray(args?.previewBackingIds) ? args.previewBackingIds.length : null,
+    older_requested: args ? args.cursor != null : null, detail_requested: args ? args.detailRef != null : null } };
+  const bytes = new TextEncoder().encode(JSON.stringify(entry)).byteLength;
+  if (target.rejected_scopes.length >= 4 || target.rejected_scope_bytes + bytes > 8_192) {
+    target.rejected_scope_overflow_count++; target.rejected_scope_overflow_bytes += bytes; return;
+  }
+  target.rejected_scopes.push(entry); target.rejected_scope_bytes += bytes;
+}
+
 /** Retain full synthetic target events and their producer presentation evidence only, bounded to 16 KiB. */
 export function chatTimingCandidateDetails(page, fixture) {
   if (fixture.synthetic !== true) return { status: "EXCLUDED_NON_SYNTHETIC" };
@@ -336,7 +392,8 @@ export function installChatPreviewTiming(config) {
   const state = { surface: config.surface, phase: null, phases: [], receipts: [], calls: [], faults: [], disposed: false,
     raw_request_count: 0, coalesced_request_count: 0, request_overflow_count: 0,
     raw_receipt_count: 0, coalesced_receipt_count: 0, receipt_overflow_count: 0,
-    raw_error_count: 0, error_overflow_count: 0 };
+    raw_error_count: 0, error_overflow_count: 0, rejected_scopes: [], rejected_scope_bytes: 0,
+    rejected_scope_overflow_count: 0, rejected_scope_overflow_bytes: 0 };
   const callIndex = new Map(); const receiptIndex = new Map();
   let phase;
   let subscription;
@@ -351,8 +408,9 @@ export function installChatPreviewTiming(config) {
     if (list.length >= bound) throw new Error("timing observation bound exceeded");
     list.push(value);
   };
-  const fail = (error) => {
+  const fail = (error, context = {}) => {
     state.raw_error_count++;
+    config.recordRejection?.(state, error, { ...context, at: now(), clock_basis: "browser:performance.now" });
     if (state.faults.length < 8) state.faults.push(String(error?.message ?? error).slice(0, 256));
     else state.error_overflow_count++;
   };
@@ -436,8 +494,12 @@ export function installChatPreviewTiming(config) {
     const turnKey = committed?.getAttribute("data-turn-key") ?? null;
     const anchor = node.closest("[data-chat-anchor-key]");
     const anchorKey = anchor?.getAttribute("data-chat-anchor-key") ?? null;
+    const controlSequence = state.receipts.reduce((latest, item) => item.control === "unscoped_reset"
+      ? Math.max(latest, item.last_sequence) : latest, 0);
+    const eligible = (item) => !item.control && item.last_sequence > controlSequence
+      && (!controlSequence || (scope?.session === config.sessionId && scopeKey(item.scope) === scopeKey(scope)));
     // A replacement response in this exact scope must not borrow an older binding.
-    const latestScoped = scope && state.receipts.findLast((item) => scopeKey(item.scope) === scopeKey(scope));
+    const latestScoped = scope && state.receipts.findLast((item) => eligible(item) && scopeKey(item.scope) === scopeKey(scope));
     const presentedMatch = (target, receipt) => Boolean(scope?.session === config.sessionId && receipt === latestScoped
       && turnKey && key === turnKey && target.presentedAnswer?.turnKey === turnKey
       && target.presentedAnswer.eventRef === target.id && anchorKey === target.key
@@ -445,17 +507,17 @@ export function installChatPreviewTiming(config) {
     const matches = (target, receipt) => turnKey
       ? target.qualifiedTurn === turnKey || presentedMatch(target, receipt)
       : target.key === key || (identity && (identity.id === target.id || identity.members?.includes(target.id)));
-    const receipt = state.receipts.findLast((item) => (!scope || scopeKey(item.scope) === scopeKey(scope))
+    const receipt = state.receipts.findLast((item) => eligible(item) && (!scope || scopeKey(item.scope) === scopeKey(scope))
       && item.targets.filter((target) => matches(target, item)).length === 1);
     const target = receipt?.targets.find((item) => matches(item, receipt));
     const presentedAnswer = target && presentedMatch(target, receipt) ? target.presentedAnswer : null;
     const presentedBinding = presentedAnswer ? JSON.stringify([scopeKey(receipt.scope), target.id, presentedAnswer]) : null;
     const admitted = Boolean(scope && scope.session === config.sessionId && receipt && scopeKey(scope) === scopeKey(receipt.scope));
-    return { host, scroll, node, row, committed, scope: scopeKey(scope), receipt, target, key, turnKey, admitted,
+    return { host, scroll, node, row, committed, scope: scopeKey(scope), receipt, target, key, turnKey, admitted, controlSequence,
       anchor: presentedAnswer ? anchor : null, anchorKey: presentedAnswer ? anchorKey : null, presentedAnswer, presentedBinding,
       qualified: Boolean(receipt && turnKey && target?.qualifiedTurn === turnKey) };
   };
-  const same = (left, right) => Boolean(left && right && ["host", "scroll", "node", "row", "committed", "scope", "key", "turnKey", "admitted", "qualified", "anchor", "anchorKey", "presentedBinding"]
+  const same = (left, right) => Boolean(left && right && ["host", "scroll", "node", "row", "committed", "scope", "key", "turnKey", "admitted", "qualified", "anchor", "anchorKey", "presentedBinding", "controlSequence"]
     .every((key) => left[key] === right[key]));
   const captureDiagnostic = (reason, wait = null) => {
     if (!config.captureDetails) return null;
@@ -493,7 +555,8 @@ export function installChatPreviewTiming(config) {
     }
   };
   const stamp = (field, body) => {
-    if (!phase || phase[field] !== null || phase.checking[field]) return;
+    const refresh = phase && field === "readableAt" && phase.readableAt !== null && phase.usableAt === null && painted === null;
+    if (!phase || (phase[field] !== null && !refresh) || phase.checking[field]) return;
     const current = phase;
     phase.checking[field] = true;
     requestAnimationFrame(() => {
@@ -503,13 +566,16 @@ export function installChatPreviewTiming(config) {
         current.checking[field] = false;
         if (state.disposed || phase !== current || !same(body, candidate())) return;
         if (field === "usableAt" && !validInteraction(body)) return;
-        current[field] = now();
-        current.frames[field] = [first, current[field]];
+        const firstObservation = current[field] === null;
+        const at = now();
+        if (firstObservation) { current[field] = at; current.frames[field] = [first, at]; }
         if (field === "readableAt") {
           painted = body;
-          current.readable = { admitted: body.admitted, row_key: body.key, scope: body.receipt?.scope ?? null,
+          const proof = { admitted: body.admitted, row_key: body.key, scope: body.receipt?.scope ?? null,
             committed_turn: body.turnKey, real_response_observed: Boolean(body.receipt),
             presented_answer: body.presentedAnswer, canonical_qualified: body.qualified };
+          if (firstObservation) current.readable = proof;
+          else current.readable_after_control = { ...proof, frames: [first, at], control_sequence: body.controlSequence };
         }
         if (field === "usableAt") current.usable_subject = { row_key: body.key, response_scope: body.receipt?.scope ?? null,
           consumer_scope_admitted: body.admitted, committed_turn: body.turnKey,
@@ -568,7 +634,10 @@ export function installChatPreviewTiming(config) {
   const receive = (receipt, details = null) => {
     if (state.disposed) return;
     if (details !== null) noteCandidateDetails(details);
-    try { record(state.receipts, receiptIndex, receipt, "receipt"); }
+    try {
+      record(state.receipts, receiptIndex, receipt, "receipt");
+      if (receipt.control === "unscoped_reset") { painted = null; interaction = null; }
+    }
     catch (error) { fail(error); }
   };
   const noteRequest = (details = {}) => {
@@ -582,12 +651,14 @@ export function installChatPreviewTiming(config) {
     subscription = facade.subscribe({ version: 1, owner: config.sessionId, onRequest(args, promise) {
       try {
         noteRequest({ session: args.sessionId, args });
+        const request = { request_sequence: state.raw_request_count, request_at: state.calls.at(-1)?.last_at,
+          args: state.calls.at(-1)?.args };
         return promise.then((page) => {
           try {
             if (config.captureDetails) noteCandidateDetails(config.inspect(page, config));
             receive(config.reduce(page, config));
           }
-          catch (error) { fail(error); }
+          catch (error) { fail(error, request); }
         }, (error) => fail(error));
       } catch (error) { fail(error); }
     } });
@@ -676,7 +747,7 @@ export function installChatPreviewTiming(config) {
 /** Compile functions at the automation script boundary, without page eval or changes to product loaders. */
 export function chatPreviewObserverScript(config) {
   const serialized = JSON.stringify(config);
-  return `const reduce = (${chatTimingReceipt.toString()});\nconst inspect = (${chatTimingCandidateDetails.toString()});\n(${installChatPreviewTiming.toString()})({ ...${serialized}, reduce, inspect });`;
+  return `const reduce = (${chatTimingReceipt.toString()});\nconst inspect = (${chatTimingCandidateDetails.toString()});\nconst recordRejection = (${recordRejectedChatScope.toString()});\n(${installChatPreviewTiming.toString()})({ ...${serialized}, reduce, inspect, recordRejection });`;
 }
 
 /** Reject UI-only, stale, API-only, canonical-first and incomplete samples explicitly. */

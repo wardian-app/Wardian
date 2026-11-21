@@ -25,6 +25,7 @@ import {
   STOPPED_SOURCE_CAPABILITY, stageSyntheticStoppedSource, verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   trustedClickWithPendingCapture,
   chatTimingReceipt, chatTimingCandidateDetails, chatPreviewObserverScript, assertChatTimingSample, recordChatTimingCase, writeChatTimingReport,
+  recordRejectedChatScope,
 } from "../lib/chatPreviewTiming.mjs";
 
 const enabled = process.env.WARDIAN_E2E_CHAT_PREVIEW_TIMING === "1";
@@ -305,7 +306,10 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
               const details = diagnostic ? chatTimingCandidateDetails(dto, fixture) : null;
               let receipt; let receiptFailure;
               try { receipt = chatTimingReceipt(dto, fixture); }
-              catch (error) { receiptFailure = error; }
+              catch (error) {
+                receiptFailure = error;
+                recordRejectedChatScope(detail, error, { at: performance.now(), clock_basis: "node:performance.now" });
+              }
               if (receiptFailure) {
                 let diagnosticFailure;
                 try { if (details) await page.evaluate((value) => window.__chatPreviewTiming.noteCandidateDetails(value), details); }
