@@ -1204,7 +1204,7 @@ fn certified_unpaired_result_order_survives_capture_with_a_later_preferred_call_
 }
 
 #[test]
-fn full_normalized_running_window_reuses_eighty_observation_order_reads() {
+fn full_normalized_running_window_reuses_observations_without_rereading_values() {
     let mut lines = vec![
         json!({"type":"session_meta","payload":{"id":"capacity-session"}}),
         json!({"type":"turn_context","payload":{"turn_id":"capacity-turn"}}),
@@ -1293,7 +1293,11 @@ fn full_normalized_running_window_reuses_eighty_observation_order_reads() {
             Some(duplicate.source_order.as_str())
         );
     }
-    assert_eq!(repeated.objects - once.objects, 80);
+    assert_eq!(
+        repeated.objects, once.objects,
+        "a second typed view must reuse the hash-validated observation bytes"
+    );
+    assert_eq!(repeated.bytes, once.bytes);
 
     let mut ordinary_store = Store::new(temp.path());
     let ordinary = index
