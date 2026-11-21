@@ -12314,6 +12314,7 @@ pub(crate) fn read(
         ReadOptions {
             limit: PAGE_ROWS,
             staging: false,
+            qualify_turns: true,
         },
     )
 }

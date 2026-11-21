@@ -296,6 +296,15 @@ Architect decision, 2026-11-19:
   bridge uses exact published-head source-scope proof. It never reserves a
   canonical conversation before capture or derives its UUID from provider IDs.
   Cold or unproven sources retain the current fast preview path.
+  The one-second target measures first usable output: owned recent narrative
+  and an interactive composer. Aware unbound openings return the honest legacy
+  preview before qualification, capture or indexing. A later ordinary read may
+  qualify under the same admission, without a new reservation, worker or
+  per-view state. Measure open-to-qualified handoff separately; it has no PR3
+  latency target, but must be bounded and preserve the anchor through one atomic
+  representation switch. Compare open-to-usable against current main with the
+  same fixture and reviewed ruler; report main's misses separately and retain
+  failures under earlier ruler versions.
 - Propose a separate issue to route Claude Chat-composer submissions through
   the Wardian mod with `asUser: true`, providing the same exact identity bridge.
 

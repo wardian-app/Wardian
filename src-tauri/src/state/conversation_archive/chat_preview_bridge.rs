@@ -181,13 +181,15 @@ impl Proof {
     }
 }
 
-/// Resolve literal selectors only in the already authorized, published scope.
+/// Resolve literal selectors in the already authorized source snapshot, then
+/// use scoped archive lookup for selectors outside that bounded window.
 /// Failed selectors expose neither an error nor lookup accounting to readers.
-pub(super) fn resolve_hints(
+fn resolve_hints(
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
     hints: &[String],
     headers: &[AgentChatEvent],
     watch: Option<&Proof>,
+    source: &AgentChatPage,
 ) -> io::Result<Option<Proof>> {
     let Some(reference) = head(&snapshot.session_id)? else {
         return Ok(None);
@@ -198,6 +200,10 @@ pub(super) fn resolve_hints(
     if published.agent_id != snapshot.session_id
         || published.source_key != context.provider_source_key
         || !cold_bootstrap::scope_matches(&published, &context)
+        || source.session_id != snapshot.session_id
+        || source.conversation_id.as_deref() != Some(published.conversation_id.as_str())
+        || source.source_epoch != published.source_epoch
+        || !source.revision.starts_with(&format!("{reference}."))
     {
         return Ok(None);
     }
@@ -208,6 +214,9 @@ pub(super) fn resolve_hints(
     let mut proof = Proof::new(published.clone(), reference.clone(), Vec::new());
     let mut valid = true;
     let mut seeks = SeekCache::default();
+    let Some(backings) = source_backings(&source.events) else {
+        return Ok(None);
+    };
     for hint in hints {
         let physical = headers
             .get(hint.as_str())
@@ -219,6 +228,23 @@ pub(super) fn resolve_hints(
                     .get(key)
             })
             .map_or(hint.as_str(), String::as_str);
+        if let Some(target) = backings.get(physical) {
+            let Some(event) = target else {
+                return Ok(None);
+            };
+            // This is positive evidence from the same scoped producer read,
+            // including native records not captured into the archive yet.
+            // No offset, client key or missing-lookup inference grants proof.
+            let physical = if event.id == physical {
+                event.metadata["chat_source_ref"]
+                    .as_str()
+                    .unwrap_or(physical)
+            } else {
+                physical
+            };
+            proof.backing.insert(hint.clone(), physical.to_owned());
+            continue;
+        }
         let found = store.get_reusing_nodes(
             &published.identities,
             &digest(physical.as_bytes()),
@@ -258,6 +284,45 @@ pub(super) fn resolve_hints(
     )
 }
 
+type SourceBackings<'a> = BTreeMap<&'a str, Option<&'a AgentChatEvent>>;
+
+/// Index only this already-read window. Repeated markers within one row are
+/// harmless; a marker shared by distinct rows stays ambiguous. Borrow keys
+/// rather than copying metadata, and bound temporary entries by the page cap.
+pub(super) fn source_backings(events: &[AgentChatEvent]) -> Option<SourceBackings<'_>> {
+    if events.len() > PAGE_ROWS {
+        return None;
+    }
+    let mut backings = SourceBackings::new();
+    let mut charge = 0usize;
+    for event in events {
+        let members = event.metadata["chat_display_member_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id.as_str());
+        for physical in std::iter::once(event.id.as_str())
+            .chain(event.metadata["chat_source_ref"].as_str())
+            .chain(members)
+        {
+            if let Some(target) = backings.get_mut(physical) {
+                if target.is_some_and(|prior| !std::ptr::eq(prior, event)) {
+                    *target = None;
+                }
+            } else {
+                charge = charge
+                    .checked_add(physical.len())?
+                    .checked_add(std::mem::size_of::<(&str, Option<&AgentChatEvent>)>())?;
+                if charge > IPC_BYTES {
+                    return None;
+                }
+                backings.insert(physical, Some(event));
+            }
+        }
+    }
+    Some(backings)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
     First,
@@ -271,35 +336,35 @@ pub(super) struct Selection<'a> {
 }
 
 fn normalize_aliases(page: &mut AgentChatPage) -> bool {
-    let mut targets = BTreeMap::new();
-    for event in &page.events {
-        let members = event.metadata["chat_display_member_ids"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|id| id.as_str());
-        for physical in std::iter::once(event.id.as_str())
-            .chain(event.metadata["chat_source_ref"].as_str())
-            .chain(members)
-        {
-            if targets
-                .insert(physical, event.id.as_str())
-                .is_some_and(|prior| prior != event.id)
-            {
-                return false;
-            }
-        }
+    let Some(targets) = source_backings(&page.events) else {
+        return false;
+    };
+    if targets.values().any(Option::is_none) {
+        return false;
     }
     let mut aliases = BTreeMap::new();
     for alias in &page.aliases {
         // The ordinary reader may retain aliases outside its final bounded
         // window. A bridge publishes only exact backing in this snapshot.
-        let Some(canonical) = targets.get(alias.canonical_id.as_str()) else {
+        let Some(Some(target)) = targets.get(alias.canonical_id.as_str()) else {
             continue;
         };
+        let canonical = target.id.as_str();
         if aliases
-            .insert(alias.observation_id.as_str(), *canonical)
-            .is_some_and(|prior| prior != *canonical)
+            .insert(alias.observation_id.as_str(), canonical)
+            .is_some_and(|prior| prior != canonical)
+        {
+            return false;
+        }
+    }
+    // Selectors choose identity anchors, never membership. Publish the exact
+    // backing aliases for every returned source row in the qualified snapshot,
+    // including rows that were not among the bounded selector subset.
+    for (observation, target) in targets {
+        let canonical = target.unwrap().id.as_str();
+        if aliases
+            .insert(observation, canonical)
+            .is_some_and(|prior| prior != canonical)
         {
             return false;
         }
@@ -567,8 +632,19 @@ pub(super) fn read(
     if !matches!(snapshot.provider.as_str(), "codex" | "claude") {
         return Ok(None);
     }
-    let Some(reference) = head(&snapshot.session_id)? else {
-        return if prior.is_some() {
+    let source_selectors = mode == Mode::Legacy && hints.is_some();
+    // Before positive selector proof, IO failure cannot let an unrelated
+    // Legacy reader retract another reader's shared certificate. The owner
+    // treats this retry signal as an unchanged Legacy response.
+    let unproven = |error| {
+        if source_selectors {
+            io::Error::new(io::ErrorKind::WouldBlock, "preview selectors unproven")
+        } else {
+            error
+        }
+    };
+    let Some(reference) = head(&snapshot.session_id).map_err(&unproven)? else {
+        return if prior.is_some() && !source_selectors {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "bound Head retired",
@@ -577,14 +653,14 @@ pub(super) fn read(
             Ok(None)
         };
     };
-    let mut store = store(&snapshot.session_id)?;
-    let published: Head = store.read(&reference)?;
+    let mut store = store(&snapshot.session_id).map_err(&unproven)?;
+    let published: Head = store.read(&reference).map_err(&unproven)?;
     let context = crate::commands::chat::conversation_archive_context_from_snapshot(snapshot);
     if published.agent_id != snapshot.session_id
         || published.source_key != context.provider_source_key
         || !cold_bootstrap::scope_matches(&published, &context)
     {
-        return if prior.is_some() {
+        return if prior.is_some() && !source_selectors {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "bound source scope retired",
@@ -593,7 +669,7 @@ pub(super) fn read(
             Ok(None)
         };
     }
-    if prior.is_some_and(|binding| !binding.matches(&published)) {
+    if !source_selectors && prior.is_some_and(|binding| !binding.matches(&published)) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "bound canonical scope changed",
@@ -603,8 +679,58 @@ pub(super) fn read(
     // select its handoff; another reader's switch never waives these aliases.
     let proof =
         proof.filter(|proof| proof.head_ref == reference && proof.binding.matches(&published));
-    if (mode == Mode::Legacy && proof.is_none()) || (mode == Mode::Bound && prior.is_none()) {
+    if (mode == Mode::Legacy && proof.is_none() && !source_selectors)
+        || (mode == Mode::Bound && prior.is_none())
+    {
         return Ok(None);
+    }
+    // Certification is shared by all readers of A. A reader's display limit
+    // must never replace that source snapshot with a smaller certification.
+    let mut page = read_preview_source(&context, snapshot, PAGE_ROWS).map_err(&unproven)?;
+    if page.conversation_id.as_deref() != Some(published.conversation_id.as_str())
+        || page.source_epoch != published.source_epoch
+        || page.events.is_empty()
+    {
+        return Ok(None);
+    }
+    if !page.revision.starts_with(&format!("{reference}.")) {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "canonical revision changed",
+        ));
+    }
+    let native_generation = page.generation.as_deref() != Some(published.generation.as_str());
+    if native_generation {
+        page.bytes_read += POLICY_BYTES as usize;
+        page.records_decoded += 1;
+        if !has_native_source_generation(snapshot, &mut store, &page, &published)
+            .map_err(&unproven)?
+        {
+            return Ok(None);
+        }
+    }
+    // A shared certificate never waives this reader's literal selectors. A
+    // failed selector returns Legacy without changing another reader's A.
+    let selected = if source_selectors {
+        resolve_hints(snapshot, hints.unwrap(), headers, proof, &page).unwrap_or(None)
+    } else {
+        None
+    };
+    let proof = if source_selectors {
+        selected
+            .as_ref()
+            .filter(|proof| proof.head_ref == reference && proof.binding.matches(&published))
+    } else {
+        proof
+    };
+    if source_selectors && proof.is_none() {
+        return Ok(None);
+    }
+    if prior.is_some_and(|binding| !binding.matches(&published)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bound canonical scope changed",
+        ));
     }
     let direct = prior.is_none() && proof.is_none() && mode == Mode::First;
     let Some(mut binding) = prior
@@ -627,33 +753,10 @@ pub(super) fn read(
     if !binding.matches(&published) {
         return Ok(None);
     }
-    if let Some(proof) = proof.filter(|proof| proof.binding.matches(&published)) {
+    if let Some(proof) = proof {
         binding
             .openings
             .extend(proof.binding.openings.iter().cloned());
-    }
-    // Certification is shared by all readers of A. A reader's display limit
-    // must never replace that source snapshot with a smaller certification.
-    let mut page = read_preview_source(&context, snapshot, PAGE_ROWS)?;
-    if page.conversation_id.as_deref() != Some(published.conversation_id.as_str())
-        || page.source_epoch != published.source_epoch
-        || page.events.is_empty()
-    {
-        return Ok(None);
-    }
-    if !page.revision.starts_with(&format!("{reference}.")) {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "canonical revision changed",
-        ));
-    }
-    let native_generation = page.generation.as_deref() != Some(published.generation.as_str());
-    if native_generation {
-        page.bytes_read += POLICY_BYTES as usize;
-        page.records_decoded += 1;
-        if !has_native_source_generation(snapshot, &mut store, &page, &published)? {
-            return Ok(None);
-        }
     }
     // Unqualified rows can change without changing turn certificates. Retain
     // the fixed source snapshot revision so the publication CAS fences those
@@ -755,6 +858,9 @@ pub(super) fn read(
     if page.events.iter().any(|event| !owned.contains(&event.id)) {
         return Ok(None);
     }
+    let Some(backings) = source_backings(&page.events) else {
+        return Ok(None);
+    };
     let mut aliases = Vec::new();
     let selectors: Vec<_> = hints.map_or_else(
         || {
@@ -785,24 +891,15 @@ pub(super) fn read(
         let Some(physical) = proof.and_then(|proof| proof.backing.get(key)) else {
             return Ok(None);
         };
-        let mut matches = page.events.iter().filter(|event| {
-            event.id == *physical
-                || event.metadata["chat_source_ref"].as_str() == Some(physical.as_str())
-                || event.metadata["chat_display_member_ids"]
-                    .as_array()
-                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(physical)))
-        });
-        let Some(event) = matches.next() else {
+        let Some(Some(event)) = backings.get(physical.as_str()) else {
             return Ok(None);
         };
-        if matches.next().is_some() {
-            return Ok(None);
-        }
         aliases.push(AgentChatAlias {
             observation_id: observation.to_owned(),
             canonical_id: event.id.clone(),
         });
     }
+    drop(backings);
     let required: BTreeSet<_> = aliases
         .iter()
         .map(|alias| alias.canonical_id.clone())

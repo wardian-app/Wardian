@@ -322,6 +322,8 @@ Malformed arrays or any invalid member reject the whole request through the
 existing bad-request path. Omission retains the previous behavior.
 
 Clients forward the literal backing IDs from the selected agent's preview.
+For a larger admitted window, they select its latest eight IDs in source order
+after validating the whole window. This selector subset proves no membership.
 The producer owns resolution within the authenticated agent, current source,
 admission and publication scope. Hints grant no new read authority and carry no
 Older cursor, detail capability or row-revalidation ACK. Valid unknown,
@@ -330,6 +332,14 @@ Only exact aliases issued with the current returned revision establish a
 preview-to-canonical correspondence; hints, text equality and aliases from an
 earlier revision cannot establish or renew that correspondence. See the
 [Remote reader contract](./remote-gateway.md#recent-header-windows).
+
+An unbound aware opening with an empty hint array returns the ordinary legacy
+source window before attempting turn qualification. It does not wait for
+capture or indexing. A subsequent ordinary read can qualify the same recent
+admission and issue one atomic handoff with exact aliases. Already certified
+admissions retain their shared state when another reader opens them. Initial
+legacy output and later qualified output are separate producer revisions;
+clients never combine their sources.
 
 The recent admission owns one shared certification state. Desktop, Remote and
 fresh opens under that admission retain the same unresolved extension gaps and

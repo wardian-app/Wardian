@@ -231,6 +231,9 @@ pub(crate) async fn load_agent_chat_page_with_preview_for_state(
         revalidate_ids.is_some(),
     )?;
     let recent_limit = recent.limit;
+    let legacy_first = recent.preview
+        && revision.is_none()
+        && preview.backing_ids.as_ref().is_some_and(Vec::is_empty);
     let revalidation_requested = revalidate_ids.is_some();
     if session_id.trim().is_empty()
         || (recent.preview && (cursor.is_some() || detail_ref.is_some() || revalidation_requested))
@@ -328,6 +331,14 @@ pub(crate) async fn load_agent_chat_page_with_preview_for_state(
         }
         if let Some(read) = canonical_bridge {
             return read();
+        }
+        if legacy_first {
+            return crate::state::conversation_archive::chat_read::read_legacy_source(
+                &context,
+                &snapshot,
+                revision.as_deref(),
+                recent_limit,
+            );
         }
         let page = crate::state::conversation_archive::chat_read::read_with_revalidation_and_limit(
             &context,
