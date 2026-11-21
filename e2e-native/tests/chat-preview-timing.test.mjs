@@ -16,6 +16,7 @@ import {
   syntheticCodexSource, stageSyntheticStoppedSource, verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   assertPendingCaptureBracket, trustedClickWithPendingCapture,
   chatTimingReceipt, chatTimingCandidateDetails, chatPreviewObserverScript, assertChatTimingSample, recordChatTimingCase, writeChatTimingReport,
+  recordRejectedChatScope,
 } from "../lib/chatPreviewTiming.mjs";
 
 const fixture = { sessionId: "owned-agent", provider: "codex", body: "A uniquely completed synthetic answer.", name: "Synthetic Agent",
@@ -51,6 +52,12 @@ function presentedPreview() {
       event_refs: [dto.events[0].id] }],
   } };
   return dto;
+}
+
+function unscopedReset() {
+  return { session_id: fixture.sessionId, conversation_id: null, generation: null, source_epoch: null,
+    revision: "opaque-unscoped-reset", events: [], next_before: null, unchanged: false, reset: true,
+    progress: "projection_pending", aliases: [], removed_ids: [], detail: null, bytes_read: 0, records_decoded: 0 };
 }
 
 function browser({ surface = "remote", disclosure = false, modeNeedsToggle = false, body = fixture.body, captureDetails = false } = {}) {
@@ -108,7 +115,7 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
     api.receive(receipt, captureDetails ? chatTimingCandidateDetails(dto, observedFixture) : null);
   };
   return { api, adopt, input, content, document, listeners, tab, scroll, workButton, row, committed, anchor,
-    async deliver(dto) { requests++; await callback({ sessionId: fixture.sessionId }, Promise.resolve(dto)); },
+    async deliver(dto, args = { sessionId: fixture.sessionId }) { requests++; await callback(args, Promise.resolve(dto)); },
     async reject(error) { requests++; await callback({ sessionId: fixture.sessionId }, Promise.reject(error)); },
     click(trusted = true) {
       const button = element({ "aria-label": surface === "desktop" ? `Agent ${fixture.name}` : `Open ${fixture.name} details` }); button.closest = () => button;
@@ -163,6 +170,178 @@ test("native response qualification excludes Mock, preview and incomplete member
   assert.equal(chatTimingReceipt(page({ provider: "mock" }), mock).targets[0].qualifiedTurn, null);
   assert.throws(() => chatTimingReceipt({ ...page(), session_id: "foreign" }, fixture), /foreign_or_unbounded_page/);
   assert.throws(() => chatTimingReceipt({ ...page(), generation: null }, fixture), /invalid_page_scope/);
+});
+
+test("public empty unscoped reset is a noncandidate control with no scope or endpoint authority", () => {
+  const receipt = chatTimingReceipt(unscopedReset(), fixture);
+  assert.equal(receipt.control, "unscoped_reset");
+  assert.deepEqual(receipt.targets, []);
+  assert.equal(receipt.scope.conversation, null); assert.equal(receipt.scope.generation, null);
+  assert.equal(receipt.scope.epoch, null); assert.equal(receipt.scope.admission, null);
+  const b = browser(); b.api.arm("empty-reset"); b.click(); b.api.noteRequest(); b.api.receive(receipt); b.advance(5);
+  const state = b.api.snapshot();
+  assert.equal(state.phase.readableAt, null); assert.equal(state.phase.usableAt, null);
+  assert.equal(state.phase.previewAt, null); assert.equal(state.phase.qualifiedAt, null);
+  assert.equal(state.faults.length, 0); assert.equal(b.api.prepareInteraction(), null); b.api.dispose();
+});
+
+test("unscoped reset recognition rejects partial/missing scope, rows and every authority-bearing control variation", () => {
+  const invalid = {
+    foreignSession: (p) => { p.session_id = "foreign"; },
+    missingRevision: (p) => { delete p.revision; }, emptyRevision: (p) => { p.revision = " "; },
+    longRevision: (p) => { p.revision = "r".repeat(1025); },
+    missingC: (p) => { delete p.conversation_id; }, missingG: (p) => { delete p.generation; }, missingE: (p) => { delete p.source_epoch; },
+    partialC: (p) => { p.conversation_id = "claimed"; }, partialG: (p) => { p.generation = "claimed"; }, partialE: (p) => { p.source_epoch = "claimed"; },
+    rows: (p) => { p.events = page().events; }, admission: (p) => { p.recent_admission = " "; },
+    undefinedAdmission: (p) => { p.recent_admission = undefined; },
+    notReset: (p) => { p.reset = false; }, missingReset: (p) => { delete p.reset; },
+    unchanged: (p) => { p.unchanged = true; }, missingUnchanged: (p) => { delete p.unchanged; },
+    presentation: (p) => { p.presentation = { version: 1, payload: {} }; }, detail: (p) => { p.detail = {}; },
+    cursor: (p) => { p.cursor = "claimed"; }, nextBefore: (p) => { p.next_before = "claimed"; },
+    older: (p) => { p.older_page = true; }, hasMore: (p) => { p.has_more = true; }, archive: (p) => { p.archive_read_ready = true; },
+    revalidation: (p) => { p.revalidated_ids = []; }, alias: (p) => { p.aliases = [{ observation_id: "a", canonical_id: "b" }]; },
+    removal: (p) => { p.removed_ids = ["claimed"]; }, malformedAliases: (p) => { p.aliases = null; },
+    malformedPaging: (p) => { p.older_page = null; }, missingProgress: (p) => { delete p.progress; },
+  };
+  for (const [name, change] of Object.entries(invalid)) {
+    const dto = unscopedReset(); change(dto);
+    assert.throws(() => chatTimingReceipt(dto, fixture), /invalid_page_scope|foreign_or_unbounded_page/, name);
+  }
+  const explicitNone = { ...unscopedReset(), recent_admission: null, presentation: null, revalidated_ids: null,
+    older_page: false, archive_read_ready: false, cursor: null, has_more: false };
+  assert.equal(chatTimingReceipt(explicitNone, fixture).control, "unscoped_reset");
+  assert.equal(chatTimingReceipt(page(), fixture).control, undefined);
+  assert.equal(chatTimingReceipt(page({ preview: true }), fixture).control, undefined);
+});
+
+test("admission-scoped empty resets retain existing scope validation and grant no endpoint", () => {
+  const dto = { ...page({ preview: true }), events: [], reset: true, unchanged: false };
+  const receipt = chatTimingReceipt(dto, fixture);
+  assert.equal(receipt.control, undefined); assert.equal(receipt.scope.admission, dto.recent_admission);
+  assert.equal(receipt.targets.length, 0);
+  const b = browser(); b.api.arm("admission-empty-reset"); b.click(); b.api.noteRequest();
+  try {
+    b.scroll.attributes["data-chat-page-scope"] = JSON.stringify(receipt.scope);
+    b.api.receive(receipt); b.advance(4);
+    const state = b.api.snapshot(); assert.equal(state.faults.length, 0);
+    for (const field of ["readableAt", "usableAt", "qualifiedAt"]) assert.equal(state.phase[field], null);
+  } finally { b.api.dispose(); }
+});
+
+test("control between frames fences old canonical, provisional and legacy receipts despite matching old DOM", () => {
+  for (const dto of [page(), presentedPreview(), page({ preview: true })]) {
+    const b = browser(); b.api.arm("control-fence"); b.click(); b.api.noteRequest(); b.adopt(dto); b.advance(2);
+    b.api.receive(chatTimingReceipt(unscopedReset(), fixture)); b.advance(5);
+    const z = b.api.snapshot().phase;
+    assert.equal(z.readableAt, null); assert.equal(z.usableAt, null);
+    assert.equal(z.previewAt, null); assert.equal(z.qualifiedAt, null);
+    assert.equal(b.api.prepareInteraction(), null); b.api.dispose();
+  }
+});
+
+test("a post-control identical scoped response coalesces but must establish two fresh frames", () => {
+  for (const dto of [page(), presentedPreview()]) {
+    const b = browser(); b.api.arm("control-resume"); b.click(); b.api.noteRequest(); b.adopt(dto); b.advance(2);
+    b.api.receive(chatTimingReceipt(unscopedReset(), fixture)); b.adopt(dto); b.advance();
+    assert.equal(b.api.snapshot().phase.readableAt, null); b.advance();
+    assert.equal(b.api.snapshot().phase.readableAt, null); b.advance();
+    const s = b.api.snapshot(); assert.ok(s.phase.readableAt); assert.equal(s.phase.readable.admitted, true);
+    assert.ok(s.phase.frames.readableAt[0] > s.receipts.find(r => r.control).last_at);
+    assert.equal(s.raw_receipt_count, 3); assert.equal(s.receipts.length, 2);
+    assert.equal(s.receipts.find(r => !r.control).last_sequence, 3); b.api.dispose();
+  }
+});
+
+test("control preserves first endpoint facts and prevents stale input credit until fresh frames and a new trusted interaction", () => {
+  const b = browser(); const dto = presentedPreview(); b.api.arm("control-after-readable"); b.click(); b.api.noteRequest(); b.adopt(dto); b.advance(3);
+  const first = b.api.snapshot().phase.readableAt; const firstFrames = b.api.snapshot().phase.frames.readableAt;
+  b.api.prepareInteraction(); b.api.receive(chatTimingReceipt(unscopedReset(), fixture));
+  b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(3);
+  assert.equal(b.api.snapshot().phase.usableAt, null); assert.equal(b.api.prepareInteraction(), null);
+  b.adopt(dto); b.advance(2); assert.equal(b.api.prepareInteraction(), null); b.advance();
+  const resumed = b.api.snapshot().phase;
+  assert.equal(resumed.readableAt, first); assert.deepEqual(resumed.frames.readableAt, firstFrames);
+  assert.equal(resumed.readable_after_control.control_sequence, 2);
+  assert.equal(resumed.readable_after_control.frames.length, 2);
+  assert.equal(b.api.prepareInteraction().kind, "wheel"); b.wheelEvent(); b.scroll.scrollTop -= 4; b.advance(3);
+  assert.ok(b.api.snapshot().phase.usableAt); assert.equal(b.api.snapshot().phase.qualifiedAt, null);
+  assert.equal(b.api.snapshot().phase.readableAt, first); b.api.dispose();
+});
+
+test("control cancels an already trusted pending usable proof and cannot infer authority from an unmarked later DOM", () => {
+  const b = browser(); b.api.arm("control-after-input"); b.click(); b.api.noteRequest(); b.adopt(presentedPreview()); b.advance(3);
+  b.api.prepareInteraction(); b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(2);
+  b.api.receive(chatTimingReceipt(unscopedReset(), fixture)); b.adopt(page(), false); b.advance(5);
+  assert.equal(b.api.snapshot().phase.usableAt, null); assert.equal(b.api.snapshot().phase.qualifiedAt, null);
+  assert.equal(b.api.prepareInteraction(), null); b.api.dispose();
+});
+
+test("coalesced controls keep their raw sequence fence across a warm phase without granting source identity", () => {
+  const b = browser(); b.api.arm("old"); b.click(); b.api.noteRequest(); b.adopt(page()); b.advance(3);
+  const firstQ = b.api.snapshot().phase.qualifiedAt;
+  const dto = unscopedReset(); dto.revision = "opaque.not-a-source-key~control";
+  for (let n = 0; n < 700; n++) b.api.receive(chatTimingReceipt(dto, fixture));
+  assert.equal(b.api.snapshot().phase.qualifiedAt, firstQ);
+  b.api.arm("warm"); b.click(); b.advance(5); assert.equal(b.api.snapshot().phase.readableAt, null);
+  assert.equal(b.api.snapshot().receipts.length, 2); assert.equal(b.api.snapshot().raw_receipt_count, 701);
+  b.adopt(page()); b.advance(3); assert.ok(b.api.snapshot().phase.qualifiedAt); b.api.dispose();
+});
+
+test("desktop rejected scope evidence is failure-only, content-free and correlated with its request promise", async () => {
+  const b = browser({ surface: "desktop" }); b.api.arm("rejected-scope"); b.click();
+  const dto = page(); dto.generation = null; dto.conversation_id = "SECRET-CONVERSATION";
+  delete dto.recent_admission;
+  dto.revision = "SECRET-RESPONSE-REVISION"; dto.source_epoch = "SECRET-EPOCH"; dto.events[0].text = "SECRET-TRANSCRIPT";
+  const args = { sessionId: fixture.sessionId, recentPreview: true, revision: "SECRET-REQUEST-REVISION", previewBackingIds: ["SECRET-BACKING"] };
+  const delivery = b.deliver(dto, args);
+  args.revision = "changed-after-request"; args.previewBackingIds.push("LATER-BACKING");
+  await delivery;
+  const s = b.api.snapshot(); assert.deepEqual([...s.faults], ["invalid_page_scope"]); assert.equal(s.raw_error_count, 1);
+  const e = s.rejected_scopes[0]; assert.equal(e.clock_basis, "browser:performance.now");
+  assert.equal(e.fields.generation.is_null, true); assert.equal(e.fields.generation.valid_id, false);
+  assert.equal(e.fields.conversation_id.type, "string"); assert.equal(e.fields.conversation_id.nonblank, true);
+  assert.equal(e.fields.recent_admission.present, false); assert.equal(e.flags_and_counts.events.count, 1);
+  assert.equal(e.request.sequence, 1); assert.equal(e.request.association, "same_onRequest_promise");
+  assert.equal(e.request.recent_preview, true); assert.equal(e.request.backing_hint_count, 1);
+  assert.equal(e.request.revision_length, "SECRET-REQUEST-REVISION".length);
+  assert.ok(Number.isFinite(e.observed_at)); assert.ok(Number.isFinite(e.request.at));
+  assert.equal(JSON.stringify(s.rejected_scopes).includes("SECRET"), false);
+  await assert.rejects(b.api.wait("qualifiedAt", 50), /timing observation invalidated/); b.api.dispose();
+});
+
+test("scope rejection maps SDK cursor and detail requests without retaining their values", async () => {
+  for (const [args, older, detail] of [[{ cursor: "SECRET-CURSOR" }, true, false], [{ detailRef: "SECRET-DETAIL" }, false, true]]) {
+    const b = browser({ surface: "desktop" }); b.api.arm("request-purpose"); b.click();
+    try {
+      await b.deliver({ ...page(), generation: null }, { sessionId: fixture.sessionId, recentPreview: false, ...args });
+      const request = b.api.snapshot().rejected_scopes[0].request;
+      assert.equal(request.older_requested, older);
+      assert.equal(request.detail_requested, detail);
+      assert.equal(JSON.stringify(request).includes("SECRET"), false);
+    } finally { b.api.dispose(); }
+  }
+});
+
+test("rejected scope metadata remains bounded with accounted overflow and unknown Remote request association", () => {
+  let rejected;
+  try { chatTimingReceipt({ ...page(), generation: null }, fixture); } catch (error) { rejected = error; }
+  const target = {};
+  for (let n = 0; n < 100; n++) recordRejectedChatScope(target, rejected, { at: 123 + n, clock_basis: "node:performance.now" });
+  assert.ok(target.rejected_scopes.length > 0 && target.rejected_scopes.length <= 4);
+  assert.ok(target.rejected_scope_bytes <= 8192); assert.equal(target.rejected_scope_overflow_count, 100 - target.rejected_scopes.length);
+  assert.ok(target.rejected_scope_overflow_bytes > 0);
+  assert.equal(target.rejected_scope_bytes, target.rejected_scopes.reduce((total, e) => total + Buffer.byteLength(JSON.stringify(e)), 0));
+  assert.equal(target.rejected_scopes[0].clock_basis, "node:performance.now");
+  assert.equal(target.rejected_scopes[0].request.sequence, null); assert.equal(target.rejected_scopes[0].request.association, "unknown");
+  assert.equal(target.rejected_scopes[0].request.at, null); assert.equal(target.rejected_scopes[0].request.args_available, false);
+  const before = target.rejected_scopes.length; recordRejectedChatScope(target, new Error("other failure"));
+  assert.equal(target.rejected_scopes.length, before);
+});
+
+test("valid scope and empty reset control never emit rejected-scope metadata", async () => {
+  const b = browser({ surface: "desktop" }); b.api.arm("valid-control"); b.click(); await b.deliver(page());
+  await b.deliver(unscopedReset()); assert.equal(b.api.snapshot().faults.length, 0);
+  assert.equal(b.api.snapshot().rejected_scopes.length, 0); assert.equal(b.api.snapshot().rejected_scope_bytes, 0); b.api.dispose();
 });
 
 test("an admitted provisional source answer in the shared renderer is readable and usable without canonical qualification", () => {

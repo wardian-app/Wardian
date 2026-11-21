@@ -984,10 +984,19 @@ Durable scope requires real conversation and generation IDs. A validated recent
 preview instead uses its producer-issued recent admission and retains every actual
 nullable canonical hint. The original preview receipt and current consumer DOM must
 match owner, admission, revision and the complete nullable tuple. Missing admission
-does not make null durable IDs valid. Preview paint proves recent-capability scope;
-it does not grant canonical-ready, Older, detail or renewal authority. A matching
+does not make null durable IDs valid for a target receipt. Preview paint proves
+recent-capability scope; it does not grant canonical-ready, Older, detail or
+renewal authority. A matching
 empty unchanged response can retain the original current target receipt while its
 actual admitted scope stays the same.
+
+An empty unscoped reset is retained only as control evidence: matching owner,
+valid revision, explicit null conversation/generation/epoch, and no admission,
+rows or authority. It fences earlier receipts and pending frame proofs. It grants
+no endpoint or qualification; a fresh scoped producer reply must pass two stable
+frames before a new endpoint can be stamped. Malformed claimed scopes remain
+errors. Bounded rejection records retain field shapes and available request
+context without transcript or identifier values.
 
 The `chat-preview-identity-native` opening case also recognizes a source-backed
 answer in the provisional shared renderer. It requires one unambiguous producer
