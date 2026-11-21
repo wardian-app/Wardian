@@ -25,9 +25,12 @@ import {
   CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, chatPreviewWatchdogMs,
   chatPreviewHomePaths, assertFreshChatPreviewHome, assertPreclaimedChatPreviewBase, assertChatPreviewHomeBinding,
   STOPPED_SOURCE_CAPABILITY, stageSyntheticStoppedSource, prepareSyntheticProviderHomes, verifySyntheticSourceProjection,
+  CHAT_PREVIEW_FIXTURE_LIFECYCLE, observeChatPreviewAutoRestore, closeChatPreviewFixtureSession,
   verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   trustedClickWithPendingCapture,
   chatTimingReceipt, chatTimingCandidateDetails, chatPreviewObserverScript, recordChatTimingCase, writeChatTimingReport,
+  recordChatPreviewOpeningError, assertChatPreviewSourceUnchanged, assertChatPreviewSurfaceErrorsEmpty,
+  recordChatPreviewSurfaceError, recordChatPreviewCleanupOutcome, chatPreviewRunOutcome, CHAT_PREVIEW_OUTCOME_PREFIX,
   recordRejectedChatScope, driveChatPreviewProbe, assertChatOpeningSample, assertChatFixtureShape, CHAT_PREVIEW_RULER_VERSION, observeChatOpening,
 } from "../lib/chatPreviewTiming.mjs";
 
@@ -235,7 +238,8 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
   prepareIsolatedHome(base);
   const file = path.join(base.isolatedHome, "artifacts", "chat-preview-identity", "result.json");
   process.stdout.write(`[chat-preview-timing] evidence: ${file}\n`);
-  const report = { schema_version: 2, ruler_version: CHAT_PREVIEW_RULER_VERSION, status: "RUNNING", cases: [], surfaces: [],
+  const report = { schema_version: 2, ruler_version: CHAT_PREVIEW_RULER_VERSION, outcome_protocol_version: 1,
+    method_revision: "v8-typed-outcome-provenance-before-first-cohort", status: "RUNNING", cases: [], surfaces: [],
     coordinator_claim: { run_id: runId, home: homes.baseHome, owner_pid: base.homeLock.pid,
       origin: suppliedRunId === undefined ? "standalone_fresh" : "live_parent_preclaim" },
     deadlines: { seed_setup_ms: CHAT_PREVIEW_SEED_TIMEOUT_MS, outer_watchdog_ms: watchdogMs,
@@ -301,13 +305,14 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         appPath: base.frozenArtifacts.app.path, sharedCliPath: base.frozenArtifacts.cli.path, ownsGeneratedHome: false };
       assertFreshChatPreviewHome(harness.isolatedHome);
       const detail = { surface, fixture_mode: mode, status: "RUNNING", cleanup: {}, websocket: { status_frames_received: 0 }, errors: [] };
+      const surfaceCaseStart = report.cases.length;
       report.surfaces.push(detail);
       let session; let browser; let page; let tls; let startupAttempted = false; let fixture;
       const pendingObservations = new Set();
       let observing = true;
       try {
         prepareIsolatedHome(harness);
-        fixture = stageSyntheticStoppedSource(harness, { upstreamStorage: true, ...(mode === "qualified" ? { turns: 128, padding: 128 }
+        fixture = stageSyntheticStoppedSource(harness, { upstreamStorage: true, savedActiveRestore: true, ...(mode === "qualified" ? { turns: 128, padding: 128 }
           : { turns: pendingTurns, padding: pendingPadding }) });
         assert.ok(mode !== "pending" || fixture.sourceBytes >= 4 * 1024 * 1024, "Pending fixture must retain a genuine large source");
         detail.fixture = { history_turns: mode === "qualified" ? 128 : pendingTurns, padding: mode === "qualified" ? 128 : pendingPadding,
@@ -339,20 +344,13 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         await waitForAppShell(session.driver, 30_000);
         // Leave transport headroom for the observer's 30-second qualification deadline.
         await session.driver.manage().setTimeouts({ script: 40_000 });
-        const agent = (await invokeTauri(session.driver, "list_agents")).find((item) => item.session_id === fixture.sessionId);
-        detail.restored_agent = agent ? { provider: agent.provider, is_off: agent.is_off, session_name: agent.session_name, synthetic: true } : null;
-        assert.ok(agent?.provider === "codex" && agent.is_off === true && agent.session_name === fixture.name,
-          "The real native roster must restore the owned stopped Codex agent");
-        const preparedCommand = await invokeTauri(session.driver, "build_agent_cli_command", { sessionId: fixture.sessionId });
-        assert.ok(typeof preparedCommand === "string" && preparedCommand.trim(), "Normal command preparation must succeed; its result is never executed");
-        detail.source_projection_before_resume = verifySyntheticSourceProjection(harness, fixture, detail.source);
-        await invokeTauri(session.driver, "resume_agent", { sessionId: fixture.sessionId });
-        detail.online_agent = await eventually(async () => {
-          const current = (await invokeTauri(session.driver, "list_agents")).find((item) => item.session_id === fixture.sessionId);
-          return current?.provider === "codex" && current.is_off === false ? { provider: current.provider, is_off: current.is_off,
-            native_owner_readiness: "UNPROVEN_BY_ROSTER_ALONE" } : null;
-        });
-        detail.source_projection_after_resume = verifySyntheticSourceProjection(harness, fixture, detail.source);
+        detail.fixture_lifecycle = CHAT_PREVIEW_FIXTURE_LIFECYCLE;
+        const restored = await eventually(() => observeChatPreviewAutoRestore(
+          (command, args) => invokeTauri(session.driver, command, args), fixture, peer.manifest.model));
+        detail.restored_agent = restored.agent;
+        detail.native_status = restored.metric;
+        detail.online_agent = { ...restored.agent, native_owner_readiness: "UNPROVEN_BY_ROSTER_ALONE" };
+        detail.source_projection_after_startup = verifySyntheticSourceProjection(harness, fixture, detail.source);
         const observerConfig = { surface, sessionId: fixture.sessionId, provider: fixture.provider, name: fixture.name, body: fixture.body, probe,
           synthetic: fixture.synthetic, sourceKey: fixture.sourceKey, sourceEpoch: fixture.sourceEpoch, targetTurn: fixture.targetTurn,
           targetMessageId: fixture.targetMessageId, captureDetails: diagnostic, rulerVersion: CHAT_PREVIEW_RULER_VERSION };
@@ -440,16 +438,21 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
             if (surface === "desktop") await closeDesktopChat(session.driver, fixture);
             else await page.getByRole("button", { name: "Back to remote agents", exact: true }).click();
           }
-          try { await measure(`${surface}-${mode}-${temperature}`); }
-          catch (error) { failures.push(error); detail.errors.push({ code: error.code ?? "error", message: String(error.message).slice(0, 512) }); }
+          const label = `${surface}-${mode}-${temperature}`;
+          try { await measure(label); }
+          catch (error) {
+            failures.push(error);
+            const record = report.cases.at(-1);
+            recordChatPreviewOpeningError(detail, error, record?.label === label ? record : null);
+          }
         }
         if (surface === "remote") assert.ok(detail.websocket.status_frames_received > 0, "No real forwarded PWA status-stream frame observed");
-        assert.deepEqual(verifySyntheticSource(fixture), detail.source, "Stopped source changed during opening measurements");
+        assertChatPreviewSourceUnchanged(detail, verifySyntheticSource(fixture));
         await Promise.allSettled([...pendingObservations]);
-        assert.equal(detail.errors.length, 0, "A timing or passive response observation failed; see retained partials");
+        assertChatPreviewSurfaceErrorsEmpty(detail, report.cases.slice(surfaceCaseStart));
         detail.status = "OBSERVED_UI_ENDPOINTS";
       } catch (error) {
-        detail.status = "FAILED"; detail.errors.push({ code: error.code ?? "error", message: String(error.message).slice(0, 1_024) }); failures.push(error);
+        detail.status = "FAILED"; recordChatPreviewSurfaceError(detail, error); failures.push(error);
       } finally {
         observing = false;
         await Promise.allSettled([...pendingObservations]);
@@ -457,7 +460,12 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
           ["observer", async () => page ? page.evaluate(() => window.__chatPreviewTiming?.dispose())
             : session?.driver.executeScript(() => window.__chatPreviewTiming?.dispose())],
           ["browser", async () => browser?.close()],
-          ["session", async () => { if (session) await closeConformanceSession(session); else assert.ok(!startupAttempted, "Unreturned native startup remains supervisor-owned"); }],
+          ["session", async () => {
+            if (!session) { assert.ok(!startupAttempted, "Unreturned native startup remains supervisor-owned"); return; }
+            detail.pause_receipt = {};
+            await closeChatPreviewFixtureSession((command, args) => invokeTauri(session.driver, command, args), fixture,
+              detail.pause_receipt, () => closeConformanceSession(session));
+          }],
           ["tls", async () => tls?.close()],
         ]) {
           try { detail.cleanup[label] = await operation() ?? "closed_or_not_started"; }
@@ -465,6 +473,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         }
         if (Object.values(detail.cleanup).some((value) => value === "UNPROVEN")) detail.status = "FAILED_CLEANUP";
         if (Object.values(detail.cleanup).every((value) => value !== "UNPROVEN")) releaseHomeLock({ home: harness.isolatedHome, runId: harness.runId });
+        recordChatPreviewCleanupOutcome(detail);
         await save();
       }
     }
@@ -481,7 +490,14 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
     report.status = "FAILED";
     report.error ??= { code: "chat_preview_failed", message: "Chat preview measurements failed; inspect retained result.json partials" };
   }
-  try { await save(); }
+  report.root_outcome = chatPreviewRunOutcome(report, retainedFailures);
+  try {
+    await save();
+    // A final report-write/read failure must not masquerade as an ordinary-only exit1.
+    const reportSha256 = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    process.stdout.write(CHAT_PREVIEW_OUTCOME_PREFIX + JSON.stringify({ version: 1, report_sha256: reportSha256,
+      diagnostic_only: diagnostic, ...report.root_outcome }) + "\n");
+  }
   catch (error) { retainedFailures.push(error); }
   if (retainedFailures.length === 1) throw retainedFailures[0];
   if (retainedFailures.length > 1) throw new AggregateError(retainedFailures,

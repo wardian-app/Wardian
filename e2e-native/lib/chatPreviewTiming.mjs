@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readHomeLock, lockHolderAlive, NATIVE_E2E_HOME_PREFIX } from "./sessionHome.mjs";
 import { freezeArtifact } from "./frozenArtifacts.mjs";
+import { pauseConformanceAgents } from "./conformance-cleanup.mjs";
 
 export const CHAT_PREVIEW_BUDGET_MS = 1_000;
 export const CHAT_PREVIEW_RULER_VERSION = 8;
@@ -13,9 +14,154 @@ const CHAT_PREVIEW_EXECUTION_ALLOWANCE_MS = 480_000;
 export const STOPPED_SOURCE_CAPABILITY = "Provide WARDIAN_CHAT_PREVIEW_SEED_EXE for the compiled backend fixture test. It must acquire an owned stopped Codex source through the real acquisition/archive owner, retaining native identity, continuity, normalizer and policy in pending conversation-capture.json and publishing a valid Head. This harness never manufactures capture or projection state.";
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const uuid = (value) => typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value);
+// Error identity, never its code/message or caller-supplied fields, supplies harness provenance.
+const outcomeProvenance = new WeakMap();
+export const CHAT_PREVIEW_OUTCOME_PREFIX = "[chat-preview-timing] outcome: ";
 
 function need(condition, code, message = code) {
   if (!condition) throw Object.assign(new Error(message), { code });
+}
+
+function ordinaryOpeningProof(error, record) {
+  const proof = outcomeProvenance.get(error);
+  return proof?.kind === "ordinary_m1" && proof.record === record ? proof : null;
+}
+
+function healthyOutcomeRecord(record) {
+  const observed = record?.observation;
+  return Boolean(observed && !record.observation_error && !record.report_error && !record.m2_error
+    && observed.faults?.length === 0 && observed.fatal_error_count === 0
+    && !observed.request_overflow_count && !observed.receipt_overflow_count && !observed.error_overflow_count
+    && !observed.busy_retry_overflow_count && observed.busy_retries?.every(entry => Number.isFinite(entry.recovered_at))
+    && !observed.diagnostics?.transcript_error_visible);
+}
+
+/** Preserve the actual opening error and register only the provenance produced by its completed flow. */
+export function recordChatPreviewOpeningError(surface, error, record) {
+  const proof = ordinaryOpeningProof(error, record);
+  const entry = { code: error.code ?? "error", message: String(error.message).slice(0, 512),
+    origin: { kind: proof ? "ordinary_m1" : "unclassified_opening", case_label: record?.label ?? null } };
+  if (proof) outcomeProvenance.set(entry, { kind: "ordinary_opening_entry", record, proof });
+  surface.errors.push(entry);
+  return entry;
+}
+
+/** The PASS is emitted only after the unchanged real source-proof assertion succeeds. */
+export function assertChatPreviewSourceUnchanged(surface, actual) {
+  assert.deepEqual(actual, surface.source, "Stopped source changed during opening measurements");
+  surface.post_source_verification = { version: 1, status: "PASS" };
+}
+
+/** Same final assertion/throw; ordinary summary is restricted to actual marked opening-error identities. */
+export function assertChatPreviewSurfaceErrorsEmpty(surface, records) {
+  try { assert.equal(surface.errors.length, 0, "A timing or passive response observation failed; see retained partials"); }
+  catch (error) {
+    const entries = surface.errors.map(entry => outcomeProvenance.get(entry));
+    const failed = records.filter(record => record.status === "FAILED");
+    if (surface.post_source_verification?.status === "PASS" && surface.errors.length > 0
+      && entries.every(entry => entry?.kind === "ordinary_opening_entry" && records.includes(entry.record)
+        && healthyOutcomeRecord(entry.record) && entry.record.metrics === null
+        && entry.record.failure_outcome?.kind === "ordinary_m1_after_full_m2"
+        && entry.record.error?.code === entry.proof.outcome.code
+        && entry.record.failure_outcome.code === entry.proof.outcome.code)
+      && new Set(entries.map(entry => entry.record)).size === entries.length
+      && entries.length === failed.length && failed.every(record => entries.some(entry => entry.record === record))) {
+      const summary = { version: 1, kind: "ordinary_m1_only", opening_error_count: entries.length,
+        failed_case_labels: failed.map(record => record.label), final_assert_error_count: 1 };
+      surface.ordinary_m1_summary = summary;
+      outcomeProvenance.set(error, { kind: "ordinary_surface_assert", surface, summary });
+    }
+    throw error;
+  }
+}
+
+/** Distinguish this exact derived assertion from any other ERR_ASSERTION without changing the error. */
+export function recordChatPreviewSurfaceError(surface, error) {
+  const proof = outcomeProvenance.get(error);
+  const known = proof?.kind === "ordinary_surface_assert" && proof.surface === surface && proof.summary === surface.ordinary_m1_summary;
+  const entry = { code: error.code ?? "error", message: String(error.message).slice(0, 1_024),
+    origin: { kind: known ? "ordinary_m1_surface_assert" : "unclassified_surface" } };
+  surface.errors.push(entry);
+  return entry;
+}
+
+/** These are completed cleanup operations, not a new claim about supervisor closure or lease removal. */
+export function recordChatPreviewCleanupOutcome(surface) {
+  const names = ["observer", "browser", "session", "tls"];
+  surface.cleanup_operations = { version: 1, status: names.every(name => Object.hasOwn(surface.cleanup, name)
+    && surface.cleanup[name] !== "UNPROVEN") ? "PASS" : "FAIL", operation_count: names.length };
+}
+
+/** Root provenance accounts for every retained exception; unknown/mixed errors cannot become benign. */
+export function chatPreviewRunOutcome(report, errors) {
+  const failed = report.cases.filter(record => record.status === "FAILED");
+  const ordinary = errors.filter(error => outcomeProvenance.get(error)?.kind === "ordinary_m1");
+  const derived = errors.filter(error => outcomeProvenance.get(error)?.kind === "ordinary_surface_assert");
+  const validSurfaces = report.surfaces.every(surface => surface.post_source_verification?.status === "PASS"
+    && surface.cleanup_operations?.status === "PASS" && surface.cleanup_operations.operation_count === 4
+    && !Object.values(surface.cleanup).includes("UNPROVEN")
+    && (surface.errors.length === 0 ? surface.status === "OBSERVED_UI_ENDPOINTS"
+      : surface.ordinary_m1_summary?.kind === "ordinary_m1_only"
+        && surface.errors.length === surface.ordinary_m1_summary.opening_error_count + 1
+        && surface.errors.filter(entry => entry.origin?.kind === "ordinary_m1_surface_assert").length === 1
+        && surface.errors.filter(entry => entry.origin?.kind === "ordinary_m1").length === surface.ordinary_m1_summary.opening_error_count));
+  const known = validSurfaces && report.cases.every(healthyOutcomeRecord)
+    && ordinary.length === failed.length && derived.length === report.surfaces.filter(surface => surface.ordinary_m1_summary).length
+    && errors.length === ordinary.length + derived.length
+    && derived.every(error => { const proof = outcomeProvenance.get(error); return report.surfaces.includes(proof.surface)
+      && proof.summary === proof.surface.ordinary_m1_summary; })
+    && ordinary.every(error => { const proof = outcomeProvenance.get(error); return report.cases.includes(proof.record)
+      && proof.record.failure_outcome?.kind === "ordinary_m1_after_full_m2" && proof.record.metrics === null; });
+  return { version: 1, kind: errors.length === 0 && failed.length === 0 && validSurfaces ? "pass"
+    : known && failed.length > 0 ? "ordinary_m1_only" : "unclassified",
+  failed_openings: failed.length, derived_surface_assertions: derived.length, retained_error_count: errors.length };
+}
+
+/** Adjudicate only finalized producer facts. Job cleanup and failed-case metric credit remain separate. */
+export function classifyChatPreviewCycleOutcome(report, { exitCode, completion, reportSha256 }) {
+  const stop = reason => ({ classification: "UNCLASSIFIED_STOP", allow_next: false, metric_credit: false, reason });
+  if (!report || report.ruler_version !== 8 || report.outcome_protocol_version !== 1 || report.cases?.length !== 8
+    || report.surfaces?.length !== 4 || report.timing_qualification !== "ISOLATED_BENCHMARK_ATTEMPT") return stop("incomplete_or_nonmeasurement_report");
+  const root = report.root_outcome;
+  if (completion?.version !== 1 || completion.diagnostic_only !== false || !/^[a-f0-9]{64}$/.test(reportSha256 ?? "")
+    || completion.report_sha256 !== reportSha256 || !root || root.version !== 1
+    || ["kind", "failed_openings", "derived_surface_assertions", "retained_error_count"].some(key => completion[key] !== root[key]))
+    return stop("missing_final_persisted_report_binding");
+  if (!report.cases.every(healthyOutcomeRecord) || report.surfaces.some(surface => surface.post_source_verification?.status !== "PASS"
+    || surface.cleanup_operations?.status !== "PASS" || surface.cleanup_operations.operation_count !== 4
+    || Object.keys(surface.cleanup ?? {}).length !== 4 || Object.values(surface.cleanup).includes("UNPROVEN"))) return stop("source_observer_or_cleanup_not_proved");
+  const failed = report.cases.filter(record => record.status === "FAILED");
+  if (exitCode === 0 && root.kind === "pass" && failed.length === 0 && root.retained_error_count === 0 && !report.error
+    && report.cases.every(record => record.status === "OBSERVED_UI_ENDPOINTS" && record.metrics !== null)
+    && report.surfaces.every(surface => surface.status === "OBSERVED_UI_ENDPOINTS" && surface.errors?.length === 0))
+    return { classification: "ALL_GATES_REPORTED_PASS", allow_next: true, metric_credit: true };
+  const ordinaryCodes = ["chat_readable_timeout", "chat_input_timeout", "probe_deadline_exceeded", "probe_attempts_exhausted", "chat_open_budget_exceeded"];
+  if (exitCode !== 1 || root.kind !== "ordinary_m1_only" || failed.length === 0
+    || root.failed_openings !== failed.length || new Set(report.cases.map(record => record.label)).size !== 8
+    || !failed.every(record => record.metrics === null && record.failure_outcome?.version === 1
+      && record.failure_outcome.kind === "ordinary_m1_after_full_m2" && record.failure_outcome.passive_m2 === "PASS"
+      && record.failure_outcome.handoff_guards === "PASS" && ordinaryCodes.includes(record.error?.code)
+      && record.error.code === record.failure_outcome.code)
+    || report.cases.some(record => record.status !== "FAILED" && (record.status !== "OBSERVED_UI_ENDPOINTS" || record.metrics === null)))
+    return stop("not_exclusively_proven_ordinary_m1");
+  const labels = []; let summaries = 0;
+  for (const surface of report.surfaces) {
+    if (surface.errors?.length === 0 && surface.status === "OBSERVED_UI_ENDPOINTS") continue;
+    const summary = surface.ordinary_m1_summary;
+    if (surface.status !== "FAILED" || summary?.version !== 1 || summary.kind !== "ordinary_m1_only"
+      || summary.final_assert_error_count !== 1 || !Array.isArray(summary.failed_case_labels)
+      || summary.failed_case_labels.length !== summary.opening_error_count
+      || surface.errors.length !== summary.opening_error_count + 1) return stop("missing_surface_ordinary_summary");
+    const opening = surface.errors.filter(entry => entry.origin?.kind === "ordinary_m1");
+    const derived = surface.errors.filter(entry => entry.origin?.kind === "ordinary_m1_surface_assert");
+    if (opening.length !== summary.opening_error_count || derived.length !== 1
+      || opening.some(entry => !summary.failed_case_labels.includes(entry.origin.case_label))) return stop("mixed_surface_error_origins");
+    labels.push(...summary.failed_case_labels); summaries++;
+  }
+  if (labels.length !== failed.length || new Set(labels).size !== labels.length || failed.some(record => !labels.includes(record.label))
+    || root.derived_surface_assertions !== summaries || root.retained_error_count !== failed.length + summaries) return stop("outcome_error_count_mismatch");
+  return { classification: "ORDINARY_M1_ONLY_CONTINUE_FIXED_PLAN", allow_next: true, metric_credit: false,
+    failed_openings: failed.length, failed_metrics_remain_null: true };
 }
 
 /** Both frozen products use this in-home compact layout and a strict 108-byte socket capacity. */
@@ -187,12 +333,15 @@ function newOwnedFile(root, relative, bytes) {
  * Stage supported restore configuration and a large synthetic native source before App startup.
  * This deliberately does not forge conversation-capture.json. A backend seed adapter is required.
  * Opt-in upstreamStorage avoids a later SDK session copy changing the certified file identity.
+ * savedActiveRestore selects desired startup intent only; the backend must earn actual readiness.
  */
 export function stageSyntheticStoppedSource(harness, options = {}) {
   const root = ownedHome(harness);
   need(!fs.existsSync(path.join(root, "settings", "state.json")), "fixture_must_precede_startup");
   const upstreamStorage = options.upstreamStorage === undefined ? false : options.upstreamStorage;
   need(typeof upstreamStorage === "boolean", "invalid_fixture_upstream_storage");
+  const savedActiveRestore = options.savedActiveRestore === undefined ? false : options.savedActiveRestore;
+  need(typeof savedActiveRestore === "boolean", "invalid_fixture_saved_active_restore");
   const sessionId = options.sessionId ?? randomUUID();
   need(uuid(sessionId), "invalid_agent_session");
   const workspace = path.join(root, "synthetic-chat-workspace");
@@ -205,13 +354,88 @@ export function stageSyntheticStoppedSource(harness, options = {}) {
   const config = JSON.parse(fs.readFileSync(new URL("../../crates/wardian-core/tests/fixtures/chat-saved-roster.json", import.meta.url), "utf8"))[0];
   const name = "Synthetic-Preview-Timing";
   newOwnedFile(root, "settings/state.json", JSON.stringify([{ ...config, session_id: sessionId, session_name: name,
-    folder: workspace, resume_session: source.nativeSessionId, conversation_logging: "enabled", is_off: true }]));
+    folder: workspace, resume_session: source.nativeSessionId, conversation_logging: "enabled", is_off: !savedActiveRestore }]));
   const providerHome = path.join(root, providerRelative);
   if (!upstreamStorage) fs.mkdirSync(providerHome);
-  return { ...source, bytes: undefined, sourcePath, sessionId, name, providerHome, upstreamStorage,
+  return { ...source, bytes: undefined, sourcePath, sessionId, name, providerHome, upstreamStorage, savedActiveRestore,
     sourceBytes: source.bytes.length, capturePath: path.join(root, "agents", sessionId, "conversation-capture.json"),
     sourceKey: `codex:session:${source.nativeSessionId}`, synthetic: true,
     cache: "process-cold only; fixture write/hash/read warmed OS filesystem cache" };
+}
+
+export const CHAT_PREVIEW_FIXTURE_LIFECYCLE = "saved-active-auto-restore-v1";
+
+/** Observe ordinary auto-restore once; roster intent alone never establishes readiness. */
+export async function observeChatPreviewAutoRestore(invoke, fixture, model) {
+  need(fixture.savedActiveRestore === true && uuid(fixture.sessionId), "fixture_requires_saved_active_restore");
+  const agents = await invoke("list_agents");
+  need(Array.isArray(agents), "fixture_restore_roster_unavailable");
+  const matches = agents.filter((agent) => agent?.session_id === fixture.sessionId);
+  need(matches.length <= 1, "fixture_restore_duplicate_agent");
+  const agent = matches[0];
+  if (!agent) return null;
+  need(agent.provider === "codex" && agent.resume_session === fixture.nativeSessionId
+    && agent.session_name === fixture.name && agent.model === model, "fixture_restore_identity_changed");
+  if (agent.is_off !== false) return null;
+  const metrics = await invoke("list_agent_metrics");
+  need(Array.isArray(metrics), "fixture_restore_metrics_unavailable");
+  const ownMetrics = metrics.filter((metric) => metric?.session_id === fixture.sessionId);
+  need(ownMetrics.length <= 1, "fixture_restore_duplicate_metrics");
+  if (ownMetrics[0]?.current_status !== "Idle") return null;
+  return { agent: { session_id: agent.session_id, provider: agent.provider, is_off: agent.is_off,
+    session_name: agent.session_name, resume_session: agent.resume_session, model: agent.model },
+  metric: { session_id: ownMetrics[0].session_id, current_status: ownMetrics[0].current_status },
+  basis: "actual backend roster and Idle metric; enabled composer and native-owner proof remain separate" };
+}
+
+/** Retain the exact real pause reply; an empty roster or driver exit cannot confirm it. */
+export async function pauseChatPreviewFixture(invoke, fixture, record) {
+  need(uuid(fixture?.sessionId) && record && typeof record === "object" && !Array.isArray(record), "invalid_fixture_pause_request");
+  Object.assign(record, { version: 1, session_id: fixture.sessionId, confirmed: false, roster_matches: null,
+    target_attempt_count: 0, attempts: [], post_pause: null, started_at: new Date().toISOString(), started_monotonic_ms: performance.now() });
+  try {
+    await pauseConformanceAgents(async (command, args) => {
+      if (command === "list_agents") {
+        const agents = await invoke(command, args);
+        record.roster_matches = Array.isArray(agents) ? agents.filter((agent) => agent?.session_id === fixture.sessionId).length : null;
+        return agents;
+      }
+      if (args?.sessionId !== fixture.sessionId) return invoke(command, args);
+      record.target_attempt_count++;
+      const attempt = { request: { command, args: { sessionId: args.sessionId } }, outcome: "PENDING",
+        started_at: new Date().toISOString(), started_monotonic_ms: performance.now(), reply: null };
+      if (record.attempts.length < 2) record.attempts.push(attempt);
+      try {
+        const reply = await invoke(command, args);
+        attempt.outcome = "FULFILLED";
+        attempt.reply = reply === null ? { type: "null", value: reply } : { type: typeof reply };
+        return reply;
+      } catch (error) { attempt.outcome = "REJECTED"; throw error; }
+      finally { attempt.ended_at = new Date().toISOString(); attempt.ended_monotonic_ms = performance.now(); }
+    });
+    need(record.roster_matches === 1 && record.target_attempt_count === 1
+      && record.attempts[0]?.outcome === "FULFILLED" && record.attempts[0].reply?.type === "null", "fixture_pause_reply_unconfirmed");
+    const started = new Date().toISOString();
+    const agents = await invoke("list_agents");
+    const matches = Array.isArray(agents) ? agents.filter((agent) => agent?.session_id === fixture.sessionId) : [];
+    record.post_pause = { started_at: started, ended_at: new Date().toISOString(), matches: matches.length,
+      session_id: matches.length === 1 ? matches[0].session_id : null,
+      is_off: matches.length === 1 && typeof matches[0].is_off === "boolean" ? matches[0].is_off : null };
+    need(matches.length === 1 && record.post_pause.is_off === true, "fixture_pause_off_unconfirmed");
+    record.confirmed = true;
+    return record;
+  } finally {
+    record.ended_at = new Date().toISOString(); record.ended_monotonic_ms = performance.now();
+    record.elapsed_ms = Math.max(0, record.ended_monotonic_ms - record.started_monotonic_ms);
+  }
+}
+
+/** A rejected pause still requires driver cleanup; either failure rejects the existing session operation. */
+export async function closeChatPreviewFixtureSession(invoke, fixture, record, close) {
+  const errors = [];
+  try { await pauseChatPreviewFixture(invoke, fixture, record); } catch (error) { errors.push(error); }
+  try { await close(); } catch (error) { errors.push(error); }
+  if (errors.length) throw new AggregateError(errors, "Fixture pause or driver cleanup remains unconfirmed");
 }
 
 function plainFixtureDirectory(root, target) {
@@ -1319,7 +1543,10 @@ export function installChatPreviewTiming(config) {
             clearTimeout(timer); cancelAnimationFrame(frame); reject(new Error("timing observation invalidated")); return;
           }
           if (now() >= current.clickAt + durationMs) {
-            clearTimeout(timer); cancelAnimationFrame(frame); current.continuity.closed = true; resolve(); return;
+            clearTimeout(timer); cancelAnimationFrame(frame); current.continuity.closed = true;
+            current.passive_m2_window = { version: 1, status: "PASS", click_at: current.clickAt,
+              deadline_at: current.clickAt + durationMs, completed_at: now() };
+            resolve(); return;
           }
           frame = requestAnimationFrame(check);
         };
@@ -1511,8 +1738,22 @@ export async function observeChatOpening({ measureM1, observeM2, snapshot, recor
   try { assertChatHandoffSample(current, options); }
   catch (error) { handoffError = error; record.m2_error = { code: error.code, message: String(error.message).slice(0, 256) }; }
   if (miss && handoffError) throw new AggregateError([miss, handoffError], "M1 and independent M2 failed", { cause: miss });
-  if (miss) throw miss;
   if (handoffError) throw handoffError;
+  if (!miss) {
+    // Run the existing final M1 checks here too, so a budget miss is classified only after full M2 guards.
+    try { assertChatOpeningSample(current, options); }
+    catch (error) { if (error.code !== "chat_open_budget_exceeded") throw error; miss = error; }
+  }
+  if (miss) {
+    const window = current.phase.passive_m2_window;
+    if (window?.version === 1 && window.status === "PASS" && window.click_at === current.phase.clickAt
+      && window.deadline_at === current.phase.clickAt + 30_000 && Number.isFinite(window.completed_at)
+      && window.completed_at >= window.deadline_at && current.phase.continuity.closed === true) {
+      const outcome = { version: 1, kind: "ordinary_m1_after_full_m2", code: miss.code, passive_m2: "PASS", handoff_guards: "PASS" };
+      outcomeProvenance.set(miss, { kind: "ordinary_m1", record, outcome });
+    }
+    throw miss;
+  }
   return current;
 }
 
@@ -1528,6 +1769,8 @@ export async function recordChatTimingCase(report, label, operation, snapshot, s
     failures.push(error);
     result.status = "FAILED";
     result.error = { code: error.code ?? "error", message: String(error.message ?? error).slice(0, 1_024) };
+    const proof = ordinaryOpeningProof(error, result);
+    result.failure_outcome = proof ? { ...proof.outcome } : { version: 1, kind: "unclassified" };
   }
   try { result.observation = await snapshot(); }
   catch (error) {
