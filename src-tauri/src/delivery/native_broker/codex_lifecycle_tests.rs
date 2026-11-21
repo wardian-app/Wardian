@@ -14,6 +14,7 @@ impl NativeDeliveryBroker {
         &self,
         agent_id: &str,
         generation: u64,
+        runtime_generation: Option<u64>,
         owner: Arc<crate::delivery::codex_shared::CodexSharedOwner>,
     ) {
         let (tx, _rx) = mpsc::channel(1);
@@ -25,9 +26,15 @@ impl NativeDeliveryBroker {
                 capabilities: NativeTransportCapabilities::degraded("codex", "codex_app_server_ws"),
                 tx,
                 shared_codex: Some(owner),
+                codex_tui_runtime_generation: None,
                 stopped: None,
             },
         );
+        if let Some(runtime_generation) = runtime_generation {
+            self.bind_codex_tui_runtime(agent_id, generation, runtime_generation)
+                .await
+                .unwrap();
+        }
     }
 }
 
@@ -276,6 +283,7 @@ async fn background_run_requires_existing_exact_owner_and_still_cleans_up() {
             capabilities: NativeTransportCapabilities::degraded("codex", "codex_app_server_ws"),
             tx,
             shared_codex: None,
+            codex_tui_runtime_generation: None,
             stopped: None,
         },
     );

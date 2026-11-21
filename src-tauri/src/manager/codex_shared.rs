@@ -227,7 +227,7 @@ pub(super) struct CodexAttachGuard {
 
 /// Own the exact starting PTY before any fallible reader/broker setup. Cleanup
 /// survives cancellation and joins this child before releasing its owner slot.
-pub(super) struct StartingCodexTui {
+pub(crate) struct StartingCodexTui {
     child: Option<Box<dyn portable_pty::Child + Send>>,
     owner: Option<(Arc<NativeDeliveryBroker>, String, u64)>,
     runtime: Option<(
@@ -237,7 +237,7 @@ pub(super) struct StartingCodexTui {
 }
 
 impl StartingCodexTui {
-    pub(super) fn new(
+    pub(crate) fn new(
         child: Box<dyn portable_pty::Child + Send>,
         owner: Option<(Arc<NativeDeliveryBroker>, String, u64)>,
     ) -> Self {
@@ -266,17 +266,25 @@ impl StartingCodexTui {
         }
     }
 
-    pub(super) fn runtime(
+    /// Retain cleanup and bind the broker's terminal incarnation before the
+    /// starting TUI can be published as an active runtime.
+    pub(crate) async fn runtime(
         &mut self,
         broker: Arc<crate::state::terminal_session::TerminalSessionBroker>,
-        generation: u64,
-    ) {
-        if self.owner.is_some() {
-            self.runtime = Some((broker, generation));
+        runtime_generation: u64,
+    ) -> Result<(), String> {
+        if let Some((owner_broker, agent_id, provider_generation)) = &self.owner {
+            // Retain cleanup before binding can fail or be cancelled.
+            self.runtime = Some((broker, runtime_generation));
+            owner_broker
+                .bind_codex_tui_runtime(agent_id, *provider_generation, runtime_generation)
+                .await
+                .map_err(|error| format!("Failed to bind Codex TUI runtime: {error}"))?;
         }
+        Ok(())
     }
 
-    pub(super) fn attached(mut self) -> Box<dyn portable_pty::Child + Send> {
+    pub(crate) fn attached(mut self) -> Box<dyn portable_pty::Child + Send> {
         self.owner = None;
         self.runtime = None;
         self.child

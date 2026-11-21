@@ -3142,7 +3142,9 @@ async fn spawn_agent_inner(
         .start_or_replace_runtime(&config.session_id, terminal_runtime, initial_geometry)
         .await
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
-    child.runtime(app_state.terminal_sessions.clone(), runtime_generation);
+    child
+        .runtime(app_state.terminal_sessions.clone(), runtime_generation)
+        .await?;
 
     if config.provider == "claude" {
         crate::delivery::claude_mod::resume_observers(&app, &config, provider_generation);
