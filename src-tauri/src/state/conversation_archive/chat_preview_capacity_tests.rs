@@ -120,13 +120,13 @@ fn a_normalized_running_prefix_fills_the_default_window_without_retiring_its_adm
             Err(error) => format!("Err({:?}: {error})", error.kind()),
         }
     };
-    let read = |revision, limit| {
+    let read = |revision, limit, hints| {
         match owner.recent_reader_with_hints(
             source.clone(),
             runtime.clone(),
             revision,
             limit,
-            Some(Vec::new()),
+            Some(hints),
         )() {
             Ok(Some(page)) if page.presentation.is_some() => {
                 let charge = owner.recent.lock().unwrap().slots.iter()
@@ -215,9 +215,44 @@ fn a_normalized_running_prefix_fills_the_default_window_without_retiring_its_adm
             slot.issued,
         )
     };
-    let first = read(None, PAGE_ROWS);
+    let latest_backing_ids = |page: &AgentChatPage| {
+        page.events
+            .iter()
+            .skip(page.events.len().saturating_sub(8))
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let legacy = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        None,
+        PAGE_ROWS,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .expect("M1 returns its honest Legacy window");
+    assert_eq!(legacy.events.len(), PAGE_ROWS);
+    assert!(legacy.presentation.is_none());
+    assert_eq!(legacy.recent_admission.as_deref(), Some(receipt.0.as_str()));
+    assert!(serde_json::to_vec(&legacy).unwrap().len() <= IPC_BYTES);
+    let opening = {
+        let recent = owner.recent.lock().unwrap();
+        let slot = recent
+            .slots
+            .iter()
+            .find(|slot| slot.admission == receipt.0)
+            .expect("M1 keeps the same live admission");
+        assert!(slot.published && slot.binding.is_none());
+        assert!(slot.charge <= IPC_BYTES);
+        (slot.certification, slot.issued)
+    };
+    let hints = latest_backing_ids(&legacy);
+    assert_eq!(hints.len(), 8);
+    let first = read(Some(legacy.revision), PAGE_ROWS, hints);
     let before = assert_running(&first, PAGE_ROWS);
     let certification = saved_binding();
+    assert!(certification.1 > opening.0);
+    assert_eq!(certification.2, opening.1);
     eprintln!("default-80 binding_bytes={}", certification.0.len());
     let serialized: serde_json::Value = serde_json::from_slice(&certification.0).unwrap();
     assert!(
@@ -226,7 +261,7 @@ fn a_normalized_running_prefix_fills_the_default_window_without_retiring_its_adm
             .len()
             <= 64 * 1024
     );
-    let small = read(Some(first.revision.clone()), 8);
+    let small = read(Some(first.revision.clone()), 8, Vec::new());
     let small_value = assert_running(&small, 8);
     assert_eq!(
         small_value,
@@ -237,7 +272,7 @@ fn a_normalized_running_prefix_fills_the_default_window_without_retiring_its_adm
         certification,
         "an 8-row reader cannot shrink shared certification"
     );
-    let refreshed = read(Some(small.revision.clone()), PAGE_ROWS);
+    let refreshed = read(Some(small.revision.clone()), PAGE_ROWS, Vec::new());
     let after = assert_running(&refreshed, PAGE_ROWS);
     assert_eq!(after.turns, before.turns);
     assert_eq!(after.items, before.items);
@@ -247,7 +282,7 @@ fn a_normalized_running_prefix_fills_the_default_window_without_retiring_its_adm
         .write_all(b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"turn_id\":\"capacity-turn\",\"message\":\"Synthetic native-only extension\"}}\n")
         .unwrap();
     // No durable capture: shared certification can advance under the same Head.
-    let extended = read(Some(refreshed.revision.clone()), PAGE_ROWS);
+    let extended = read(Some(refreshed.revision.clone()), PAGE_ROWS, Vec::new());
     assert_eq!(
         head("agent-1").unwrap().as_deref(),
         Some(same_head.as_str())
@@ -402,12 +437,28 @@ fn a_normalized_running_prefix_fills_the_default_window_without_retiring_its_adm
     assert!(owner
         .publish_recent(&source, &runtime, &next, Vec::new())
         .unwrap());
-    let rebound = owner.recent_reader_with_hints(
+    let rebound_legacy = owner.recent_reader_with_hints(
         source.clone(),
         runtime.clone(),
         None,
         PAGE_ROWS,
         Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert_eq!(rebound_legacy.events.len(), PAGE_ROWS);
+    assert!(rebound_legacy.presentation.is_none());
+    assert_eq!(
+        rebound_legacy.recent_admission.as_deref(),
+        Some(next.0.as_str())
+    );
+    let hints = latest_backing_ids(&rebound_legacy);
+    let rebound = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(rebound_legacy.revision),
+        PAGE_ROWS,
+        Some(hints),
     )()
     .unwrap()
     .unwrap();

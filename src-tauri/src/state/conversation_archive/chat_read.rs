@@ -1292,42 +1292,42 @@ impl ProjectionOwner {
                 bytes_read: scope.as_ref().map(|(_, bytes)| *bytes).unwrap_or(0),
                 records_decoded: 0,
             };
+            // An unbound aware opening displays Legacy first. Revision/hints
+            // identify its next ordinary read; a shared certified A keeps its
+            // existing monotonic path, even for a newly opened reader.
+            let deferred = revision.is_none()
+                && hints.as_ref().is_some_and(Vec::is_empty)
+                && binding.is_none();
             drop(recent);
             if page.recent_admission.is_some() {
-                let canonical = recent_canonical_proof(&snapshot, &coverage);
-                let selected_proof = hints
-                    .as_deref()
-                    .filter(|ids| !ids.is_empty() && requested_binding.is_none())
-                    .map(|ids| {
-                        preview_bridge::resolve_hints(
+                // Read the honest source window once, retaining its native
+                // backing IDs for this reader's later literal selectors.
+                // Returning this page directly also prevents factory fallback
+                // from repeating the same physical reads on an empty result.
+                let legacy_source = if deferred {
+                    Some(read_legacy_source(
+                        &crate::commands::chat::conversation_archive_context_from_snapshot(
                             &snapshot,
-                            ids,
-                            &headers,
-                            canonical
-                                .as_ref()
-                                .ok()
-                                .and_then(|(proof, _)| proof.as_ref()),
-                        )
-                    });
-                let hints_valid = selected_proof
+                        ),
+                        &snapshot,
+                        None,
+                        Some(limit),
+                    )?)
+                } else {
+                    None
+                };
+                let canonical = if deferred {
+                    Ok((None, 0))
+                } else {
+                    recent_canonical_proof(&snapshot, &coverage)
+                };
+                let proof = canonical
                     .as_ref()
-                    .is_none_or(|proof| proof.as_ref().is_ok_and(Option::is_some));
-                if !hints_valid && requested_binding.is_none() {
-                    binding = None;
-                }
-                let proof = selected_proof
-                    .as_ref()
-                    .and_then(|proof| proof.as_ref().ok())
-                    .and_then(Option::as_ref)
-                    .or_else(|| {
-                        canonical
-                            .as_ref()
-                            .ok()
-                            .and_then(|(proof, _)| proof.as_ref())
-                    });
+                    .ok()
+                    .and_then(|(proof, _)| proof.as_ref());
                 let refresh_legacy =
                     legacy_revision && revision.as_deref() != Some(page.revision.as_str());
-                let handoff = if !aware || refresh_legacy || !hints_valid {
+                let handoff = if deferred || !aware || refresh_legacy {
                     Ok(None)
                 } else {
                     preview_bridge::read(
@@ -1382,7 +1382,10 @@ impl ProjectionOwner {
                             && slot.issued == issued
                             && slot.certification_matches(
                                 certification,
-                                handoff.is_some() || requested_binding.is_some() || lost_binding,
+                                deferred
+                                    || handoff.is_some()
+                                    || requested_binding.is_some()
+                                    || lost_binding,
                             )
                             && slot.native_source == native_source
                             && after.as_ref().is_ok_and(|(scope, _)| *scope == slot.scope)
@@ -1422,6 +1425,23 @@ impl ProjectionOwner {
                     page.unchanged = false;
                     page.revision = format!("{prefix}retired");
                     page.progress = "source_changed".into();
+                } else if deferred {
+                    if let Some(mut source) = legacy_source {
+                        if !source.events.is_empty() || headers.is_empty() {
+                            // Archive-only Legacy has its own exact authority
+                            // gate, which requires no preview admission stamp.
+                            if !source.archive_read_ready {
+                                source.recent_admission = page.recent_admission;
+                            }
+                            source.bytes_read += page.bytes_read;
+                            return finish(source).map(Some);
+                        }
+                        // Watch may have visible Legacy output before the
+                        // ordinary source publishes any rows. Keep that
+                        // existing floor until its own proof becomes available.
+                        page.bytes_read += source.bytes_read;
+                        page.records_decoded += source.records_decoded;
+                    }
                 } else if changed_head {
                     if requested_binding.is_some() {
                         return Err(io::Error::new(
@@ -1499,7 +1519,11 @@ impl ProjectionOwner {
                 }
                 page.bytes_read += canonical.map(|(_, bytes)| bytes).unwrap_or(0);
             }
-            if headers.is_empty() && !previous_preview && page.recent_admission.is_some() {
+            if !deferred
+                && headers.is_empty()
+                && !previous_preview
+                && page.recent_admission.is_some()
+            {
                 return Ok(None);
             }
             if requested_binding.is_some() && page.recent_admission.is_none() {
@@ -4583,6 +4607,7 @@ pub(crate) fn read_with_revalidation_and_limit(
             ReadOptions {
                 limit,
                 staging: false,
+                qualify_turns: true,
             },
         );
     };
@@ -4602,6 +4627,37 @@ pub(crate) fn read_with_revalidation_and_limit(
 struct ReadOptions {
     limit: usize,
     staging: bool,
+    qualify_turns: bool,
+}
+
+/// The aware opening returns the ordinary source window before attempting a
+/// turn handoff. Source authorization, ordering and read limits stay identical;
+/// only the optional turn projection waits for a later read of the same A.
+pub(crate) fn read_legacy_source(
+    context: &ConversationArchiveContext,
+    snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+    revision: Option<&str>,
+    limit: Option<usize>,
+) -> io::Result<AgentChatPage> {
+    let limit = limit.unwrap_or(PAGE_ROWS);
+    if !(1..=PAGE_ROWS).contains(&limit) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid recent Chat limit",
+        ));
+    }
+    read_with_recent_limit(
+        context,
+        snapshot,
+        None,
+        revision,
+        None,
+        ReadOptions {
+            limit,
+            staging: false,
+            qualify_turns: false,
+        },
+    )
 }
 
 /// Preserve authenticated Row markers only inside this producer operation.
@@ -4626,6 +4682,7 @@ pub(super) fn read_preview_source(
         ReadOptions {
             limit,
             staging: true,
+            qualify_turns: true,
         },
     )
 }
@@ -6075,7 +6132,7 @@ fn read_with_recent_limit(
             result.progress = progress;
         }
     }
-    if detail_ref.is_none() {
+    if detail_ref.is_none() && options.qualify_turns {
         turn_read::attach(
             &mut store,
             current_head.as_ref(),

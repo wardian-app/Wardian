@@ -76,6 +76,429 @@ fn settle(owner: &ProjectionOwner) {
     panic!("synthetic turn did not settle in bounded checkpoints");
 }
 
+fn open_then_qualify(
+    owner: &ProjectionOwner,
+    source: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+    runtime: &Arc<Mutex<String>>,
+    limit: usize,
+) -> AgentChatPage {
+    let legacy = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        None,
+        limit,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(legacy.presentation.is_none());
+    let hints: Vec<_> = legacy.events.iter().map(|event| event.id.clone()).collect();
+    assert!(hints.len() <= 8);
+    owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(legacy.revision),
+        limit,
+        Some(hints),
+    )()
+    .unwrap()
+    .unwrap()
+}
+
+#[test]
+fn source_backing_index_resolves_exact_markers_and_retains_ambiguity() {
+    let mut first = event("display-one", "Synthetic first row.");
+    first.metadata = json!({
+        "chat_source_ref": "native-physical-one",
+        "chat_display_member_ids": ["native-physical-one", "native-mirror-one", "display-one"]
+    });
+    let mut second = event("display-two", "Synthetic second row.");
+    second.metadata["chat_source_ref"] = json!("native-physical-two");
+    let rows = vec![first.clone(), second.clone()];
+    let index = preview_bridge::source_backings(&rows).unwrap();
+    for id in ["display-one", "native-physical-one", "native-mirror-one"] {
+        assert!(std::ptr::eq(index.get(id).unwrap().unwrap(), &rows[0]));
+    }
+    assert!(std::ptr::eq(
+        index.get("native-physical-two").unwrap().unwrap(),
+        &rows[1]
+    ));
+    for unknown in [
+        "unknown",
+        "native-physical",
+        "native-physical-one-extra",
+        "foreign-native",
+    ] {
+        assert!(!index.contains_key(unknown));
+    }
+
+    // Repeated markers on one row are harmless. Distinct rows sharing a
+    // marker stay ambiguous even when a third row repeats that marker again.
+    second.metadata["chat_source_ref"] = json!("native-physical-one");
+    let mut replay = first.clone();
+    replay.id = "display-three".into();
+    let ambiguous = vec![first.clone(), second, replay];
+    let index = preview_bridge::source_backings(&ambiguous).unwrap();
+    assert!(index.get("native-physical-one").unwrap().is_none());
+    assert!(index.get("native-mirror-one").unwrap().is_none());
+    assert!(index.get("display-one").unwrap().is_none());
+    assert!(std::ptr::eq(
+        index.get("display-two").unwrap().unwrap(),
+        &ambiguous[1]
+    ));
+
+    let duplicate_rows = vec![first.clone(), first];
+    let index = preview_bridge::source_backings(&duplicate_rows).unwrap();
+    assert!(index.get("display-one").unwrap().is_none());
+}
+
+#[test]
+fn source_backing_index_respects_existing_row_and_byte_caps() {
+    let row = event("bounded-row", "Synthetic bounded row.");
+    assert!(preview_bridge::source_backings(&vec![row.clone(); PAGE_ROWS + 1]).is_none());
+    let mut oversized = row;
+    oversized.metadata["chat_source_ref"] = json!("x".repeat(IPC_BYTES));
+    assert!(preview_bridge::source_backings(&[oversized]).is_none());
+}
+
+#[test]
+fn aware_open_defers_qualification_and_native_selectors_bind_the_same_admission() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("deferred-preview.jsonl");
+    let (mut source, _) = super::tests::owned_native_source_for_provider_session(
+        &path,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"deferred-session\"}}\n",
+        "agent-1",
+        "deferred-session",
+    );
+    source.current_status = "Processing".into();
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    let archive = ConversationArchiveState::default();
+    let capture = |previous| {
+        let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            previous,
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut batch.events,
+            "codex",
+            &path,
+        );
+        batch
+    };
+    let prime = capture(None);
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &prime.events,
+            None,
+            &prime.next,
+            prime.source_proof(),
+        )
+        .unwrap();
+    let append = |frames: Vec<Value>| {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for frame in frames {
+            writeln!(file, "{frame}").unwrap();
+        }
+        file.flush().unwrap();
+    };
+    let bracket = |turn: &str| {
+        vec![
+            json!({"type":"turn_context","payload":{"turn_id":turn}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}),
+            json!({"type":"response_item","payload":{"type":"message","id":format!("prompt-{turn}"),"role":"user","content":[{"type":"input_text","text":"Synthetic request."}],"internal_chat_message_metadata_passthrough":{"turn_id":turn,"content_item_kinds":["user.text"]}}}),
+            json!({"type":"response_item","payload":{"type":"message","id":format!("answer-{turn}"),"role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Synthetic answer."}],"internal_chat_message_metadata_passthrough":{"turn_id":turn}}}),
+        ]
+    };
+    let mut closed = bracket("captured");
+    closed
+        .push(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"captured"}}));
+    append(closed);
+    let captured = capture(Some(prime.next.clone()));
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &captured.events,
+            Some(&prime.next),
+            &captured.next,
+            captured.source_proof(),
+        )
+        .unwrap();
+    super::tests::finish_projection(&archive);
+    let canonical_ref = head("agent-1").unwrap().unwrap();
+    let mut canonical_reader = store("agent-1").unwrap();
+    let published: Head = canonical_reader.read(&canonical_ref).unwrap();
+    let (canonical_rows, _) =
+        page(&mut canonical_reader, &canonical_ref, &published, None).unwrap();
+    // The ordinary source window may honestly include an unresolved lifecycle
+    // row. Establish captured finality from the persisted scoped Index, without
+    // requiring that mixed source window to have a canonical presentation.
+    let canonical = published
+        .turns
+        .page(&mut canonical_reader, &canonical_rows, false)
+        .unwrap()
+        .expect("captured closed turn has canonical Index metadata");
+    assert_eq!(canonical.turns.len(), 1);
+    assert!(canonical.turns[0].membership_complete);
+    assert_eq!(canonical.turns[0].status, ChatTurnStatus::Completed);
+    assert!(!canonical.items.is_empty());
+    assert!(canonical
+        .items
+        .iter()
+        .all(|item| item.provenance == ChatItemProvenance::Canonical));
+    let root = captured
+        .events
+        .iter()
+        .find(|event| event.role == Some(AgentChatRole::User))
+        .and_then(|event| event.metadata["request_root_id"].as_str())
+        .expect("captured native prompt proves its root");
+    let closed = published
+        .turns
+        .closed_roots_reusing_nodes(
+            &mut canonical_reader,
+            &super::super::chat_turn_index::Scope {
+                agent_id: &published.agent_id,
+                conversation_id: &published.conversation_id,
+                source_key: published.source_key.as_deref(),
+                source_epoch: published.source_epoch.as_deref(),
+                can_activate: false,
+            },
+            &BTreeSet::from([root.to_owned()]),
+            &mut SeekCache::default(),
+        )
+        .unwrap();
+    assert!(
+        closed.contains_key(root),
+        "captured root is proven closed before M1"
+    );
+
+    // These genuine native IDs have never passed through capture/indexing.
+    append(bracket("pending"));
+    let expected = read_legacy_source(&context, &source, None, Some(8)).unwrap();
+    assert!(expected.presentation.is_none());
+    let pending = expected
+        .events
+        .iter()
+        .find(|event| {
+            event.role == Some(AgentChatRole::User) && event.metadata["chat_provisional"] == true
+        })
+        .expect("uncaptured native prompt remains visible");
+    let mut reader = store("agent-1").unwrap();
+    let published: Head = reader.read(&canonical_ref).unwrap();
+    let physical = pending.metadata["chat_source_ref"]
+        .as_str()
+        .unwrap_or(&pending.id);
+    assert!(reader
+        .get(&published.identities, &digest(physical.as_bytes()))
+        .unwrap()
+        .is_none());
+
+    let owner = &archive.chat_projection;
+    let runtime = Arc::new(Mutex::new("Processing".into()));
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    assert!(owner
+        .publish_recent(&source, &runtime, &receipt, Vec::new())
+        .unwrap());
+    let first =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .unwrap()
+        .unwrap();
+    assert!(first.presentation.is_none());
+    assert_eq!(first.recent_admission.as_deref(), Some(receipt.0.as_str()));
+    assert_eq!(first.revision, expected.revision);
+    assert_eq!(
+        first.records_decoded, expected.records_decoded,
+        "M1 performs only its ordinary source read"
+    );
+    assert_eq!(
+        serde_json::to_value(&first.events).unwrap(),
+        serde_json::to_value(&expected.events).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&first.aliases).unwrap(),
+        serde_json::to_value(&expected.aliases).unwrap()
+    );
+    assert_eq!(first.next_before, expected.next_before);
+    assert_eq!(first.generation, expected.generation);
+    assert_eq!(first.source_epoch, expected.source_epoch);
+    {
+        let recent = owner.recent.lock().unwrap();
+        let slot = recent
+            .slots
+            .iter()
+            .find(|slot| slot.admission == receipt.0)
+            .unwrap();
+        assert!(slot.binding.is_none());
+        assert_eq!(slot.certification, 0);
+    }
+    let hints = vec![pending.id.clone(), first.events.last().unwrap().id.clone()];
+    let second = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(first.revision.clone()),
+        8,
+        Some(hints.clone()),
+    )()
+    .expect("M2 same-admission read succeeds")
+    .expect("M2 returns its qualified handoff");
+    assert!(
+        second.presentation.is_some(),
+        "M2 handoff missing: progress={}, events={}, recent={:?}, unresolved_rows={:?}",
+        second.progress,
+        second.events.len(),
+        second.recent_admission,
+        second
+            .events
+            .iter()
+            .filter(|event| event.metadata["chat_provisional"] == true
+                || event.metadata["chat_identity_resolution"] == "unresolved")
+            .map(|event| (
+                &event.kind,
+                event.metadata["raw_type"].as_str(),
+                event.metadata["chat_turn_membership_complete"] == true,
+                event.metadata["chat_source_start"].as_u64(),
+                event.metadata["chat_source_end"].as_u64()
+            ))
+            .collect::<Vec<_>>()
+    );
+    let qualified = value(&second);
+    assert_eq!(
+        qualified.preview_bridge.as_ref().unwrap().admission_id,
+        receipt.0
+    );
+    assert_eq!(
+        qualified.preview_bridge.as_ref().unwrap().canonical_head,
+        canonical_ref
+    );
+    assert!(second.reset && !second.unchanged);
+    assert!(hints.iter().all(|id| second
+        .aliases
+        .iter()
+        .any(|alias| alias.observation_id == *id)));
+    assert!(second
+        .events
+        .iter()
+        .all(|event| std::iter::once(event.id.as_str())
+            .chain(event.metadata["chat_source_ref"].as_str())
+            .chain(
+                event.metadata["chat_display_member_ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+            )
+            .all(|id| second
+                .aliases
+                .iter()
+                .any(|alias| alias.observation_id == id && alias.canonical_id == event.id))));
+    assert!(first
+        .events
+        .iter()
+        .all(|old| second.events.iter().any(|event| event.id == old.id)
+            || second
+                .aliases
+                .iter()
+                .any(|alias| alias.observation_id == old.id)));
+    assert!(canonical.items.iter().all(|item| qualified
+        .items
+        .iter()
+        .any(|next| next.item_key == item.item_key
+            && next.provenance == ChatItemProvenance::Canonical)));
+    assert!(qualified
+        .items
+        .iter()
+        .any(|item| item.provenance == ChatItemProvenance::Provisional));
+    assert!(qualified
+        .turns
+        .iter()
+        .any(|turn| turn.membership_complete && turn.status == ChatTurnStatus::Completed));
+    assert!(
+        !second.archive_read_ready
+            && second.next_before.is_none()
+            && second.detail.is_none()
+            && second.revalidated_ids.is_none()
+    );
+
+    let repeated = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(second.revision.clone()),
+        8,
+        Some(Vec::new()),
+    )()
+    .expect("bound repeat read succeeds")
+    .expect("bound repeat returns a page");
+    assert!(
+        repeated.presentation.is_some(),
+        "bound repeat lost its handoff: progress={}, events={}, recent={:?}",
+        repeated.progress,
+        repeated.events.len(),
+        repeated.recent_admission
+    );
+    assert_eq!(qualified.items, value(&repeated).items);
+    assert_eq!(qualified.turns, value(&repeated).turns);
+    let reopened =
+        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
+        )
+        .expect("shared-admission reopen succeeds")
+        .expect("shared-admission reopen returns a page");
+    assert!(
+        reopened.presentation.is_some(),
+        "shared-admission reopen lost its handoff: progress={}, events={}, recent={:?}",
+        reopened.progress,
+        reopened.events.len(),
+        reopened.recent_admission
+    );
+    assert_eq!(
+        qualified.items,
+        value(&reopened).items,
+        "shared bound A never returns to Legacy"
+    );
+    let delayed = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(second.revision),
+        8,
+        Some(Vec::new()),
+    );
+    let fence = owner.recent_boundary(Some("agent-1")).unwrap();
+    let retired = delayed().unwrap().unwrap();
+    assert!(retired.presentation.is_none() && retired.events.is_empty() && retired.reset);
+    assert!(!owner
+        .publish_recent(&source, &runtime, &receipt, first.events)
+        .unwrap());
+    drop(fence);
+    assert_eq!(
+        head("agent-1").unwrap().as_deref(),
+        Some(canonical_ref.as_str())
+    );
+}
+
+#[test]
+fn aware_empty_admission_returns_legacy_without_factory_reread() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    assert!(owner
+        .publish_recent(&source, &runtime, &receipt, Vec::new())
+        .unwrap());
+    let page = owner.recent_reader_with_hints(source, runtime, None, 8, Some(Vec::new()))()
+        .unwrap()
+        .expect("the source result is final, including an empty window");
+    assert!(page.presentation.is_none() && page.events.is_empty());
+    assert_eq!(page.recent_admission.as_deref(), Some(receipt.0.as_str()));
+    assert!(owner.recent.lock().unwrap().slots[0].binding.is_none());
+}
+
 #[test]
 fn recent_cold_first_miss_skips_source_scope_io() {
     let (_guard, _temp) = isolated_home();
@@ -387,7 +810,10 @@ fn recent_identity_handoff_is_one_owned_revision_and_privacy_retires_its_receipt
         presented.preview_bridge.as_ref().unwrap().admission_id,
         receipt.0
     );
-    assert_eq!(switched.aliases.len(), switched.events.len());
+    assert!(cold.events.iter().all(|event| switched
+        .aliases
+        .iter()
+        .any(|alias| alias.observation_id == event.id)));
     assert!(switched.recent_admission.is_none());
     assert!(presented.turns.iter().all(|turn| turn.membership_complete));
     let repeated = owner.recent_reader_with_hints(
@@ -452,11 +878,7 @@ fn one_readers_binding_cannot_waive_another_readers_legacy_aliases() {
         .committed(candidate, "shared-first-view".into())
         .unwrap();
     settle(&owner);
-    let first_view =
-        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
-        )
-        .unwrap()
-        .unwrap();
+    let first_view = open_then_qualify(&owner, &source, &runtime, 8);
     assert!(value(&first_view).preview_bridge.is_some());
     let still_legacy = owner.recent_reader_with_hints(
         source.clone(),
@@ -631,11 +1053,7 @@ fn canonical_older_pages_retain_the_owned_bridge_with_unmigrated_history() {
         .committed(candidate, "synthetic-older".into())
         .unwrap();
     settle(&owner);
-    let current =
-        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 5, Some(Vec::new()))(
-        )
-        .unwrap()
-        .unwrap();
+    let current = open_then_qualify(&owner, &source, &runtime, 5);
     assert!(value(&current).preview_bridge.is_some());
     let mut older = read_with_revalidation_and_limit(
         &ctx,
@@ -1063,11 +1481,7 @@ fn native_source_index_generation_preserves_canonical_preview_binding_and_proven
     assert!(owner
         .publish_recent(&source, &runtime, &receipt, Vec::new())
         .unwrap());
-    let bound =
-        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
-        )
-        .unwrap()
-        .unwrap();
+    let bound = open_then_qualify(owner, &source, &runtime, 8);
     let original = value(&bound);
     assert_eq!(
         original.preview_bridge.as_ref().unwrap().admission_id,
@@ -1265,15 +1679,7 @@ fn passive_bound_recent_refresh_keeps_empty_continuity_for_unchanged_and_unquali
         assert!(owner
             .publish_recent(&source, &runtime, &receipt, Vec::new())
             .unwrap());
-        let bound = owner.recent_reader_with_hints(
-            source.clone(),
-            runtime.clone(),
-            None,
-            8,
-            Some(Vec::new()),
-        )()
-        .unwrap()
-        .unwrap();
+        let bound = open_then_qualify(owner, &source, &runtime, 8);
         assert_eq!(value(&bound).turns[0].status, ChatTurnStatus::Completed);
         assert_eq!(
             value(&bound).preview_bridge.unwrap().admission_id,
@@ -1597,11 +2003,7 @@ fn retired_admission_can_requalify_under_new_a_with_exact_returned_hint_aliases(
     owner
         .publish_recent(&source, &runtime, &first, vec![])
         .unwrap();
-    let bound =
-        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
-        )
-        .unwrap()
-        .unwrap();
+    let bound = open_then_qualify(&owner, &source, &runtime, 8);
     assert!(value(&bound).preview_bridge.is_some());
     let fence = owner.recent_boundary(Some("agent-1")).unwrap();
     let retired = owner.recent_reader_with_hints(
@@ -1733,11 +2135,7 @@ fn retired_admission_stays_legacy_while_same_a_is_still_live() {
     owner
         .publish_recent(&source, &runtime, &admission, vec![])
         .unwrap();
-    let bound =
-        owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, Some(Vec::new()))(
-        )
-        .unwrap()
-        .unwrap();
+    let bound = open_then_qualify(&owner, &source, &runtime, 8);
     assert_eq!(
         value(&bound).preview_bridge.unwrap().admission_id,
         admission.0

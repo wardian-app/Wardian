@@ -101,6 +101,9 @@ marks a clipped tail. Counts marked **at least** are incomplete. Older history,
 unproven turn membership, other providers, and previews without a proven saved
 conversation retain the existing Work log presentation.
 
+Chat opens with the available recent messages while turn qualification runs
+later. Running agents keep the composer available before the turn view appears.
+
 Qualified running turns show **Working**. Their counts are in progress, and
 assistant narration stays inside the work summary until completion proves a
 final answer. Content awaiting saved capture is marked **Provisional** and has

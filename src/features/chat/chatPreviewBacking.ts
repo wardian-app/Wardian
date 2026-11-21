@@ -28,10 +28,12 @@ export function boundedPreviewBackingIds(ids: string[] | undefined): string[] | 
       && new TextEncoder().encode(id).length <= MAX_PREVIEW_BACKING_ID_BYTES) ? ids : undefined;
 }
 
-/** An initial/canonical aware read carries []; source legacy/preview rows forward literal IDs. */
+/** Awareness hints select the latest literal IDs; they do not certify window membership or continuity. */
 export function previewBackingIdsForWindow(page: AgentChatPage | null, events: readonly AgentChatEvent[]): string[] | undefined {
   if (!page || (page.recent_admission == null && chatPresentationPayload(page) !== null)) return [];
   const admitted = events.filter((event) => event.metadata.optimistic !== true);
-  if (admitted.some((event) => event.session_id !== page.session_id)) return undefined;
-  return boundedPreviewBackingIds(admitted.map((event) => event.id));
+  // Validate the whole admitted window before selecting; a foreign/invalid row
+  // outside the hint suffix must not disappear behind the bound.
+  if (admitted.some((event) => event.session_id !== page.session_id || !boundedPreviewBackingIds([event.id]))) return undefined;
+  return boundedPreviewBackingIds(admitted.slice(-MAX_PREVIEW_BACKING_IDS).map((event) => event.id));
 }
