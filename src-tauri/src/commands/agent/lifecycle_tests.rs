@@ -9,6 +9,10 @@ use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride};
 
 use super::{stop_native_owner, stop_native_owner_with_before_capture, PendingRuntime};
 
+#[cfg(windows)]
+#[path = "owner_generation_tests.rs"]
+mod owner_generation_tests;
+
 pub(in crate::commands) fn acquire_test_roster_barrier(
 ) -> wardian_core::agent_replacement::AgentRosterBarrier {
     wardian_core::agent_replacement::acquire_agent_roster_barrier(true)

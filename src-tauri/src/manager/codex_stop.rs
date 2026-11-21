@@ -423,13 +423,13 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
                 }
             }
             if let Some(owner) = &worker.prior_hold {
-                if let (Some(receipt), Some(generation)) = (writer_exit.as_ref(), worker.generation) {
+                if let (Some(receipt), Some(captured_owner)) = (writer_exit.as_ref(), worker.codex_owner.as_ref()) {
                     let leases = wardian_core::conversation_lease::load_leases_checked()?;
                     let hold = leases.iter().find(|hold| hold.owner() == *owner)
                         .ok_or("Bound Codex hold is missing; writer receipt retained")?;
-                    // The private receipt validates agent/generation/thread and
+                    // The private receipt validates agent/owner-generation/thread and
                     // compares the entire acquisition under both lease locks.
-                    receipt.release_hold(hold, generation)?;
+                    captured_owner.release_hold(receipt, hold)?;
                 } else {
                     log_retained_writer_hold();
                 }

@@ -12,7 +12,7 @@ use std::time::Duration;
 pub(crate) struct CapturedCodexStop {
     broker: Arc<NativeDeliveryBroker>,
     agent_id: String,
-    generation: Option<u64>,
+    owner_generation: Option<u64>,
     owner: Option<Arc<CodexSharedOwner>>,
     _gate: tokio::sync::OwnedMutexGuard<()>,
     _admission: CodexStopAdmission,
@@ -53,22 +53,69 @@ impl CapturedCodexStop {
             .stop_registered_owner_with_evidence(
                 &self.agent_id,
                 None,
-                self.generation,
+                self.owner_generation,
                 thread_id,
                 tui_tree_exited,
             )
             .await?;
         Ok(receipt)
     }
+
+    /// Validate writer evidence against the captured owner, whose generation
+    /// is independent of the TUI generation retained by the stop worker.
+    pub(crate) fn release_hold(
+        &self,
+        receipt: &CodexThreadExit,
+        hold: &wardian_core::conversation_lease::ConversationLease,
+    ) -> Result<(), String> {
+        receipt.release_hold(
+            hold,
+            self.owner_generation
+                .ok_or("Captured Codex owner generation is absent")?,
+        )
+    }
 }
 
 impl NativeDeliveryBroker {
+    /// Bind a newly registered terminal to its exact prepared owner. Provider
+    /// input can advance without a terminal, so these counters are not equal.
+    pub(crate) async fn bind_codex_tui_runtime(
+        &self,
+        agent_id: &str,
+        provider_generation: u64,
+        runtime_generation: u64,
+    ) -> Result<(), CodexSharedError> {
+        let gate = self.owner_gate(agent_id).await;
+        let _gate = gate.lock().await;
+        let mut sessions = self.sessions.lock().await;
+        let handle = sessions
+            .get_mut(agent_id)
+            .filter(|handle| {
+                handle.provider == "codex"
+                    && handle.generation == provider_generation
+                    && handle.shared_codex.is_some()
+            })
+            .ok_or_else(|| CodexSharedError::uncertain("Codex TUI owner changed before binding"))?;
+        if runtime_generation == 0
+            || handle
+                .codex_tui_runtime_generation
+                .is_some_and(|bound| bound != runtime_generation)
+        {
+            return Err(CodexSharedError::uncertain(
+                "Codex owner is already bound to another TUI or the TUI generation is invalid",
+            ));
+        }
+        handle.codex_tui_runtime_generation = Some(runtime_generation);
+        Ok(())
+    }
+
     /// Reserve the current Codex owner without stopping or discarding it before
     /// the roster's runtime and prior-session hold transfer into the stop fence.
+    /// The supplied generation names the TUI, not the provider-input counter.
     pub(crate) async fn capture_codex_stop(
         self: &Arc<Self>,
         agent_id: &str,
-        generation: Option<u64>,
+        runtime_generation: Option<u64>,
     ) -> Result<CapturedCodexStop, NativeBrokerError> {
         let admission = self
             .codex_creations
@@ -76,17 +123,18 @@ impl NativeDeliveryBroker {
             .map_err(|message| shared_error(CodexSharedError::unsupported(message)))?;
         let gate = self.lock_owner_for_stop(agent_id, None).await?;
         let handle = self.sessions.lock().await.get(agent_id).cloned();
-        if handle.as_ref().is_some_and(|handle| {
-            generation.is_some_and(|generation| generation != handle.generation)
-        }) {
+        if handle
+            .as_ref()
+            .is_some_and(|handle| handle.codex_tui_runtime_generation != runtime_generation)
+        {
             return Err(shared_error(CodexSharedError::uncertain(
-                "Codex owner generation does not match captured TUI",
+                "Codex owner is not bound to captured TUI",
             )));
         }
         Ok(CapturedCodexStop {
             broker: self.clone(),
             agent_id: agent_id.to_owned(),
-            generation,
+            owner_generation: handle.as_ref().map(|handle| handle.generation),
             owner: handle.and_then(|handle| handle.shared_codex),
             _gate: gate,
             _admission: admission,
@@ -365,6 +413,7 @@ impl NativeDeliveryBroker {
                 capabilities: capabilities.clone(),
                 tx: starting_tx,
                 shared_codex: None,
+                codex_tui_runtime_generation: None,
                 stopped: Some(starting_exit),
             },
         );
@@ -429,6 +478,7 @@ impl NativeDeliveryBroker {
                 capabilities,
                 tx,
                 shared_codex: Some(owner.clone()),
+                codex_tui_runtime_generation: None,
                 stopped: None,
             },
         );
@@ -1098,6 +1148,7 @@ mod tests {
                     ),
                     tx,
                     shared_codex: None,
+                    codex_tui_runtime_generation: None,
                     stopped: Some(observed),
                 },
             );
@@ -1129,6 +1180,7 @@ mod tests {
                 capabilities: NativeTransportCapabilities::degraded("codex", "codex_app_server_ws"),
                 tx,
                 shared_codex: None,
+                codex_tui_runtime_generation: None,
                 stopped: Some(observed),
             },
         );
@@ -1154,6 +1206,7 @@ mod tests {
                     capabilities: NativeProviderProtocol::CodexAppServer.capabilities("0.153.4"),
                     tx,
                     shared_codex: None,
+                    codex_tui_runtime_generation: None,
                     stopped: Some(observed),
                 },
             );

@@ -214,7 +214,7 @@ async fn cancelled_before_runtime_capture_preserves_the_live_registered_owner() 
     let fixture = stop_fixture(directory.path(), "owner", 7, "thread", WriterCase::Owned).await;
     let broker = Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new());
     broker
-        .install_stop_test_owner("owner", 7, fixture.owner.clone())
+        .install_stop_test_owner("owner", 7, Some(7), fixture.owner.clone())
         .await;
     let captured = broker.capture_codex_stop("owner", Some(7)).await.unwrap();
     drop(captured);

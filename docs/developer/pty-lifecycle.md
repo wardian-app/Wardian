@@ -99,6 +99,14 @@ owner and its generation gate through terminal-tree shutdown. Terminal job exit
 alone cannot release the hold: ordinary daemon discovery can put a thread's
 writer outside that job.
 
+Provider-input generations and terminal incarnations advance independently.
+Restoring a saved Off agent advances provider input without creating a terminal.
+Each prepared Codex owner is therefore bound to its exact terminal incarnation
+before runtime publication. Stop validates that binding and retains both
+identities: terminal cleanup uses the terminal generation, while owner shutdown
+and writer receipts use the captured provider-input generation. A different or
+unbound TUI cannot stop the registered owner.
+
 Automatic release requires a thread previously observed on the captured private
 owner. After verified terminal-tree exit, the worker uses supported
 `thread/loaded/list` evidence, with a single `thread/unsubscribe` request when
@@ -106,7 +114,7 @@ needed, to establish that the thread is unloaded. Missing, ambiguous, foreign,
 or timed-out evidence retains the hold. The worker then joins the owner's
 launch-contained Windows job using retained member handles, direct-child exit,
 and empty-job verification. Only this path can construct a private receipt
-matching the agent, runtime generation, and provider thread. Hold release
+matching the agent, captured owner generation, and provider thread. Hold release
 compares that receipt and the complete acquisition under the lease locks.
 
 Cancellation of the requesting command does not cancel the worker. A failed

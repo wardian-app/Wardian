@@ -128,7 +128,7 @@ async fn late_tui_exit_cannot_bypass_failed_native_owner_join_without_a_hold() {
     .await;
     let broker = Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new());
     broker
-        .install_stop_test_owner("late-owner", 7, fixture.owner.clone())
+        .install_stop_test_owner("late-owner", 7, Some(7), fixture.owner.clone())
         .await;
     let owner = broker
         .capture_codex_stop("late-owner", Some(7))
@@ -218,11 +218,24 @@ async fn real_tree_release(
     save_leases(&[hold.clone(), later.clone()]).unwrap();
     let history = home.path().join("history.jsonl");
     std::fs::write(&history, "retained history\n").unwrap();
-    let mut fixture =
-        stop_fixture(home.path(), &hold.agent_id, 7, &hold.resume_session, case).await;
+    // Restore can advance provider input without allocating a terminal.
+    let owner_generation = 9;
+    let mut fixture = stop_fixture(
+        home.path(),
+        &hold.agent_id,
+        owner_generation,
+        &hold.resume_session,
+        case,
+    )
+    .await;
     let broker = Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new());
     broker
-        .install_stop_test_owner(&hold.agent_id, 7, fixture.owner.clone())
+        .install_stop_test_owner(
+            &hold.agent_id,
+            owner_generation,
+            Some(7),
+            fixture.owner.clone(),
+        )
         .await;
     let owner = broker
         .capture_codex_stop(&hold.agent_id, Some(7))

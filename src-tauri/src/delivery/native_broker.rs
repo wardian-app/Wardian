@@ -280,11 +280,14 @@ impl std::error::Error for NativeBrokerError {}
 
 #[derive(Debug)]
 struct NativeSessionHandle {
+    /// Provider-input generation owning this native session.
     generation: u64,
     provider: String,
     capabilities: NativeTransportCapabilities,
     tx: mpsc::Sender<SessionCommand>,
     shared_codex: Option<Arc<super::codex_shared::CodexSharedOwner>>,
+    /// Exact TUI incarnation attached to this provider-input generation.
+    codex_tui_runtime_generation: Option<u64>,
     stopped: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
@@ -1964,6 +1967,7 @@ impl NativeDeliveryBroker {
             capabilities: capabilities.clone(),
             tx,
             shared_codex: None,
+            codex_tui_runtime_generation: None,
             stopped: Some(stopped_rx),
         };
         self.sessions
@@ -2062,6 +2066,7 @@ impl Clone for NativeSessionHandle {
             capabilities: self.capabilities.clone(),
             tx: self.tx.clone(),
             shared_codex: self.shared_codex.clone(),
+            codex_tui_runtime_generation: self.codex_tui_runtime_generation,
             stopped: self.stopped.clone(),
         }
     }
