@@ -1058,6 +1058,23 @@ DOM/status/config enablement, Mock substitution or wheel probe can satisfy V8 M1
 The peer tests synthetic startup and unsent input only, not real Codex inference
 or delivery. Pin its corrected JS/transport, interpreter and dependency hashes.
 
+V8 opts into `upstreamStorage: true` when staging the raw fixture. Its physical
+source starts under
+`<wardian-home>/agents/<session-id>/synthetic-provider-home/.codex/sessions`,
+and that owned plain `.codex` directory is the application's explicit upstream
+`CODEX_HOME`. Default staging retains the historical local-session layout.
+Staging locally and then projecting into a different upstream can copy the
+file, invalidating its certified physical identity even when its bytes match.
+
+Before resume, invoke the normal `build_agent_cli_command` preparation command
+without executing its returned shell string. Verify that managed `sessions`
+resolves to the staged upstream directory and that source bytes, body hash and
+device/file identity match the original witness. Repeat those checks after
+supported resume and ordinary compaction. Reuse an existing provider directory
+only for this opt-in owned plain upstream; reject linked or foreign ancestors.
+Keep source/capture/peer guards intact and retain failed diagnostic roots. These
+filesystem checks do not establish native-owner readiness or measurement credit.
+
 M2 retains the stronger consumer scope, producer-issued admission, turn/item,
 event-reference and source-evidence checks across two fresh frames. Provisional
 items require matching page, bridge and item admissions and an exact answer anchor.

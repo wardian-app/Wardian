@@ -132,27 +132,79 @@ function newOwnedFile(root, relative, bytes) {
 /**
  * Stage supported restore configuration and a large synthetic native source before App startup.
  * This deliberately does not forge conversation-capture.json. A backend seed adapter is required.
+ * Opt-in upstreamStorage avoids a later SDK session copy changing the certified file identity.
  */
 export function stageSyntheticStoppedSource(harness, options = {}) {
   const root = ownedHome(harness);
   need(!fs.existsSync(path.join(root, "settings", "state.json")), "fixture_must_precede_startup");
+  const upstreamStorage = options.upstreamStorage === undefined ? false : options.upstreamStorage;
+  need(typeof upstreamStorage === "boolean", "invalid_fixture_upstream_storage");
   const sessionId = options.sessionId ?? randomUUID();
   need(uuid(sessionId), "invalid_agent_session");
   const workspace = path.join(root, "synthetic-chat-workspace");
   fs.mkdirSync(workspace, { recursive: true });
   const source = syntheticCodexSource({ ...options, workspace });
+  const providerRelative = upstreamStorage ? `agents/${sessionId}/synthetic-provider-home` : "synthetic-empty-provider-home";
+  const sourceRelative = upstreamStorage ? `${providerRelative}/.codex` : `agents/${sessionId}/habitat/.codex`;
   const sourcePath = newOwnedFile(root,
-    `agents/${sessionId}/habitat/.codex/sessions/2026/01/01/rollout-2026-01-01T00-00-00-${source.nativeSessionId}.jsonl`, source.bytes);
+    `${sourceRelative}/sessions/2026/01/01/rollout-2026-01-01T00-00-00-${source.nativeSessionId}.jsonl`, source.bytes);
   const config = JSON.parse(fs.readFileSync(new URL("../../crates/wardian-core/tests/fixtures/chat-saved-roster.json", import.meta.url), "utf8"))[0];
   const name = "Synthetic-Preview-Timing";
   newOwnedFile(root, "settings/state.json", JSON.stringify([{ ...config, session_id: sessionId, session_name: name,
     folder: workspace, resume_session: source.nativeSessionId, conversation_logging: "enabled", is_off: true }]));
-  const providerHome = path.join(root, "synthetic-empty-provider-home");
-  fs.mkdirSync(providerHome);
-  return { ...source, bytes: undefined, sourcePath, sessionId, name, providerHome,
+  const providerHome = path.join(root, providerRelative);
+  if (!upstreamStorage) fs.mkdirSync(providerHome);
+  return { ...source, bytes: undefined, sourcePath, sessionId, name, providerHome, upstreamStorage,
     sourceBytes: source.bytes.length, capturePath: path.join(root, "agents", sessionId, "conversation-capture.json"),
     sourceKey: `codex:session:${source.nativeSessionId}`, synthetic: true,
     cache: "process-cold only; fixture write/hash/read warmed OS filesystem cache" };
+}
+
+function plainFixtureDirectory(root, target) {
+  const relative = path.relative(root, target);
+  need(relative && !relative.startsWith("..") && !path.isAbsolute(relative), "foreign_fixture_directory");
+  let current = root;
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    const stat = fs.lstatSync(current);
+    need(stat.isDirectory() && !stat.isSymbolicLink() && path.relative(current, fs.realpathSync(current)) === "", "linked_fixture_directory");
+  }
+}
+
+function fixtureProviderHome(root, fixture) {
+  need(uuid(fixture.sessionId) && typeof fixture.upstreamStorage === "boolean", "invalid_fixture_provider_home");
+  const expected = fixture.upstreamStorage ? path.join(root, "agents", fixture.sessionId, "synthetic-provider-home")
+    : path.join(root, "synthetic-empty-provider-home");
+  need(path.resolve(fixture.providerHome) === expected, "foreign_fixture_provider_home");
+  plainFixtureDirectory(root, expected);
+  return expected;
+}
+
+/** Reuse only the opt-in owned plain upstream; legacy homes retain exclusive creation. */
+export function prepareSyntheticProviderHomes(harness, fixture) {
+  const root = ownedHome(harness), providerHome = fixtureProviderHome(root, fixture);
+  const homes = { CODEX_HOME: path.join(providerHome, ".codex"), CLAUDE_CONFIG_DIR: path.join(providerHome, ".claude") };
+  if (fixture.upstreamStorage) plainFixtureDirectory(root, homes.CODEX_HOME);
+  else fs.mkdirSync(homes.CODEX_HOME);
+  fs.mkdirSync(homes.CLAUDE_CONFIG_DIR);
+  return homes;
+}
+
+/** Observe normal prepare/resume projection without copying or repairing native source state. */
+export function verifySyntheticSourceProjection(harness, fixture, expectedSource) {
+  const root = ownedHome(harness), providerHome = fixtureProviderHome(root, fixture);
+  need(fixture.upstreamStorage, "fixture_requires_upstream_storage");
+  const upstream = path.join(providerHome, ".codex", "sessions");
+  plainFixtureDirectory(root, upstream);
+  const expectedPath = path.join(upstream, "2026", "01", "01", `rollout-2026-01-01T00-00-00-${fixture.nativeSessionId}.jsonl`);
+  need(path.resolve(fixture.sourcePath) === expectedPath && path.relative(expectedPath, fs.realpathSync(expectedPath)) === "", "foreign_fixture_upstream_source");
+  const managed = path.join(root, "agents", fixture.sessionId, "habitat", ".codex", "sessions");
+  const managedReal = fs.realpathSync(managed), upstreamReal = fs.realpathSync(upstream);
+  need(managedReal === upstreamReal, "foreign_fixture_sessions_projection");
+  const source = verifySyntheticSource(fixture);
+  need(["dev", "ino", "bytes", "sha256", "body_sha256", "successful_output", "synthetic"]
+    .every((key) => source[key] === expectedSource?.[key]), "fixture_source_identity_changed");
+  return { managed_sessions_realpath: managedReal, upstream_sessions_realpath: upstreamReal, source };
 }
 
 /** Independently prove full successful native output, without invoking any Chat reader. */

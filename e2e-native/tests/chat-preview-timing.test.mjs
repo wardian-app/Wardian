@@ -13,7 +13,8 @@ import { randomUUID, createHash } from "node:crypto";
 import { acquireHomeLock } from "../lib/sessionHome.mjs";
 import {
   CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, CHAT_PREVIEW_RULER_VERSION, chatPreviewWatchdogMs,
-  syntheticCodexSource, stageSyntheticStoppedSource, verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
+  syntheticCodexSource, stageSyntheticStoppedSource, prepareSyntheticProviderHomes, verifySyntheticSourceProjection,
+  verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   assertPendingCaptureBracket, trustedClickWithPendingCapture,
   chatTimingReceipt, chatTimingNativeEvidence, chatTimingCandidateDetails, chatPreviewObserverScript, assertChatTimingSample, recordChatTimingCase, writeChatTimingReport,
   recordRejectedChatScope, driveChatPreviewProbe, assertChatOpeningSample, chatTimingHandoffEvidence, recordChatContinuity, assertChatFixtureShape,
@@ -1218,6 +1219,99 @@ test("stopped-source staging uses the supported restore layout and never manufac
   assert.throws(() => stageSyntheticStoppedSource(harness, { turns: 128, padding: 128 }), /fixture_must_precede_startup/);
   fs.appendFileSync(staged.sourcePath, "{}\n");
   assert.throws(() => verifySyntheticSource(staged), /source_size_changed/);
+});
+
+function linkFixtureSessions(harness, staged, target = path.join(staged.providerHome, ".codex", "sessions")) {
+  const managedHome = path.join(harness.isolatedHome, "agents", staged.sessionId, "habitat", ".codex");
+  fs.mkdirSync(managedHome, { recursive: true });
+  fs.symlinkSync(target, path.join(managedHome, "sessions"), process.platform === "win32" ? "junction" : "dir");
+  return managedHome;
+}
+
+test("upstream stopped-source storage is opt-in, agent-scoped and keeps the existing physical source during provider preparation", (t) => {
+  const harness = tempHome(t), staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128, upstreamStorage: true });
+  const expectedHome = path.join(harness.isolatedHome, "agents", staged.sessionId, "synthetic-provider-home");
+  assert.equal(staged.providerHome, expectedHome);
+  assert.equal(staged.sourcePath, path.join(expectedHome, ".codex", "sessions", "2026", "01", "01",
+    `rollout-2026-01-01T00-00-00-${staged.nativeSessionId}.jsonl`));
+  assert.equal(fs.realpathSync(staged.sourcePath), staged.sourcePath);
+  assert.equal(fs.existsSync(path.join(harness.isolatedHome, "agents", staged.sessionId, "habitat")), false);
+  const before = verifySyntheticSource(staged), homes = prepareSyntheticProviderHomes(harness, staged);
+  assert.equal(homes.CODEX_HOME, path.join(expectedHome, ".codex"));
+  assert.equal(homes.CLAUDE_CONFIG_DIR, path.join(expectedHome, ".claude"));
+  assert.deepEqual(verifySyntheticSource(staged), before);
+  assert.equal(fs.existsSync(staged.capturePath), false);
+  const config = JSON.parse(fs.readFileSync(path.join(harness.isolatedHome, "settings", "state.json")))[0];
+  assert.equal(config.provider, "codex"); assert.equal(config.model, "fixture-model"); assert.equal(config.is_off, true);
+  assert.equal(config.session_persistence, "resume"); assert.equal(config.resume_session, staged.nativeSessionId);
+});
+
+test("legacy provider-home preparation retains exclusive directory creation", (t) => {
+  const harness = tempHome(t), staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128 });
+  assert.equal(staged.upstreamStorage, false);
+  assert.equal(staged.providerHome, path.join(harness.isolatedHome, "synthetic-empty-provider-home"));
+  fs.mkdirSync(path.join(staged.providerHome, ".codex"));
+  assert.throws(() => prepareSyntheticProviderHomes(harness, staged), { code: "EEXIST" });
+  assert.equal(fs.existsSync(path.join(staged.providerHome, ".claude")), false);
+});
+
+test("upstream source identity survives managed sessions and relocated-home junctions", (t) => {
+  const harness = tempHome(t), staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128, upstreamStorage: true });
+  const before = verifySyntheticSource(staged), managedHome = linkFixtureSessions(harness, staged);
+  const first = verifySyntheticSourceProjection(harness, staged, before);
+  assert.equal(first.managed_sessions_realpath, fs.realpathSync(path.join(staged.providerHome, ".codex", "sessions")));
+  assert.deepEqual(first.source, before);
+  // Filesystem shape only: native tests must separately prove the product's owner/compaction lifecycle.
+  const relocated = path.join(harness.isolatedHome, "relocated-managed-home");
+  fs.renameSync(managedHome, relocated);
+  fs.symlinkSync(relocated, managedHome, process.platform === "win32" ? "junction" : "dir");
+  assert.deepEqual(verifySyntheticSourceProjection(harness, staged, before), first);
+});
+
+test("upstream projection refuses the R03 same-byte replacement with a different physical file", (t) => {
+  const harness = tempHome(t), staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128, upstreamStorage: true });
+  const before = verifySyntheticSource(staged); linkFixtureSessions(harness, staged);
+  fs.renameSync(staged.sourcePath, `${staged.sourcePath}.original`);
+  fs.copyFileSync(`${staged.sourcePath}.original`, staged.sourcePath);
+  const after = verifySyntheticSource(staged);
+  assert.equal(after.sha256, before.sha256); assert.equal(after.bytes, before.bytes); assert.notEqual(after.ino, before.ino);
+  assert.throws(() => verifySyntheticSourceProjection(harness, staged, before), { code: "fixture_source_identity_changed" });
+});
+
+test("upstream staging accepts only a boolean storage opt-in before creating fixture content", (t) => {
+  const harness = tempHome(t);
+  for (const upstreamStorage of ["true", 1, null]) {
+    assert.throws(() => stageSyntheticStoppedSource(harness, { upstreamStorage }), { code: "invalid_fixture_upstream_storage" });
+    assert.deepEqual(fs.readdirSync(harness.isolatedHome), [".native-e2e-lock"]);
+  }
+});
+
+test("upstream staging refuses a linked provider ancestor without writing through it", (t) => {
+  const harness = tempHome(t), external = tempHome(t), sessionId = randomUUID();
+  const agent = path.join(harness.isolatedHome, "agents", sessionId); fs.mkdirSync(agent, { recursive: true });
+  const externalBefore = fs.readdirSync(external.isolatedHome);
+  fs.symlinkSync(external.isolatedHome, path.join(agent, "synthetic-provider-home"), process.platform === "win32" ? "junction" : "dir");
+  assert.throws(() => stageSyntheticStoppedSource(harness, { turns: 128, padding: 128, upstreamStorage: true, sessionId }), { code: "linked_fixture_parent" });
+  assert.deepEqual(fs.readdirSync(external.isolatedHome), externalBefore);
+  assert.equal(fs.existsSync(path.join(harness.isolatedHome, "settings", "state.json")), false);
+});
+
+test("upstream provider preparation refuses foreign homes and a linked existing CODEX_HOME", (t) => {
+  const harness = tempHome(t), external = tempHome(t), staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128, upstreamStorage: true });
+  assert.throws(() => prepareSyntheticProviderHomes(harness, { ...staged, providerHome: external.isolatedHome }), { code: "foreign_fixture_provider_home" });
+  fs.renameSync(path.join(staged.providerHome, ".codex"), path.join(staged.providerHome, ".codex-original"));
+  const externalBefore = fs.readdirSync(external.isolatedHome);
+  fs.symlinkSync(external.isolatedHome, path.join(staged.providerHome, ".codex"), process.platform === "win32" ? "junction" : "dir");
+  assert.throws(() => prepareSyntheticProviderHomes(harness, staged), { code: "linked_fixture_directory" });
+  assert.equal(fs.existsSync(path.join(staged.providerHome, ".claude")), false);
+  assert.deepEqual(fs.readdirSync(external.isolatedHome), externalBefore);
+});
+
+test("upstream source projection rejects a foreign managed sessions target", (t) => {
+  const harness = tempHome(t), external = tempHome(t), staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128, upstreamStorage: true });
+  const before = verifySyntheticSource(staged); linkFixtureSessions(harness, staged, external.isolatedHome);
+  assert.throws(() => verifySyntheticSourceProjection(harness, staged, before), { code: "foreign_fixture_sessions_projection" });
+  assert.deepEqual(verifySyntheticSource(staged), before);
 });
 
 test("pending metadata is a labelled witness and cannot be replaced by complete or foreign-source metadata", (t) => {

@@ -23,7 +23,8 @@ import { startRemoteClientTlsFixture } from "../lib/remoteClientTlsFixture.mjs";
 import { prepareChatPreviewCodexPeer } from "../lib/chatPreviewCodexPeer.mjs";
 import {
   CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, chatPreviewWatchdogMs,
-  STOPPED_SOURCE_CAPABILITY, stageSyntheticStoppedSource, verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
+  STOPPED_SOURCE_CAPABILITY, stageSyntheticStoppedSource, prepareSyntheticProviderHomes, verifySyntheticSourceProjection,
+  verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   trustedClickWithPendingCapture,
   chatTimingReceipt, chatTimingCandidateDetails, chatPreviewObserverScript, recordChatTimingCase, writeChatTimingReport,
   recordRejectedChatScope, driveChatPreviewProbe, assertChatOpeningSample, assertChatFixtureShape, CHAT_PREVIEW_RULER_VERSION, observeChatOpening,
@@ -60,9 +61,7 @@ async function freePort() {
 }
 
 async function startOwnedSession(harness, fixture, peer) {
-  const overrides = { CODEX_HOME: path.join(fixture.providerHome, ".codex"), CLAUDE_CONFIG_DIR: path.join(fixture.providerHome, ".claude"),
-    WARDIAN_NATIVE_SESSION_START_ATTEMPTS: "1", ...peer.environment };
-  fs.mkdirSync(overrides.CODEX_HOME); fs.mkdirSync(overrides.CLAUDE_CONFIG_DIR);
+  const overrides = { ...prepareSyntheticProviderHomes(harness, fixture), WARDIAN_NATIVE_SESSION_START_ATTEMPTS: "1", ...peer.environment };
   const previous = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
   Object.assign(process.env, overrides);
   try { return await startNativeSession(harness); }
@@ -296,8 +295,8 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
       let observing = true;
       try {
         prepareIsolatedHome(harness);
-        fixture = stageSyntheticStoppedSource(harness, mode === "qualified" ? { turns: 128, padding: 128 }
-          : { turns: pendingTurns, padding: pendingPadding });
+        fixture = stageSyntheticStoppedSource(harness, { upstreamStorage: true, ...(mode === "qualified" ? { turns: 128, padding: 128 }
+          : { turns: pendingTurns, padding: pendingPadding }) });
         assert.ok(mode !== "pending" || fixture.sourceBytes >= 4 * 1024 * 1024, "Pending fixture must retain a genuine large source");
         detail.fixture = { history_turns: mode === "qualified" ? 128 : pendingTurns, padding: mode === "qualified" ? 128 : pendingPadding,
           records: fixture.records, source_bytes: fixture.sourceBytes };
@@ -332,12 +331,16 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         detail.restored_agent = agent ? { provider: agent.provider, is_off: agent.is_off, session_name: agent.session_name, synthetic: true } : null;
         assert.ok(agent?.provider === "codex" && agent.is_off === true && agent.session_name === fixture.name,
           "The real native roster must restore the owned stopped Codex agent");
+        const preparedCommand = await invokeTauri(session.driver, "build_agent_cli_command", { sessionId: fixture.sessionId });
+        assert.ok(typeof preparedCommand === "string" && preparedCommand.trim(), "Normal command preparation must succeed; its result is never executed");
+        detail.source_projection_before_resume = verifySyntheticSourceProjection(harness, fixture, detail.source);
         await invokeTauri(session.driver, "resume_agent", { sessionId: fixture.sessionId });
         detail.online_agent = await eventually(async () => {
           const current = (await invokeTauri(session.driver, "list_agents")).find((item) => item.session_id === fixture.sessionId);
           return current?.provider === "codex" && current.is_off === false ? { provider: current.provider, is_off: current.is_off,
             native_owner_readiness: "UNPROVEN_BY_ROSTER_ALONE" } : null;
         });
+        detail.source_projection_after_resume = verifySyntheticSourceProjection(harness, fixture, detail.source);
         const observerConfig = { surface, sessionId: fixture.sessionId, provider: fixture.provider, name: fixture.name, body: fixture.body, probe,
           synthetic: fixture.synthetic, sourceKey: fixture.sourceKey, sourceEpoch: fixture.sourceEpoch, targetTurn: fixture.targetTurn,
           targetMessageId: fixture.targetMessageId, captureDetails: diagnostic, rulerVersion: CHAT_PREVIEW_RULER_VERSION };
