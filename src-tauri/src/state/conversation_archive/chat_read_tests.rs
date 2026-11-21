@@ -1927,6 +1927,235 @@ fn referenced_packed_page_corruption_does_not_fall_back_to_valid_rows() {
 }
 
 #[test]
+fn recent_alias_source_window_reuses_identity_nodes_within_one_read() {
+    use std::io::Write;
+
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("recent-alias-window.jsonl");
+    let (snapshot, _) = owned_native_source(
+        &path,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"one\"}}\n",
+    );
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let archive = ConversationArchiveState::default();
+    let capture = |previous| {
+        let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            previous,
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut batch.events,
+            "codex",
+            &path,
+        );
+        batch
+    };
+    let prime = capture(None);
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &prime.events,
+            None,
+            &prime.next,
+            prime.source_proof(),
+        )
+        .unwrap();
+    let append = |frames: Vec<serde_json::Value>| {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for frame in frames {
+            writeln!(file, "{frame}").unwrap();
+        }
+        file.flush().unwrap();
+    };
+    let frames = |turn: &str| {
+        vec![
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}),
+            json!({"type":"response_item","payload":{"type":"message","id":format!("request-{turn}"),"role":"user","content":[{"type":"input_text","text":format!("Synthetic request {turn}")}],"internal_chat_message_metadata_passthrough":{"turn_id":turn,"content_item_kinds":["user.text"]}}}),
+            json!({"type":"response_item","payload":{"type":"message","id":format!("answer-{turn}"),"role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":format!("Synthetic answer {turn}")}],"internal_chat_message_metadata_passthrough":{"turn_id":turn}}}),
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn}}),
+        ]
+    };
+    append(frames("captured"));
+    let captured = capture(Some(prime.next.clone()));
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &captured.events,
+            Some(&prime.next),
+            &captured.next,
+            captured.source_proof(),
+        )
+        .unwrap();
+    finish_projection(&archive);
+    assert!(super::super::chat_source_index::pointer("agent-1")
+        .unwrap()
+        .is_none());
+    let reference = head("agent-1").unwrap().unwrap();
+    let mut canonical_reader = store("agent-1").unwrap();
+    let published: Head = canonical_reader.read(&reference).unwrap();
+    assert_eq!(published.progress, "ready");
+    let (canonical, _) = page(&mut canonical_reader, &reference, &published, None).unwrap();
+    assert!(!canonical.is_empty());
+    let mut identity_reader = store("agent-1").unwrap();
+    let identity_nodes = identity_reader
+        .page(&published.identities, None, PAGE_ROWS)
+        .unwrap()
+        .len();
+    assert!(identity_nodes > 0 && identity_nodes < PAGE_ROWS);
+
+    // The suffix is normally acquired by the recent reader, not appended to
+    // the archive. Its eighty physical IDs must remain visible when unowned.
+    for turn in 0..20 {
+        append(frames(&format!("pending-{turn}")));
+    }
+    let seed = crate::commands::chat_recent_seed::read_limited(&snapshot, None, PAGE_ROWS).unwrap();
+    assert_eq!(seed.events.len(), PAGE_ROWS);
+    let ids: Vec<_> = seed.events.iter().map(|event| event.id.clone()).collect();
+    assert!(seed.events.iter().all(|event| {
+        event.metadata["chat_source_ref"].as_str() == Some(event.id.as_str())
+            && event.metadata["chat_source_start"].as_u64().unwrap()
+                < event.metadata["chat_source_end"].as_u64().unwrap()
+            && event.metadata["chat_source_epoch"].as_str() == published.source_epoch.as_deref()
+            && !canonical
+                .iter()
+                .any(|row| row.metadata["chat_source_ref"] == event.metadata["chat_source_ref"])
+    }));
+    let source = read_preview_source(&context, &snapshot, PAGE_ROWS).unwrap();
+    assert_eq!(source.events.len(), PAGE_ROWS);
+    assert_eq!(
+        source
+            .events
+            .iter()
+            .map(|event| &event.id)
+            .collect::<Vec<_>>(),
+        ids.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        source.conversation_id,
+        Some(published.conversation_id.clone())
+    );
+    assert_eq!(source.generation, Some(published.generation.clone()));
+    assert_eq!(source.source_epoch, published.source_epoch);
+    assert!(source
+        .aliases
+        .iter()
+        .all(|alias| ids.contains(&alias.canonical_id)));
+    assert!(source.events.windows(2).all(|rows| {
+        rows[0].metadata["chat_source_start"].as_u64()
+            <= rows[1].metadata["chat_source_start"].as_u64()
+    }));
+    let small = read_preview_source(&context, &snapshot, 8).unwrap();
+    assert_eq!(small.events.len(), 8);
+    assert_eq!(
+        small
+            .events
+            .iter()
+            .map(|event| &event.id)
+            .collect::<Vec<_>>(),
+        ids[PAGE_ROWS - 8..].iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        head("agent-1").unwrap().as_deref(),
+        Some(reference.as_str())
+    );
+
+    let known: Vec<_> = canonical
+        .iter()
+        .map(|event| {
+            event.metadata["chat_source_ref"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let mut plain_reader = store("agent-1").unwrap();
+    let mut cached_reader = store("agent-1").unwrap();
+    let mut cache = SeekCache::default();
+    for source_ref in known.iter().chain(ids[..8].iter()) {
+        let plain = alias(&mut plain_reader, &published, source_ref).unwrap();
+        let cached =
+            alias_with_cache(&mut cached_reader, &published, source_ref, &mut cache).unwrap();
+        assert_eq!(
+            serde_json::to_value(&cached).unwrap(),
+            serde_json::to_value(&plain).unwrap()
+        );
+    }
+    let alias_reads = (plain_reader.objects, cached_reader.objects);
+    assert!(alias_reads.1 < alias_reads.0);
+    assert!(
+        alias_with_cache(&mut cached_reader, &published, &ids[0], &mut cache)
+            .unwrap()
+            .is_none()
+    );
+    let before_row = cached_reader.objects;
+    assert!(
+        alias_with_cache(&mut cached_reader, &published, &known[0], &mut cache)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        cached_reader.objects,
+        before_row + 1,
+        "a cached identity path must still read and validate its physical Row"
+    );
+    for agent_changed in [true, false] {
+        let mut foreign = published.clone();
+        if agent_changed {
+            foreign.agent_id = "foreign-agent".into();
+        } else {
+            foreign.conversation_id = "foreign-conversation".into();
+        }
+        let plain = alias(&mut store("agent-1").unwrap(), &foreign, &known[0]).unwrap_err();
+        let cached = alias_with_cache(
+            &mut store("agent-1").unwrap(),
+            &foreign,
+            &known[0],
+            &mut SeekCache::default(),
+        )
+        .unwrap_err();
+        assert_eq!(cached.kind(), plain.kind());
+        assert_eq!(cached.to_string(), plain.to_string());
+        assert_eq!(cached.to_string(), "foreign chat alias");
+    }
+    cached_reader.objects = super::super::chat_read_store::READ_OBJECTS;
+    assert!(alias_with_cache(&mut cached_reader, &published, &known[0], &mut cache).is_err());
+    assert_eq!(
+        cached_reader.objects,
+        super::super::chat_read_store::READ_OBJECTS
+    );
+    cached_reader.objects = 0;
+    cached_reader.bytes = super::super::chat_read_store::READ_BYTES;
+    assert!(alias_with_cache(&mut cached_reader, &published, &known[0], &mut cache).is_err());
+    assert_eq!(cached_reader.objects, 1);
+    assert_eq!(
+        cached_reader.bytes,
+        super::super::chat_read_store::READ_BYTES
+    );
+
+    // One identity-tree visit suffices for the whole alias loop. A separate
+    // frontier seek may revisit that tree; scope accounting is bounded too.
+    let record_bound = seed.records_decoded + canonical_reader.objects + 2 * identity_nodes + 8;
+    eprintln!(
+        "recent alias read counts: source_records={} bound={} uncached_alias_objects={} cached_alias_objects={}",
+        source.records_decoded, record_bound, alias_reads.0, alias_reads.1
+    );
+    assert!(
+        source.records_decoded <= record_bound,
+        "source aliases reread immutable seek nodes: records={} bound={} seed={} canonical={} identity_nodes={}",
+        source.records_decoded,
+        record_bound,
+        seed.records_decoded,
+        canonical_reader.objects,
+        identity_nodes
+    );
+}
+
+#[test]
 fn recent_native_window_tracks_actual_emitted_frontier_through_canonical_catchup() {
     let (_guard, temp) = isolated_home();
     let path = temp.path().join("recent-window.jsonl");
