@@ -29,6 +29,8 @@ use processes::RemovalProcesses;
 #[path = "bound_removal.rs"]
 mod bound;
 pub(crate) use bound::recover_bound_removals;
+#[path = "persisted_removal.rs"]
+mod persisted;
 
 #[cfg(test)]
 #[path = "bound_removal_tests.rs"]
@@ -56,7 +58,7 @@ pub(super) async fn remove_agent<R: tauri::Runtime>(
         agents.get(&session_id).map(|agent| agent.config.clone())
     };
     let Some(target_config) = target_config else {
-        return bound::retry(session_id, expected_name, app).await;
+        return persisted::remove(session_id, expected_name, app, require_stopped).await;
     };
     let _lifecycle_lease =
         acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "remove").await?;

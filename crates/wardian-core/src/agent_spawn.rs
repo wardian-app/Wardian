@@ -719,7 +719,10 @@ pub fn recover_first_native_bindings(roster: &[crate::models::AgentConfig]) -> R
     }).map_err(|error| error.to_string())
 }
 
-fn restore_is_excluded_with_conn(conn: &Connection, agent_id: &str) -> rusqlite::Result<bool> {
+pub(crate) fn restore_is_excluded_with_conn(
+    conn: &Connection,
+    agent_id: &str,
+) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM agent_spawn_operations
          WHERE planned_agent_id = ?1 AND state IN

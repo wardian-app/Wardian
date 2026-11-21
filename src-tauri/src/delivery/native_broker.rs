@@ -537,6 +537,51 @@ impl NativeDeliveryBroker {
         Self::default()
     }
 
+    /// Observe native ownership while the caller retains the agent lifecycle
+    /// lease. Pending preparations count as owners; failed launch metadata does
+    /// not. Check preparations before published slots so handoff is not missed.
+    pub(crate) async fn has_agent_owner(&self, agent_id: &str) -> Result<bool, String> {
+        {
+            let revisions = self
+                .codex_creations
+                .revisions
+                .lock()
+                .map_err(|_| "Could not inspect pending Codex ownership")?;
+            if revisions
+                .iter()
+                .any(|((id, _), request)| id == agent_id && request.upgrade().is_some())
+            {
+                return Ok(true);
+            }
+        }
+        {
+            let stopping = self
+                .codex_creations
+                .stopping
+                .lock()
+                .map_err(|_| "Could not inspect stopping Codex ownership")?;
+            if stopping.contains_key(agent_id) {
+                return Ok(true);
+            }
+        }
+        if self
+            .opencode_http_states
+            .lock()
+            .await
+            .get(agent_id)
+            .is_some_and(|state| state.phase != OpenCodeHttpLaunchPhase::Failed)
+        {
+            return Ok(true);
+        }
+        if self.pi_bridges.lock().await.contains_key(agent_id) {
+            return Ok(true);
+        }
+        if self.opencode_http.lock().await.contains_key(agent_id) {
+            return Ok(true);
+        }
+        Ok(self.sessions.lock().await.contains_key(agent_id))
+    }
+
     pub async fn admit(
         &self,
         request: NativeDeliveryAdmission,
@@ -3754,6 +3799,118 @@ fn error(
         code,
         message: message.into(),
         provider_boundary_crossed,
+    }
+}
+
+#[cfg(test)]
+mod agent_owner_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn has_agent_owner_returns_false_for_absent_agent() {
+        let broker = NativeDeliveryBroker::new();
+        assert!(!broker.has_agent_owner("agent").await.unwrap());
+
+        let _gate = broker.owner_gate("agent").await;
+        assert!(
+            !broker.has_agent_owner("agent").await.unwrap(),
+            "an unused owner gate does not own a runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn has_agent_owner_counts_pending_codex_until_creation_request_drops() {
+        let broker = NativeDeliveryBroker::new();
+        let pending = broker.codex_creations.register("agent", 7).unwrap();
+        assert!(broker.has_agent_owner("agent").await.unwrap());
+        assert!(!broker.has_agent_owner("other").await.unwrap());
+
+        broker.codex_creations.cancel("agent", Some(7)).unwrap();
+        assert!(pending.is_cancelled());
+        assert!(
+            broker.has_agent_owner("agent").await.unwrap(),
+            "cancellation does not release a retained creation request"
+        );
+        drop(pending);
+        assert!(
+            !broker.has_agent_owner("agent").await.unwrap(),
+            "an expired weak creation entry does not retain ownership"
+        );
+    }
+
+    #[tokio::test]
+    async fn has_agent_owner_counts_captured_codex_stop_until_released() {
+        let broker = Arc::new(NativeDeliveryBroker::new());
+        let captured = broker.capture_codex_stop("agent", Some(7)).await.unwrap();
+        assert!(broker.has_agent_owner("agent").await.unwrap());
+        assert!(!broker.has_agent_owner("other").await.unwrap());
+
+        drop(captured);
+        assert!(!broker.has_agent_owner("agent").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn has_agent_owner_counts_opencode_pending_and_ready_but_not_failed_metadata() {
+        let broker = NativeDeliveryBroker::new();
+        broker
+            .prepare_opencode_http("agent", 7, "fingerprint".into())
+            .await
+            .unwrap();
+        assert!(broker.has_agent_owner("agent").await.unwrap());
+        assert!(!broker.has_agent_owner("other").await.unwrap());
+
+        // Exercise Ready without launching or registering an HTTP provider.
+        broker
+            .opencode_http_states
+            .lock()
+            .await
+            .get_mut("agent")
+            .unwrap()
+            .phase = OpenCodeHttpLaunchPhase::Ready;
+        assert!(broker.has_agent_owner("agent").await.unwrap());
+
+        broker.fail_opencode_http("agent", 7).await;
+        assert!(broker
+            .opencode_http_states
+            .lock()
+            .await
+            .contains_key("agent"));
+        assert!(broker.opencode_http.lock().await.is_empty());
+        assert!(
+            !broker.has_agent_owner("agent").await.unwrap(),
+            "retained Failed metadata without an owner must not block removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn has_agent_owner_counts_published_native_session_despite_failed_metadata() {
+        let broker = NativeDeliveryBroker::new();
+        broker.opencode_http_states.lock().await.insert(
+            "agent".into(),
+            OpenCodeHttpLaunchState {
+                generation: 7,
+                config_fingerprint: "fingerprint".into(),
+                phase: OpenCodeHttpLaunchPhase::Failed,
+            },
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        broker.sessions.lock().await.insert(
+            "agent".into(),
+            NativeSessionHandle {
+                generation: 8,
+                provider: "pi".into(),
+                capabilities: NativeTransportCapabilities::degraded("pi", "pi_rpc"),
+                tx,
+                shared_codex: None,
+                codex_tui_runtime_generation: None,
+                stopped: None,
+            },
+        );
+        assert!(broker.has_agent_owner("agent").await.unwrap());
+        assert!(!broker.has_agent_owner("other").await.unwrap());
+
+        broker.sessions.lock().await.remove("agent");
+        assert!(!broker.has_agent_owner("agent").await.unwrap());
     }
 }
 

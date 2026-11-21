@@ -1,13 +1,31 @@
 use super::*;
 use wardian_core::control::{AgentSpawnAdmissionResponse, AgentSpawnOperationResponse};
 
-/// Deletion alone may resolve an exact durable ticket after the live target is
-/// gone. Names never adopt a ticket, and storage errors never become absence.
+/// Resolve deletion targets from live state, then actual persisted identities.
+/// Only a UUID may resolve a durable removal ticket when both are absent;
+/// storage errors never become absence.
 pub(super) async fn resolve_removal_uuid(
     state: &AppState,
     target: &str,
 ) -> Result<Option<String>, ControlError> {
     if let Some(id) = resolve_target_uuid_in_state(state, target).await {
+        return Ok(Some(id));
+    }
+    let lookup = target.to_string();
+    let persisted = tokio::task::spawn_blocking(move || {
+        wardian_core::db::get_db_conn(
+            |conn| match wardian_core::identity::resolve_by_name_or_uuid(conn, &lookup) {
+                Ok(identity) => Ok(Some(identity.uuid)),
+                Err(wardian_core::identity::IdentityError::NotFound(_)) => Ok(None),
+                Err(error) => Err(error.into()),
+            },
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| ControlError::request_failed(error.to_string()))?
+    .map_err(ControlError::request_failed)?;
+    if let Some(id) = persisted {
         return Ok(Some(id));
     }
     let Ok(uuid) = uuid::Uuid::parse_str(target) else {
@@ -340,6 +358,68 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn persisted_unloaded_resolution_by_name_and_exact_uuid() {
+        let home = crate::control::test_support::TestWardianHome::new_async().await;
+        let agent = uuid::Uuid::new_v4().to_string();
+        wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+            session_id: &agent,
+            session_name: "PersistedOnly",
+            description: "",
+            agent_class: "Coder",
+            provider: "mock",
+            workspace: Some("workspace"),
+            project: None,
+            is_off: false,
+            created_at: None,
+        })
+        .unwrap();
+        wardian_core::db::update_agent_status(&agent, "Off", None).unwrap();
+
+        let state = AppState::new();
+        assert!(state.agents.lock().await.is_empty());
+        assert!(!home.path().join("settings/state.json").exists());
+        assert!(wardian_core::agent_spawn::bound_removal_ticket(&agent)
+            .unwrap()
+            .is_none());
+        let rows = wardian_core::db::get_all_agents().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].last_status.as_deref(), Some("Off"));
+        assert_eq!(rows[0].last_pid, None);
+        assert!(!rows[0].is_off);
+
+        for target in ["PersistedOnly", agent.as_str()] {
+            assert_eq!(
+                resolve_removal_uuid(&state, target).await.unwrap(),
+                Some(agent.clone()),
+                "DB-only agent must resolve by exact name or UUID: {target}"
+            );
+        }
+        for target in ["persistedonly", &agent[..8]] {
+            assert_eq!(resolve_removal_uuid(&state, target).await.unwrap(), None);
+        }
+        assert!(state.agents.lock().await.is_empty());
+        assert!(!home.path().join("settings/state.json").exists());
+    }
+
+    #[tokio::test]
+    async fn persisted_unloaded_database_failure_is_not_target_absence() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        wardian_core::db::get_db_conn(|conn| {
+            conn.execute("DROP TABLE agents", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let state = AppState::new();
+        let agent = uuid::Uuid::new_v4().to_string();
+        for target in ["PersistedOnly", agent.as_str()] {
+            let error = resolve_removal_uuid(&state, target)
+                .await
+                .expect_err("persisted target lookup errors must not become not-found");
+            assert_eq!(error.code(), "request_failed");
+        }
+    }
+
+    #[tokio::test]
     async fn removal_resolves_only_exact_ticket_uuid_after_live_target_is_gone() {
         use wardian_core::agent_spawn as ledger;
         let _home = crate::control::test_support::TestWardianHome::new_async().await;
@@ -375,17 +455,32 @@ mod tests {
         })
         .unwrap();
         ledger::complete_legacy_name(&attempt, &agent, std::slice::from_ref(&config)).unwrap();
-        ledger::admit_bound_removal(
+        let profile = ledger::RemovalProfileIdentity {
+            directory_id: None,
+            ownership_records: Default::default(),
+        };
+        let ticket = ledger::admit_bound_removal(
             &ledger::RemovalAgentIdentity::from(&config),
             None,
-            &ledger::RemovalProfileIdentity {
-                directory_id: None,
-                ownership_records: Default::default(),
-            },
+            &profile,
             || Ok(()),
         )
         .unwrap()
         .unwrap();
+        let ticket = ledger::seal_bound_removal(
+            &ticket,
+            &ledger::RemovalClosureReceipt {
+                runtime_generation: None,
+                owned_process_count: 0,
+                all_process_handles_joined: true,
+                broker_closed: true,
+            },
+            &profile,
+            || Ok(()),
+        )
+        .unwrap();
+        ledger::complete_bound_removal(&ticket, &[], &profile, || Ok(())).unwrap();
+        assert!(wardian_core::db::get_all_agents().unwrap().is_empty());
         let state = AppState::new();
         assert_eq!(
             resolve_removal_uuid(&state, &agent).await.unwrap(),
@@ -395,6 +490,7 @@ mod tests {
             resolve_removal_uuid(&state, "TicketOnly").await.unwrap(),
             None
         );
+        assert_eq!(resolve_removal_uuid(&state, "missing").await.unwrap(), None);
         assert_eq!(
             resolve_removal_uuid(&state, &uuid::Uuid::new_v4().to_string())
                 .await

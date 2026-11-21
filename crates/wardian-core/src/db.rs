@@ -595,12 +595,40 @@ pub fn delete_agent_after_owned_removal_fenced(
     closure_proved: bool,
     fence: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    delete_agent_fenced(session_id, closure_proved, None, fence)
+}
+
+/// Cascade an unloaded identity only while its exact database record remains
+/// unchanged and no unresolved spawn owns it. The app retains lifecycle and
+/// roster exclusion and proves runtime-owner absence before calling this API.
+/// The SQL-lock fence validates that retained lifecycle authority only.
+pub fn delete_unloaded_agent_fenced(
+    expected: &AgentRow,
+    fence: impl FnOnce() -> Result<(), String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    delete_agent_fenced(&expected.session_id, true, Some(expected), fence)
+}
+
+fn delete_agent_fenced(
+    session_id: &str,
+    closure_proved: bool,
+    expected: Option<&AgentRow>,
+    fence: impl FnOnce() -> Result<(), String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut guard = DB_CONN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let conn = guard.as_mut().ok_or("database not initialized")?;
     let transaction = conn.transaction()?;
     crate::agent_spawn::reject_bound_ordinary_delete(&transaction, session_id)?;
+    if let Some(expected) = expected {
+        if get_agent_by_session_id_with_conn(&transaction, session_id)?.as_ref() != Some(expected) {
+            return Err("Persisted agent identity changed during removal".into());
+        }
+        if crate::agent_spawn::restore_is_excluded_with_conn(&transaction, session_id)? {
+            return Err("Cannot remove an unloaded agent with unresolved spawn ownership".into());
+        }
+    }
     fence()?;
     if closure_proved {
         crate::agent_spawn::delete_removed_agent_claims(&transaction, session_id)?;
