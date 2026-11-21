@@ -41,6 +41,11 @@ async function settleOwnedDeferreds() {
 }
 const tick = async (ms = 1000) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
 
+function expectRecentWithLatestLiteralHints(request: Parameters<ChatPageLoader>[0], fixtureEvents: AgentChatEvent[]) {
+  expect(fixtureEvents.length).toBeGreaterThan(8);
+  expect(request).toEqual({ sessionId: "agent", revision: "r1", previewBackingIds: fixtureEvents.slice(-8).map(event => event.id) });
+}
+
 async function setup(count = 80) {
   vi.useFakeTimers();
   const target = generatedRow("F129", { chat_body_pending: true, chat_body_binding: "body" });
@@ -106,7 +111,7 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
     await h.empty(); await tick(999);
     expect(h.calls).toHaveLength(2);
     await tick(1);
-    expect(h.calls[2]).toEqual({ sessionId: "agent", revision: "r1" });
+    expectRecentWithLatestLiteralHints(h.calls[2], h.initial);
     expect(h.hook.result.current.events.find(e => e.id === h.ready.id)?.metadata.chat_detail_ref).toBe("synthetic-detail:0");
     expect(h.hook.result.current.events.map(e => e.id)).toEqual(before);
     expect(h.hook.result.current.page?.next_before).toBe("cursor");
@@ -129,7 +134,7 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
     const recent = deferred();
     h.recent(() => recent.promise);
     await h.empty(); await tick();
-    expect(h.calls[2]).toEqual({ sessionId: "agent", revision: "r1" });
+    expectRecentWithLatestLiteralHints(h.calls[2], h.initial);
     const beforeScope = h.hook.result.current.submissionScope();
     const publicRow = generatedRow("public-during-recent");
     const publicSecond = generatedRow("public-second-during-recent");
@@ -218,7 +223,7 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
     expect(hook.result.current.page?.next_before).toBe("canonical-older-cursor");
     expect(hook.result.current.loadingOlder).toBe(true);
     await tick();
-    expect(calls[2]).toEqual({ sessionId: "agent", revision: "r1" });
+    expectRecentWithLatestLiteralHints(calls[2], initial);
     expect(calls[2].revalidateIds).toBeUndefined();
     expect(settled).toBe(0);
 
@@ -377,13 +382,13 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
     let recentReads = 0;
     h.recent(() => recentReads++ === 0 ? mismatch.promise : freshPage.promise);
     await h.empty(); await tick();
-    expect(h.calls[2]).toEqual({ sessionId: "agent", revision: "r1" });
+    expectRecentWithLatestLiteralHints(h.calls[2], h.initial);
     await act(async () => {
       mismatch.resolve(page({ [field]: "changed", events: [mismatchEvent], next_before: null }));
     });
     await h.demand;
     expect(h.calls).toHaveLength(4);
-    expect(h.calls[3]).toEqual({ sessionId: "agent" });
+    expect(h.calls[3]).toEqual({ sessionId: "agent", previewBackingIds: [] });
     expect(recentReads).toBe(2);
     expect(h.hook.result.current.page).toBeNull();
     expect(h.hook.result.current.events).toEqual([]);
@@ -423,7 +428,7 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
       await tick(5000);
       expect(h.calls.filter(call => call.sessionId === "agent")).toHaveLength(3);
       expect(h.calls.filter(call => call.sessionId === "other")).toEqual(
-        action === "switch" ? [{ sessionId: "other", revision: undefined }] : []);
+        action === "switch" ? [{ sessionId: "other", revision: undefined, previewBackingIds: [] }] : []);
       expect(h.stats().maxPerSession).toBe(1);
       expect(h.stats().active).toBe(action === "switch" ? 2 : 1);
       h.recent((request) => request.sessionId === "other" ? other.promise : Promise.resolve(page({ events: [] })));
@@ -508,7 +513,7 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
       expect(await second).toMatchObject({ text: "suffix", next: null, complete: true });
     });
     await tick();
-    expect(h.calls[4]).toEqual({ sessionId: "agent", revision: "r1" });
+    expectRecentWithLatestLiteralHints(h.calls[4], h.initial);
     expect(h.stats().settled).toBe(0); expect(h.stats().maxActive).toBe(1);
     h.hook.unmount(); await h.demand;
   });
@@ -534,7 +539,7 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
       await h.demand;
       await tick(5000);
       expect(h.calls.filter(call => call.sessionId === "agent")).toHaveLength(4);
-      expect(h.calls.filter(call => call.sessionId === "other")).toEqual([{ sessionId: "other", revision: undefined }]);
+      expect(h.calls.filter(call => call.sessionId === "other")).toEqual([{ sessionId: "other", revision: undefined, previewBackingIds: [] }]);
       expect(h.stats().active).toBe(2); expect(h.stats().maxPerSession).toBe(1);
       expect(continuationSettled).toBe(false);
       await act(async () => { recent.resolve(page({ events: [h.ready] })); });
@@ -568,11 +573,11 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
         ...Array.from({ length: 5 }, (_, index) => (index + 1) * 1000),
       ]);
       expect(otherReads.map(read => read.request)).toEqual([
-        { sessionId: "other", revision: undefined },
-        ...Array.from({ length: 14 }, () => ({ sessionId: "other", revision: "r1" })),
+        { sessionId: "other", revision: undefined, previewBackingIds: [] },
+        ...Array.from({ length: 14 }, () => ({ sessionId: "other", revision: "r1", previewBackingIds: [] })),
       ]);
       expect(h.calls.filter(call => call.sessionId === "agent")).toEqual([
-        { sessionId: "agent", revision: undefined }, { sessionId: "agent", cursor: "cursor" },
+        { sessionId: "agent", revision: undefined, previewBackingIds: [] }, { sessionId: "agent", cursor: "cursor" },
       ]);
       expect(h.stats()).toMatchObject({ active: 1, maxActive: 2, maxPerSession: 1, settled: 1 });
       expect(h.timeline.some(read => read.stage === "settled" && read.request.cursor)).toBe(false);

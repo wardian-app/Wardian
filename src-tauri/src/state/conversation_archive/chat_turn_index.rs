@@ -1,6 +1,7 @@
 //! Incremental canonical turn metadata in the existing immutable Store.
 //! Admission, source qualification and publication remain with the archive owner.
-//! No transcript bodies, raw records, delivery inference or preview state live here.
+//! No transcript bodies, raw records or delivery inference live here. Preview
+//! hints are bounded metadata retained only by the existing in-memory owner.
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
@@ -23,6 +24,295 @@ pub(super) struct Scope<'a> {
     /// The owner proved this request is new to its previous Head, or is building
     /// complete canonical metadata rather than observing only changed rows.
     pub(super) can_activate: bool,
+}
+
+/// Opaque, bounded ownership hints from the caller's exact immutable Head.
+/// These retain metadata only and grant no canonical output/detail authority.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(super) struct PreviewOwners {
+    scope: Option<String>,
+    source: Option<(String, String)>,
+    admission: Option<String>,
+    rows: BTreeMap<String, PreviewOwner>,
+    remembered: BTreeMap<String, Item>,
+    members: BTreeMap<String, String>,
+    /// Display state IDs link only to previously resolved physical owners.
+    state_rows: BTreeMap<String, String>,
+    /// Global opening order keyed by canonical turn_key, not request_root_id.
+    pub(super) turn_orders: BTreeMap<String, String>,
+    /// Current-Head opening proof is operation-local, never binding authority.
+    #[serde(skip)]
+    opening_roots: BTreeSet<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PreviewOwner {
+    item: Item,
+    kind: ChatPresentedItemKind,
+    observation: String,
+    source_order: String,
+    physical_members: Vec<String>,
+}
+
+impl PreviewOwners {
+    /// These maps index the same retained source backing certificates. Count
+    /// the largest logical set rather than duplicate JSON/index representations.
+    pub(super) fn record_count(&self) -> usize {
+        self.members
+            .len()
+            .max(self.remembered.len())
+            .max(self.state_rows.len())
+    }
+
+    /// Roots certified by the same scoped Turn reads used to resolve this slice.
+    pub(super) fn proven_openings(&self) -> &BTreeSet<String> {
+        &self.opening_roots
+    }
+
+    /// Preserve admitted item order within the caller's fenced source admission.
+    /// Canonical capture may choose a later call's order for an unpaired result;
+    /// matching identity can retain view order without changing current evidence.
+    pub(super) fn preserve_item_orders(&self, value: &mut ChatPresentationV1) {
+        let Some((source_key, source_epoch)) = self.source.as_ref() else {
+            return;
+        };
+        if self.scope.is_none()
+            || self.admission.is_none()
+            || self.remembered.len() > CHAT_PRESENTATION_MAX_ITEMS
+            || value.items.len() > CHAT_PRESENTATION_MAX_ITEMS
+            || value.preview_bridge.as_ref().is_some_and(|bridge| {
+                self.admission.as_deref() != Some(bridge.admission_id.as_str())
+            })
+        {
+            return;
+        }
+        for item in &mut value.items {
+            let Some(previous) = self.remembered.get(&item.item_key) else {
+                continue;
+            };
+            if previous.membership.item_key != item.item_key
+                || previous.membership.turn_key != item.turn_key
+                || item
+                    .admission_id
+                    .as_ref()
+                    .is_some_and(|admission| Some(admission) != self.admission.as_ref())
+            {
+                continue;
+            }
+            if matches!(
+                (&previous.evidence, &item.evidence),
+                (
+                    ChatEvidenceIdentity::Source { source_key: old_key, source_epoch: old_epoch, .. },
+                    ChatEvidenceIdentity::Source { source_key: current_key, source_epoch: current_epoch, .. }
+                ) if old_key == source_key && current_key == source_key
+                    && old_epoch == source_epoch && current_epoch == source_epoch
+            ) {
+                item.order_key.clone_from(&previous.order_key);
+            }
+        }
+    }
+
+    /// Retain identity metadata for only this admitted presentation. Transcript
+    /// text, previews, labels, invocation/result records and detail refs are absent.
+    pub(super) fn from_presentation(
+        scope: &Scope<'_>,
+        admission: &str,
+        value: &ChatPresentationV1,
+    ) -> io::Result<Option<Self>> {
+        let Some((source_key, source_epoch)) = scope.source_key.zip(scope.source_epoch) else {
+            return Ok(None);
+        };
+        if ![
+            scope.agent_id,
+            scope.conversation_id,
+            source_key,
+            source_epoch,
+            admission,
+        ]
+        .into_iter()
+        .all(bounded_id)
+            || value.validate().is_err()
+            || value
+                .preview_bridge
+                .as_ref()
+                .is_some_and(|bridge| bridge.admission_id != admission)
+        {
+            return Ok(None);
+        }
+        let mut saved = Self {
+            scope: Some(owner_identity(scope)?),
+            source: Some((source_key.into(), source_epoch.into())),
+            admission: Some(admission.into()),
+            ..Self::default()
+        };
+        for turn in &value.turns {
+            if !bounded_id(&turn.turn_key) || turn.order_key.len() > 2 * ID_BYTES {
+                return Ok(None);
+            }
+            saved
+                .turn_orders
+                .insert(turn.turn_key.clone(), turn.order_key.clone());
+        }
+        for item in &value.items {
+            let ChatEvidenceIdentity::Source {
+                source_key: key,
+                source_epoch: epoch,
+                record_key,
+            } = &item.evidence
+            else {
+                return Ok(None);
+            };
+            if key != source_key
+                || epoch != source_epoch
+                || !bounded_id(record_key)
+                || !bounded_id(&item.item_key)
+                || !bounded_id(&item.turn_key)
+                || item.order_key.len() > 2 * ID_BYTES
+                || item.provenance == ChatItemProvenance::Pending
+                || (item.provenance == ChatItemProvenance::Provisional
+                    && item.admission_id.as_deref() != Some(admission))
+            {
+                return Ok(None);
+            }
+            let owner = Item {
+                membership: Membership {
+                    item_key: item.item_key.clone(),
+                    turn_key: item.turn_key.clone(),
+                },
+                order_key: item.order_key.clone(),
+                kind: item.kind.clone(),
+                evidence: item.evidence.clone(),
+                step: None,
+                state_only: false,
+                legacy_only: false,
+            };
+            if saved
+                .members
+                .insert(record_key.clone(), item.item_key.clone())
+                .is_some_and(|known| known != item.item_key)
+            {
+                return Ok(None);
+            }
+            saved.remembered.insert(item.item_key.clone(), owner);
+        }
+        Ok(Some(saved))
+    }
+
+    /// Carry this slice's certified component aliases forward, bounded by the
+    /// current admitted items rather than growing a session-wide identity cache.
+    pub(super) fn remember(
+        &self,
+        scope: &Scope<'_>,
+        admission: &str,
+        value: &ChatPresentationV1,
+    ) -> io::Result<Option<Self>> {
+        let Some(mut saved) = Self::from_presentation(scope, admission, value)? else {
+            return Ok(None);
+        };
+        if self
+            .scope
+            .as_ref()
+            .is_some_and(|owner| Some(owner) != saved.scope.as_ref())
+            || self
+                .source
+                .as_ref()
+                .is_some_and(|source| Some(source) != saved.source.as_ref())
+            || self
+                .admission
+                .as_deref()
+                .is_some_and(|known| known != admission)
+        {
+            return Ok(None);
+        }
+        for reference in &value.state_event_refs {
+            let Some(item) = self
+                .rows
+                .get(&reference.event_id)
+                .map(|hint| &hint.item)
+                .or_else(|| {
+                    self.state_rows
+                        .get(&reference.event_id)
+                        .and_then(|key| self.remembered.get(key))
+                })
+            else {
+                // The DTO has no physical state evidence to reconstruct here.
+                continue;
+            };
+            if !item.state_only
+                || item.legacy_only
+                || item.membership.turn_key != reference.turn_key
+                || saved
+                    .remembered
+                    .get(&item.membership.item_key)
+                    .is_some_and(|known| {
+                        !known.state_only
+                            || known.membership != item.membership
+                            || known.order_key != item.order_key
+                            || known.evidence != item.evidence
+                    })
+            {
+                return Ok(None);
+            }
+            let mut owner = item.clone();
+            owner.step = None;
+            saved
+                .state_rows
+                .insert(reference.event_id.clone(), item.membership.item_key.clone());
+            saved
+                .remembered
+                .insert(item.membership.item_key.clone(), owner);
+        }
+        let updated = self
+            .rows
+            .values()
+            .map(|hint| hint.item.membership.item_key.as_str())
+            .collect::<BTreeSet<_>>();
+        for (physical, item_key) in &self.members {
+            if !updated.contains(item_key.as_str())
+                && saved.remembered.contains_key(item_key)
+                && saved
+                    .members
+                    .insert(physical.clone(), item_key.clone())
+                    .is_some_and(|known| known != *item_key)
+            {
+                return Ok(None);
+            }
+        }
+        for hint in self.rows.values() {
+            let item_key = &hint.item.membership.item_key;
+            if !saved.remembered.contains_key(item_key) {
+                continue;
+            }
+            for physical in &hint.physical_members {
+                if saved
+                    .members
+                    .insert(physical.clone(), item_key.clone())
+                    .is_some_and(|known| known != *item_key)
+                {
+                    return Ok(None);
+                }
+            }
+        }
+        if saved.remembered.len() > CHAT_PRESENTATION_MAX_ITEMS
+            || saved.members.len() > 3 * CHAT_PRESENTATION_MAX_ITEMS
+            || saved.state_rows.len() > CHAT_PRESENTATION_MAX_ITEMS
+        {
+            return Ok(None);
+        }
+        Ok(Some(saved))
+    }
+}
+
+struct Component {
+    item: Item,
+    kind: ChatPresentedItemKind,
+    versions: BTreeSet<String>,
+}
+
+struct PageMembers {
+    members: Vec<Membership>,
+    source_order: Option<String>,
 }
 
 /// Only roots belong in the Head. Their AVL values contain bounded metadata;
@@ -63,6 +353,8 @@ struct Turn {
     totals: Totals,
     status: ChatTurnStatus,
     status_order: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closed_order: Option<String>,
     #[serde(default)]
     order_key: Option<String>,
 }
@@ -78,6 +370,7 @@ impl Default for Turn {
             totals: Totals::default(),
             status: ChatTurnStatus::Unknown,
             status_order: None,
+            closed_order: None,
             order_key: None,
         }
     }
@@ -90,6 +383,21 @@ impl Turn {
 
     fn membership_complete(&self) -> bool {
         self.adapter_proven && self.membership_closed && !self.invalid_proof
+    }
+
+    fn closed_source_order(&self) -> Option<&str> {
+        (self.eligible()
+            && self.membership_complete()
+            && matches!(
+                self.status,
+                ChatTurnStatus::Completed | ChatTurnStatus::Failed | ChatTurnStatus::Cancelled
+            ))
+        .then(|| {
+            self.closed_order
+                .as_deref()
+                .or(self.status_order.as_deref())
+        })
+        .flatten()
     }
 }
 
@@ -247,38 +555,28 @@ impl Index {
         {
             return Ok(None);
         }
-        let owner = key(&("turn-owner-v1", scope.agent_id, scope.conversation_id))?;
-        if self.scope.as_ref().is_some_and(|known| known != &owner) {
-            return Err(io::Error::other("foreign canonical turn index scope"));
-        }
-        let source = key(&(
-            "turn-source-v1",
-            &owner,
-            scope.source_key,
-            scope.source_epoch,
-        ))?;
-        let turn_key = key(&("turn-v1", &source, root))?;
-        let call = matches!(kind, ChatPresentedItemKind::Step)
-            .then(|| call_identity(event))
-            .flatten();
-        let physical = string(event, "chat_source_ref").unwrap_or(&event.id);
-        if !bounded_id(physical) {
+        let Some(Identity {
+            owner,
+            source,
+            turn_key,
+            item_key: proposed,
+            physical,
+            call,
+        }) = identity(scope, event, root, &kind, self.scope.as_deref())?
+        else {
             return Ok(None);
-        }
-        let proposed = if kind == ChatPresentedItemKind::Prompt {
-            key(&("prompt-v1", &turn_key))?
-        } else if let Some(call) = call {
-            key(&("step-v1", &turn_key, call))?
-        } else {
-            key(&("item-v1", &turn_key, physical))?
         };
         let mut cache = SeekCache::default();
         let mut membership = None;
         let mut first_source_order: Option<String> = None;
+        let mut physical_seen = false;
+        let mut event_seen = false;
         for id in [event.id.as_str(), physical] {
             if let Some(known) =
                 lookup::<Observation>(store, &self.events, &digest(id.as_bytes()), &mut cache)?
             {
+                physical_seen |= id == physical;
+                event_seen |= id == event.id;
                 if known.membership.turn_key != turn_key
                     || membership
                         .as_ref()
@@ -304,6 +602,44 @@ impl Index {
             item_key: proposed,
         });
         let old: Option<Item> = lookup(store, &self.items, &membership.item_key, &mut cache)?;
+        // Closed replays retain metadata, but cannot rebind an existing physical
+        // record between prompt, step and narrative identities.
+        if old.as_ref().is_some_and(|item| {
+            item.membership != membership
+                || (!legacy_only
+                    && !item.legacy_only
+                    && ((item.kind == ChatPresentedItemKind::Step)
+                        != (kind == ChatPresentedItemKind::Step)
+                        || (item.kind == ChatPresentedItemKind::Prompt)
+                            != (kind == ChatPresentedItemKind::Prompt)))
+        }) {
+            return Err(io::Error::other("canonical turn item changed identity"));
+        }
+        let prior_turn: Option<Turn> = lookup(store, &self.turns, &turn_key, &mut cache)?;
+        if let Some(closed_order) = prior_turn.as_ref().and_then(Turn::closed_source_order) {
+            if physical_seen {
+                let member = membership;
+                // Re-identification may add an event alias, but a replay cannot
+                // rewrite a closed turn's item metadata, counters or status.
+                if !event_seen {
+                    let reference = store.put(&Observation {
+                        membership: member.clone(),
+                        source_order: first_source_order.unwrap_or_else(|| order_key.into()),
+                    })?;
+                    let mut next = self.clone();
+                    next.events = Some(store.insert(
+                        &next.events,
+                        &digest(event.id.as_bytes()),
+                        &reference,
+                    )?);
+                    *self = next;
+                }
+                return Ok(Some(member.item_key));
+            }
+            if source_order_after(order_key, closed_order) {
+                return Ok(None);
+            }
+        }
         // Existing v1 observations may predate per-event order metadata. Keep
         // their selected record's known order when upgrading that observation.
         let source_order = first_source_order
@@ -345,16 +681,6 @@ impl Index {
             state_only: state_only(event),
             legacy_only,
         });
-        if item.membership != membership
-            || (!legacy_only
-                && !item.legacy_only
-                && ((item.kind == ChatPresentedItemKind::Step)
-                    != (kind == ChatPresentedItemKind::Step)
-                    || (item.kind == ChatPresentedItemKind::Prompt)
-                        != (kind == ChatPresentedItemKind::Prompt)))
-        {
-            return Err(io::Error::other("canonical turn item changed identity"));
-        }
         // A missing or unknown phase in a replay cannot erase proven final
         // evidence. Known commentary/final phases still follow canonical source
         // evidence; idle and text position never determine an answer.
@@ -375,7 +701,7 @@ impl Index {
         if !item.legacy_only && item.kind == ChatPresentedItemKind::Step {
             update_step(&mut item, event, source_order);
         }
-        let mut turn: Turn = lookup(store, &self.turns, &turn_key, &mut cache)?.unwrap_or_default();
+        let mut turn = prior_turn.unwrap_or_default();
         if let Some(old) = &old {
             turn.totals.remove(old)?;
         }
@@ -400,6 +726,9 @@ impl Index {
             turn.membership_closed |= receipt.complete();
             turn.invalid_proof |= receipt.partial();
             let order = receipt.order();
+            if receipt.complete() && !receipt.partial() && turn.closed_order.is_none() {
+                turn.closed_order = Some(order.clone());
+            }
             if turn
                 .status_order
                 .as_deref()
@@ -439,6 +768,14 @@ impl Index {
                 }
             }
         }
+        if turn.closed_order.is_none() && turn.closed_source_order().is_some() {
+            turn.closed_order =
+                if adapter_proven && event.metadata["chat_turn_membership_complete"] == true {
+                    Some(source_order.into())
+                } else {
+                    turn.status_order.clone()
+                };
+        }
         let mut next = self.clone();
         next.version = 1;
         next.scope = Some(owner);
@@ -467,6 +804,26 @@ impl Index {
         events: &[AgentChatEvent],
         complete: bool,
     ) -> io::Result<Option<ChatPresentationV1>> {
+        self.page_inner(store, events, complete, false)
+    }
+
+    /// A bound canonical view retains its lifetime while paging into legacy
+    /// history. This grants no turn membership to those legacy rows.
+    pub(super) fn continuation_page(
+        &self,
+        store: &mut Store,
+        events: &[AgentChatEvent],
+    ) -> io::Result<Option<ChatPresentationV1>> {
+        self.page_inner(store, events, false, true)
+    }
+
+    fn page_inner(
+        &self,
+        store: &mut Store,
+        events: &[AgentChatEvent],
+        complete: bool,
+        allow_legacy_only: bool,
+    ) -> io::Result<Option<ChatPresentationV1>> {
         if self.version != 1 {
             return Ok(None);
         }
@@ -489,49 +846,17 @@ impl Index {
             {
                 return Ok(None);
             }
-            let Some(members) = self.page_members(store, event, &mut cache)? else {
+            let Some(PageMembers { members, .. }) = self.page_members(store, event, &mut cache)?
+            else {
                 bindings.push(None);
                 continue;
             };
-            let mut selected: Option<(String, Item)> = None;
-            let mut logical_kind = None;
-            let mut versions = BTreeSet::new();
-            for member in members {
-                if !loaded.contains_key(&member.item_key) {
-                    let Some(reference) =
-                        store.get_reusing_nodes(&self.items, &member.item_key, &mut cache)?
-                    else {
-                        return Ok(None);
-                    };
-                    let item: Item = store.read(&reference)?;
-                    loaded.insert(member.item_key.clone(), (reference, item));
-                }
-                let Some((reference, item)) = loaded.get(&member.item_key) else {
-                    return Ok(None);
-                };
-                versions.insert(reference.clone());
-                if item.membership != member
-                    || selected.as_ref().is_some_and(|(_, prior)| {
-                        prior.membership.turn_key != member.turn_key
-                            || !compatible_component_kinds(&prior.kind, &item.kind)
-                    })
-                {
-                    return Ok(None);
-                }
-                // Membership is already certified by the existing logical
-                // owner. Explicit final evidence enriches that component while
-                // its earliest persisted item/order retains visible ownership.
-                if logical_kind.is_none() || item.kind == ChatPresentedItemKind::Answer {
-                    logical_kind = Some(item.kind.clone());
-                }
-                if selected.as_ref().is_none_or(|(_, prior): &(String, Item)| {
-                    (&item.order_key, &item.membership.item_key)
-                        < (&prior.order_key, &prior.membership.item_key)
-                }) {
-                    selected = Some((reference.clone(), item.clone()));
-                }
-            }
-            let Some((_, item)) = selected else {
+            let Some(Component {
+                item,
+                kind: logical_kind,
+                versions,
+            }) = self.component(store, members, &mut cache, &mut loaded)?
+            else {
                 return Ok(None);
             };
             let member = &item.membership;
@@ -552,8 +877,8 @@ impl Index {
             turn.supported &= !item.legacy_only && item_kind(event).is_some();
             let kind = logical_kinds
                 .entry(member.item_key.clone())
-                .or_insert_with(|| logical_kind.clone().unwrap_or_else(|| item.kind.clone()));
-            if logical_kind == Some(ChatPresentedItemKind::Answer) {
+                .or_insert_with(|| logical_kind.clone());
+            if logical_kind == ChatPresentedItemKind::Answer {
                 *kind = ChatPresentedItemKind::Answer;
             }
             bindings.push(Some(member.item_key.clone()));
@@ -688,6 +1013,7 @@ impl Index {
             presented_turns.push(ChatPresentedTurn {
                 turn_key,
                 order_key,
+                prefix_attributed: false,
                 membership_complete: turn.membership_complete(),
                 status: aggregate_status(&turn),
                 prompt_item_keys: local
@@ -711,7 +1037,7 @@ impl Index {
                 counts_complete: turn.membership_complete(),
             });
         }
-        if presented_turns.is_empty() {
+        if presented_turns.is_empty() && !allow_legacy_only {
             return Ok(None);
         }
         let mut legacy_turns = legacy.into_values().collect::<Vec<_>>();
@@ -744,6 +1070,7 @@ impl Index {
             turns: presented_turns,
             items,
             detail: None,
+            preview_bridge: None,
         };
         if page.validate().is_err()
             || serde_json::to_vec(&page).map_err(io::Error::other)?.len()
@@ -752,6 +1079,274 @@ impl Index {
             return Ok(None);
         }
         Ok(Some(page))
+    }
+
+    /// Return only requested roots' proven terminal source boundaries, reusing
+    /// hash-validated immutable seek nodes from the caller's operation-local
+    /// cache. Store read limits and source-boundary qualification are unchanged.
+    pub(super) fn closed_roots_reusing_nodes(
+        &self,
+        store: &mut Store,
+        scope: &Scope<'_>,
+        roots: &BTreeSet<String>,
+        cache: &mut SeekCache,
+    ) -> io::Result<BTreeMap<String, String>> {
+        if roots.len() > CHAT_PRESENTATION_MAX_ITEMS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "closed root budget exceeded",
+            ));
+        }
+        let mut closed = BTreeMap::new();
+        if self.version != 1 {
+            return Ok(closed);
+        }
+        let owner = owner_identity(scope)?;
+        if self.scope.as_ref().is_some_and(|known| known != &owner) {
+            return Err(io::Error::other("foreign canonical turn index scope"));
+        }
+        for root in roots.iter().filter(|root| bounded_id(root)) {
+            let (_, turn_key) = turn_identity(&owner, scope.source_key, scope.source_epoch, root)?;
+            if let Some(turn) = lookup::<Turn>(store, &self.turns, &turn_key, cache)? {
+                if let Some(order) = turn.closed_source_order() {
+                    closed.insert(root.clone(), order.into());
+                }
+            }
+        }
+        Ok(closed)
+    }
+
+    /// Compare physical ranges rather than mutable normalizer sequences or
+    /// projection IDs. A closing frame itself is never after its own boundary.
+    pub(super) fn after_closed_source_order(event: &AgentChatEvent, order: &str) -> bool {
+        source_position(order)
+            .zip(
+                event.metadata["chat_source_start"]
+                    .as_u64()
+                    .zip(event.metadata["chat_source_end"].as_u64()),
+            )
+            .is_some_and(|(closed, observed)| observed > closed)
+    }
+
+    /// Reuse only a previous producer-certified owner from this same source
+    /// admission when a newly coalesced physical mirror has not been captured.
+    /// The caller's operation-local cache reuses hash-validated immutable seek
+    /// nodes across turn lookups while preserving the Store's hard read limits.
+    pub(super) fn preview_owners_reusing_nodes(
+        &self,
+        store: &mut Store,
+        scope: &Scope<'_>,
+        events: &[AgentChatEvent],
+        previous: Option<&PreviewOwners>,
+        cache: &mut SeekCache,
+    ) -> io::Result<Option<PreviewOwners>> {
+        if events.len() > CHAT_PRESENTATION_MAX_ITEMS || (self.version != 1 && !self.is_empty()) {
+            return Ok(None);
+        }
+        let owner = owner_identity(scope)?;
+        if self.scope.as_ref().is_some_and(|known| known != &owner) {
+            return Err(io::Error::other("foreign canonical turn index scope"));
+        }
+        let source = scope
+            .source_key
+            .zip(scope.source_epoch)
+            .map(|(key, epoch)| (key.to_owned(), epoch.to_owned()));
+        if previous.is_some_and(|previous| {
+            previous.scope.as_ref() != Some(&owner)
+                || previous.source != source
+                || previous.admission.is_none()
+                || previous.remembered.len() > CHAT_PRESENTATION_MAX_ITEMS
+                || previous.members.len() > 3 * CHAT_PRESENTATION_MAX_ITEMS
+                || previous.state_rows.len() > CHAT_PRESENTATION_MAX_ITEMS
+                || previous.turn_orders.len() > CHAT_PRESENTATION_MAX_ITEMS
+        }) {
+            return Ok(None);
+        }
+        let mut owners = PreviewOwners {
+            scope: Some(owner),
+            source,
+            admission: previous.and_then(|previous| previous.admission.clone()),
+            rows: BTreeMap::new(),
+            members: previous.map_or_else(BTreeMap::new, |previous| previous.members.clone()),
+            ..PreviewOwners::default()
+        };
+        let mut loaded = BTreeMap::new();
+        let mut root_turns = BTreeMap::<String, Option<Turn>>::new();
+        for event in events {
+            let Some(observation) = preview_observation(event)? else {
+                return Ok(None);
+            };
+            let Some(kind) = item_kind(event) else {
+                return Ok(None);
+            };
+            let root = string(event, "request_root_id").expect("qualified observation");
+            let Some(derived) = identity(scope, event, root, &kind, owners.scope.as_deref())?
+            else {
+                return Ok(None);
+            };
+            if !root_turns.contains_key(&derived.turn_key) {
+                let turn = lookup::<Turn>(store, &self.turns, &derived.turn_key, cache)?;
+                root_turns.insert(derived.turn_key.clone(), turn);
+            }
+            let turn = root_turns.get(&derived.turn_key).and_then(Option::as_ref);
+            if turn.is_some_and(|turn| {
+                turn.active && turn.supported && turn.adapter_proven && !turn.invalid_proof
+            }) {
+                owners.opening_roots.insert(root.into());
+            }
+            let certified_before = previous
+                .is_some_and(|previous| previous.turn_orders.contains_key(&derived.turn_key));
+            let stored_order = turn
+                .filter(|turn| turn.eligible() && !turn.invalid_proof)
+                .and_then(|turn| turn.order_key.as_ref())
+                .or_else(|| {
+                    previous.and_then(|previous| previous.turn_orders.get(&derived.turn_key))
+                });
+            if let Some(order) = stored_order {
+                owners
+                    .turn_orders
+                    .insert(derived.turn_key.clone(), order.clone());
+            }
+            let members = self.page_members(store, event, cache)?;
+            let mut source_order = members
+                .as_ref()
+                .and_then(|members| members.source_order.clone());
+            let (component, reused) = if let Some(PageMembers { members, .. }) = members {
+                let Some(component) = self.component(store, members, cache, &mut loaded)? else {
+                    return Ok(None);
+                };
+                (Some(component), false)
+            } else {
+                let component = if event.metadata.get("chat_display_member_ids").is_some() {
+                    None
+                } else {
+                    lookup::<Item>(store, &self.items, &derived.item_key, cache)?.map(|item| {
+                        Component {
+                            kind: item.kind.clone(),
+                            item,
+                            versions: BTreeSet::new(),
+                        }
+                    })
+                };
+                if component.is_some() {
+                    (component, false)
+                } else if let Some(previous) = previous {
+                    (
+                        self.remembered_component(
+                            store,
+                            scope,
+                            event,
+                            previous,
+                            cache,
+                            &mut loaded,
+                        )?,
+                        true,
+                    )
+                } else {
+                    (None, false)
+                }
+            };
+            let Some(component) = component else {
+                if event.metadata.get("chat_display_member_ids").is_some()
+                    || turn.is_some_and(|turn| !turn.supported || turn.invalid_proof)
+                {
+                    return Ok(None);
+                }
+                continue;
+            };
+            // A newly unsupported extension cannot retract exact old members,
+            // or use that exception to admit a new physical mirror/component.
+            let certified_member = previous.is_some_and(|previous| {
+                let item_key = &component.item.membership.item_key;
+                previous.members.get(derived.physical) == Some(item_key)
+                    && physical_members(event)
+                        .iter()
+                        .all(|physical| previous.members.get(physical) == Some(item_key))
+            });
+            let expected_source = ChatEvidenceIdentity::Source {
+                source_key: scope.source_key.unwrap_or(&derived.source).into(),
+                source_epoch: scope.source_epoch.unwrap_or(&derived.source).into(),
+                record_key: match &component.item.evidence {
+                    ChatEvidenceIdentity::Source { record_key, .. } => record_key.clone(),
+                    _ => return Ok(None),
+                },
+            };
+            if component.item.membership.turn_key != derived.turn_key
+                || component.item.evidence != expected_source
+                || component.item.legacy_only
+                || !compatible_component_kinds(&component.kind, &kind)
+                || (matches!(
+                    kind,
+                    ChatPresentedItemKind::Prompt | ChatPresentedItemKind::Step
+                ) && component.item.membership.item_key != derived.item_key)
+                || turn.is_some_and(|turn| {
+                    ((!turn.supported || turn.invalid_proof) && !certified_member)
+                        || (!turn.eligible() && !certified_before)
+                })
+                || (turn.is_none() && !reused)
+            {
+                return Ok(None);
+            }
+            // An authenticated singleton Row already loaded its owning Item.
+            // Reuse native order only when that persisted owner proves the same
+            // recipe; old orders, aliases and re-identifications still seek it.
+            if source_order.is_none()
+                && event.metadata["_wardian_canonical_row"] == true
+                && event.metadata.get("chat_display_member_ids").is_none()
+                && event.id == derived.physical
+                && scope.source_key.is_some()
+                && scope.source_epoch.is_some()
+                && string(event, "chat_source_epoch") == scope.source_epoch
+                && native_member_start(scope, derived.physical).is_some_and(|start| {
+                    event.metadata["chat_source_start"].as_u64() == Some(start)
+                })
+                && string(event, "chat_turn_key")
+                    == Some(component.item.membership.turn_key.as_str())
+                && string(event, "chat_turn_item_key")
+                    == Some(component.item.membership.item_key.as_str())
+                && matches!(&component.item.evidence,
+                    ChatEvidenceIdentity::Source { record_key, .. } if record_key == derived.physical)
+            {
+                source_order = super::chat_read::presentation_order(event).filter(|order| {
+                    component.item.order_key
+                        == format!("{order}:{}", component.item.membership.item_key)
+                });
+            }
+            if source_order.is_none() {
+                for id in [event.id.as_str(), derived.physical] {
+                    if let Some(known) =
+                        lookup::<Observation>(store, &self.events, &digest(id.as_bytes()), cache)?
+                    {
+                        if !known.source_order.is_empty() {
+                            source_order = Some(known.source_order);
+                            break;
+                        }
+                    }
+                }
+            }
+            let Some(source_order) =
+                source_order.or_else(|| super::chat_read::presentation_order(event))
+            else {
+                return Ok(None);
+            };
+            if owners
+                .rows
+                .insert(
+                    event.id.clone(),
+                    PreviewOwner {
+                        item: component.item,
+                        kind: component.kind,
+                        observation,
+                        source_order,
+                        physical_members: physical_members(event),
+                    },
+                )
+                .is_some()
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(owners))
     }
 
     /// Return stored opaque keys for the canonical Row owner after observation.
@@ -856,12 +1451,165 @@ impl Index {
         .then_some((item, turn)))
     }
 
+    fn remembered_component(
+        &self,
+        store: &mut Store,
+        scope: &Scope<'_>,
+        event: &AgentChatEvent,
+        previous: &PreviewOwners,
+        cache: &mut SeekCache,
+        loaded: &mut BTreeMap<String, (String, Item)>,
+    ) -> io::Result<Option<Component>> {
+        let members = physical_members(event);
+        let mut remembered: Option<&Item> = None;
+        let mut known = Vec::new();
+        for id in &members {
+            if let Some(key) = previous.members.get(id) {
+                if let Some(candidate) = previous.remembered.get(key) {
+                    if remembered.is_some_and(|prior| {
+                        prior.membership.turn_key != candidate.membership.turn_key
+                            || !compatible_component_kinds(&prior.kind, &candidate.kind)
+                    }) {
+                        return Ok(None);
+                    }
+                    if remembered.is_none_or(|prior| {
+                        (&candidate.order_key, &candidate.membership.item_key)
+                            < (&prior.order_key, &prior.membership.item_key)
+                    }) {
+                        remembered = Some(candidate);
+                    }
+                }
+            }
+            if let Some(member) =
+                lookup::<Membership>(store, &self.events, &digest(id.as_bytes()), cache)?
+            {
+                known.push(member);
+            }
+        }
+        let Some(owner) = remembered else {
+            return Ok(None);
+        };
+        let Some((owner_start, _)) = source_position(&owner.order_key) else {
+            return Ok(None);
+        };
+        for id in &members {
+            if previous.members.get(id) == Some(&owner.membership.item_key) {
+                continue;
+            }
+            // The new representative has exact coordinates from acquisition.
+            // Other unknown members require the native source-ref parser; text
+            // order and normalizer sequence never establish precedence.
+            let start = if let Some(known) = previous
+                .members
+                .get(id)
+                .and_then(|key| previous.remembered.get(key))
+            {
+                source_position(&known.order_key).map(|(start, _)| start)
+            } else if string(event, "chat_source_ref") == Some(id.as_str()) {
+                event.metadata["chat_source_start"].as_u64()
+            } else {
+                native_member_start(scope, id)
+            };
+            if start.is_none_or(|start| start <= owner_start) {
+                return Ok(None);
+            }
+        }
+        let canonical = if known.is_empty() {
+            None
+        } else {
+            let Some(component) = self.component(store, known, cache, loaded)? else {
+                return Ok(None);
+            };
+            if component.item.membership.turn_key != owner.membership.turn_key
+                || !compatible_component_kinds(&component.kind, &owner.kind)
+                || (component.item.membership.item_key != owner.membership.item_key
+                    && source_position(&component.item.order_key)
+                        .is_none_or(|(start, _)| start <= owner_start))
+            {
+                return Ok(None);
+            }
+            Some(component)
+        };
+        let current_kind = item_kind(event);
+        if current_kind
+            .as_ref()
+            .is_none_or(|kind| !compatible_component_kinds(kind, &owner.kind))
+        {
+            return Ok(None);
+        }
+        let kind = if current_kind == Some(ChatPresentedItemKind::Answer)
+            || canonical
+                .as_ref()
+                .is_some_and(|component| component.kind == ChatPresentedItemKind::Answer)
+        {
+            ChatPresentedItemKind::Answer
+        } else {
+            owner.kind.clone()
+        };
+        Ok(Some(Component {
+            item: owner.clone(),
+            kind,
+            versions: BTreeSet::new(),
+        }))
+    }
+
+    fn component(
+        &self,
+        store: &mut Store,
+        members: Vec<Membership>,
+        cache: &mut SeekCache,
+        loaded: &mut BTreeMap<String, (String, Item)>,
+    ) -> io::Result<Option<Component>> {
+        let mut selected: Option<Item> = None;
+        let mut kind = None;
+        let mut versions = BTreeSet::new();
+        for member in members {
+            if !loaded.contains_key(&member.item_key) {
+                let Some(reference) =
+                    store.get_reusing_nodes(&self.items, &member.item_key, cache)?
+                else {
+                    return Ok(None);
+                };
+                let item: Item = store.read_reusing_values(&reference, cache)?;
+                loaded.insert(member.item_key.clone(), (reference, item));
+            }
+            let Some((reference, item)) = loaded.get(&member.item_key) else {
+                return Ok(None);
+            };
+            versions.insert(reference.clone());
+            if item.membership != member
+                || selected.as_ref().is_some_and(|prior| {
+                    prior.membership.turn_key != member.turn_key
+                        || !compatible_component_kinds(&prior.kind, &item.kind)
+                })
+            {
+                return Ok(None);
+            }
+            // Canonical and provisional display rows choose the same earliest
+            // persisted owner while explicit final evidence enriches its kind.
+            if kind.is_none() || item.kind == ChatPresentedItemKind::Answer {
+                kind = Some(item.kind.clone());
+            }
+            if selected.as_ref().is_none_or(|prior| {
+                (&item.order_key, &item.membership.item_key)
+                    < (&prior.order_key, &prior.membership.item_key)
+            }) {
+                selected = Some(item.clone());
+            }
+        }
+        Ok(selected.zip(kind).map(|(item, kind)| Component {
+            item,
+            kind,
+            versions,
+        }))
+    }
+
     fn page_members(
         &self,
         store: &mut Store,
         event: &AgentChatEvent,
         cache: &mut SeekCache,
-    ) -> io::Result<Option<Vec<Membership>>> {
+    ) -> io::Result<Option<PageMembers>> {
         // This field is a producer certificate, not an arbitrary list of text
         // aliases. The caller supplies only admitted canonical display rows.
         let ids = if let Some(members) = event.metadata.get("chat_display_member_ids") {
@@ -891,17 +1639,26 @@ impl Index {
                 string(event, "chat_turn_key").filter(|key| valid_ref(key)),
                 string(event, "chat_turn_item_key").filter(|key| valid_ref(key)),
             ) {
-                return Ok(Some(vec![Membership {
-                    turn_key: turn_key.into(),
-                    item_key: item_key.into(),
-                }]));
+                return Ok(Some(PageMembers {
+                    members: vec![Membership {
+                        turn_key: turn_key.into(),
+                        item_key: item_key.into(),
+                    }],
+                    source_order: None,
+                }));
             }
             for id in [Some(event.id.as_str()), string(event, "chat_source_ref")]
                 .into_iter()
                 .flatten()
             {
-                if let Some(member) = lookup(store, &self.events, &digest(id.as_bytes()), cache)? {
-                    return Ok(Some(vec![member]));
+                if let Some(observation) =
+                    lookup::<Observation>(store, &self.events, &digest(id.as_bytes()), cache)?
+                {
+                    return Ok(Some(PageMembers {
+                        members: vec![observation.membership],
+                        source_order: (!observation.source_order.is_empty())
+                            .then_some(observation.source_order),
+                    }));
                 }
             }
             return Ok(None);
@@ -913,7 +1670,11 @@ impl Index {
             };
             members.push(member);
         }
-        Ok(Some(members))
+        // Logical aliases retain their existing display-row order lookup.
+        Ok(Some(PageMembers {
+            members,
+            source_order: None,
+        }))
     }
 }
 
@@ -925,7 +1686,7 @@ fn lookup<T: DeserializeOwned>(
 ) -> io::Result<Option<T>> {
     store
         .get_reusing_nodes(root, key, cache)?
-        .map(|reference| store.read(&reference))
+        .map(|reference| store.read_reusing_values(&reference, cache))
         .transpose()
 }
 
@@ -933,6 +1694,161 @@ fn key(value: &impl Serialize) -> io::Result<String> {
     Ok(digest(
         &serde_json::to_vec(value).map_err(io::Error::other)?,
     ))
+}
+
+struct Identity<'a> {
+    owner: String,
+    source: String,
+    turn_key: String,
+    item_key: String,
+    physical: &'a str,
+    call: Option<&'a str>,
+}
+
+/// Bind opaque ownership hints to the exact displayed physical/component row,
+/// excluding mutable normalization sequence and display text from identity.
+fn physical_members(event: &AgentChatEvent) -> Vec<String> {
+    event.metadata["chat_display_member_ids"]
+        .as_array()
+        .map(|members| {
+            members
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            string(event, "chat_source_ref")
+                .map(str::to_owned)
+                .into_iter()
+                .collect()
+        })
+}
+
+fn source_position(order: &str) -> Option<(u64, u64)> {
+    let mut fields = order.strip_prefix("source:")?.split(':');
+    let start = fields.next()?.parse().ok()?;
+    let end = fields.next()?.parse().ok()?;
+    (start < end).then_some((start, end))
+}
+
+fn source_order_after(observed: &str, closed: &str) -> bool {
+    source_position(observed)
+        .zip(source_position(closed))
+        .map_or_else(|| observed > closed, |(observed, closed)| observed > closed)
+}
+
+fn native_member_start(scope: &Scope<'_>, id: &str) -> Option<u64> {
+    if !super::chat_source_index::valid_source_id(scope.agent_id, id) {
+        return None;
+    }
+    let prefix = format!("source:{}:", scope.agent_id);
+    let mut fields = id.strip_prefix(&prefix)?.split(':');
+    if Some(fields.next()?) != scope.source_epoch {
+        return None;
+    }
+    fields.next()?.parse().ok()
+}
+
+fn preview_observation(event: &AgentChatEvent) -> io::Result<Option<String>> {
+    let Some(root) = string(event, "request_root_id").filter(|root| bounded_id(root)) else {
+        return Ok(None);
+    };
+    let Some(physical) = string(event, "chat_source_ref").filter(|id| bounded_id(id)) else {
+        return Ok(None);
+    };
+    if !bounded_id(&event.id) {
+        return Ok(None);
+    }
+    if event
+        .metadata
+        .get("chat_display_physical_id")
+        .is_some_and(|id| id.as_str() != Some(physical))
+    {
+        return Ok(None);
+    }
+    if let Some(members) = event.metadata.get("chat_display_member_ids") {
+        if !members.as_array().is_some_and(|members| {
+            !members.is_empty()
+                && members.len() <= 2
+                && members.iter().all(|id| id.as_str().is_some_and(bounded_id))
+                && members.iter().any(|id| id.as_str() == Some(physical))
+        }) {
+            return Ok(None);
+        }
+    } else if event.metadata.get("chat_display_physical_id").is_some() {
+        return Ok(None);
+    }
+    key(&(
+        "preview-owner-v1",
+        &event.id,
+        root,
+        physical,
+        &event.metadata["chat_display_member_ids"],
+        call_identity(event),
+    ))
+    .map(Some)
+}
+
+/// Keep physical and invocation identity identical across canonical observation
+/// and bounded previews. Qualification remains with each caller; this retains
+/// the canonical event-ID fallback and foreign-scope error ordering unchanged.
+fn identity<'a>(
+    scope: &Scope<'_>,
+    event: &'a AgentChatEvent,
+    root: &str,
+    kind: &ChatPresentedItemKind,
+    known_owner: Option<&str>,
+) -> io::Result<Option<Identity<'a>>> {
+    let owner = owner_identity(scope)?;
+    if known_owner.is_some_and(|known| known != owner) {
+        return Err(io::Error::other("foreign canonical turn index scope"));
+    }
+    let (source, turn_key) = turn_identity(&owner, scope.source_key, scope.source_epoch, root)?;
+    let call = (*kind == ChatPresentedItemKind::Step)
+        .then(|| call_identity(event))
+        .flatten();
+    let physical = string(event, "chat_source_ref").unwrap_or(&event.id);
+    if !bounded_id(physical) {
+        return Ok(None);
+    }
+    let item_key = if *kind == ChatPresentedItemKind::Prompt {
+        key(&("prompt-v1", &turn_key))?
+    } else if let Some(call) = call {
+        key(&("step-v1", &turn_key, call))?
+    } else {
+        key(&("item-v1", &turn_key, physical))?
+    };
+    Ok(Some(Identity {
+        owner,
+        source,
+        turn_key,
+        item_key,
+        physical,
+        call,
+    }))
+}
+
+fn owner_identity(scope: &Scope<'_>) -> io::Result<String> {
+    key(&("turn-owner-v1", scope.agent_id, scope.conversation_id))
+}
+
+fn turn_identity(
+    owner: &str,
+    source_key: Option<&str>,
+    source_epoch: Option<&str>,
+    root: &str,
+) -> io::Result<(String, String)> {
+    let source = source_identity(owner, source_key, source_epoch)?;
+    let turn_key = key(&("turn-v1", &source, root))?;
+    Ok((source, turn_key))
+}
+
+fn source_identity(
+    owner: &str,
+    source_key: Option<&str>,
+    source_epoch: Option<&str>,
+) -> io::Result<String> {
+    key(&("turn-source-v1", owner, source_key, source_epoch))
 }
 
 fn bounded_id(value: &str) -> bool {
@@ -1363,3 +2279,7 @@ fn label(event: &AgentChatEvent) -> (String, ChatToolCategory, String) {
 #[cfg(test)]
 #[path = "chat_turn_index_tests.rs"]
 mod tests;
+
+#[path = "chat_turn_preview.rs"]
+mod chat_turn_preview;
+pub(super) use chat_turn_preview::preview;

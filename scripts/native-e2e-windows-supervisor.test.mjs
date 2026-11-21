@@ -284,8 +284,16 @@ describe("Windows PowerShell 5.1 supervisor contract", { skip: process.platform 
   test("root zero with positive observed owned residue records kill-on-close and remains unqualified", () => {
     const childSource = `
       const { spawn } = require("node:child_process");
-      const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore", windowsHide: true });
-      child.once("spawn", () => child.unref());
+      // Survive the Node root's exit while remaining owned by the supervisor Job.
+      const child = spawn(process.execPath, ["-e", 'setTimeout(() => {}, 60000); process.send("ready");'], {
+        stdio: ["ignore", "ignore", "ignore", "ipc"], windowsHide: true, detached: true,
+      });
+      // A spawn event alone does not prove the descendant's timer is armed.
+      child.once("message", (message) => {
+        if (message !== "ready") throw new Error("Owned descendant readiness mismatch");
+        child.disconnect();
+        child.unref();
+      });
     `;
     const plan = { command: process.execPath, args: ["-e", childSource] };
     const fixture = receiptCase(plan);

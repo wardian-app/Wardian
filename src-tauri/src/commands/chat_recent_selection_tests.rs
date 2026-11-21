@@ -57,7 +57,7 @@ async fn read_recent(
     session: &str,
     revision: Option<String>,
 ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
-    load_agent_chat_page_with_recent_for_state(
+    load_agent_chat_page_with_preview_for_state(
         state,
         session.into(),
         None,

@@ -3,6 +3,192 @@ use crate::state::conversation_archive::{tests::isolated_home, ConversationArchi
 use wardian_core::conversations::AgentConversationLoggingSetting;
 use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
 
+/// Exercise the fixture owner normally in CI. An explicit owned-home request
+/// runs the same preparation in the separate native harness process.
+#[test]
+fn seed_native_preview_timing_fixture() {
+    if let Some(request) = std::env::var_os("WARDIAN_CHAT_PREVIEW_SEED_REQUEST") {
+        let _guard = crate::utils::wardian_test_env_lock();
+        seed_native_preview_timing_fixture_from_request(Path::new(&request));
+        return;
+    }
+    let (_guard, temp) = isolated_home();
+    let agent = uuid::Uuid::new_v4().to_string();
+    let native = uuid::Uuid::new_v4().to_string();
+    let directory = temp.path().join("agents").join(&agent);
+    fs::create_dir_all(&directory).unwrap();
+    fs::create_dir_all(temp.path().join(".native-e2e-lock")).unwrap();
+    fs::write(
+        temp.path().join(".native-e2e-lock/owner.json"),
+        serde_json::to_vec(&json!({"runId":"fixture-owner-smoke","pid":std::process::id()}))
+            .unwrap(),
+    )
+    .unwrap();
+    let source = directory.join("synthetic-preview.jsonl");
+    let rows = [
+        json!({"type":"session_meta","payload":{"id":native}}),
+        json!({"type":"turn_context","payload":{"turn_id":"smoke-turn"}}),
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"smoke-turn"}}),
+        json!({"type":"response_item","payload":{"type":"message","id":"smoke-prompt","role":"user","content":[{"type":"input_text","text":"Run the synthetic fixture."}],"internal_chat_message_metadata_passthrough":{"turn_id":"smoke-turn","content_item_kinds":["user.text"]}}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"The fixture completed."}],"internal_chat_message_metadata_passthrough":{"turn_id":"smoke-turn"}}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"smoke-turn"}}),
+    ];
+    fs::write(
+        &source,
+        rows.iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let request = temp.path().join("preview-seed-request.json");
+    fs::write(
+        &request,
+        serde_json::to_vec(
+            &json!({"home":temp.path(),"run_id":"fixture-owner-smoke", "session_id":agent,
+        "native_session_id":native,"source_path":source,"mode":"qualified"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    seed_native_preview_timing_fixture_from_request(&request);
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(format!("{}.result.json", request.display())).unwrap())
+            .unwrap();
+    assert_eq!(receipt["fixture_version"], 2);
+    assert_eq!(receipt["capture"]["status"], "complete");
+    assert!(receipt["completed_turns"].as_u64().unwrap() > 0);
+}
+
+fn seed_native_preview_timing_fixture_from_request(request_path: &Path) {
+    let request_path = request_path.to_path_buf();
+    let request: serde_json::Value =
+        serde_json::from_slice(&fs::read(&request_path).unwrap()).unwrap();
+    let complete = match request["mode"].as_str().unwrap_or("pending") {
+        "pending" => false,
+        "qualified" => true,
+        _ => panic!("unknown fixture mode"),
+    };
+    let fixture_home = PathBuf::from(request["home"].as_str().unwrap())
+        .canonicalize()
+        .unwrap();
+    assert_eq!(
+        PathBuf::from(std::env::var_os("WARDIAN_HOME").unwrap())
+            .canonicalize()
+            .unwrap(),
+        fixture_home
+    );
+    let lock: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture_home.join(".native-e2e-lock/owner.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lock["runId"], request["run_id"]);
+    assert!(lock["pid"].as_u64().is_some_and(|pid| pid > 0));
+    let agent_id = request["session_id"].as_str().unwrap();
+    let native_id = request["native_session_id"].as_str().unwrap();
+    uuid::Uuid::parse_str(agent_id).unwrap();
+    uuid::Uuid::parse_str(native_id).unwrap();
+    let source_path = PathBuf::from(request["source_path"].as_str().unwrap())
+        .canonicalize()
+        .unwrap();
+    assert!(source_path.starts_with(fixture_home.join("agents").join(agent_id)));
+    let source_bytes = source_path.metadata().unwrap().len();
+    assert!(complete || source_bytes > 4 * 1024 * 1024);
+    let mut source = snapshot(&ConversationArchiveContext::for_agent_id(agent_id, "codex"));
+    source.resume_session = Some(native_id.to_owned());
+    source.log_path = Some(source_path.clone());
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    let archive = ConversationArchiveState::default();
+    let admission =
+        crate::commands::provider_log_acquisition::observe_provider_log_policy_with_identity(
+            &source_path,
+            context.provider_source_key.as_deref().unwrap(),
+            None,
+            true,
+            true,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    archive
+        .append_provider_log_batch_with_context(context.clone(), &[], None, &admission.next)
+        .unwrap();
+    let mut previous = Some(admission.next);
+    for _ in 0..4096 {
+        let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            agent_id,
+            "codex",
+            &source_path,
+            context.provider_source_key.as_deref().unwrap(),
+            previous.clone(),
+            true,
+        )
+        .unwrap();
+        assert!(batch.next.committed_offset > 0);
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut batch.events,
+            "codex",
+            &source_path,
+        );
+        archive
+            .append_verified_provider_log_batch_with_context(
+                context.clone(),
+                &batch.events,
+                previous.as_ref(),
+                &batch.next,
+                batch.source_proof(),
+            )
+            .unwrap();
+        let finished = batch.next.status == "complete";
+        previous = Some(batch.next);
+        if !complete || finished {
+            break;
+        }
+    }
+    let capture = previous.unwrap();
+    assert_eq!(
+        capture.status,
+        if complete { "complete" } else { "pending" }
+    );
+    assert!(complete || capture.committed_offset < source_bytes);
+    for _ in 0..4096 {
+        if !archive.chat_projection.advance(agent_id).unwrap() {
+            let reference = head(agent_id).unwrap().expect("published fixture head");
+            let published: Head = store(agent_id).unwrap().read(&reference).unwrap();
+            let mut reader = store(agent_id).unwrap();
+            let (headers, _) = page(&mut reader, &reference, &published, None).unwrap();
+            let completed_turns = published
+                .turns
+                .page(&mut reader, &headers, false)
+                .unwrap()
+                .map_or(0, |value| {
+                    value
+                        .turns
+                        .iter()
+                        .filter(|turn| turn.membership_complete)
+                        .count()
+                });
+            assert!(
+                !complete || completed_turns > 0,
+                "qualified timing fixture must carry canonical terminal proof"
+            );
+            let receipt = json!({ "fixture_version": 2, "completed_turns": completed_turns,
+                "session_id": agent_id, "native_session_id": native_id,
+                "source_bytes": source_bytes, "capture": { "status": capture.status, "committed_offset": capture.committed_offset },
+                "head": { "sha256": reference, "conversation_id": published.conversation_id, "generation": published.generation }});
+            fs::write(
+                format!("{}.result.json", PathBuf::from(&request_path).display()),
+                serde_json::to_vec(&receipt).unwrap(),
+            )
+            .unwrap();
+            println!("seeded native preview fixture: {reference}");
+            return;
+        }
+    }
+    panic!("fixture projection did not settle");
+}
+
 fn presentation_contract_page() -> AgentChatPage {
     serde_json::from_value(json!({
         "session_id": "fixture-agent", "conversation_id": "fixture-conversation",
@@ -81,6 +267,22 @@ fn narrative_header_preview_ends_at_a_complete_word() {
     assert_eq!(narrative_preview("one\n\ntwoword", 8), "one");
     assert_eq!(narrative_preview("éé word", 4), "éé");
     assert_eq!(narrative_preview("unbroken", 4), "");
+}
+
+#[test]
+fn source_headers_preserve_final_key_identities_or_mark_the_whole_prefix_partial() {
+    let mut source = event("synthetic-call", "Synthetic output");
+    source.metadata = json!({"call_id":"c".repeat(400), "request_root_id":"r".repeat(500),
+        "provider_turn_id":"t".repeat(300), "chat_turn_membership_partial":false});
+    let admitted = header(&source);
+    for key in ["call_id", "request_root_id", "provider_turn_id"] {
+        assert_eq!(admitted.metadata[key], source.metadata[key]);
+    }
+    assert_eq!(admitted.metadata["chat_turn_membership_partial"], false);
+    source.metadata["call_id"] = json!("c".repeat(513));
+    let rejected = header(&source);
+    assert_eq!(rejected.metadata["chat_turn_membership_partial"], true);
+    assert!(rejected.metadata["call_id"].as_str().unwrap().len() <= 512);
 }
 
 #[test]
@@ -197,7 +399,7 @@ fn recent_owner_native_database_replacement_or_truncation_resets_without_old_dat
             vec![native_header(&receipt, "native-row", "current")],
         )
         .unwrap();
-    let page = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+    let page = owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, None)()
         .unwrap()
         .unwrap();
     fs::rename(&path, temp.path().join("old.db")).unwrap();
@@ -210,9 +412,15 @@ fn recent_owner_native_database_replacement_or_truncation_resets_without_old_dat
             vec![event("late", "old native source")]
         )
         .unwrap());
-    let retired = owner.recent_reader(source.clone(), runtime.clone(), Some(page.revision), 8)()
-        .unwrap()
-        .unwrap();
+    let retired = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(page.revision),
+        8,
+        None,
+    )()
+    .unwrap()
+    .unwrap();
     assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
     let next_anchor = crate::commands::chat_recent_database::Source::open(&path).unwrap();
     let next = owner
@@ -233,7 +441,7 @@ fn recent_owner_native_database_replacement_or_truncation_resets_without_old_dat
         .unwrap()
         .set_len(0)
         .unwrap();
-    let retired = owner.recent_reader(source, runtime, None, 8)()
+    let retired = owner.recent_reader_with_hints(source, runtime, None, 8, None)()
         .unwrap()
         .unwrap();
     assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
@@ -249,12 +457,12 @@ fn recent_owner_unpublished_admission_does_not_reappear_after_retirement() {
     owner
         .publish_recent(&source, &runtime, &first, vec![event("current", "current")])
         .unwrap();
-    let old = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+    let old = owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, None)()
         .unwrap()
         .unwrap();
     owner.retire_recent(&source.session_id).unwrap();
     let _failed_publication = owner.begin_recent(&source, &runtime).unwrap();
-    let retired = owner.recent_reader(source, runtime, Some(old.revision), 8)()
+    let retired = owner.recent_reader_with_hints(source, runtime, Some(old.revision), 8, None)()
         .unwrap()
         .unwrap();
     assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
@@ -290,7 +498,7 @@ fn recent_owner_handoff_requires_published_coverage_of_every_current_version() {
         .publish_recent(&source, &runtime, &receipt, previews)
         .unwrap();
     owner.note_recent_coverage(&receipt, &tags).unwrap();
-    let first = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+    let first = owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, None)()
         .unwrap()
         .unwrap();
     assert!(owner.owns_recent_revision(Some(&first.revision)));
@@ -298,11 +506,12 @@ fn recent_owner_handoff_requires_published_coverage_of_every_current_version() {
     pending.context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
     owner.committed(pending, "current-capture".into()).unwrap();
     assert!(
-        owner.recent_reader(
+        owner.recent_reader_with_hints(
             source.clone(),
             runtime.clone(),
             Some(first.revision.clone()),
-            8
+            8,
+            None
         )()
         .unwrap()
         .is_some(),
@@ -320,9 +529,15 @@ fn recent_owner_handoff_requires_published_coverage_of_every_current_version() {
         "controlled 81-row projection must finish within its existing test budget"
     );
     assert!(
-        owner.recent_reader(source.clone(), runtime.clone(), Some(first.revision), 8)()
-            .unwrap()
-            .is_none(),
+        owner.recent_reader_with_hints(
+            source.clone(),
+            runtime.clone(),
+            Some(first.revision),
+            8,
+            None
+        )()
+        .unwrap()
+        .is_none(),
         "only actual published original IDs, keys and versions release the canonical read"
     );
     let next = owner.begin_recent(&source, &runtime).unwrap();
@@ -338,7 +553,7 @@ fn recent_owner_handoff_requires_published_coverage_of_every_current_version() {
         .unwrap();
     owner.note_recent_coverage(&next, &next_tags).unwrap();
     assert!(
-        owner.recent_reader(source, runtime, None, 8)()
+        owner.recent_reader_with_hints(source, runtime, None, 8, None)()
             .unwrap()
             .is_some(),
         "old canonical version cannot cover a newer part edit"
@@ -432,7 +647,7 @@ fn recent_owner_older_same_scope_work_cannot_overwrite_newer_publication() {
     assert!(!owner
         .publish_recent(&source, &runtime, &old, vec![event("old", "older")])
         .unwrap());
-    let page = owner.recent_reader(source, runtime, None, 8)()
+    let page = owner.recent_reader_with_hints(source, runtime, None, 8, None)()
         .unwrap()
         .unwrap();
     assert_eq!(page.events[0].id, "new");
@@ -448,7 +663,7 @@ fn recent_owner_privacy_guard_blocks_read_and_readmission_until_actual_end() {
     owner
         .publish_recent(&source, &runtime, &old, vec![event("old", "old")])
         .unwrap();
-    let first = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+    let first = owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, None)()
         .unwrap()
         .unwrap();
     let boundary = owner.recent_boundary(Some("agent-1")).unwrap();
@@ -456,9 +671,15 @@ fn recent_owner_privacy_guard_blocks_read_and_readmission_until_actual_end() {
     assert!(!owner
         .publish_recent(&source, &runtime, &old, vec![event("late", "late")])
         .unwrap());
-    let retired = owner.recent_reader(source.clone(), runtime.clone(), Some(first.revision), 8)()
-        .unwrap()
-        .unwrap();
+    let retired = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(first.revision),
+        8,
+        None,
+    )()
+    .unwrap()
+    .unwrap();
     assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
     drop(boundary);
     let new = owner.begin_recent(&source, &runtime).unwrap();
@@ -467,7 +688,7 @@ fn recent_owner_privacy_guard_blocks_read_and_readmission_until_actual_end() {
         .publish_recent(&source, &runtime, &new, vec![event("new", "new")])
         .unwrap());
     assert_eq!(
-        owner.recent_reader(source, runtime, None, 8)()
+        owner.recent_reader_with_hints(source, runtime, None, 8, None)()
             .unwrap()
             .unwrap()
             .events[0]
@@ -486,7 +707,7 @@ fn recent_owner_keeps_same_content_stable_and_retires_empty_without_ack() {
     assert!(owner
         .publish_recent(&source, &runtime, &admission, vec![event("actual", "one")])
         .unwrap());
-    let first = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+    let first = owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, None)()
         .unwrap()
         .unwrap();
     assert_eq!(first.events.len(), 1);
@@ -502,11 +723,12 @@ fn recent_owner_keeps_same_content_stable_and_retires_empty_without_ack() {
     assert!(owner
         .publish_recent(&source, &runtime, &admission, vec![event("actual", "one")])
         .unwrap());
-    let unchanged = owner.recent_reader(
+    let unchanged = owner.recent_reader_with_hints(
         source.clone(),
         runtime.clone(),
         Some(first.revision.clone()),
         8,
+        None,
     )()
     .unwrap()
     .unwrap();
@@ -520,25 +742,34 @@ fn recent_owner_keeps_same_content_stable_and_retires_empty_without_ack() {
             vec![event("actual", "edited")]
         )
         .unwrap());
-    let edited = owner.recent_reader(
+    let edited = owner.recent_reader_with_hints(
         source.clone(),
         runtime.clone(),
         Some(first.revision.clone()),
         8,
+        None,
     )()
     .unwrap()
     .unwrap();
     assert_ne!(edited.revision, first.revision);
     assert_eq!(edited.events[0].text.as_deref(), Some("edited"));
     owner.retire_recent(&source.session_id).unwrap();
-    let retired = owner.recent_reader(source.clone(), runtime.clone(), Some(edited.revision), 8)()
-        .unwrap()
-        .unwrap();
+    let retired = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(edited.revision),
+        8,
+        None,
+    )()
+    .unwrap()
+    .unwrap();
     assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
     assert!(!retired.unchanged && retired.revalidated_ids.is_none());
-    assert!(owner.recent_reader(source, runtime, None, 8)()
-        .unwrap()
-        .is_none());
+    assert!(
+        owner.recent_reader_with_hints(source, runtime, None, 8, None)()
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -569,11 +800,13 @@ fn recent_owner_fences_same_source_different_runtime_watch_and_aba() {
     assert!(owner
         .publish_recent(&a, &runtime_a, &back, vec![event("current", "new")])
         .unwrap());
-    assert!(owner.recent_reader(a.clone(), runtime_b, None, 8)()
-        .unwrap()
-        .is_none());
+    assert!(
+        owner.recent_reader_with_hints(a.clone(), runtime_b, None, 8, None)()
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
-        owner.recent_reader(a.clone(), runtime_a.clone(), None, 8)()
+        owner.recent_reader_with_hints(a.clone(), runtime_a.clone(), None, 8, None)()
             .unwrap()
             .unwrap()
             .events[0]
@@ -582,9 +815,11 @@ fn recent_owner_fences_same_source_different_runtime_watch_and_aba() {
         "a delayed foreign read cannot retire the new owner"
     );
     let watch_replacement = snapshot(&context());
-    assert!(owner.recent_reader(watch_replacement, runtime_a, None, 8)()
-        .unwrap()
-        .is_none());
+    assert!(
+        owner.recent_reader_with_hints(watch_replacement, runtime_a, None, 8, None)()
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -602,7 +837,7 @@ fn recent_owner_policy_change_rejects_inflight_publication() {
             vec![event("original-id", "current")],
         )
         .unwrap();
-    let first = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+    let first = owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, None)()
         .unwrap()
         .unwrap();
     let mut policy = super::super::ConversationCaptureState::default();
@@ -611,7 +846,7 @@ fn recent_owner_policy_change_rejects_inflight_publication() {
     assert!(!owner
         .publish_recent(&source, &runtime, &admission, vec![event("late", "old")])
         .unwrap());
-    let retired = owner.recent_reader(source, runtime, Some(first.revision), 8)()
+    let retired = owner.recent_reader_with_hints(source, runtime, Some(first.revision), 8, None)()
         .unwrap()
         .unwrap();
     assert!(retired.events.is_empty() && retired.reset && retired.recent_admission.is_none());
@@ -637,7 +872,7 @@ fn recent_owner_initial_unrestricted_source_preserves_watch_admission() {
             vec![event("observed", "current")],
         )
         .unwrap();
-    let first = owner.recent_reader(source.clone(), runtime.clone(), None, 80)()
+    let first = owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 80, None)()
         .unwrap()
         .unwrap();
     let observed = crate::commands::provider_log_acquisition::observe_provider_log_policy_with_initial_absence(
@@ -659,10 +894,15 @@ fn recent_owner_initial_unrestricted_source_preserves_watch_admission() {
             &policy.provider_log_sources[0],
         )
         .unwrap();
-    let unchanged =
-        owner.recent_reader(source.clone(), runtime.clone(), Some(first.revision), 80)()
-            .unwrap()
-            .unwrap();
+    let unchanged = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(first.revision),
+        80,
+        None,
+    )()
+    .unwrap()
+    .unwrap();
     assert_eq!(
         unchanged.recent_admission, first.recent_admission,
         "initial unrestricted acquisition must not blank a validated Watch preview"
@@ -684,11 +924,12 @@ fn recent_owner_initial_unrestricted_source_preserves_watch_admission() {
             _ => policy.provider_log_sources[0].policy_generation = 1,
         }
         super::super::storage::write_capture_state(&source.session_id, &policy).unwrap();
-        let retired = owner.recent_reader(
+        let retired = owner.recent_reader_with_hints(
             source.clone(),
             runtime.clone(),
             Some(unchanged.revision.clone()),
             80,
+            None,
         )()
         .unwrap()
         .unwrap();
@@ -709,7 +950,7 @@ fn recent_owner_reads_and_retires_before_busy_legacy_work() {
     owner
         .publish_recent(&source, &runtime, &admission, vec![event("current", "new")])
         .unwrap();
-    let read = owner.recent_reader(source, runtime, None, 8);
+    let read = owner.recent_reader_with_hints(source, runtime, None, 8, None);
     let work = owner.work.lock().unwrap();
     let (send, recv) = std::sync::mpsc::sync_channel(1);
     let reader = std::thread::spawn(move || send.send(read()).unwrap());
@@ -779,9 +1020,11 @@ fn recent_owner_resident_budget_evicts_to_safe_miss() {
         assert!(recent.slots.iter().map(|slot| slot.charge).sum::<usize>() <= 1024 * 1024);
     }
     let (source, runtime) = first.unwrap();
-    assert!(owner.recent_reader(source, runtime, None, 8)()
-        .unwrap()
-        .is_none());
+    assert!(
+        owner.recent_reader_with_hints(source, runtime, None, 8, None)()
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(alive.len(), 32);
 }
 
@@ -1681,6 +1924,235 @@ fn referenced_packed_page_corruption_does_not_fall_back_to_valid_rows() {
     );
     fs::remove_file(&path).unwrap();
     assert!(read(&context(), &snapshot(&context()), None, None, None).is_err());
+}
+
+#[test]
+fn recent_alias_source_window_reuses_identity_nodes_within_one_read() {
+    use std::io::Write;
+
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("recent-alias-window.jsonl");
+    let (snapshot, _) = owned_native_source(
+        &path,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"one\"}}\n",
+    );
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let archive = ConversationArchiveState::default();
+    let capture = |previous| {
+        let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            previous,
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut batch.events,
+            "codex",
+            &path,
+        );
+        batch
+    };
+    let prime = capture(None);
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &prime.events,
+            None,
+            &prime.next,
+            prime.source_proof(),
+        )
+        .unwrap();
+    let append = |frames: Vec<serde_json::Value>| {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for frame in frames {
+            writeln!(file, "{frame}").unwrap();
+        }
+        file.flush().unwrap();
+    };
+    let frames = |turn: &str| {
+        vec![
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}),
+            json!({"type":"response_item","payload":{"type":"message","id":format!("request-{turn}"),"role":"user","content":[{"type":"input_text","text":format!("Synthetic request {turn}")}],"internal_chat_message_metadata_passthrough":{"turn_id":turn,"content_item_kinds":["user.text"]}}}),
+            json!({"type":"response_item","payload":{"type":"message","id":format!("answer-{turn}"),"role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":format!("Synthetic answer {turn}")}],"internal_chat_message_metadata_passthrough":{"turn_id":turn}}}),
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn}}),
+        ]
+    };
+    append(frames("captured"));
+    let captured = capture(Some(prime.next.clone()));
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &captured.events,
+            Some(&prime.next),
+            &captured.next,
+            captured.source_proof(),
+        )
+        .unwrap();
+    finish_projection(&archive);
+    assert!(super::super::chat_source_index::pointer("agent-1")
+        .unwrap()
+        .is_none());
+    let reference = head("agent-1").unwrap().unwrap();
+    let mut canonical_reader = store("agent-1").unwrap();
+    let published: Head = canonical_reader.read(&reference).unwrap();
+    assert_eq!(published.progress, "ready");
+    let (canonical, _) = page(&mut canonical_reader, &reference, &published, None).unwrap();
+    assert!(!canonical.is_empty());
+    let mut identity_reader = store("agent-1").unwrap();
+    let identity_nodes = identity_reader
+        .page(&published.identities, None, PAGE_ROWS)
+        .unwrap()
+        .len();
+    assert!(identity_nodes > 0 && identity_nodes < PAGE_ROWS);
+
+    // The suffix is normally acquired by the recent reader, not appended to
+    // the archive. Its eighty physical IDs must remain visible when unowned.
+    for turn in 0..20 {
+        append(frames(&format!("pending-{turn}")));
+    }
+    let seed = crate::commands::chat_recent_seed::read_limited(&snapshot, None, PAGE_ROWS).unwrap();
+    assert_eq!(seed.events.len(), PAGE_ROWS);
+    let ids: Vec<_> = seed.events.iter().map(|event| event.id.clone()).collect();
+    assert!(seed.events.iter().all(|event| {
+        event.metadata["chat_source_ref"].as_str() == Some(event.id.as_str())
+            && event.metadata["chat_source_start"].as_u64().unwrap()
+                < event.metadata["chat_source_end"].as_u64().unwrap()
+            && event.metadata["chat_source_epoch"].as_str() == published.source_epoch.as_deref()
+            && !canonical
+                .iter()
+                .any(|row| row.metadata["chat_source_ref"] == event.metadata["chat_source_ref"])
+    }));
+    let source = read_preview_source(&context, &snapshot, PAGE_ROWS).unwrap();
+    assert_eq!(source.events.len(), PAGE_ROWS);
+    assert_eq!(
+        source
+            .events
+            .iter()
+            .map(|event| &event.id)
+            .collect::<Vec<_>>(),
+        ids.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        source.conversation_id,
+        Some(published.conversation_id.clone())
+    );
+    assert_eq!(source.generation, Some(published.generation.clone()));
+    assert_eq!(source.source_epoch, published.source_epoch);
+    assert!(source
+        .aliases
+        .iter()
+        .all(|alias| ids.contains(&alias.canonical_id)));
+    assert!(source.events.windows(2).all(|rows| {
+        rows[0].metadata["chat_source_start"].as_u64()
+            <= rows[1].metadata["chat_source_start"].as_u64()
+    }));
+    let small = read_preview_source(&context, &snapshot, 8).unwrap();
+    assert_eq!(small.events.len(), 8);
+    assert_eq!(
+        small
+            .events
+            .iter()
+            .map(|event| &event.id)
+            .collect::<Vec<_>>(),
+        ids[PAGE_ROWS - 8..].iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        head("agent-1").unwrap().as_deref(),
+        Some(reference.as_str())
+    );
+
+    let known: Vec<_> = canonical
+        .iter()
+        .map(|event| {
+            event.metadata["chat_source_ref"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let mut plain_reader = store("agent-1").unwrap();
+    let mut cached_reader = store("agent-1").unwrap();
+    let mut cache = SeekCache::default();
+    for source_ref in known.iter().chain(ids[..8].iter()) {
+        let plain = alias(&mut plain_reader, &published, source_ref).unwrap();
+        let cached =
+            alias_with_cache(&mut cached_reader, &published, source_ref, &mut cache).unwrap();
+        assert_eq!(
+            serde_json::to_value(&cached).unwrap(),
+            serde_json::to_value(&plain).unwrap()
+        );
+    }
+    let alias_reads = (plain_reader.objects, cached_reader.objects);
+    assert!(alias_reads.1 < alias_reads.0);
+    assert!(
+        alias_with_cache(&mut cached_reader, &published, &ids[0], &mut cache)
+            .unwrap()
+            .is_none()
+    );
+    let before_row = cached_reader.objects;
+    assert!(
+        alias_with_cache(&mut cached_reader, &published, &known[0], &mut cache)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        cached_reader.objects,
+        before_row + 1,
+        "a cached identity path must still read and validate its physical Row"
+    );
+    for agent_changed in [true, false] {
+        let mut foreign = published.clone();
+        if agent_changed {
+            foreign.agent_id = "foreign-agent".into();
+        } else {
+            foreign.conversation_id = "foreign-conversation".into();
+        }
+        let plain = alias(&mut store("agent-1").unwrap(), &foreign, &known[0]).unwrap_err();
+        let cached = alias_with_cache(
+            &mut store("agent-1").unwrap(),
+            &foreign,
+            &known[0],
+            &mut SeekCache::default(),
+        )
+        .unwrap_err();
+        assert_eq!(cached.kind(), plain.kind());
+        assert_eq!(cached.to_string(), plain.to_string());
+        assert_eq!(cached.to_string(), "foreign chat alias");
+    }
+    cached_reader.objects = super::super::chat_read_store::READ_OBJECTS;
+    assert!(alias_with_cache(&mut cached_reader, &published, &known[0], &mut cache).is_err());
+    assert_eq!(
+        cached_reader.objects,
+        super::super::chat_read_store::READ_OBJECTS
+    );
+    cached_reader.objects = 0;
+    cached_reader.bytes = super::super::chat_read_store::READ_BYTES;
+    assert!(alias_with_cache(&mut cached_reader, &published, &known[0], &mut cache).is_err());
+    assert_eq!(cached_reader.objects, 1);
+    assert_eq!(
+        cached_reader.bytes,
+        super::super::chat_read_store::READ_BYTES
+    );
+
+    // One identity-tree visit suffices for the whole alias loop. A separate
+    // frontier seek may revisit that tree; scope accounting is bounded too.
+    let record_bound = seed.records_decoded + canonical_reader.objects + 2 * identity_nodes + 8;
+    eprintln!(
+        "recent alias read counts: source_records={} bound={} uncached_alias_objects={} cached_alias_objects={}",
+        source.records_decoded, record_bound, alias_reads.0, alias_reads.1
+    );
+    assert!(
+        source.records_decoded <= record_bound,
+        "source aliases reread immutable seek nodes: records={} bound={} seed={} canonical={} identity_nodes={}",
+        source.records_decoded,
+        record_bound,
+        seed.records_decoded,
+        canonical_reader.objects,
+        identity_nodes
+    );
 }
 
 #[test]
@@ -11833,7 +12305,18 @@ pub(crate) fn read(
     revision: Option<&str>,
     detail_ref: Option<&str>,
 ) -> io::Result<AgentChatPage> {
-    read_with_recent_limit(context, snapshot, cursor, revision, detail_ref, PAGE_ROWS)
+    read_with_recent_limit(
+        context,
+        snapshot,
+        cursor,
+        revision,
+        detail_ref,
+        ReadOptions {
+            limit: PAGE_ROWS,
+            staging: false,
+            qualify_turns: true,
+        },
+    )
 }
 
 #[test]

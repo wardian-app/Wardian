@@ -1440,7 +1440,7 @@ async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
         .recv_timeout(std::time::Duration::from_secs(2))
         .unwrap();
     crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
-    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -1473,7 +1473,7 @@ async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
         .is_empty());
     // Same-inode truncate/regrow cannot keep the old admitted Watch body.
     std::fs::write(&path, content.replace("current", "changed")).unwrap();
-    let retired = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let retired = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -1492,7 +1492,7 @@ async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
     let (parsed, source) = super::read_log_with_watch_source(&path, "gemini").unwrap();
     super::record_latest_gemini_with_source(&snap, &parsed, source);
     crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
-    let rebound = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let rebound = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -1512,7 +1512,7 @@ async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
     );
     std::fs::rename(&path, path.with_extension("retained")).unwrap();
     std::fs::write(&path, content).unwrap();
-    let replaced = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let replaced = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
@@ -1576,7 +1576,7 @@ async fn recent_file_watch_cannot_borrow_live_ownership_or_a_foreign_stale_recei
         .await
         .unwrap();
         crate::commands::chat::publish_recent_for_state(&state, &session, None).unwrap();
-        let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
             &state,
             session,
             None,

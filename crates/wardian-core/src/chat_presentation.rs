@@ -29,6 +29,17 @@ impl ChatPresentationV1 {
     /// Check the bounded structural contract before atomic page publication.
     /// Source authority and scope/revision validation remain with the owner.
     pub fn validate(&self) -> Result<(), String> {
+        if self.preview_bridge.as_ref().is_some_and(|bridge| {
+            bridge.admission_id.is_empty()
+                || bridge.admission_id.len() > 256
+                || bridge.canonical_head.len() != 64
+                || !bridge
+                    .canonical_head
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            return Err("invalid preview continuity proof".into());
+        }
         if self.items.len() > CHAT_PRESENTATION_MAX_ITEMS
             || self.turns.len() + self.legacy_turns.len() > CHAT_PRESENTATION_MAX_ITEMS
         {
@@ -136,6 +147,20 @@ impl ChatPresentationV1 {
             return Err("turn presentation header budget exceeded".into());
         }
         for turn in &self.turns {
+            if turn.prefix_attributed
+                && (!turn.membership_complete
+                    && (!matches!(
+                        turn.status,
+                        ChatTurnStatus::Running
+                            | ChatTurnStatus::ActionRequired
+                            | ChatTurnStatus::Incomplete
+                    ) || turn.counts_complete
+                        || turn.references_complete
+                        || turn.answer_recorded
+                        || !turn.answer_item_keys.is_empty()))
+            {
+                return Err("live prefix grants final turn authority".into());
+            }
             let loaded_steps = self
                 .items
                 .iter()

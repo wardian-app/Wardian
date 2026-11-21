@@ -73,6 +73,12 @@ array contains one to eight backend-issued source observation IDs, each no
 longer than 512 UTF-8 bytes. The backend validates the raw list before
 deduplication and source I/O.
 
+Aware recent reads may also send optional `previewBackingIds`: zero to eight
+literal displayed IDs, each at most 512 UTF-8 bytes. These scoped hints let the
+producer issue exact preview aliases and grant no renewal, Older or detail
+authority. Omitted hints preserve existing client behavior. Do not send them
+on cursor, detail or renewal reads.
+
 Renewal returns the existing `AgentChatPage` metadata envelope. A successful
 response includes `revalidated_ids` for the complete requested set. Missing or
 partial acknowledgement, an incomplete source index, or a changed head does
@@ -84,6 +90,20 @@ present. An incomplete first-page projection can admit its first complete page
 only before committed rows or an older frontier exist. See [IPC event and DTO
 contracts](./ipc-events.md#ordinary-canonical-reads-and-first-page-bootstrap)
 and the [internal revalidation contract](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-26-chat-row-revalidation.md).
+
+Recent pages may include `presentation.payload.preview_bridge` with the exact
+recent admission and published canonical Head. Only the producer can issue this
+continuity proof. Its aliases replace preview backing atomically without a
+client scope reset. A bridge with `recent_admission` still present grants no
+Older cursor, detail read or revalidation ACK. A running turn's separate
+`prefix_attributed` certificate does not imply `membership_complete`; counts
+and references remain incomplete until their respective canonical evidence.
+Missing heads, unsupported providers and unproven membership keep the legacy
+path. Retiring the recent admission also retires its identity binding.
+Within a bound source view, unqualified turns remain producer-owned legacy
+groups; their later qualification preserves source order. A forced retraction
+keeps that open view on the legacy path until it is reopened. Revisions remain
+opaque and must be forwarded unchanged, including on Older and detail reads.
 
 ## Classes (`commands/class.rs`)
 

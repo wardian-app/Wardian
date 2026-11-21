@@ -219,13 +219,57 @@ requests retain their existing budgets.
 Normal initial/latest desktop and PWA reads opt into `recent_preview=true`.
 The default is false, and Older, detail and revalidation requests cannot opt
 in. A non-null opaque `recent_admission` marks bounded, non-authoritative
-headers from the current producer incarnation. These pages issue no Older
-cursor, detail capability, aliases or row-revalidation ACK. Consumers retain
+headers from the current producer incarnation. These provisional pages issue no
+Older cursor, detail capability or row-revalidation ACK. Consumers retain
 the marker unchanged and replace the window when it changes or is retired,
-including an empty retirement response. Actual canonical publication must
-cover every current native observation and version before the reader leaves
-preview mode. That transition explicitly resets the window; clients do not
-invent aliases between provisional and canonical IDs.
+including an empty retirement response. Unqualified previews retain the
+existing reset on canonical publication. A qualified producer handoff replaces
+the preview atomically with one source snapshot, preserving the reading anchor
+and expansion state. That snapshot may include qualified turns and ordered
+Earlier activity. Only exact aliases issued by the producer for the current
+returned revision establish a bridge; clients do not infer correspondence or
+reuse aliases from a prior revision.
+
+After a qualified bridge is issued, readers also forward its current opaque
+`revision` on Older and detail requests. They omit preview backing hints on
+those requests. The revision preserves representation continuity; it does not
+replace the cursor or detail reference that authorizes the read.
+Passive latest reads can return an empty continuity envelope for that validated
+admission. It carries no rows or read capabilities; readers retain their loaded
+window and use the existing Head-change revalidation rules.
+
+Both authenticated Chat read routes accept the optional `preview_backing_ids`
+query value as one URL-encoded JSON array, for example
+`preview_backing_ids=%5B%22preview-id%22%5D`. It contains at most eight nonempty,
+non-whitespace IDs, each at most 512 UTF-8 bytes. An initial empty array is valid.
+The parameter requires `recent_preview=true` and cannot accompany `before`,
+`detail` or `revalidate_ids`, including an empty revalidation array. Repeated
+query keys, malformed JSON, non-string members and any invalid member reject
+the whole request with the existing HTTP 400 `agent_chat_projection_unavailable`
+error. Omitting the parameter preserves the existing read behavior.
+
+These are client-forwarded hints for the selected agent's preview backing IDs.
+Larger admitted windows select the latest eight literal IDs in source order
+after validating the whole window. The subset does not certify membership.
+The gateway forwards them through the existing authenticated agent read scope;
+the producer resolves them against its current source and publication proof.
+They grant no additional authority and issue no Older cursor, detail capability
+or row-revalidation ACK. Valid unknown, out-of-scope or stale IDs expose no
+lookup or differentiated error oracle. Only producer-proven exact aliases in
+the current returned revision can establish canonical identity; a hint alone
+cannot establish a match or renew a prior one.
+
+An unbound opening with an empty hint array returns the existing legacy source
+window promptly, before qualification, capture or indexing. Later ordinary
+reads can qualify under the same recent admission and issue the single atomic
+handoff. An opening under an already certified admission retains that shared
+state. Usability is measured when owned recent narrative and an interactive
+composer are visible; qualification is a separate measurement.
+
+Certification belongs to the recent admission and is shared with desktop and
+other readers. Reopening while the admission lives retains unresolved gaps and
+sticky overflow state. A new admission re-evaluates the source. Reader-specific
+display limits and hints do not reset that shared state.
 
 The existing projection owner keeps the recent slot separately from slow
 archive work. Normal selection only coalesces bounded producer work; source

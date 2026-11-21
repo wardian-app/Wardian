@@ -19,6 +19,7 @@ import type {
   RemoteAutomationMonitorSnapshot,
 } from "../../types";
 import type { RemoteAttachment, RemoteAttachmentSubmission } from "../../types/remote";
+import { boundedPreviewBackingIds } from "../chat/chatPreviewBacking";
 
 export type RemoteAgentChatPage = AgentChatPage;
 
@@ -233,6 +234,7 @@ export const remoteClient = {
     signal?: AbortSignal,
     revalidateIds?: string[],
     recentPreview = false,
+    previewBackingIds?: string[],
   ): Promise<RemoteAgentChatPage> {
     const query = new URLSearchParams();
     if (before) query.set("before", before);
@@ -240,7 +242,11 @@ export const remoteClient = {
     if (detail) query.set("detail", detail);
     if (revalidateIds?.length) query.set("revalidate_ids", JSON.stringify(revalidateIds));
     if (!before && !detail && !revalidateIds?.length) query.set("limit", "8");
-    if (recentPreview && !before && !detail && !revalidateIds?.length) query.set("recent_preview", "true");
+    if (recentPreview && !before && !detail && revalidateIds === undefined) {
+      query.set("recent_preview", "true");
+      const backing = boundedPreviewBackingIds(previewBackingIds);
+      if (backing !== undefined) query.set("preview_backing_ids", JSON.stringify(backing));
+    }
     return remoteJson<RemoteAgentChatPage>(`/remote/api/agents/${encodeURIComponent(sessionId)}/chat${query.size ? `?${query}` : ""}`, { signal }, true);
   },
   async loadAgentTerminal(sessionId: string) {
