@@ -6,6 +6,9 @@ use crate::utils::fs::create_directory_link;
 use tauri::Manager;
 use wardian_core::models::AgentConfig;
 
+#[path = "unloaded_removal_tests.rs"]
+mod unloaded_removal_tests;
+
 #[tokio::test]
 async fn removal_of_pending_name_is_atomic_and_sql_failure_keeps_removed_roster_absent() {
     let home = crate::control::test_support::TestWardianHome::new_async().await;

@@ -645,6 +645,13 @@ explicitly terminates that provider first. Rename is live and does not restart
 the provider. Agent-owned Wardian history is cascaded with deletion; project
 workspace files are never removed.
 
+Deletion also accepts persisted identities returned by `agent list` or `agent
+show` when they have no loaded runtime or saved restore configuration. It uses
+their actual persisted identity and the same confirmation and cleanup path;
+it does not restore or start a provider. Unresolved spawn ownership, retained
+provider holds, or an unverified runtime still block removal, including with
+`--force`.
+
 `wardian message send <target> <message>` admits and automatically delivers an
 informational message, waking an idle recipient when its original provider
 conversation is available. It does not create a task or reply obligation.
