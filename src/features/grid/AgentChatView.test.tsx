@@ -1359,6 +1359,43 @@ describe("AgentChatView", () => {
     expect(screen.queryByTestId("chat-work-group")).not.toBeInTheDocument();
   });
 
+  it.each([true, false])("preserves the answer through backfill and follows new tail only at bottom (%s)", async (atBottom) => {
+    vi.useFakeTimers();
+    const answer = event({ id: "answer", text: "Recent answer" });
+    const history = event({ id: "history", text: "Earlier captured message" });
+    const tail = event({ id: "tail", text: "New tail message" });
+    const pages = [[answer], [history, answer], [history, answer, tail]];
+    let read = 0;
+    invokeMock.mockImplementation((command) => Promise.resolve(command === "load_agent_chat_page"
+      ? olderReadPage({ events: pages[read] ?? pages[pages.length - 1], revision: String(++read), next_before: null })
+      : undefined));
+    await act(async () => { render(<AgentChatView sessionId="agent-1" refreshIntervalMs={3_000} />); });
+    const scroll = screen.getByTestId("agent-chat-scroll-region");
+    const row = screen.getByText("Recent answer").closest<HTMLElement>("[data-chat-row-key]")!;
+    scroll.getBoundingClientRect = () => new DOMRect(0, 0, 300, 200);
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true,
+      get: () => 300 + scroll.querySelectorAll("[data-chat-row-key]").length * 100 });
+    // Match browser clamping and derive row geometry from actual DOM order.
+    let top = 0;
+    Object.defineProperty(scroll, "scrollTop", { configurable: true, get: () => top,
+      set: (value: number) => { top = Math.max(0, Math.min(value, scroll.scrollHeight - scroll.clientHeight)); } });
+    const rows = () => Array.from(scroll.querySelectorAll<HTMLElement>("[data-chat-row-key]"));
+    row.getBoundingClientRect = () => new DOMRect(0, 300 + rows().indexOf(row) * 100 - top, 300, 100);
+    scroll.scrollTop = atBottom ? 200 : 180;
+    fireEvent.scroll(scroll);
+    const answerOffset = row.getBoundingClientRect().top;
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(rows().map((node) => node.dataset.chatRowKey)).toEqual(["history", "answer"]);
+    expect(rows()[1]).toBe(row);
+    expect(row.getBoundingClientRect().top).toBe(answerOffset);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(screen.getByText("New tail message")).toBeInTheDocument();
+    expect(scroll.scrollTop).toBe(atBottom ? 400 : 280);
+  });
+
   it("allows another older scroll after a failed read and preserves the prepended viewport", async () => {
     const firstOlder = deferred<AgentChatPage>();
     const secondOlder = deferred<AgentChatPage>();
