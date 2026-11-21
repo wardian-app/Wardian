@@ -16,10 +16,13 @@ import {
   CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, CHAT_PREVIEW_RULER_VERSION, chatPreviewWatchdogMs,
   chatPreviewHomePaths, chatPreviewSocketPath, assertFreshChatPreviewHome, assertPreclaimedChatPreviewBase, assertChatPreviewHomeBinding,
   syntheticCodexSource, stageSyntheticStoppedSource, prepareSyntheticProviderHomes, verifySyntheticSourceProjection,
+  CHAT_PREVIEW_FIXTURE_LIFECYCLE, observeChatPreviewAutoRestore, pauseChatPreviewFixture, closeChatPreviewFixtureSession,
   verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   assertPendingCaptureBracket, trustedClickWithPendingCapture,
   chatTimingReceipt, chatTimingNativeEvidence, chatTimingCandidateDetails, chatPreviewObserverScript, assertChatTimingSample, recordChatTimingCase, writeChatTimingReport,
   recordRejectedChatScope, driveChatPreviewProbe, assertChatOpeningSample, chatTimingHandoffEvidence, recordChatContinuity, assertChatFixtureShape,
+  recordChatPreviewOpeningError, assertChatPreviewSourceUnchanged, assertChatPreviewSurfaceErrorsEmpty,
+  recordChatPreviewSurfaceError, recordChatPreviewCleanupOutcome, chatPreviewRunOutcome, classifyChatPreviewCycleOutcome,
 } from "../lib/chatPreviewTiming.mjs";
 
 const fixture = { sessionId: "owned-agent", provider: "codex", body: "A uniquely completed synthetic answer.", name: "Synthetic Agent",
@@ -343,13 +346,191 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
   };
 }
 
-function v8Opening(b, dto = nativeLegacyPage(), marker = false) {
-  b.api.arm("v8-opening"); b.click(); b.adopt(dto, marker); b.advance(3);
+function v8Opening(b, dto = nativeLegacyPage(), marker = false, delay = 0) {
+  b.api.arm("v8-opening"); b.click(); if (delay) b.elapse(delay); b.adopt(dto, marker); b.advance(3);
   const plan = b.api.prepareInteraction();
   assert.equal(plan?.kind, "input"); assert.equal(v8Probe.length, 29); b.input.value = v8Probe; b.document.activeElement = b.input;
   b.inputEvent(); b.advance(3);
   return b.api.snapshot();
 }
+
+async function ordinaryOutcomeCase({ budget = false, success = false, fullWindow = true, missingM2 = false, passiveError, label = "owned-case" } = {}) {
+  const b = browser({ rulerVersion: 8 });
+  const original = Object.assign(new Error("controlled measured miss", { cause: new Error("original cause") }), { code: "probe_deadline_exceeded" });
+  const report = { cases: [] }; let failure;
+  try {
+    await recordChatTimingCase(report, label, async () => {
+      const record = report.cases.at(-1);
+      const final = await (await import("../lib/chatPreviewTiming.mjs")).observeChatOpening({ record,
+        options: { sourceRole: "candidate", requireCanonical: true },
+        measureM1: async () => {
+          if (budget || success) { v8Opening(b, canonicalNativePage(), true, budget ? 1_100 : 0); return; }
+          b.api.arm("measured-miss"); b.click(); b.elapse(5_000); throw original;
+        },
+        observeM2: async () => {
+          if (passiveError) throw passiveError;
+          if (!budget && !success) { b.elapse(5_000); if (!missingM2) { b.adopt(canonicalNativePage(), true); b.advance(6); } }
+          if (fullWindow) { b.elapse(30_000); await b.api.finishObservation(); }
+        }, snapshot: async () => b.api.snapshot(),
+      });
+      return assertChatOpeningSample(final, { sourceRole: "candidate", requireCanonical: true });
+    }, async () => b.api.snapshot(), async () => {});
+  } catch (error) { failure = error; }
+  b.api.dispose();
+  return { report, record: report.cases[0], error: failure, original };
+}
+
+function finishOrdinarySurface(outcome, { sourcePass = true, extraError, cleanupFailure = false } = {}) {
+  const surface = { source: { sha256: "actual-synthetic-proof", ino: "1" }, errors: [], cleanup: {}, status: "FAILED" };
+  recordChatPreviewOpeningError(surface, outcome.error, outcome.record);
+  if (extraError !== undefined) surface.errors.push(extraError);
+  if (sourcePass) assertChatPreviewSourceUnchanged(surface, { ...surface.source });
+  let finalError;
+  try { assertChatPreviewSurfaceErrorsEmpty(surface, [outcome.record]); } catch (error) { finalError = error; }
+  recordChatPreviewSurfaceError(surface, finalError);
+  surface.cleanup = { observer: "closed", browser: "closed", session: cleanupFailure ? "UNPROVEN" : "closed", tls: "closed" };
+  if (cleanupFailure) surface.status = "FAILED_CLEANUP";
+  recordChatPreviewCleanupOutcome(surface);
+  return { surface, finalError };
+}
+
+test("ordinary provenance requires the actual full-window miss flow and preserves original exception/cause, FAILED and null metrics", async () => {
+  const outcome = await ordinaryOutcomeCase();
+  assert.equal(outcome.error, outcome.original); assert.equal(outcome.error.cause, outcome.original.cause);
+  assert.equal(outcome.record.status, "FAILED"); assert.equal(outcome.record.metrics, null);
+  assert.equal(outcome.record.failure_outcome.kind, "ordinary_m1_after_full_m2");
+  assert.equal(outcome.record.observation.phase.passive_m2_window.status, "PASS");
+  const { surface, finalError } = finishOrdinarySurface(outcome);
+  assert.equal(finalError.code, "ERR_ASSERTION"); assert.equal(surface.errors.at(-1).origin.kind, "ordinary_m1_surface_assert");
+  assert.equal(chatPreviewRunOutcome({ cases: [outcome.record], surfaces: [surface] }, [outcome.error, finalError]).kind, "ordinary_m1_only");
+});
+
+test("ordinary budget provenance comes only after unchanged final M1 checks and full passive M2 guards", async () => {
+  const outcome = await ordinaryOutcomeCase({ budget: true });
+  assert.equal(outcome.error.code, "chat_open_budget_exceeded"); assert.equal(outcome.record.metrics, null);
+  assert.equal(outcome.record.failure_outcome.kind, "ordinary_m1_after_full_m2");
+  assert.ok(outcome.record.observation.phase.usableAt - outcome.record.observation.phase.clickAt > 1_000);
+});
+
+test("incomplete passive window or M2 failure cannot emit ordinary provenance", async () => {
+  for (const options of [{ fullWindow: false }, { missingM2: true }]) {
+    const outcome = await ordinaryOutcomeCase(options);
+    assert.equal(outcome.record.failure_outcome.kind, "unclassified");
+    if (options.missingM2) { assert.equal(outcome.error.cause, outcome.original); assert.ok(outcome.record.m2_error); }
+    const { surface } = finishOrdinarySurface(outcome); assert.equal(surface.ordinary_m1_summary, undefined);
+  }
+});
+
+test("source ERR_ASSERTION is not the ordinary final summary and missing post-source PASS never qualifies", async () => {
+  const outcome = await ordinaryOutcomeCase();
+  const surface = { source: { ino: "original" }, errors: [] }; let sourceError;
+  try { assertChatPreviewSourceUnchanged(surface, { ino: "changed" }); } catch (error) { sourceError = error; }
+  assert.equal(sourceError.code, "ERR_ASSERTION"); assert.equal(surface.post_source_verification, undefined);
+  assert.equal(recordChatPreviewSurfaceError(surface, sourceError).origin.kind, "unclassified_surface");
+  const missing = finishOrdinarySurface(outcome, { sourcePass: false });
+  assert.equal(missing.surface.ordinary_m1_summary, undefined);
+  assert.equal(chatPreviewRunOutcome({ cases: [outcome.record], surfaces: [missing.surface] }, [outcome.error, missing.finalError]).kind, "unclassified");
+});
+
+test("passive same-code/spoofed provenance, duplicate counts and mixed unknown errors cannot become ordinary", async () => {
+  const passiveError = Object.assign(new Error("passive failure"), { code: "probe_deadline_exceeded",
+    failure_outcome: { version: 1, kind: "ordinary_m1_after_full_m2", passive_m2: "PASS", handoff_guards: "PASS" } });
+  const passive = await ordinaryOutcomeCase({ passiveError });
+  assert.equal(passive.error.cause, passive.original); assert.equal(passive.error.errors[1], passiveError);
+  assert.equal(passive.record.failure_outcome.kind, "unclassified"); assert.equal(passive.record.metrics, null);
+  const outcome = await ordinaryOutcomeCase();
+  for (const extraError of ["passive error", { code: outcome.error.code, origin: { kind: "ordinary_m1", case_label: outcome.record.label } }]) {
+    assert.equal(finishOrdinarySurface(outcome, { extraError }).surface.ordinary_m1_summary, undefined);
+  }
+  const duplicate = { source: {}, errors: [], post_source_verification: { status: "PASS" } };
+  const entry = recordChatPreviewOpeningError(duplicate, outcome.error, outcome.record); duplicate.errors.push(entry);
+  assert.throws(() => assertChatPreviewSurfaceErrorsEmpty(duplicate, [outcome.record])); assert.equal(duplicate.ordinary_m1_summary, undefined);
+  const mixed = finishOrdinarySurface(outcome);
+  assert.equal(chatPreviewRunOutcome({ cases: [outcome.record], surfaces: [mixed.surface] }, [outcome.error, mixed.finalError, new Error("unknown")]).kind, "unclassified");
+});
+
+test("cleanup failure, later observation failure and unmarked lookalike exceptions remain nonordinary", async () => {
+  const outcome = await ordinaryOutcomeCase();
+  const cleanup = finishOrdinarySurface(outcome, { cleanupFailure: true });
+  assert.equal(chatPreviewRunOutcome({ cases: [outcome.record], surfaces: [cleanup.surface] }, [outcome.error, cleanup.finalError]).kind, "unclassified");
+  outcome.record.observation_error = "late observer failure";
+  assert.equal(finishOrdinarySurface(outcome).surface.ordinary_m1_summary, undefined);
+  const spoof = Object.assign(new Error(outcome.error.message), { code: outcome.error.code, failure_outcome: outcome.record.failure_outcome });
+  const surface = { errors: [] };
+  assert.equal(recordChatPreviewOpeningError(surface, spoof, outcome.record).origin.kind, "unclassified_opening");
+});
+
+async function ordinaryOutcomeCycle(ordinaryCount = 8) {
+  const report = { ruler_version: 8, outcome_protocol_version: 1, timing_qualification: "ISOLATED_BENCHMARK_ATTEMPT",
+    status: "FAILED", error: { code: "chat_preview_failed" }, cases: [], surfaces: [] };
+  const errors = [];
+  for (let index = 0; index < 4; index++) {
+    const records = [], surface = { source: { ino: "owned" }, errors: [], cleanup: {}, status: "FAILED" };
+    for (let opening = 0; opening < 2; opening++) {
+      const outcome = await ordinaryOutcomeCase({ label: `case-${index}-${opening}`, success: report.cases.length >= ordinaryCount });
+      report.cases.push(outcome.record); records.push(outcome.record);
+      if (outcome.error) {
+        assert.equal(outcome.error, outcome.original); errors.push(outcome.error);
+        recordChatPreviewOpeningError(surface, outcome.error, outcome.record);
+      }
+    }
+    assertChatPreviewSourceUnchanged(surface, { ...surface.source });
+    try { assertChatPreviewSurfaceErrorsEmpty(surface, records); surface.status = "OBSERVED_UI_ENDPOINTS"; }
+    catch (error) { errors.push(error); recordChatPreviewSurfaceError(surface, error); }
+    surface.cleanup = { observer: "closed", browser: "closed", session: "closed", tls: "closed" };
+    recordChatPreviewCleanupOutcome(surface); report.surfaces.push(surface);
+  }
+  if (errors.length === 0) { report.status = "OBSERVED_UI_ENDPOINTS"; delete report.error; }
+  report.root_outcome = chatPreviewRunOutcome(report, errors);
+  return report;
+}
+
+function finalizedOutcome(report, overrides = {}) {
+  const reportSha256 = createHash("sha256").update(JSON.stringify(report)).digest("hex");
+  return { exitCode: 1, reportSha256, completion: { version: 1, diagnostic_only: false, report_sha256: reportSha256,
+    ...report.root_outcome }, ...overrides };
+}
+
+test("finalized actual ordinary misses permit fixed-plan continuation without metric credit or status changes", async () => {
+  const report = await ordinaryOutcomeCycle(), before = JSON.stringify(report);
+  assert.equal(report.root_outcome.kind, "ordinary_m1_only");
+  assert.deepEqual(classifyChatPreviewCycleOutcome(report, finalizedOutcome(report)), {
+    classification: "ORDINARY_M1_ONLY_CONTINUE_FIXED_PLAN", allow_next: true, metric_credit: false,
+    failed_openings: 8, failed_metrics_remain_null: true,
+  });
+  assert.equal(JSON.stringify(report), before);
+  assert.ok(report.cases.every(record => record.status === "FAILED" && record.metrics === null));
+  const mixed = await ordinaryOutcomeCycle(1);
+  assert.equal(classifyChatPreviewCycleOutcome(mixed, finalizedOutcome(mixed)).allow_next, true);
+  assert.equal(mixed.cases.filter(record => record.status === "FAILED" && record.metrics === null).length, 1);
+  assert.equal(mixed.cases.filter(record => record.metrics?.m1.usable_ms < 1_000).length, 7);
+  const passed = await ordinaryOutcomeCycle(0);
+  assert.deepEqual(classifyChatPreviewCycleOutcome(passed, finalizedOutcome(passed, { exitCode: 0 })), {
+    classification: "ALL_GATES_REPORTED_PASS", allow_next: true, metric_credit: true,
+  });
+});
+
+test("controller rejects missing final persistence proof, source/passive/assertion/cleanup/M2 ambiguity and count mismatches", async () => {
+  const original = await ordinaryOutcomeCycle();
+  for (const change of [
+    report => { delete report.surfaces[0].post_source_verification; },
+    report => { report.surfaces[0].errors.at(-1).origin.kind = "unclassified_surface"; },
+    report => { report.surfaces[0].errors.push({ code: "probe_deadline_exceeded", origin: { kind: "ordinary_m1" } }); },
+    report => { report.surfaces[0].cleanup.session = "UNPROVEN"; },
+    report => { report.cases[0].m2_error = { code: "missing_qualified_handoff" }; },
+    report => { report.cases[0].observation.fatal_error_count++; },
+    report => { report.cases[0].failure_outcome.kind = "unclassified"; },
+    report => { report.root_outcome.retained_error_count++; },
+    report => { report.surfaces[0].ordinary_m1_summary.failed_case_labels[0] = "foreign"; },
+  ]) {
+    const report = structuredClone(original); change(report);
+    assert.equal(classifyChatPreviewCycleOutcome(report, finalizedOutcome(report)).allow_next, false);
+  }
+  for (const overrides of [{ completion: undefined }, { completion: { ...finalizedOutcome(original).completion, report_sha256: "0".repeat(64) } },
+    { completion: { ...finalizedOutcome(original).completion, diagnostic_only: true } }, { exitCode: 2 }]) {
+    assert.equal(classifyChatPreviewCycleOutcome(original, finalizedOutcome(original, overrides)).allow_next, false);
+  }
+});
 
 test("v8 common M1 has literal native wire evidence plus separate visible content without Remote DOM markers or M2 credit", () => {
   const b = browser({ rulerVersion: 8 });
@@ -1356,6 +1537,158 @@ test("stopped-source staging uses the supported restore layout and never manufac
   assert.throws(() => stageSyntheticStoppedSource(harness, { turns: 128, padding: 128 }), /fixture_must_precede_startup/);
   fs.appendFileSync(staged.sourcePath, "{}\n");
   assert.throws(() => verifySyntheticSource(staged), /source_size_changed/);
+});
+
+test("saved-active staging changes desired restore intent only and keeps the exact source generator", (t) => {
+  const harness = tempHome(t), nativeSessionId = randomUUID();
+  const staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128, nativeSessionId,
+    upstreamStorage: true, savedActiveRestore: true });
+  const config = JSON.parse(fs.readFileSync(path.join(harness.isolatedHome, "settings", "state.json")))[0];
+  assert.equal(CHAT_PREVIEW_FIXTURE_LIFECYCLE, "saved-active-auto-restore-v1");
+  assert.equal(staged.savedActiveRestore, true); assert.equal(config.is_off, false);
+  assert.equal(config.model, "fixture-model"); assert.equal(config.provider, "codex");
+  assert.equal(config.session_persistence, "resume"); assert.equal(config.resume_session, nativeSessionId);
+  const original = syntheticCodexSource({ workspace: config.folder, turns: 128, padding: 128, nativeSessionId });
+  assert.deepEqual(fs.readFileSync(staged.sourcePath), Buffer.from(original.bytes));
+  assert.equal(staged.bodySha256, original.bodySha256); assert.equal(staged.records, original.records);
+  assert.equal(fs.existsSync(staged.capturePath), false);
+});
+
+test("saved-active staging remains opt-in and rejects malformed flags before any write", (t) => {
+  for (const savedActiveRestore of [undefined, false]) {
+    const harness = tempHome(t), staged = stageSyntheticStoppedSource(harness, { turns: 128, padding: 128, savedActiveRestore });
+    assert.equal(staged.savedActiveRestore, false);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(harness.isolatedHome, "settings", "state.json")))[0].is_off, true);
+  }
+  for (const savedActiveRestore of [null, 0, 1, "true", "false", {}, []]) {
+    const harness = tempHome(t), before = fs.readdirSync(harness.isolatedHome);
+    assert.throws(() => stageSyntheticStoppedSource(harness, { savedActiveRestore }), { code: "invalid_fixture_saved_active_restore" });
+    assert.deepEqual(fs.readdirSync(harness.isolatedHome), before);
+  }
+});
+
+function autoRestoreCase() {
+  const fixture = { sessionId: randomUUID(), nativeSessionId: randomUUID(), name: "Synthetic-Preview-Timing", savedActiveRestore: true };
+  const agent = { session_id: fixture.sessionId, resume_session: fixture.nativeSessionId, session_name: fixture.name,
+    provider: "codex", model: "fixture-model", is_off: false };
+  const metric = { session_id: fixture.sessionId, current_status: "Idle" };
+  return { fixture, agent, metric };
+}
+
+test("fixture auto-restore needs the actual owned Idle metric and never invokes activation", async () => {
+  const { fixture, agent, metric } = autoRestoreCase(), calls = [];
+  const invoke = async (command) => { calls.push(command); return command === "list_agents" ? [agent] : [metric]; };
+  const ready = await observeChatPreviewAutoRestore(invoke, fixture, agent.model);
+  assert.deepEqual(ready.agent, agent); assert.deepEqual(ready.metric, metric);
+  assert.deepEqual(calls, ["list_agents", "list_agent_metrics"]);
+  for (const current_status of ["Restoring", "Processing...", "Action Needed", "Off"]) {
+    assert.equal(await observeChatPreviewAutoRestore(async (command) => command === "list_agents" ? [agent] : [{ ...metric, current_status }], fixture, agent.model), null);
+  }
+  assert.equal(await observeChatPreviewAutoRestore(async (command) => command === "list_agents" ? [agent] : [], fixture, agent.model), null);
+});
+
+test("fixture auto-restore rejects foreign identity, duplicate rows and legacy-Off use", async () => {
+  const { fixture, agent, metric } = autoRestoreCase();
+  for (const changed of [{ provider: "mock" }, { resume_session: randomUUID() }, { model: "wrong" }, { session_name: "foreign" }]) {
+    await assert.rejects(observeChatPreviewAutoRestore(async () => [{ ...agent, ...changed }], fixture, agent.model), { code: "fixture_restore_identity_changed" });
+  }
+  await assert.rejects(observeChatPreviewAutoRestore(async () => [agent, agent], fixture, agent.model), { code: "fixture_restore_duplicate_agent" });
+  await assert.rejects(observeChatPreviewAutoRestore(async (command) => command === "list_agents" ? [agent] : [metric, metric], fixture, agent.model), { code: "fixture_restore_duplicate_metrics" });
+  await assert.rejects(observeChatPreviewAutoRestore(async () => { throw new Error("must not invoke"); }, { ...fixture, savedActiveRestore: false }, agent.model), { code: "fixture_requires_saved_active_restore" });
+  assert.equal(await observeChatPreviewAutoRestore(async () => [], fixture, agent.model), null);
+  assert.equal(await observeChatPreviewAutoRestore(async () => [{ ...agent, is_off: true }], fixture, agent.model), null);
+});
+
+function pauseCase({ roster, reply = null, postRoster, reject, otherReject } = {}) {
+  const sessionId = randomUUID(), otherId = randomUUID();
+  const own = { session_id: sessionId, is_off: false }, other = { session_id: otherId, is_off: false };
+  let reads = 0;
+  const calls = [], record = {};
+  const invoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "list_agents") return ++reads === 1 ? roster?.(own, other) ?? [own] : postRoster?.(own, other) ?? [{ ...own, is_off: true }];
+    if (args.sessionId === sessionId && reject) throw reject;
+    if (args.sessionId === otherId && otherReject) throw otherReject;
+    return reply;
+  };
+  return { fixture: { sessionId }, invoke, record, calls };
+}
+
+test("fixture pause retains the actual exact-ID request/null reply and one read-only Off check", async () => {
+  const value = pauseCase();
+  assert.equal(await pauseChatPreviewFixture(value.invoke, value.fixture, value.record), value.record);
+  assert.equal(value.record.confirmed, true); assert.equal(value.record.roster_matches, 1);
+  assert.equal(value.record.target_attempt_count, 1);
+  assert.deepEqual(value.record.attempts[0].request, { command: "pause_agent", args: { sessionId: value.fixture.sessionId } });
+  assert.deepEqual(value.record.attempts[0].reply, { type: "null", value: null });
+  assert.equal(value.record.attempts[0].outcome, "FULFILLED");
+  assert.equal(value.record.post_pause.is_off, true); assert.equal(value.record.post_pause.session_id, value.fixture.sessionId);
+  assert.deepEqual(value.calls.map((call) => call.command), ["list_agents", "pause_agent", "list_agents"]);
+  assert.ok(value.record.elapsed_ms >= 0);
+  assert.ok(value.record.attempts[0].ended_monotonic_ms >= value.record.attempts[0].started_monotonic_ms);
+});
+
+test("fixture pause cannot earn a receipt from empty, missing or duplicate selection", async () => {
+  for (const roster of [() => [], (_own, other) => [other], (own) => [own, own]]) {
+    const value = pauseCase({ roster });
+    await assert.rejects(pauseChatPreviewFixture(value.invoke, value.fixture, value.record), { code: "fixture_pause_reply_unconfirmed" });
+    assert.equal(value.record.confirmed, false);
+    assert.equal(value.calls.filter((call) => call.command === "list_agents").length, 1);
+    // The maintained helper still attempts every captured ID; the wrapper does not filter or retry.
+    assert.equal(value.calls.filter((call) => call.command === "pause_agent").length, value.calls.length - 1);
+  }
+});
+
+test("fixture pause rejects missing/non-unit replies instead of fabricating success", async () => {
+  for (const reply of [undefined, {}, true, "ok"]) {
+    const value = pauseCase();
+    const invoke = (command, args) => command === "pause_agent" ? Promise.resolve(reply) : value.invoke(command, args);
+    await assert.rejects(pauseChatPreviewFixture(invoke, value.fixture, value.record), { code: "fixture_pause_reply_unconfirmed" });
+    assert.equal(value.record.confirmed, false); assert.equal(value.record.post_pause, null);
+    assert.notEqual(value.record.attempts[0].reply?.type, "null");
+  }
+});
+
+test("fixture pause preserves native rejection and other owned-agent errors", async () => {
+  const original = Object.assign(new Error("generation guard"), { code: "uncertain" });
+  for (const options of [{ reject: original }, { roster: (own, other) => [own, other], otherReject: original }]) {
+    const value = pauseCase(options);
+    await assert.rejects(pauseChatPreviewFixture(value.invoke, value.fixture, value.record), (error) => error instanceof AggregateError && error.errors[0] === original);
+    assert.equal(value.record.confirmed, false); assert.equal(value.record.post_pause, null);
+    assert.equal(value.calls.filter((call) => call.command === "list_agents").length, 1);
+    assert.ok(value.record.ended_at);
+  }
+});
+
+test("fixture pause requires the same unique Off agent afterward without retrying", async () => {
+  for (const postRoster of [() => [], (_own, other) => [{ ...other, is_off: true }], (own) => [own],
+    (own) => [{ ...own, is_off: true }, { ...own, is_off: true }]]) {
+    const value = pauseCase({ postRoster });
+    await assert.rejects(pauseChatPreviewFixture(value.invoke, value.fixture, value.record), { code: "fixture_pause_off_unconfirmed" });
+    assert.equal(value.record.confirmed, false);
+    assert.deepEqual(value.calls.map((call) => call.command), ["list_agents", "pause_agent", "list_agents"]);
+  }
+});
+
+test("fixture session closes the driver after rejected pause and retains both failures", async () => {
+  const pauseError = new Error("owner stop rejected"), driverError = new Error("driver exit unconfirmed");
+  const value = pauseCase({ reject: pauseError });
+  let closes = 0;
+  await assert.rejects(closeChatPreviewFixtureSession(value.invoke, value.fixture, value.record, async () => { closes++; throw driverError; }), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.errors[0].errors[0], pauseError); assert.equal(error.errors[1], driverError);
+    return true;
+  });
+  assert.equal(closes, 1); assert.equal(value.record.confirmed, false);
+});
+
+test("fixture session keeps successful pause evidence separate from a later driver failure", async () => {
+  const driverError = new Error("driver did not join"), value = pauseCase();
+  await assert.rejects(closeChatPreviewFixtureSession(value.invoke, value.fixture, value.record, async () => { throw driverError; }), (error) => error instanceof AggregateError && error.errors[0] === driverError);
+  assert.equal(value.record.confirmed, true);
+  const successful = pauseCase(); let closes = 0;
+  await closeChatPreviewFixtureSession(successful.invoke, successful.fixture, successful.record, async () => { closes++; });
+  assert.equal(closes, 1); assert.equal(successful.record.confirmed, true);
 });
 
 function linkFixtureSessions(harness, staged, target = path.join(staged.providerHome, ".codex", "sessions")) {

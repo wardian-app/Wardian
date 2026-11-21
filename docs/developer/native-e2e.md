@@ -1050,9 +1050,14 @@ content are separate observations. Body text never assigns a DOM ID or alias.
 Main Remote lacks consumer scope/row DOM markers; V8 neither adds nor infers them.
 Existing markers, when present, must agree with the actual current response.
 
-Both sources use the supported native Codex PATH/resume lifecycle with the quiet
-synthetic protocol peer. The composer must really be enabled. Roster online state
-or a successful resume command alone does not prove native-owner readiness; the
+Both sources use the versioned `saved-active-auto-restore-v1` fixture lifecycle
+with the quiet synthetic Codex PATH peer. Staging opts into
+`savedActiveRestore: true` and writes desired `is_off: false` before app startup;
+default staging remains saved-Off. The ordinary backend restores the existing
+literal native session through its resume policy. It must earn the real owner,
+ordinary TUI attachment, exclusive Idle thread and direct-input readiness.
+The composer must really be enabled. Saved config or roster online state alone
+does not prove native-owner readiness; the
 separate fixture-readiness diagnostic must establish it before measurement. No
 DOM/status/config enablement, Mock substitution or wheel probe can satisfy V8 M1.
 The peer tests synthetic startup and unsent input only, not real Codex inference
@@ -1066,14 +1071,29 @@ and that owned plain `.codex` directory is the application's explicit upstream
 Staging locally and then projecting into a different upstream can copy the
 file, invalidating its certified physical identity even when its bytes match.
 
-Before resume, invoke the normal `build_agent_cli_command` preparation command
-without executing its returned shell string. Verify that managed `sessions`
-resolves to the staged upstream directory and that source bytes, body hash and
-device/file identity match the original witness. Repeat those checks after
-supported resume and ordinary compaction. Reuse an existing provider directory
+Saved-active mode invokes neither `build_agent_cli_command` nor `resume_agent`:
+normal owner startup prepares the projection. After actual backend Idle readiness,
+verify that managed `sessions` resolves to the staged upstream directory and that
+source bytes, body hash and device/file identity match the pre-app witness.
+Retain those checks through cleanup and ordinary compaction. Reuse an existing provider directory
 only for this opt-in owned plain upstream; reject linked or foreign ancestors.
 Keep source/capture/peer guards intact and retain failed diagnostic roots. These
 filesystem checks do not establish native-owner readiness or measurement credit.
+
+Strict cleanup must retain one successful native `pause_agent` request and its
+actual null reply for the exact fixture agent, followed by one read-only roster
+check confirming that same agent is Off. Empty selection, another agent's reply,
+driver exit or a zero-process Job receipt cannot substitute for the pause reply.
+Pause failure still requires driver cleanup and remains a failed cleanup.
+
+This lifecycle applies identically to baseline and candidate: qualified
+128-turn/padding-128 and pending 12,000-turn/padding-1,024 workloads, source/body
+proofs, cold first-Chat and warm reopen definitions, trusted input/frames, budgets
+and M1/M2 gates stay fixed. No retry, resampling, retroactive credit or alternate
+fixture is permitted after a saved-active validation failure; that failure blocks
+PR3. The saved-Off/manual-resume path remains uncovered under
+[issue #1778](https://github.com/wardian-app/Wardian/issues/1778), with R07 retained
+as failed evidence. A later Off-path follow-up is separate from PR3's merge gate.
 
 M2 retains the stronger consumer scope, producer-issued admission, turn/item,
 event-reference and source-evidence checks across two fresh frames. Provisional
@@ -1110,6 +1130,26 @@ until the original click plus 30 seconds, without new input, another opening or 
 new deadline. Its separate component result remains available even when M1 fails.
 No M2 frame or transition after that absolute cutoff receives credit. Authority,
 setup and fatal observer failures still trigger immediate owned cleanup.
+
+Before the first V8 cohort, the typed outcome protocol distinguishes an ordinary
+M1 miss from a fatal cycle failure. Only the actual opening flow can mark its
+original exception after the full passive M2 window and every handoff guard has
+passed. The case remains `FAILED`, with null accepted metrics and the same error
+and cause. Codes, messages and caller-supplied fields cannot supply this origin.
+The surface records post-source-verification `PASS` only after its real source
+assertion. Its existing final errors-length assertion emits an ordinary-only
+summary only when every recorded error is exactly one marked opening miss;
+source assertions, passive errors, unknown origins and count mismatches do not
+qualify. Cleanup operation results remain separate from supervisor closure.
+
+After the final report is persisted, one bounded stdout outcome record binds the
+root classification to that report's SHA-256. A controller can continue the fixed
+48-opening plan on root exit 1 only with this finalized binding, exact ordinary
+case/surface/error accounting, all source and observer checks, completed cleanup
+operations, and the matching joined, active-zero, closed Job receipt. Missing or
+mixed evidence stops the plan. Continuation retains exit 1 and every failed/null
+M1 result; it supplies no metric credit and does not excuse an M2 failure. This
+method revision applies before the first cohort, never to historical V7 samples.
 
 Controls fence old receipts and in-flight frames. A later exact current response
 needs fresh health frames. Busy recovery preserves a properly healthy first M1
