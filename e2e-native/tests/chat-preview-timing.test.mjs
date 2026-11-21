@@ -16,7 +16,7 @@ import {
   syntheticCodexSource, stageSyntheticStoppedSource, verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   assertPendingCaptureBracket, trustedClickWithPendingCapture,
   chatTimingReceipt, chatTimingCandidateDetails, chatPreviewObserverScript, assertChatTimingSample, recordChatTimingCase, writeChatTimingReport,
-  recordRejectedChatScope,
+  recordRejectedChatScope, driveChatPreviewProbe,
 } from "../lib/chatPreviewTiming.mjs";
 
 const fixture = { sessionId: "owned-agent", provider: "codex", body: "A uniquely completed synthetic answer.", name: "Synthetic Agent",
@@ -80,7 +80,9 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
   host.querySelectorAll = (selector) => selector === ".chat-transcript-scroll" ? [scroll] : selector === "textarea" ? [input]
     : selector.includes("Switch to Chat") ? [modeButton] : selector.includes("chat-turn-work") && disclosure ? [workButton] : [];
   scroll.scrollTop = 50; scroll.scrollHeight = 1_000; scroll.clientHeight = 400;
-  scroll.querySelectorAll = () => [content]; scroll.contains = (value) => value === content;
+  const transcriptAlert = element(); transcriptAlert.hidden = true;
+  scroll.querySelectorAll = (selector) => selector === ':scope > [role="alert"]' ? [transcriptAlert] : [content];
+  scroll.contains = (value) => value === content;
   content.textContent = body;
   Object.defineProperty(content, "outerHTML", { get: () => `<div class="chat-message-content">${content.textContent}</div>` });
   content.contains = (node) => node === content;
@@ -114,9 +116,10 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
     anchor.attributes["data-chat-anchor-key"] = rendered.events[0].metadata.chat_display_key ?? rendered.events[0].id;
     api.receive(receipt, captureDetails ? chatTimingCandidateDetails(dto, observedFixture) : null);
   };
-  return { api, adopt, input, content, document, listeners, tab, scroll, workButton, row, committed, anchor,
+  return { api, adopt, input, content, document, listeners, tab, scroll, workButton, row, committed, anchor, transcriptAlert,
     async deliver(dto, args = { sessionId: fixture.sessionId }) { requests++; await callback(args, Promise.resolve(dto)); },
     async reject(error) { requests++; await callback({ sessionId: fixture.sessionId }, Promise.reject(error)); },
+    observe(promise, args = { sessionId: fixture.sessionId }) { requests++; return callback(args, promise); },
     click(trusted = true) {
       const button = element({ "aria-label": surface === "desktop" ? `Agent ${fixture.name}` : `Open ${fixture.name} details` }); button.closest = () => button;
       for (const handler of listeners.get("click")) handler({ isTrusted: trusted, target: button });
@@ -125,7 +128,7 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
       for (const handler of listeners.get("click")) handler({ isTrusted: true, target: modeButton });
       modeButton.attributes.title = "Switch to Terminal";
     },
-    wheelEvent(trusted = true) { for (const handler of listeners.get("wheel")) handler({ isTrusted: trusted, target: scroll }); },
+    wheelEvent(trusted = true, deltaY) { for (const handler of listeners.get("wheel")) handler({ isTrusted: trusted, target: scroll, deltaY }); },
     inputEvent(trusted = true) { for (const handler of listeners.get("input")) handler({ isTrusted: trusted, target: input }); },
     advance(count = 1) {
       for (let index = 0; index < count; index++) {
@@ -1004,6 +1007,189 @@ test("pending click completion retains both witnesses and publishes no pending p
   assert.equal(record.before.status, "pending"); assert.equal(record.after.status, "complete"); assert.equal(record.proof, undefined);
 });
 
+test("an exactly associated desktop busy rejection recovers only from a later request and cleared alert", async () => {
+  const b = browser({ surface: "desktop" }); const dto = presentedPreview();
+  b.api.arm("busy-recovery"); b.click(); b.adopt(dto); b.advance(3);
+  const first = b.api.snapshot().phase.readableAt;
+  await b.reject(new Error("chat source temporarily busy")); b.transcriptAlert.hidden = false;
+  assert.equal(b.api.snapshot().raw_error_count, 1);
+  assert.deepEqual(Array.from(b.api.snapshot().faults), [], "only the exact associated busy error is nonfatal");
+  b.advance(2); assert.equal(b.api.prepareInteraction(), null);
+  await b.deliver(dto); b.advance(3);
+  assert.equal(b.api.prepareInteraction(), null, "a visible direct-child transcript alert blocks recovery");
+  b.transcriptAlert.hidden = true; b.advance(3);
+  assert.equal(b.api.snapshot().busy_retries[0].recovered_at !== null, true);
+  const plan = b.api.prepareInteraction(); assert.equal(plan.kind, "input");
+  b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(3);
+  const result = b.api.snapshot(); assert.ok(result.phase.usableAt);
+  assert.equal(result.phase.readableAt, first); assert.equal(result.raw_error_count, 1);
+  assert.equal(assertChatTimingSample(result, { requireQualified: false, requireTransition: false }).usability_probe, "input");
+  b.api.dispose();
+});
+
+test("busy recovery rejects old and pre-rejection dispatched replies, controls and a persisting alert", async () => {
+  const b = browser({ surface: "desktop" }); const dto = presentedPreview();
+  b.api.arm("busy-order"); b.click(); b.adopt(dto); b.advance(3);
+  let rejectBusy; let resolveOld;
+  const busy = b.observe(new Promise((_, reject) => { rejectBusy = reject; }));
+  const old = b.observe(new Promise((resolve) => { resolveOld = resolve; }));
+  rejectBusy("chat source temporarily busy"); await busy; b.advance(1);
+  resolveOld(dto); await old; b.advance(4);
+  assert.equal(b.api.snapshot().busy_retries[0].recovered_at, null);
+  assert.equal(b.api.prepareInteraction(), null, "a successful request dispatched before rejection cannot recover");
+  await b.deliver(unscopedReset()); b.advance(4);
+  assert.equal(b.api.snapshot().busy_retries[0].recovered_at, null);
+  assert.throws(() => assertChatTimingSample(b.api.snapshot(), { requireQualified: false }), { code: "unresolved_chat_retry" });
+  b.advance(1); b.transcriptAlert.hidden = false; await b.deliver(dto); b.advance(4);
+  await assert.rejects(b.api.wait("usableAt", 2), /usableAt timed out/);
+  assert.equal(b.api.snapshot().busy_retries[0].recovered_at, null);
+  b.transcriptAlert.hidden = true; b.advance(2); b.transcriptAlert.hidden = false; b.advance();
+  assert.equal(b.api.snapshot().busy_retries[0].recovered_at, null, "alert absence is required at both recovery frames");
+  b.transcriptAlert.hidden = true; b.advance(3);
+  assert.ok(b.api.snapshot().busy_retries[0].recovered_at); b.api.dispose();
+});
+
+test("busy exceptions preserve the original promise and dispatch phase; unknown association and other errors stay fatal", async () => {
+  const b = browser({ surface: "desktop" }); b.api.arm("cold-dispatch"); b.click();
+  let reject; const original = new Promise((_, no) => { reject = no; }); const observation = b.observe(original);
+  b.api.arm("warm-arrival"); b.click(); reject(new Error("chat source temporarily busy")); await observation;
+  await assert.rejects(original, /chat source temporarily busy/);
+  const entry = b.api.snapshot().busy_retries[0]; assert.equal(entry.phase_label, "cold-dispatch");
+  assert.equal(entry.phase_index, 0); assert.equal(entry.operation, "load_agent_chat_page");
+  assert.equal(b.api.snapshot().phase.label, "warm-arrival"); assert.equal(b.api.snapshot().raw_error_count, 1);
+  b.api.dispose();
+  for (const [message, args] of [["chat source temporarily busy", { sessionId: "foreign" }],
+    ["chat source temporarily busy!", { sessionId: fixture.sessionId }], ["other failure", { sessionId: fixture.sessionId }]]) {
+    const bad = browser({ surface: "desktop" }); bad.api.arm("fatal"); bad.click();
+    await bad.observe(Promise.reject(new Error(message)), args);
+    assert.equal(bad.api.snapshot().faults.length, 1); assert.equal(bad.api.snapshot().busy_retries.length, 0); bad.api.dispose();
+  }
+});
+
+test("busy evidence is content-free and bounded; historical endpoints cannot bypass an unresolved retry", async () => {
+  const b = browser({ surface: "desktop" }); b.api.arm("busy-cap"); b.click(); b.adopt(page()); b.advance(3);
+  b.api.prepareInteraction(); b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(3);
+  const usable = b.api.snapshot().phase.usableAt; assert.ok(usable);
+  await b.reject(new Error("chat source temporarily busy"));
+  assert.equal(b.api.snapshot().phase.usableAt, usable); assert.equal(b.api.prepareInteraction(), null);
+  await assert.rejects(b.api.wait("qualifiedAt", 2), /qualifiedAt timed out/);
+  assert.throws(() => assertChatTimingSample(b.api.snapshot()), { code: "unresolved_chat_retry" });
+  for (let index = 1; index < 9; index++) await b.reject(new Error("chat source temporarily busy"));
+  const state = b.api.snapshot(); assert.equal(state.raw_error_count, 9); assert.equal(state.busy_retries.length, 8);
+  assert.equal(state.busy_retry_overflow_count, 1); assert.ok(state.busy_retry_overflow_bytes > 0);
+  assert.ok(state.busy_retry_bytes <= 8_192); assert.equal(state.faults.length, 1);
+  assert.equal(JSON.stringify(state.busy_retries).includes(fixture.sessionId), false); b.api.dispose();
+});
+
+test("busy after healthy first endpoints preserves metrics but requires fresh current health and canonical proof", async () => {
+  const b = browser({ surface: "desktop" }); b.api.arm("healthy-before-busy"); b.click(); b.api.noteRequest(); b.adopt(page()); b.advance(3);
+  b.api.prepareInteraction(); b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(3);
+  const initial = b.api.snapshot(); const first = assertChatTimingSample(initial, { requireTransition: false });
+  await b.reject(new Error("chat source temporarily busy")); b.advance(400);
+  assert.equal(b.api.snapshot().phase.usableAt, initial.phase.usableAt);
+  await assert.rejects(b.api.wait("qualifiedAt", 2), /qualifiedAt timed out/);
+  assert.throws(() => assertChatTimingSample(b.api.snapshot(), { requireTransition: false }), { code: "unresolved_chat_retry" });
+  const provisional = presentedPreview(); b.adopt(provisional); await b.deliver(provisional); b.advance(3);
+  assert.ok(b.api.snapshot().busy_retries[0].recovered_at);
+  assert.throws(() => assertChatTimingSample(b.api.snapshot(), { requireTransition: false }), { code: "missing_current_retry_qualification" });
+  b.adopt(page()); await b.deliver(page()); b.advance(3);
+  const state = b.api.snapshot(); const result = assertChatTimingSample(state, { requireTransition: false });
+  assert.equal(result.usable_ms, first.usable_ms); assert.equal(result.qualified_ms, first.qualified_ms);
+  assert.equal(state.phase.usableAt, initial.phase.usableAt); assert.equal(state.phase.qualifiedAt, initial.phase.qualifiedAt);
+  assert.ok(state.phase.qualified_after_retry.at > initial.phase.qualifiedAt);
+  assert.equal(state.phase.qualified_after_retry.frames.length, 2);
+  assert.equal(state.phase.probe.attempts.length, 1, "a healthy historical first witness does not require a late extra input");
+  b.api.dispose();
+});
+
+test("oversized busy metadata fails closed without retaining a record beyond its byte cap", async () => {
+  const b = browser({ surface: "desktop" }); b.api.arm("bounded-label".repeat(800)); b.click();
+  await b.reject(new Error("chat source temporarily busy"));
+  const state = b.api.snapshot(); assert.equal(state.busy_retries.length, 0);
+  assert.equal(state.busy_retry_bytes, 0); assert.equal(state.busy_retry_overflow_count, 1);
+  assert.ok(state.busy_retry_overflow_bytes > 8_192); assert.equal(state.fatal_error_count, 1); b.api.dispose();
+});
+
+test("node replacement and target retraction cannot reuse a dispatched old probe", () => {
+  const b = browser(); b.input.disabled = true; const dto = presentedPreview();
+  b.api.arm("dom-replacement"); b.click(); b.adopt(dto); b.advance(3);
+  const first = b.api.prepareInteraction(); assert.equal(b.api.isInteractionCurrent(first.attempt), true);
+  const replacement = { ...b.content }; b.content.isConnected = false;
+  b.scroll.querySelectorAll = (selector) => selector === ':scope > [role="alert"]' ? [] : [replacement];
+  b.wheelEvent(); b.scroll.scrollTop -= 4; b.advance(3);
+  assert.equal(b.api.snapshot().phase.usableAt, null);
+  const second = b.api.prepareInteraction(); assert.equal(second.attempt, 2);
+  const retracted = structuredClone(dto); retracted.events = [];
+  b.api.receive(chatTimingReceipt(retracted, fixture)); b.advance(3);
+  assert.equal(b.api.isInteractionCurrent(second.attempt), false); assert.equal(b.api.prepareInteraction(), null);
+  assert.equal(b.api.snapshot().phase.usableAt, null); b.api.dispose();
+});
+
+test("a replaced probe subject requires fresh paint and a new trusted wheel without resetting clocks", () => {
+  const b = browser(); b.input.disabled = true; b.scroll.scrollTop = 0;
+  const dto = presentedPreview(); b.api.arm("probe-replacement"); b.click(); b.api.noteRequest(); b.adopt(dto); b.advance(3);
+  const first = b.api.snapshot().phase;
+  const plan = b.api.prepareInteraction(); assert.equal(plan.kind, "wheel");
+  const deadline = b.api.snapshot().phase.probe.deadline_at;
+  b.wheelEvent(true, plan.delta); b.scroll.scrollTop += plan.delta; b.advance(2);
+  dto.revision = "replacement-after-trusted-wheel"; b.adopt(dto); b.advance(3);
+  assert.equal(b.api.snapshot().phase.usableAt, null, "old input must not credit the replacement");
+  const replacement = b.api.prepareInteraction();
+  assert.equal(replacement?.kind, "wheel", "a fresh admitted subject needs a fresh safe probe");
+  assert.equal(b.api.snapshot().phase.readableAt, first.readableAt);
+  assert.equal(b.api.snapshot().phase.clickAt, first.clickAt);
+  b.advance(3); assert.equal(b.api.snapshot().phase.usableAt, null);
+  b.wheelEvent(); b.scroll.scrollTop += replacement.delta; b.advance(3);
+  const result = b.api.snapshot().phase;
+  assert.ok(result.usableAt); assert.equal(result.usable_subject.response_scope.revision, dto.revision);
+  assert.equal(result.clickAt, first.clickAt); assert.equal(result.readableAt, first.readableAt);
+  assert.equal(result.probe.deadline_at, deadline); assert.equal(result.probe.attempts.length, 2);
+  assert.equal(result.probe.attempts[0].event_delta_y, plan.delta);
+  assert.equal(result.probe.attempts[0].invalidation, "subject_replaced");
+  assert.equal(result.probe.attempts[1].last_check.same_subject, true);
+  assert.equal(result.probe.attempts[1].last_check.before !== result.probe.attempts[1].last_check.scroll_top, true);
+  assert.ok(result.probe.evidence_bytes <= 4_096); assert.equal(result.probe.evidence_overflow_count, 0);
+  b.api.dispose();
+});
+
+test("probe attempts cap at three and unchanged nonmovement cannot retry or renew the deadline", () => {
+  const b = browser(); b.input.disabled = true; b.scroll.scrollTop = 0;
+  const dto = presentedPreview(); b.api.arm("three-probes"); b.click(); b.adopt(dto); b.advance(3);
+  let deadline;
+  for (let index = 0; index < 3; index++) {
+    const plan = b.api.prepareInteraction(); assert.equal(plan.attempt, index + 1);
+    deadline ??= b.api.snapshot().phase.probe.deadline_at;
+    b.wheelEvent(true, plan.delta); b.scroll.scrollTop += plan.delta;
+    dto.revision = `next-subject-${index}`; b.adopt(dto); b.advance(3);
+    assert.equal(b.api.snapshot().phase.usableAt, null);
+    assert.equal(b.api.snapshot().phase.probe.deadline_at, deadline);
+  }
+  assert.equal(b.api.prepareInteraction().code, "probe_attempts_exhausted");
+  assert.equal(b.api.snapshot().phase.probe.attempts.length, 3); b.api.dispose();
+  const stable = browser(); stable.input.disabled = true;
+  stable.api.arm("no-movement"); stable.click(); stable.adopt(page()); stable.advance(3);
+  stable.api.prepareInteraction(); stable.wheelEvent(); stable.advance(4);
+  assert.equal(stable.api.prepareInteraction(), null); assert.equal(stable.api.snapshot().phase.probe.attempts.length, 1);
+  stable.advance(320); assert.equal(stable.api.prepareInteraction().code, "probe_deadline_exceeded");
+  assert.equal(stable.api.snapshot().phase.usableAt, null); stable.api.dispose();
+});
+
+test("probe driver shares one absolute deadline, rejects repeated attempts and preserves cleanup errors", async () => {
+  let clock = 0; const remaining = []; const released = []; let index = 0;
+  await driveChatPreviewProbe({ now: () => clock,
+    next: async (left) => { remaining.push(left); clock += 50; return ++index < 3 ? { kind: "wheel", attempt: index } : { kind: "complete" }; },
+    isCurrent: async () => true, act: async () => { clock += 500; }, release: async (plan) => released.push(plan.kind) });
+  assert.deepEqual(remaining, [5000, 4450, 3900]); assert.equal(released.length, 3);
+  await assert.rejects(driveChatPreviewProbe({ now: () => clock,
+    next: async () => ({ kind: "wheel", attempt: 1 }), isCurrent: async () => true,
+    act: async () => { clock += 5001; } }), { code: "probe_deadline_exceeded" });
+  await assert.rejects(driveChatPreviewProbe({ next: async () => ({ kind: "wheel", attempt: 1 }),
+    isCurrent: async () => true, act: async () => {} }), { code: "invalid_or_repeated_probe_attempt" });
+  await assert.rejects(driveChatPreviewProbe({ next: async () => ({ kind: "failed", code: "probe_attempts_exhausted" }),
+    release: async () => { throw new Error("release-failed"); } }), (error) => error instanceof AggregateError
+      && error.cause.code === "probe_attempts_exhausted" && error.errors[1].message === "release-failed");
+});
+
 test("readonly overflowing output requires a trusted wheel and actual two-frame scroll change", () => {
   const b = browser(); b.input.disabled = true;
   b.api.arm("overflow"); b.click(); b.api.noteRequest(); b.adopt(page()); b.advance(3);
@@ -1062,7 +1248,8 @@ test("normal desktop Chat activation keeps the original trusted Roster clock and
 test("usable subject may bind a later real render before the first probe without resetting the click/readable clocks", () => {
   const b = browser(); b.api.arm("transition"); b.click(); b.api.noteRequest(); b.adopt(page({ preview: true })); b.advance(3);
   const original = b.api.snapshot().phase;
-  b.adopt(page()); assert.equal(b.api.prepareInteraction().kind, "input");
+  b.adopt(page()); assert.equal(b.api.prepareInteraction(), null);
+  b.advance(3); assert.equal(b.api.prepareInteraction().kind, "input");
   b.input.value = "probe"; b.document.activeElement = b.input; b.inputEvent(); b.advance(3);
   const final = b.api.snapshot();
   assert.equal(final.phase.clickAt, original.clickAt); assert.equal(final.phase.readableAt, original.readableAt);

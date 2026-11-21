@@ -998,6 +998,25 @@ frames before a new endpoint can be stamped. Malformed claimed scopes remain
 errors. Bounded rejection records retain field shapes and available request
 context without transcript or identifier values.
 
+The timing observer classifies only the exact desktop rejection `chat source
+temporarily busy` with a known original page-request sequence, dispatch time,
+operation and phase as a pending retry. The SDK promise and normal product retry
+remain unchanged. Every rejection still increments the raw error count; at most
+eight structural records and 8 KiB are retained. Other errors and unknown request
+association remain fatal. Recovery requires a normal request dispatched after the
+rejection, a validated target matching the current admitted DOM, and two fresh
+frames without a visible direct-child transcript alert. Old replies and empty
+reset controls cannot recover it. Pending retry or a current transcript alert
+blocks usability, qualification, endpoint waits and final acceptance, even when
+earlier endpoint timestamps exist.
+The reported latency remains the first healthy usable witness. A busy error
+before it delays that witness under the original opening budget. An error after
+it preserves the historical timestamps and metrics, but final acceptance still
+requires fresh post-rejection target health and, for qualified cases, fresh
+canonical frame proof. Recovery qualification is recorded separately; old
+qualification cannot satisfy that gate. No late recovery input or renewed probe
+deadline is required to preserve an already healthy first usability witness.
+
 The `chat-preview-identity-native` opening case also recognizes a source-backed
 answer in the provisional shared renderer. It requires one unambiguous producer
 item/event-reference binding, the literal answer anchor and turn key in the DOM,
@@ -1029,7 +1048,15 @@ model discovery or wake. If no safe composer exists, an overflowing owned viewpo
 uses a trusted wheel. Its baseline comes from the existing DOM metadata read before
 the action, so compositor scrolling before the event handler cannot erase it.
 Both an actual trusted event inside that region and an offset change are required.
-There is no retry or fallback after a failed probe; no safe control fails honestly.
+An ordinary subject replacement cancels the old probe and pending frame proof.
+The replacement must pass fresh admitted paint frames and receive its own trusted
+input or wheel; old input never credits a new scope or DOM subject. Each opening
+permits at most three probe attempts within one absolute five-second probe window.
+The original Roster, readable and usable clocks never reset. An unchanged subject
+with no scroll movement is not retried. No safe control, an exhausted attempt cap,
+or an expired deadline fails honestly. Content-free attempt evidence retains the
+selected wheel delta and baseline, actual trusted event delta, current scroll and
+subject predicates, and frame/invalidation times, capped at three records/4 KiB.
 The fixture never toggles Off Chat away or loads history to manufacture activation
 or overflow. Both paint and trusted interaction retain the same admitted body and
 scope through two animation frames. Live cold/warm and small Mock Saved-Off cold/warm

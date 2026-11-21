@@ -25,7 +25,7 @@ import {
   STOPPED_SOURCE_CAPABILITY, stageSyntheticStoppedSource, verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   trustedClickWithPendingCapture,
   chatTimingReceipt, chatTimingCandidateDetails, chatPreviewObserverScript, assertChatTimingSample, recordChatTimingCase, writeChatTimingReport,
-  recordRejectedChatScope,
+  recordRejectedChatScope, driveChatPreviewProbe,
 } from "../lib/chatPreviewTiming.mjs";
 
 const enabled = process.env.WARDIAN_E2E_CHAT_PREVIEW_TIMING === "1";
@@ -110,15 +110,16 @@ async function measureDesktop(driver, fixture, label, report, save, options, aft
     if (mode.needsToggle) await mode.node.click();
     // Normal mode activation remains inside the original trusted Roster clock.
     await desktopEndpoint(driver, "readableAt", 5_000);
-    const plan = await driver.wait(() => driver.executeScript(() => window.__chatPreviewTiming.prepareInteraction()),
-      5_000, "No safe owned control appeared before the interaction deadline", 25);
-    assert.ok(plan?.node, "No safe owned control for the original painted body");
-    if (plan.kind === "input") await plan.node.sendKeys(probe);
-    else {
-      assert.equal(plan.kind, "wheel");
-      await driver.actions({ async: true }).scroll(0, 0, 0, plan.delta, plan.node).perform();
-    }
-    await desktopEndpoint(driver, "usableAt", 5_000);
+    await driveChatPreviewProbe({
+      next: (remaining) => driver.wait(() => driver.executeScript(() => window.__chatPreviewTiming.prepareInteraction()),
+        remaining, "No safe owned control appeared before the original interaction deadline", 25),
+      isCurrent: (plan) => driver.executeScript((attempt) => window.__chatPreviewTiming.isInteractionCurrent(attempt), plan.attempt),
+      act: async (plan) => {
+        assert.ok(plan.node, "No safe owned control for the current painted body");
+        if (plan.kind === "input") await plan.node.sendKeys(probe);
+        else await driver.actions({ async: true }).scroll(0, 0, 0, plan.delta, plan.node).perform();
+      },
+    });
     await afterUsable?.();
     if (options.requireQualified) await desktopEndpoint(driver, "qualifiedAt", 30_000);
     return endpointResult(await driver.executeScript(() => window.__chatPreviewTiming.snapshot()), options);
@@ -154,22 +155,36 @@ async function measureRemote(page, fixture, label, report, save, options, afterU
       () => page.getByRole("button", { name: `Open ${fixture.name} details`, exact: true }).click(), pending);
     process.stdout.write(`[chat-preview-timing] trusted click active: ${label}\n`);
     await page.evaluate(() => window.__chatPreviewTiming.wait("readableAt", 5_000));
-    const handle = await page.waitForFunction(() => window.__chatPreviewTiming.prepareInteraction(), null, { timeout: 5_000, polling: "raf" });
-    try {
-      const kind = await (await handle.getProperty("kind")).jsonValue();
-      const node = (await handle.getProperty("node")).asElement();
-      assert.ok(node, "No safe owned PWA control for original painted body");
-      if (kind === "input") await node.type(probe);
-      else {
-        assert.equal(kind, "wheel");
-        const bounds = await node.boundingBox();
-        assert.ok(bounds);
-        const delta = await (await handle.getProperty("delta")).jsonValue();
-        await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
-        await page.mouse.wheel(0, delta);
-      }
-    } finally { await handle.dispose(); }
-    await page.evaluate(() => window.__chatPreviewTiming.wait("usableAt", 5_000));
+    await driveChatPreviewProbe({
+      next: async (remaining) => {
+        const handle = await page.waitForFunction(() => window.__chatPreviewTiming.prepareInteraction(), null, { timeout: remaining, polling: "raf" });
+        try {
+          const kind = await (await handle.getProperty("kind")).jsonValue();
+          if (kind === "complete") return { kind, handle };
+          if (kind === "failed") return { kind, handle, code: await (await handle.getProperty("code")).jsonValue() };
+          return { kind, handle, node: (await handle.getProperty("node")).asElement(),
+            attempt: await (await handle.getProperty("attempt")).jsonValue(),
+            delta: kind === "wheel" ? await (await handle.getProperty("delta")).jsonValue() : null };
+        } catch (error) {
+          const failures = [error];
+          try { await handle.dispose(); }
+          catch (cleanupError) { failures.push(cleanupError); }
+          if (failures.length > 1) throw new AggregateError(failures, "Probe plan and handle cleanup failed", { cause: error });
+          throw error;
+        }
+      },
+      isCurrent: (plan) => page.evaluate((attempt) => window.__chatPreviewTiming.isInteractionCurrent(attempt), plan.attempt),
+      act: async (plan) => {
+        assert.ok(plan.node, "No safe owned PWA control for the current painted body");
+        if (plan.kind === "input") await plan.node.type(probe);
+        else {
+          const bounds = await plan.node.boundingBox(); assert.ok(bounds);
+          await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+          await page.mouse.wheel(0, plan.delta);
+        }
+      },
+      release: (plan) => plan.handle.dispose(),
+    });
     await afterUsable?.();
     if (options.requireQualified) await page.evaluate(() => window.__chatPreviewTiming.wait("qualifiedAt", 30_000));
     return endpointResult(await page.evaluate(() => window.__chatPreviewTiming.snapshot()), options);
