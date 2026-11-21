@@ -415,6 +415,56 @@ impl InteractionState {
     }
 }
 
+impl InteractionState {
+    /// Read a controller-owned durable mailbox after the control layer has
+    /// authenticated and authorized its principal.
+    pub(crate) async fn receive_controller_messages(
+        &self,
+        recipient: &str,
+        cursor: Option<&str>,
+        ack_cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<wardian_core::agent_messaging::AgentMessagePage, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        if self.deleted_sessions.lock().await.contains(recipient) {
+            return Err(AgentMessagingError::new(
+                "unauthorized",
+                "Receiver was deleted.",
+            ));
+        }
+        store::with_db(|conn| store::receive(conn, recipient, cursor, ack_cursor, limit))
+    }
+
+    /// Check controller mailbox activity without advancing its durable cursor.
+    pub(crate) async fn has_unacknowledged_controller_messages(
+        &self,
+        recipient: &str,
+    ) -> Result<bool, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        if self.deleted_sessions.lock().await.contains(recipient) {
+            return Err(AgentMessagingError::new(
+                "unauthorized",
+                "Receiver was deleted.",
+            ));
+        }
+        store::with_db(|conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM agent_message_availability a
+                    LEFT JOIN agent_message_delivery d ON d.interaction_id=a.interaction_id
+                    WHERE a.recipient=?1
+                    AND a.sequence > COALESCE(
+                        (SELECT sequence FROM agent_message_ack WHERE recipient=?1),0
+                    )
+                    AND (d.owner IS NULL OR d.owner IN ('stored','pending','receiver_available'))
+                )",
+                [recipient],
+                |row| row.get(0),
+            )?)
+        })
+    }
+}
+
 /// Test-only compatibility helpers for durable mailbox regression fixtures.
 #[cfg(test)]
 mod test_support {

@@ -1,6 +1,35 @@
 use super::*;
 use rusqlite::Connection;
 use serde_json::{json, Value};
+use wardian_core::conversations::{
+    read_jsonl_records, write_jsonl_atomic, ConversationNarrativeRecord, ConversationSourceRecord,
+};
+
+struct ArchiveHome {
+    directory: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ArchiveHome {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("WARDIAN_HOME");
+        std::env::set_var("WARDIAN_HOME", directory.path());
+        Self {
+            directory,
+            previous,
+        }
+    }
+}
+
+impl Drop for ArchiveHome {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => std::env::set_var("WARDIAN_HOME", previous),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+}
 
 fn fixture() -> Vec<Value> {
     serde_json::from_str(include_str!(
@@ -166,6 +195,135 @@ fn field(number: usize, bytes: &[u8]) -> Vec<u8> {
     result.extend(varint(bytes.len()));
     result.extend(bytes);
     result
+}
+
+#[test]
+fn antigravity_archive_replay_preserves_legacy_sources_when_tools_shift_sequence() {
+    let _lock = crate::utils::wardian_test_env_lock();
+    let home = ArchiveHome::new();
+    let path = home.directory.path().join("synthetic.db");
+    let connection = database(&path);
+    connection.execute("DELETE FROM steps", []).unwrap();
+    let planner = |first_args: &[u8]| {
+        let call = |args: &[u8]| {
+            let mut call = field(2, b"run_command");
+            call.extend(field(3, args));
+            field(7, &call)
+        };
+        let mut calls = call(first_args);
+        calls.extend(call(br#"{"CommandLine":"echo second"}"#));
+        let mut payload = vec![0x2a, 2, 0x18, 2];
+        payload.extend(field(20, &calls));
+        payload
+    };
+    connection
+        .execute("INSERT INTO steps VALUES (1,15,?1)", [planner(b"{")])
+        .unwrap();
+    let initial = load_antigravity_database_chat_events("agent", "antigravity", &path);
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].metadata["tool_ordinal"], 1);
+    let mut context = ConversationArchiveContext::for_agent_id("agent", "antigravity");
+    context.provider_session_ids = vec!["synthetic".to_string()];
+    let archive = crate::state::ConversationArchiveState::default();
+    archive
+        .append_chat_events_with_context(context.clone(), &initial)
+        .unwrap();
+    let conversation_id = archive.active_conversation_id_for_test("agent").unwrap();
+    let directory = wardian_core::paths::agent_conversation_dir("agent", &conversation_id).unwrap();
+    let sources_path = directory.join("sources.jsonl");
+    let records_path = directory.join("conversation.jsonl");
+
+    // Recreate the published pre-fix shape in this synthetic profile only.
+    let mut sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path).unwrap();
+    sources[0].source_id = "src_1".to_string();
+    sources[0].provider_session_id = None;
+    sources[0].cursor = Some("1".to_string());
+    sources[0].provider_event_type = Some("run_command".to_string());
+    write_jsonl_atomic(&sources_path, &sources).unwrap();
+    let legacy_source = sources[0].clone();
+    let legacy_bytes = std::fs::read(&sources_path).unwrap();
+    let mut records: Vec<ConversationNarrativeRecord> = read_jsonl_records(&records_path).unwrap();
+    records[0].source_refs = vec!["src_1".to_string()];
+    write_jsonl_atomic(&records_path, &records).unwrap();
+    let legacy_record = records[0].clone();
+    drop(archive);
+
+    connection
+        .execute(
+            "UPDATE steps SET step_payload=?1",
+            [planner(br#"{"CommandLine":"echo first"}"#)],
+        )
+        .unwrap();
+    let mut complete = load_antigravity_database_chat_events("agent", "antigravity", &path);
+    assert_eq!(complete.len(), 2);
+    assert_eq!(complete[1].id, initial[0].id);
+    assert_eq!(complete[1].sequence, Some(2));
+    let restarted = crate::state::ConversationArchiveState::default();
+    assert_eq!(
+        restarted
+            .append_chat_events_with_context(context.clone(), &complete)
+            .expect("legacy replay must tolerate display renumbering"),
+        1
+    );
+    assert_eq!(
+        restarted
+            .append_chat_events_with_context(context, &complete)
+            .unwrap(),
+        0
+    );
+    let sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path).unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0], legacy_source);
+    assert!(sources[1]
+        .source_id
+        .starts_with("src_antigravity_observation_"));
+    assert!(std::fs::read(&sources_path)
+        .unwrap()
+        .starts_with(&legacy_bytes));
+    let records: Vec<ConversationNarrativeRecord> = read_jsonl_records(&records_path).unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0], legacy_record);
+    let published_sources = std::fs::read(&sources_path).unwrap();
+    complete[1].metadata["raw_type"] = json!("enriched_tool_type");
+    complete[1].metadata["hash"] = json!("updated-payload-version");
+    for _ in 0..2 {
+        restarted
+            .append_chat_events_with_context(
+                ConversationArchiveContext::for_agent_id("agent", "antigravity"),
+                &complete,
+            )
+            .unwrap();
+    }
+    assert_eq!(std::fs::read(&sources_path).unwrap(), published_sources);
+    // This is the archive boundary that New Session must cross before replacing
+    // the old provider runtime. Exercise it only in this synthetic profile.
+    restarted
+        .append_lifecycle_boundary_with_context(
+            ConversationArchiveContext::for_agent_id("agent", "antigravity"),
+            wardian_core::conversations::ConversationBoundaryReason::Clear,
+        )
+        .unwrap();
+    assert_eq!(
+        restarted
+            .rollover_agent(
+                "agent",
+                wardian_core::conversations::ConversationBoundaryReason::Clear,
+            )
+            .unwrap(),
+        Some(conversation_id.clone())
+    );
+    let fresh_path = home.directory.path().join("fresh.db");
+    let _fresh_database = database(&fresh_path);
+    let fresh_events = load_antigravity_database_chat_events("agent", "antigravity", &fresh_path);
+    let mut fresh_context = ConversationArchiveContext::for_agent_id("agent", "antigravity");
+    fresh_context.provider_session_ids = vec!["fresh".to_string()];
+    restarted
+        .append_chat_events_with_context(fresh_context, &fresh_events)
+        .unwrap();
+    assert_ne!(
+        restarted.active_conversation_id_for_test("agent"),
+        Some(conversation_id)
+    );
 }
 
 #[test]

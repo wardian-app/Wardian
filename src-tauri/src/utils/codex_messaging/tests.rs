@@ -33,6 +33,59 @@ fn read_config(codex: &Path) -> DocumentMut {
 }
 
 #[test]
+fn fresh_profile_keeps_managed_messaging_policy_and_explicit_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let selected_home = prepare(home, "selected-agent", true);
+    ensure_managed_messaging(home, "selected-agent").unwrap();
+    let mut selected = read_config(&selected_home);
+    selected["mcp_servers"][SERVER]["enabled"] = value(false);
+    let mut tools = Array::new();
+    tools.push("read_history");
+    selected["mcp_servers"][SERVER]["enabled_tools"] = value(tools);
+    let path = selected_home.join("config.toml");
+    std::fs::write(&path, selected.to_string()).unwrap();
+
+    let target = ProfileTarget::Fresh {
+        wardian_home: home,
+        run_id: "run-agent",
+    };
+    let profile = McpProfile::load(home, "selected-agent").unwrap().unwrap();
+    let projection = ProfileProjection {
+        profile: &profile,
+        target,
+    };
+    let mut launched = DocumentMut::new();
+    projection.apply(&mut launched).unwrap();
+    let server = &launched["mcp_servers"][SERVER];
+    assert!(projection.inherits_messaging());
+    assert_eq!(server["enabled"].as_bool(), Some(false));
+    assert_eq!(server["enabled_tools"][0].as_str(), Some("read_history"));
+    assert_eq!(
+        server["env"]["WARDIAN_SESSION_ID"].as_str(),
+        Some("run-agent")
+    );
+    assert_eq!(
+        read_config(&selected_home).to_string(),
+        selected.to_string()
+    );
+
+    selected["mcp_servers"]
+        .as_table_like_mut()
+        .unwrap()
+        .remove(SERVER);
+    std::fs::write(&path, selected.to_string()).unwrap();
+    let profile = McpProfile::load(home, "selected-agent").unwrap().unwrap();
+    let projection = ProfileProjection {
+        profile: &profile,
+        target,
+    };
+    projection.apply(&mut launched).unwrap();
+    assert!(projection.inherits_messaging());
+    assert!(launched["mcp_servers"].get(SERVER).is_none());
+}
+
+#[test]
 fn registration_binds_two_agents_and_is_byte_idempotent_without_approval_grants() {
     let temp = tempfile::tempdir().unwrap();
     for agent in ["agent-one", "agent-two"] {

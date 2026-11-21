@@ -167,6 +167,18 @@ Antigravity runs directly in the real target workspace. Wardian does not use a p
   provider step and call position, and identifies tool results with the Tool
   role. Completion alone does not establish success. Unknown step layouts are
   omitted; this does not establish coverage of every Antigravity tool type.
+- SQLite archive sources use the database path, native step index, event kind,
+  and tool-call ordinal as their identity. Their cursor is the native step,
+  independent of display-sequence renumbering and mutable tool payloads.
+  Existing `src_<narrative-sequence>` rows retain their original provenance:
+  retry reuses one only when its exact archived event proves the same native
+  coordinate and the legacy row remains bound to that narrative. Its historical
+  payload metadata, fallback cursor, and missing session metadata are preserved
+  without rewriting the source history. Conflicting native coordinates still
+  fail capture.
+- A failed closing capture stops **New Session** before conversation rollover.
+  The UI and CLI preserve the original capture error and explain that the
+  current conversation is preserved and New Session can be retried.
 - The real-provider rendering audit uses a short exact marker prompt for Antigravity, submits it through Wardian's provider-aware prompt delivery path, and treats the post-clear respawn as marker-optional. This avoids mistaking echoed prompt text for the model response while still proving initial live rendering, resize, pause, and resume behavior.
 
 ### Prompt delivery

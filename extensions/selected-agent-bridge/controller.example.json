@@ -1,0 +1,8 @@
+{
+  "cli_path": "/absolute/path/to/wardian-cli",
+  "wardian_home": "/absolute/path/to/wardian-home",
+  "resource": "https://bridge.example/mcp",
+  "allowed_origins": [],
+  "port": 47691,
+  "audit_path": "/absolute/path/to/controller-audit.jsonl"
+}

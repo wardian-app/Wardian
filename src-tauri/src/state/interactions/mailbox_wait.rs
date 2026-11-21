@@ -80,6 +80,20 @@ impl InteractionState {
             });
         }
     }
+
+    /// Subscribe before a controller reads its durable mailbox so activity
+    /// published during the read cannot be missed.
+    pub(crate) async fn subscribe_agent_mailbox(
+        &self,
+        recipient: &str,
+    ) -> watch::Receiver<AgentMailboxSignal> {
+        self.agent_mailboxes
+            .lock()
+            .await
+            .entry(recipient.to_owned())
+            .or_insert_with(|| watch::channel(AgentMailboxSignal::default()).0)
+            .subscribe()
+    }
 }
 
 #[cfg(test)]
@@ -89,19 +103,6 @@ mod tests {
     use tokio::time::timeout;
 
     impl InteractionState {
-        /// Subscribe before reading the durable mailbox in legacy wait fixtures.
-        pub(crate) async fn subscribe_agent_mailbox(
-            &self,
-            recipient: &str,
-        ) -> watch::Receiver<AgentMailboxSignal> {
-            self.agent_mailboxes
-                .lock()
-                .await
-                .entry(recipient.to_owned())
-                .or_insert_with(|| watch::channel(AgentMailboxSignal::default()).0)
-                .subscribe()
-        }
-
         /// Read the provider revision through the test-only mailbox subscription.
         pub(crate) async fn agent_message_provider_revision(&self, recipient: &str) -> u64 {
             self.subscribe_agent_mailbox(recipient)

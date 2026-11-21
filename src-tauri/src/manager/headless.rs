@@ -136,10 +136,9 @@ pub struct HeadlessRunOptions<'a> {
     pub cwd: &'a std::path::Path,
     pub prompt: &'a str,
     pub wardian_session_id: &'a str,
-    /// Registered agent that owns recall and in-process `wardian memory`
-    /// commands. Fresh automation workers may keep a synthetic provider session
-    /// while using this durable memory identity. `None` disables durable
-    /// memory for ephemeral automation providers.
+    /// Registered agent that owns recall, in-process `wardian memory` commands,
+    /// and the Codex MCP profile. Fresh automations still use a separate process
+    /// session. Ephemeral provider workers have no registered agent.
     pub memory_agent_id: Option<&'a str>,
     pub resume_session: Option<&'a str>,
     pub output_format: &'a str,
@@ -225,6 +224,7 @@ fn headless_provider_context(
     provider_name: &str,
     cwd: &std::path::Path,
     wardian_session_id: &str,
+    profile_agent_id: Option<&str>,
     config_override: Option<&AgentConfig>,
     persisted_config: Option<&AgentConfig>,
 ) -> Result<HeadlessProviderContext, String> {
@@ -233,8 +233,13 @@ fn headless_provider_context(
         .map(|config| config.agent_class.trim().to_string())
         .filter(|class_name| !class_name.is_empty())
         .unwrap_or_default();
-    let habitat_root =
-        prepare_provider_habitat(provider_name, cwd, &class_name, Some(wardian_session_id))?;
+    let habitat_root = prepare_provider_habitat_with_profile(
+        provider_name,
+        cwd,
+        &class_name,
+        Some(wardian_session_id),
+        profile_agent_id,
+    )?;
     let command_cwd =
         super::interactive_provider_cwd(provider_name, cwd, habitat_root.as_deref(), None);
     let args_cwd = if provider_name == "opencode" {
@@ -530,6 +535,7 @@ pub(crate) async fn run_headless_with_client_authority(
         provider_name,
         cwd,
         wardian_session_id,
+        memory_agent_id,
         config_override,
         persisted_config.as_ref(),
     )?;
@@ -1523,6 +1529,17 @@ async fn obtain_session_id_inner(
                 )?;
             } else {
                 sync_codex_agent_home(&real_codex_home, bootstrap_home, std::path::Path::new(""))?;
+            }
+            if let Some(profile_id) = bootstrap_session_id {
+                use crate::utils::codex_messaging::{McpProfile, ProfileProjection, ProfileTarget};
+                let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+                if let Some(profile) = McpProfile::load(&wardian_home, profile_id)? {
+                    ProfileProjection {
+                        profile: &profile,
+                        target: ProfileTarget::Bootstrap,
+                    }
+                    .write_bootstrap_config(bootstrap_home)?;
+                }
             }
             cmd.env("CODEX_HOME", bootstrap_home);
         } else if let Some(root) = habitat_root.as_ref() {
@@ -3456,6 +3473,7 @@ mod tests {
             workspace.path(),
             "agent-1",
             None,
+            None,
             Some(&persisted),
         )
         .expect("headless context");
@@ -3485,6 +3503,114 @@ mod tests {
     }
 
     #[test]
+    fn codex_headless_context_projects_the_selected_agents_mcp_profile() {
+        let test_home = TestWardianHome::new();
+        let workspace = tempfile::tempdir().unwrap();
+        let upstream = test_home._home.path().join("upstream");
+        std::fs::create_dir(&upstream).unwrap();
+        let previous_upstream = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", &upstream);
+        struct RestoreCodexHome(Option<OsString>);
+        impl Drop for RestoreCodexHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("CODEX_HOME", value),
+                    None => std::env::remove_var("CODEX_HOME"),
+                }
+            }
+        }
+        let _restore_upstream = RestoreCodexHome(previous_upstream);
+        std::fs::write(
+            upstream.join("config.toml"),
+            "[mcp_servers.stub]\ncommand = 'upstream-command'\nenabled_tools = ['upstream-tool']\ncwd = 'upstream-cwd'\n[mcp_servers.stub.env]\nSTUB_VALUE = 'upstream'\n",
+        )
+        .unwrap();
+        let agent_home = habitat_codex_home(
+            &prepare_habitat_workspace(workspace.path(), "", "selected-agent").unwrap(),
+        );
+        std::fs::create_dir(&agent_home).unwrap();
+        let selected = r#"
+[mcp_servers.stub]
+command = 'stub-command'
+enabled_tools = ['allowed']
+cwd = 'stub-cwd'
+[mcp_servers.stub.env]
+STUB_VALUE = 'fixture'
+[mcp_servers.agent_only]
+command = 'selected-only-command'
+[mcp_servers.wardian]
+command = 'user-command'
+enabled = false
+enabled_tools = ['restricted']
+disabled_tools = ['denied']
+[mcp_servers.wardian.env]
+WARDIAN_SESSION_ID = 'selected-agent'
+WARDIAN_HOME = 'old-home'
+OTHER = 'keep'
+"#;
+        std::fs::write(agent_home.join("config.toml"), selected).unwrap();
+
+        let prepare = |session_id, selected_agent| {
+            let context = headless_provider_context(
+                "codex",
+                workspace.path(),
+                session_id,
+                selected_agent,
+                None,
+                None,
+            )
+            .unwrap();
+            let home = habitat_codex_home(&context.habitat_root.unwrap());
+            let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+            (home, config.parse::<toml_edit::DocumentMut>().unwrap())
+        };
+        let (fresh_home, fresh) = prepare("automation-bg-test", Some("selected-agent"));
+        assert_eq!(
+            std::fs::read_to_string(agent_home.join("config.toml")).unwrap(),
+            selected
+        );
+        let (resume_home, resume) = prepare("selected-agent", Some("selected-agent"));
+        let (_, temporary) = prepare("automation-temp-test", None);
+        assert_ne!(fresh_home, resume_home);
+        assert_eq!(resume_home, agent_home);
+        for config in [&fresh, &resume] {
+            let server = config["mcp_servers"]
+                .get("stub")
+                .expect("selected MCP server");
+            assert_eq!(server["command"].as_str(), Some("stub-command"));
+            assert_eq!(server["enabled_tools"][0].as_str(), Some("allowed"));
+            assert_eq!(server["cwd"].as_str(), Some("stub-cwd"));
+            assert_eq!(server["env"]["STUB_VALUE"].as_str(), Some("fixture"));
+            assert!(config["mcp_servers"].get("agent_only").is_some());
+            let messaging = &config["mcp_servers"]["wardian"];
+            assert_eq!(messaging["command"].as_str(), Some("user-command"));
+            assert_eq!(messaging["enabled"].as_bool(), Some(false));
+            assert_eq!(messaging["enabled_tools"][0].as_str(), Some("restricted"));
+            assert_eq!(messaging["disabled_tools"][0].as_str(), Some("denied"));
+            assert_eq!(messaging["env"]["OTHER"].as_str(), Some("keep"));
+        }
+        let fresh_env = &fresh["mcp_servers"]["wardian"]["env"];
+        assert_eq!(
+            fresh_env["WARDIAN_SESSION_ID"].as_str(),
+            Some("automation-bg-test")
+        );
+        assert_eq!(
+            fresh_env["WARDIAN_HOME"].as_str(),
+            test_home._home.path().to_str()
+        );
+        assert_eq!(
+            resume["mcp_servers"]["wardian"]["env"]["WARDIAN_SESSION_ID"].as_str(),
+            Some("selected-agent")
+        );
+        assert!(temporary["mcp_servers"].get("agent_only").is_none());
+        assert!(temporary["mcp_servers"].get("wardian").is_none());
+        assert_eq!(
+            temporary["mcp_servers"]["stub"]["enabled_tools"][0].as_str(),
+            Some("upstream-tool")
+        );
+    }
+
+    #[test]
     fn opencode_headless_context_keeps_real_workspace_as_run_dir() {
         let _guard = crate::utils::wardian_test_env_lock();
         let previous_home = std::env::var_os("WARDIAN_HOME");
@@ -3502,6 +3628,7 @@ mod tests {
             "opencode",
             workspace.path(),
             "agent-1",
+            None,
             None,
             Some(&persisted),
         )

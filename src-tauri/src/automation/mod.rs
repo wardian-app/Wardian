@@ -804,6 +804,8 @@ impl StepExecutor for LiveStepExecutor {
 
 #[cfg(test)]
 mod tests {
+    mod codex_profile_e2e;
+
     use super::*;
     use crate::automation::runner::{FakeAgentRunner, FakeLiveAgentRunner};
     use std::sync::Arc;

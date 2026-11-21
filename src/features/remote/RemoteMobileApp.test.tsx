@@ -2610,12 +2610,16 @@ describe("RemoteMobileApp", () => {
       await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
       expect(await screen.findByText("Initial active message.")).toBeVisible();
       expect(chatCalls).toBe(1);
-      const statusSocket = MockWebSocket.instances.find((socket) => socket.url.includes("/remote/api/status-stream"));
-      if (!statusSocket) throw new Error("The active status stream must be connected before the repeated frame");
+      const statusSocket = await waitFor(() => {
+        const socket = MockWebSocket.instances.find((candidate) => candidate.url.includes("/remote/api/status-stream"));
+        expect(socket).toBeDefined();
+        return socket!;
+      });
 
       // Navigation may load views asynchronously; only the status-refresh phase needs a clock.
       vi.useFakeTimers({ shouldClearNativeTimers: true });
       act(() => {
+        statusSocket.emit("open");
         statusSocket.emit("message", {
           data: JSON.stringify({
             type: "agent_status",

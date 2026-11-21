@@ -3556,7 +3556,7 @@ async fn clear_agent_session_inner(
         &session_id,
     )
     .await
-    .map_err(|error| format!("Failed to acquire the closing provider log: {error}"))?;
+    .map_err(clear_observability::closing_capture_error)?;
     // Persist the closing evidence while the old runtime is intact, but leave
     // the archive open until the replacement runtime and metadata commit.
     let archive_snapshot = match archive_snapshot {

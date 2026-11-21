@@ -1184,7 +1184,7 @@ describe("normal Chat page polling", () => {
   });
 
   it("rejects a body from a different published generation", async () => {
-    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(page("agent"))
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(page("agent", { events: [row("current")] }))
       .mockResolvedValueOnce(page("agent", { generation: "foreign", detail: { event_id: "event", text: "body", next: null, complete: true } }));
     const hook = renderHook(() => useChatPages("agent", loader, 60_000, 0));
     await waitFor(() => expect(hook.result.current.page).not.toBeNull());

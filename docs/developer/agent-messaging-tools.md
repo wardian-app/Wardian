@@ -338,8 +338,15 @@ untrusted-startup diagnostic; the harness does not answer native trust prompts.
 
 Attached mode also requires both original terminals to remain on the same
 owned provider sessions and display exchange activity. Lifecycle checks prove
-that idle information does not start a turn and that one interrupt affects the
-exact observed active turn. Background mode, selected with
+that newly admitted information starts exactly one same-thread provider turn
+as context, without creating a task or reply obligation, and that one interrupt
+affects the exact observed active turn. Background mode, selected with
 `WARDIAN_E2E_MESSAGING_V2_MODE=background` and the lifecycle flag unset, checks a
 later task after owner exit: a new generation must resume the same conversation
 and recall the prior result without being given that result again.
+
+## External controller ingress
+
+`ControllerMessaging` is an authenticated capability port distinct from `MessageOrigin`. Its bearer grant names an exact HTTPS resource, selected agent UUIDs and operation scopes. The backend validates it independently of transport validation and preserves canonical admission, provider claims, replies and completion outbox behavior. Controller mailbox owners use `controller:<uuid>` and never become provider agents. Receive acknowledgement requires a separate capability; quiet waits recheck revocation. No schema migration or provider-session changes are required.
+
+See the [external controller transport guide](https://github.com/wardian-app/Wardian/blob/main/extensions/selected-agent-bridge/CONTROLLERS.md) for activation, transport constraints and acceptance testing.

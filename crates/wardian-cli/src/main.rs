@@ -7,7 +7,7 @@ mod automation_invoker;
 mod automation_replay;
 mod browser;
 mod disk;
-mod early_commands;
+pub(crate) mod early_commands;
 mod errors;
 mod graph;
 mod inbox;
@@ -65,7 +65,7 @@ fn run() -> i32 {
         return error.code_i32();
     }
     let result = match cli.command {
-        Command::Mcp { .. } => unreachable!("MCP runs before home migration"),
+        Command::Mcp { .. } | Command::Controller(_) => unreachable!("early CLI command"),
         Command::Schema { path } => schema::render(&path),
         Command::Agent(args) => handle_agent(args),
         Command::Artifact(args) => artifact::handle_artifact(args),
