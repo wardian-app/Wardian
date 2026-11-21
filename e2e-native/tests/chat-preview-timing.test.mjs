@@ -11,8 +11,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { randomUUID, createHash } from "node:crypto";
 import { acquireHomeLock } from "../lib/sessionHome.mjs";
+import { createWindowsSupervisorPlan } from "../../scripts/native-e2e-runner.mjs";
 import {
   CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, CHAT_PREVIEW_RULER_VERSION, chatPreviewWatchdogMs,
+  chatPreviewHomePaths, chatPreviewSocketPath, assertFreshChatPreviewHome, assertPreclaimedChatPreviewBase, assertChatPreviewHomeBinding,
   syntheticCodexSource, stageSyntheticStoppedSource, prepareSyntheticProviderHomes, verifySyntheticSourceProjection,
   verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   assertPendingCaptureBracket, trustedClickWithPendingCapture,
@@ -23,6 +25,141 @@ import {
 const fixture = { sessionId: "owned-agent", provider: "codex", body: "A uniquely completed synthetic answer.", name: "Synthetic Agent",
   synthetic: true, sourceKey: "native-source", sourceEpoch: "source-epoch", targetTurn: "synthetic-completed-unit", targetMessageId: "answer-128" };
 const v8Probe = "synthetic-unsent-timing-probe";
+
+test("supervisor HOME scope accepts only the literal default for its supplied fixed-width run", () => {
+  const r = "0123456789abcdef", expected = `C:\\wvc2\\wardian-e2e-native-${r}`;
+  assertChatPreviewHomeBinding(expected, r, expected);
+  for (const [home, run, resolved] of [
+    [expected, undefined, expected], [expected, "short", expected], ["C:\\foreign", r, expected],
+    [expected, r, `${expected}-other`], [expected.replaceAll("\\", "/"), r, expected], ["", r, expected],
+  ]) assert.throws(() => assertChatPreviewHomeBinding(home, run, resolved), { code: "chat_preview_nondefault_home_override" });
+});
+
+test("standalone no-HOME route remains fresh and a bound HOME cannot bypass the live preclaim guard", () => {
+  const f = parentClaimFixture();
+  assertChatPreviewHomeBinding(undefined, undefined, f.home);
+  assertFreshChatPreviewHome(f.home, () => false);
+  assertChatPreviewHomeBinding(f.home, f.runId, f.home);
+  f.io.lockHolderAlive = () => false;
+  assert.throws(() => assertPreclaimedChatPreviewBase(f.home, f.runId, f.io), { code: "chat_preview_invalid_parent_claim" });
+  assert.throws(() => assertFreshChatPreviewHome(f.home, () => true), { code: "chat_preview_home_collision" });
+});
+
+function parentClaimFixture() {
+  const runId = "0123456789abcdef";
+  const home = path.join(path.parse(process.cwd()).root, "wpv8", `wardian-e2e-native-${runId}`);
+  const owner = { runId, pid: 4321, startedAt: "2026-11-21T00:00:00.000Z" };
+  const rootEntries = [".native-e2e-lock"], lockEntries = ["owner.json"];
+  const metadata = new Map([home, path.join(home, ".native-e2e-lock"), path.join(home, ".native-e2e-lock", "owner.json")]
+    .map((target, index) => [target, { directory: index < 2, link: false, size: index === 2 ? 128 : 0 }]));
+  const io = {
+    lstatSync(target) {
+      const entry = metadata.get(target);
+      if (!entry) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      return { isSymbolicLink: () => entry.link, isDirectory: () => entry.directory, isFile: () => !entry.directory, size: entry.size };
+    },
+    realpathSync: target => target, readdirSync: target => target === home ? rootEntries : lockEntries,
+    readHomeLock: () => owner, lockHolderAlive: pid => pid === 4321,
+  };
+  return { runId, home, owner, rootEntries, lockEntries, metadata, io };
+}
+
+test("parent preclaim adoption preserves the live parent's exact run/PID metadata without writing", () => {
+  const f = parentClaimFixture(); const before = JSON.stringify(f.owner);
+  assert.equal(assertPreclaimedChatPreviewBase(f.home, f.runId, f.io), f.owner);
+  assert.equal(JSON.stringify(f.owner), before); assert.equal(f.owner.pid, 4321);
+});
+
+test("parent preclaim rejects dirty base and extra lock contents before preparation", () => {
+  for (const where of ["rootEntries", "lockEntries"]) {
+    const f = parentClaimFixture(); f[where].push("arbitrary-existing-state");
+    assert.throws(() => assertPreclaimedChatPreviewBase(f.home, f.runId, f.io));
+  }
+});
+
+test("parent preclaim rejects linked/nonplain root, lock, owner and redirected physical paths", () => {
+  for (const target of parentClaimFixture().metadata.keys()) {
+    const f = parentClaimFixture(); f.metadata.get(target).link = true;
+    assert.throws(() => assertPreclaimedChatPreviewBase(f.home, f.runId, f.io));
+  }
+  const f = parentClaimFixture(); f.io.realpathSync = target => target === f.home ? path.join(f.home, "foreign") : target;
+  assert.throws(() => assertPreclaimedChatPreviewBase(f.home, f.runId, f.io));
+  const wrongKind = parentClaimFixture(); wrongKind.metadata.get(wrongKind.home).directory = false;
+  assert.throws(() => assertPreclaimedChatPreviewBase(wrongKind.home, wrongKind.runId, wrongKind.io));
+});
+
+test("parent preclaim rejects missing/unreadable owner, foreign run, invalid/dead holder and oversized metadata", () => {
+  for (const mutate of [
+    f => { f.io.readHomeLock = () => null; }, f => { f.owner.runId = "fedcba9876543210"; }, f => { f.io.lockHolderAlive = () => false; },
+    f => { f.owner.pid = 0; }, f => { f.metadata.delete(path.join(f.home, ".native-e2e-lock", "owner.json")); },
+    f => { f.metadata.get(path.join(f.home, ".native-e2e-lock", "owner.json")).size = 4097; },
+  ]) { const f = parentClaimFixture(); mutate(f); assert.throws(() => assertPreclaimedChatPreviewBase(f.home, f.runId, f.io)); }
+});
+
+test("provided run cannot invent a missing parent claim or admit a colliding sibling", () => {
+  const f = parentClaimFixture(); f.metadata.delete(f.home);
+  assert.throws(() => assertPreclaimedChatPreviewBase(f.home, f.runId, f.io), { code: "ENOENT" });
+  const layout = chatPreviewHomePaths({ baseHome: f.home, runId: f.runId });
+  for (const item of layout.cases) assert.throws(() => assertFreshChatPreviewHome(item.home, () => true), { code: "chat_preview_home_collision" });
+  assert.throws(() => assertPreclaimedChatPreviewBase(f.home, "invalid", f.io), { code: "invalid_chat_preview_run_id" });
+});
+
+test("maintained supervisor binds the selected preclaim run, target index and exact executable/arguments hash", () => {
+  const runId = "0123456789abcdef", command = process.execPath;
+  const args = ["--test", "--test-concurrency=1", "e2e-native/tests/chat-preview-identity-native.test.mjs"];
+  const receipt = { path: path.join(path.parse(process.cwd()).root, "proof", "receipt.json"), runId, targetIndex: 0 };
+  const plan = createWindowsSupervisorPlan({ command, args }, "win32", receipt);
+  const value = flag => plan.args[plan.args.indexOf(flag) + 1];
+  assert.equal(value("-ReceiptRunId"), runId); assert.equal(value("-ReceiptTargetIndex"), "0");
+  assert.equal(value("-ReceiptTargetSha256"), createHash("sha256").update(command).update("\0").update(JSON.stringify(args)).digest("hex"));
+  assert.equal(value("-Executable"), command); assert.deepEqual(JSON.parse(value("-ArgumentsJson")), args);
+});
+
+test("short-home preflight rejects the old nested UUID path and keeps all four named Windows homes at 103 socket bytes", () => {
+  const w = path.win32, temp = "C:\\wpv8", runId = "0123456789abcdef";
+  const oldHome = w.join(temp, "wardian-e2e-native-00000000-0000-4000-8000-000000000000", "wardian-e2e-native-desktop-qualified");
+  assert.throws(() => chatPreviewSocketPath(oldHome, w), { code: "chat_preview_socket_path_too_long" });
+  const homes = chatPreviewHomePaths({ baseHome: w.join(temp, `wardian-e2e-native-${runId}`), runId }, w);
+  assert.deepEqual(homes.cases.map(item => item.code), ["d-p", "r-p", "d-q", "r-q"]);
+  for (const item of homes.cases) {
+    assert.equal(w.dirname(item.home), temp); assert.equal(w.basename(item.home), `wardian-e2e-native-${runId}-${item.code}`);
+    assert.equal(Buffer.byteLength(item.home), 47); assert.equal(item.bytes, 103); assert.ok(item.bytes <= 107);
+  }
+  assert.throws(() => chatPreviewHomePaths({ baseHome: homes.baseHome, runId: "not-fixed-width" }, w), { code: "invalid_chat_preview_run_id" });
+  assert.throws(() => chatPreviewHomePaths({ baseHome: "C:\\wpv8\\foreign", runId }, w), { code: "invalid_chat_preview_base_home" });
+  assert.throws(() => chatPreviewHomePaths({ baseHome: w.join("C:\\much-longer-owned-temp", `wardian-e2e-native-${runId}`), runId }, w), { code: "chat_preview_socket_path_too_long" });
+});
+
+test("short-home collision preflight refuses existing entries or unknown access without reset, ID retry or filesystem creation", () => {
+  const runId = "0123456789abcdef";
+  const homes = chatPreviewHomePaths({ baseHome: path.join(path.parse(process.cwd()).root, "wpv8", `wardian-e2e-native-${runId}`), runId });
+  const roots = [homes.baseHome, ...homes.cases.map(item => item.home)];
+  for (const collision of roots) {
+    const checked = [];
+    assert.throws(() => { for (const home of roots) assertFreshChatPreviewHome(home, target => { checked.push(target); return target === collision; }); }, { code: "chat_preview_home_collision" });
+    assert.equal(checked.filter(target => target === collision).length, 1); assert.equal(checked.at(-1), collision);
+    assert.equal(homes.runId, runId);
+  }
+  for (const home of roots) assertFreshChatPreviewHome(home, () => false);
+  const denied = Object.assign(new Error("unknown access"), { code: "EACCES" });
+  assert.throws(() => assertFreshChatPreviewHome(homes.baseHome, () => { throw denied; }), error => error === denied);
+});
+
+test("short-home source generation keeps body, workspace encoding, records and byte counts equal for every role/case", () => {
+  let expected;
+  const hashes = new Set();
+  for (const runId of ["a".repeat(16), "b".repeat(16)]) {
+    const homes = chatPreviewHomePaths({ baseHome: path.join(path.parse(process.cwd()).root, "wpv8", `wardian-e2e-native-${runId}`), runId });
+    for (const item of homes.cases) {
+      const source = syntheticCodexSource({ workspace: path.join(item.home, "synthetic-chat-workspace"), turns: 128, padding: 128,
+        nativeSessionId: runId.startsWith("a") ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222" });
+      expected ??= source.generation;
+      assert.deepEqual(source.generation, expected); assert.equal(Buffer.byteLength(source.body), 950);
+      assert.equal(source.nativeSessionId.length, 36); hashes.add(source.sourceSha256);
+    }
+  }
+  assert.ok(hashes.size > 1, "literal source values/hashes must not be normalized");
+});
 
 test("setup watchdog adds one 180-second preparation allowance per surface/mode without changing the UI budget", () => {
   assert.equal(CHAT_PREVIEW_SEED_TIMEOUT_MS, 180_000); assert.equal(CHAT_PREVIEW_BUDGET_MS, 1_000);

@@ -12,17 +12,18 @@ import path from "node:path";
 import net from "node:net";
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { By } from "selenium-webdriver";
 import { chromium } from "@playwright/test";
 import { createNativeHarness, assertNativePreflight, prepareIsolatedHome, startNativeSession, waitForAppShell, invokeTauri } from "../lib/harness.mjs";
 import { closeConformanceSession } from "../lib/conformance-cleanup.mjs";
-import { releaseHomeLock } from "../lib/sessionHome.mjs";
+import { releaseHomeLock, defaultNativeE2EHome } from "../lib/sessionHome.mjs";
 import { startRemoteClientTlsFixture } from "../lib/remoteClientTlsFixture.mjs";
 import { prepareChatPreviewCodexPeer } from "../lib/chatPreviewCodexPeer.mjs";
 import {
   CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, chatPreviewWatchdogMs,
+  chatPreviewHomePaths, assertFreshChatPreviewHome, assertPreclaimedChatPreviewBase, assertChatPreviewHomeBinding,
   STOPPED_SOURCE_CAPABILITY, stageSyntheticStoppedSource, prepareSyntheticProviderHomes, verifySyntheticSourceProjection,
   verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   trustedClickWithPendingCapture,
@@ -216,17 +217,27 @@ async function measureRemote(page, fixture, label, report, save, options, afterU
 test("real desktop and native-gateway PWA preview-to-qualified opening timing", { skip: !enabled, timeout: watchdogMs }, async () => {
   assert.equal(process.env.WARDIAN_NATIVE_SKIP_BUILD, "1", "Use the prebuilt fast runner; this benchmark never builds");
   assert.ok(process.env.WARDIAN_NATIVE_APP && process.env.WARDIAN_NATIVE_CLI, "Explicit frozen app and paired CLI are required");
-  // Equal-length UUID roots prevent per-turn cwd length from biasing paired raw sources.
-  assert.ok(!process.env.WARDIAN_E2E_NATIVE_HOME, "V8 uses fresh equal-length default homes, not an inherited explicit home");
+  // Fixed-width fresh IDs and case suffixes preserve byte equality without exceeding the in-home socket limit.
+  const suppliedRunId = process.env.WARDIAN_E2E_RUN_ID;
+  const runId = suppliedRunId ?? randomBytes(8).toString("hex");
+  const defaultHome = defaultNativeE2EHome(runId);
+  assertChatPreviewHomeBinding(process.env.WARDIAN_E2E_NATIVE_HOME, suppliedRunId, defaultHome);
+  const homes = chatPreviewHomePaths({ runId, baseHome: defaultHome });
+  if (suppliedRunId === undefined) assertFreshChatPreviewHome(homes.baseHome);
+  else assertPreclaimedChatPreviewBase(homes.baseHome, runId);
+  for (const item of homes.cases) assertFreshChatPreviewHome(item.home);
   const priorRunId = process.env.WARDIAN_E2E_RUN_ID;
-  process.env.WARDIAN_E2E_RUN_ID = randomUUID();
+  process.env.WARDIAN_E2E_RUN_ID = runId;
   let base;
   try { base = await createNativeHarness(); }
   finally { if (priorRunId === undefined) delete process.env.WARDIAN_E2E_RUN_ID; else process.env.WARDIAN_E2E_RUN_ID = priorRunId; }
+  assert.equal(base.isolatedHome, homes.baseHome, "Harness must retain the ordinary default home resolver");
   prepareIsolatedHome(base);
   const file = path.join(base.isolatedHome, "artifacts", "chat-preview-identity", "result.json");
   process.stdout.write(`[chat-preview-timing] evidence: ${file}\n`);
   const report = { schema_version: 2, ruler_version: CHAT_PREVIEW_RULER_VERSION, status: "RUNNING", cases: [], surfaces: [],
+    coordinator_claim: { run_id: runId, home: homes.baseHome, owner_pid: base.homeLock.pid,
+      origin: suppliedRunId === undefined ? "standalone_fresh" : "live_parent_preclaim" },
     deadlines: { seed_setup_ms: CHAT_PREVIEW_SEED_TIMEOUT_MS, outer_watchdog_ms: watchdogMs,
       opening_budget_ms: CHAT_PREVIEW_BUDGET_MS, qualified_wait_ms: 30_000 },
     timing_qualification: diagnostic ? "DIAGNOSTIC_ONLY_NOT_BENCHMARK" : "ISOLATED_BENCHMARK_ATTEMPT",
@@ -286,8 +297,9 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
     assert.ok(Number.isSafeInteger(pendingTurns) && pendingTurns >= 12_000 && pendingTurns <= 20_000, "Pending history must contain 12000..20000 turns");
     report.fixture_modes = modes;
     for (const { surface, mode } of modes.flatMap((mode) => ["desktop", "remote"].map((surface) => ({ mode, surface })))) {
-      const harness = { ...base, isolatedHome: path.join(base.isolatedHome, `wardian-e2e-native-${surface}-${mode}`), homeLock: undefined,
+      const harness = { ...base, isolatedHome: homes.cases.find((item) => item.surface === surface && item.mode === mode).home, homeLock: undefined,
         appPath: base.frozenArtifacts.app.path, sharedCliPath: base.frozenArtifacts.cli.path, ownsGeneratedHome: false };
+      assertFreshChatPreviewHome(harness.isolatedHome);
       const detail = { surface, fixture_mode: mode, status: "RUNNING", cleanup: {}, websocket: { status_frames_received: 0 }, errors: [] };
       report.surfaces.push(detail);
       let session; let browser; let page; let tls; let startupAttempted = false; let fixture;
