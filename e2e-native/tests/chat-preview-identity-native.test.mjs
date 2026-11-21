@@ -38,7 +38,7 @@ function endpointResult(snapshot, options) {
   const result = assertChatTimingSample(snapshot, options);
   // Concurrent-build diagnostics prove the ruler and product path, not a budget.
   return diagnostic ? { diagnostic_only: true, readable: true, usable: true, usability_probe: result.usability_probe,
-    evidence_level: result.evidence_level, transition: result.transition } : result;
+    evidence_level: result.evidence_level, renderer_at_readable: result.renderer_at_readable, transition: result.transition } : result;
 }
 
 async function eventually(operation, timeoutMs = 15_000) {
@@ -271,7 +271,8 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         assert.ok(agent?.provider === "codex" && agent.is_off === true && agent.session_name === fixture.name,
           "The real native roster must restore the owned stopped Codex agent");
         const observerConfig = { surface, sessionId: fixture.sessionId, provider: fixture.provider, name: fixture.name, body: fixture.body, probe,
-          synthetic: fixture.synthetic, targetTurn: fixture.targetTurn, targetMessageId: fixture.targetMessageId, captureDetails: diagnostic };
+          synthetic: fixture.synthetic, sourceKey: fixture.sourceKey, targetTurn: fixture.targetTurn,
+          targetMessageId: fixture.targetMessageId, captureDetails: diagnostic };
         if (surface === "desktop") {
           await session.driver.executeScript(chatPreviewObserverScript(observerConfig));
         } else {
@@ -324,7 +325,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         await adapter.beforeColdOpen?.({ harness, fixture, session, mode });
         if (mode === "pending") detail.cold_open_capture = pendingCaptureWitness(fixture);
         const measure = (label, cold) => {
-          const options = { requireQualified: mode === "qualified", requireAdmitted: false,
+          const options = { requireQualified: mode === "qualified", requireAdmitted: true,
             pendingFixture: mode === "pending" ? fixture : null,
             ...(diagnostic ? { budgetMs: Number.MAX_SAFE_INTEGER } : {}),
             requireTransition: !diagnostic && mode === "qualified" && cold && process.env.WARDIAN_CHAT_PREVIEW_REQUIRE_TRANSITION === "1" };

@@ -988,6 +988,19 @@ does not make null durable IDs valid. Preview paint proves recent-capability sco
 it does not grant canonical-ready, Older, detail or renewal authority. A matching
 empty unchanged response can retain the original current target receipt while its
 actual admitted scope stays the same.
+
+The `chat-preview-identity-native` opening case also recognizes a source-backed
+answer in the provisional shared renderer. It requires one unambiguous producer
+item/event-reference binding, the literal answer anchor and turn key in the DOM,
+and matching consumer session, conversation, generation, epoch, admission and
+revision across both frame witnesses. Bridge and item admissions must equal the
+page admission. Both desktop and Remote require the consumer scope marker.
+This proves provisional readability and usability; canonical qualification still
+requires the existing non-provisional, completed canonical answer. A
+preview-to-qualified interval can describe capture promotion in place and does
+not by itself prove a source-representation switch or anchor preservation.
+Those behaviors need their separate regression evidence.
+
 Readable timing retains the independent full raw assistant body/hash in the RPC
 proof. Before App startup, the existing Markdown parser prepares a bounded
 rendered-text witness; plain Mock text retains whole-text matching. The actual

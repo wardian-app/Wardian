@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentChatEvent, AgentChatPage, RemoteAgentSummary } from "../../types";
+import type { AgentChatEvent, AgentChatPage, ChatPresentationV1, RemoteAgentSummary } from "../../types";
 import { RemoteAgentDetailView } from "./RemoteAgentDetailView";
 import { remoteClient } from "./remoteClient";
 import { useRemoteStore } from "./useRemoteStore";
@@ -224,6 +224,62 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     expect(screen.getByRole("button", { name: /Worked.*4 steps/ })).toHaveAttribute("aria-expanded", "true");
     expect(section!.querySelector("[data-chat-anchor-key]")).toHaveAttribute("data-chat-anchor-key", legacy.events[0].id);
     expect(screen.getByText("All 42 tests passed.")).toBeVisible();
+  });
+
+  it("marks the bound provisional page actually rendered instead of the latest read page", () => {
+    const { provisional, canonical } = previewIdentityFixture(agent.session_id);
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatEvents: provisional.events,
+      chatPage: canonical, chatPresentationPage: provisional });
+    render(<RemoteAgentDetailView agent={agent} />);
+    expect(screen.getByTestId("chat-committed-turn")).toBeVisible();
+    expect(screen.getByRole("region", { name: "Coder chat" })).toHaveAttribute("data-chat-page-scope", JSON.stringify({
+      session: agent.session_id, conversation: provisional.conversation_id, generation: provisional.generation,
+      epoch: provisional.source_epoch, revision: "provisional-prefix", admission: "preview-admission",
+    }));
+  });
+
+  it("updates the rendered generation revision and admission together and clears an unready retired scope", () => {
+    const { provisional } = previewIdentityFixture(agent.session_id);
+    const payload = provisional.presentation!.payload as ChatPresentationV1;
+    const next: AgentChatPage = { ...provisional, generation: "next-generation", revision: "next-revision",
+      recent_admission: "next-admission", presentation: { version: 1, payload: { ...payload,
+        preview_bridge: { admission_id: "next-admission", canonical_head: "d".repeat(64) },
+        items: payload.items.map((item) => ({ ...item, admission_id: "next-admission" })),
+      } } };
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatEvents: provisional.events,
+      chatPage: provisional, chatPresentationPage: provisional });
+    render(<RemoteAgentDetailView agent={agent} />);
+    const pane = screen.getByRole("region", { name: "Coder chat" });
+    expect(JSON.parse(pane.getAttribute("data-chat-page-scope")!)).toEqual({
+      session: agent.session_id, conversation: provisional.conversation_id, generation: provisional.generation,
+      epoch: provisional.source_epoch, revision: provisional.revision, admission: provisional.recent_admission,
+    });
+    act(() => useRemoteStore.setState({ chatEvents: next.events, chatPage: next, chatPresentationPage: next }));
+    expect(screen.getByTestId("chat-committed-turn")).toBeVisible();
+    expect(JSON.parse(pane.getAttribute("data-chat-page-scope")!)).toEqual({
+      session: agent.session_id, conversation: next.conversation_id, generation: "next-generation",
+      epoch: next.source_epoch, revision: "next-revision", admission: "next-admission",
+    });
+    act(() => useRemoteStore.setState({ chatPage: null, chatEvents: [] }));
+    expect(pane).not.toHaveAttribute("data-chat-page-scope");
+    const retired = olderReadPage({ generation: "retired-generation", revision: "retired-revision",
+      source_epoch: next.source_epoch, recent_admission: null, next_before: null });
+    act(() => useRemoteStore.setState({ chatPage: retired, chatPresentationPage: retired }));
+    expect(JSON.parse(pane.getAttribute("data-chat-page-scope")!)).toEqual({
+      session: agent.session_id, conversation: retired.conversation_id, generation: "retired-generation",
+      epoch: retired.source_epoch, revision: "retired-revision", admission: null,
+    });
+  });
+
+  it("omits the consumer scope for a different agent or a stale presentation without a ready page", () => {
+    const { provisional } = previewIdentityFixture(agent.session_id);
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatEvents: provisional.events,
+      chatPage: provisional, chatPresentationPage: provisional });
+    const { rerender } = render(<RemoteAgentDetailView agent={{ ...agent, session_id: "agent-2", session_name: "Next" }} />);
+    expect(screen.getByRole("region", { name: "Next chat" })).not.toHaveAttribute("data-chat-page-scope");
+    act(() => useRemoteStore.setState({ chatPage: null, chatEvents: [] }));
+    rerender(<RemoteAgentDetailView agent={agent} />);
+    expect(screen.getByRole("region", { name: "Coder chat" })).not.toHaveAttribute("data-chat-page-scope");
   });
 
   it("merges same-revision page metadata and drops prior metadata on a new revision or preview", () => {
