@@ -141,16 +141,36 @@ describe("AgentChatView", () => {
     let current = legacy;
     invokeMock.mockImplementation((command) => Promise.resolve(command === "load_agent_chat_page" ? current : []));
     const view = render(<AgentChatView sessionId="agent-1" provider="codex" refreshIntervalMs={100} readOnly deferModelDiscovery />);
+    const anchorKey = legacy.events[0].id;
+    const geometry = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
     try {
       await act(async () => {});
       expect(screen.queryByTestId("chat-committed-turn")).toBeNull();
       fireEvent.click(screen.getByTitle("Show all work"));
+
+      const scroll = screen.getByTestId("agent-chat-scroll-region");
+      Object.defineProperty(scroll, "scrollHeight", { configurable: true,
+        get: () => scroll.querySelector('[data-testid="chat-committed-turn"]') ? 1_200 : 1_000 });
+      Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 200 });
+      geometry.mockImplementation(function (this: HTMLElement) {
+        if (this === scroll) return new DOMRect(0, 0, 300, 200);
+        if (this.dataset.chatRowKey === anchorKey || this.dataset.chatAnchorKey === anchorKey) {
+          const documentTop = this.closest('[data-testid="chat-committed-turn"]') ? 940 : 870;
+          return new DOMRect(0, documentTop - scroll.scrollTop, 300, 40);
+        }
+        return new DOMRect();
+      });
+      scroll.scrollTop = 800;
+      fireEvent.scroll(scroll);
+
       current = provisional;
       await act(async () => { await vi.advanceTimersByTimeAsync(100); });
       const section = screen.getByTestId("chat-committed-turn");
       expect(screen.queryByTestId("chat-work-group")).toBeNull();
       expect(screen.getByRole("button", { name: /Working.*In progress/ })).toHaveAttribute("aria-expanded", "true");
-      expect(section.querySelector("[data-chat-anchor-key]")).toHaveAttribute("data-chat-anchor-key", legacy.events[0].id);
+      const anchor = section.querySelector("[data-chat-anchor-key]");
+      expect(anchor).toHaveAttribute("data-chat-anchor-key", anchorKey);
+      expect(anchor?.getBoundingClientRect().top).toBe(70);
       expect(screen.queryByText(/All 42 tests passed/)).toBeNull();
       for (const next of [canonical, closed]) {
         current = next;
@@ -160,7 +180,10 @@ describe("AgentChatView", () => {
       }
       expect(screen.getByRole("button", { name: /Worked.*4 steps/ })).toHaveAttribute("aria-expanded", "true");
       expect(screen.getByText("All 42 tests passed.")).toBeVisible();
-    } finally { view.unmount(); }
+    } finally {
+      geometry.mockRestore();
+      view.unmount();
+    }
   });
 
   beforeEach(() => {
