@@ -1031,6 +1031,11 @@ Those behaviors need their separate regression evidence.
 
 ### V8 native Chat opening and qualified handoff
 
+The current harness revision is `v9-retention-selector-diagnostics`. It uses the
+unchanged V8 endpoint predicates, numeric ruler version, workload, probe, clocks,
+budgets and authority checks. Historical V8 artifacts remain immutable and receive
+no new credit from this revision.
+
 V8 separates the first usable opening (M1) from producer-qualified handoff (M2).
 Historical V7 freezes, failed cohorts and null accepted metrics remain unchanged.
 The same V8 ruler runs against normal release main and candidate artifacts. Each
@@ -1143,13 +1148,53 @@ source assertions, passive errors, unknown origins and count mismatches do not
 qualify. Cleanup operation results remain separate from supervisor closure.
 
 After the final report is persisted, one bounded stdout outcome record binds the
-root classification to that report's SHA-256. A controller can continue the fixed
-48-opening plan on root exit 1 only with this finalized binding, exact ordinary
-case/surface/error accounting, all source and observer checks, completed cleanup
-operations, and the matching joined, active-zero, closed Job receipt. Missing or
-mixed evidence stops the plan. Continuation retains exit 1 and every failed/null
-M1 result; it supplies no metric credit and does not excuse an M2 failure. This
-method revision applies before the first cohort, never to historical V7 samples.
+root classification to that report's SHA-256. Typed classification still requires
+exact ordinary case/surface/error accounting, source and observer checks,
+completed cleanup and the matching joined, active-zero, closed Job receipt. It
+does not authorize another native run. Missing or mixed evidence remains a stop.
+
+The remaining operational authorization is one reviewed diagnostic followed by
+one last reviewed fixed 48-opening cohort, each requiring a separate parent GO.
+There are no extra trials, retries, resampling or retroactive credit. After the
+last cohort, failure to obtain an accepted series stops runtime for any reason
+and returns the merge decision to the user. This is an operator policy, not a new
+persisted counter, inferred permission or authority supplied by an outcome label.
+
+The one diagnostic uses the existing test with all of these selectors:
+
+| Environment selector | Value |
+| --- | --- |
+| `WARDIAN_CHAT_PREVIEW_DIAGNOSTIC` | `1` |
+| `WARDIAN_CHAT_PREVIEW_DIAGNOSTIC_DESKTOP_PENDING` | `1` |
+| `WARDIAN_CHAT_PREVIEW_FIXTURES` | `pending` |
+| `WARDIAN_CHAT_PREVIEW_SOURCE_ROLE` | `baseline` |
+
+That selector rejects other roles/modes, runs Desktop cold then warm only, and
+keeps accepted metrics, M1 and M2 null even if the endpoint operation succeeds.
+It changes no source/body/capture proof, trusted interaction, frame or cleanup
+gate. The selector itself is not a GO. No native execution is authorized merely
+by setting these variables.
+
+Selector diagnostics record bounded scalar counts, stage reasons and first/last
+failures from the actual owned-host, single-visible-scroll, exact-visible-body
+and text-range-intersection predicates. Counts describe selector calls, not
+animation-frame counts. They retain no body text, DOM fragments or mutations and
+never supply a healthy endpoint. Diagnostic DOM capture uses the same single
+visible scroll rather than the first matching scroll.
+
+Report retention is minified and remains capped at 512 KiB. Passing observations
+keep the original raw SHA-256/byte count, phase identity/frame/probe/continuity
+facts and the negative fields consumed by outcome predicates. Failed observations
+and each immediate predecessor retain raw evidence, including the full receipt
+ledger once per case. The duplicated `phases` history is removed; each case keeps
+its current `phase`. This storage view does not mutate in-memory verdicts or typed
+error provenance, and existing outcome readers consume the same negative fields.
+It introduces no interning, table/codec layer or relaxed proof.
+
+If required raw evidence still exceeds 512 KiB, the writer reports exact
+`measured_bytes` and `limit_bytes`, refuses the write and leaves the previous
+partial intact. It never raises the cap, truncates failures or invents a complete
+report. Such an overflow remains a failed run with an explicit retention gap.
 
 Controls fence old receipts and in-flight frames. A later exact current response
 needs fresh health frames. Busy recovery preserves a properly healthy first M1

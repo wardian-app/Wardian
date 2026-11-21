@@ -9,6 +9,7 @@ import { pauseConformanceAgents } from "./conformance-cleanup.mjs";
 
 export const CHAT_PREVIEW_BUDGET_MS = 1_000;
 export const CHAT_PREVIEW_RULER_VERSION = 8;
+export const CHAT_PREVIEW_METHOD_REVISION = "v9-retention-selector-diagnostics";
 export const CHAT_PREVIEW_SEED_TIMEOUT_MS = 180_000;
 const CHAT_PREVIEW_EXECUTION_ALLOWANCE_MS = 480_000;
 export const STOPPED_SOURCE_CAPABILITY = "Provide WARDIAN_CHAT_PREVIEW_SEED_EXE for the compiled backend fixture test. It must acquire an owned stopped Codex source through the real acquisition/archive owner, retaining native identity, continuity, normalizer and policy in pending conversation-capture.json and publishing a valid Head. This harness never manufactures capture or projection state.";
@@ -20,6 +21,15 @@ export const CHAT_PREVIEW_OUTCOME_PREFIX = "[chat-preview-timing] outcome: ";
 
 function need(condition, code, message = code) {
   if (!condition) throw Object.assign(new Error(message), { code });
+}
+
+/** The one explicitly scoped diagnostic uses the existing workload and opening flow. */
+export function chatPreviewSurfaceCases(modes, diagnostic, desktopPendingOnly, sourceRole) {
+  if (desktopPendingOnly) {
+    need(diagnostic && sourceRole === "baseline" && modes.length === 1 && modes[0] === "pending", "invalid_desktop_pending_diagnostic");
+    return [{ mode: "pending", surface: "desktop" }];
+  }
+  return modes.flatMap((mode) => ["desktop", "remote"].map((surface) => ({ mode, surface })));
 }
 
 function ordinaryOpeningProof(error, record) {
@@ -971,13 +981,14 @@ export function installChatPreviewTiming(config) {
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
   };
-  const container = () => {
+  const container = (selection) => {
     const candidates = config.surface === "desktop"
       ? [...document.querySelectorAll('[data-agent-grid-card-id], [data-testid="agent-session-surface"]')]
         .filter((node) => node.getAttribute("data-agent-grid-card-id") === config.sessionId || node.getAttribute("data-resource-key") === config.sessionId)
       : [...document.querySelectorAll('[data-testid="remote-agent-detail"]')]
         .filter((node) => node.querySelector("h1")?.textContent === config.name);
     const shown = candidates.filter(visible);
+    if (selection) { selection.host_candidates = candidates.length; selection.visible_hosts = shown.length; }
     if (shown.length !== 1) return null;
     const node = shown[0];
     if (config.surface === "desktop") {
@@ -995,23 +1006,51 @@ export function installChatPreviewTiming(config) {
   };
   const parse = (value) => { try { return JSON.parse(value); } catch { return null; } };
   const scopeKey = (scope) => scope && JSON.stringify([scope.session, scope.conversation, scope.generation, scope.epoch, scope.revision, scope.admission ?? null]);
-  const contentView = () => {
-    const host = container();
-    const scrolls = host ? [...host.querySelectorAll(".chat-transcript-scroll")].filter(visible) : [];
-    if (scrolls.length !== 1) return null;
+  const contentView = (selection) => {
+    const counts = { at: now(), reason: "selected", host_candidates: 0, visible_hosts: 0,
+      owned_host: false, scroll_candidates: 0, visible_scrolls: 0, body_candidates: 0,
+      exact_bodies: null, exact_visible_bodies: 0, range_rects: 0, range_intersects: false };
+    const finish = (view, reason) => {
+      counts.reason = reason;
+      if (selection) Object.assign(selection, counts);
+      if (phase) {
+        const diagnostic = phase.selector_diagnostics ??= { version: 1, calls: 0, failures: 0, reasons: {}, first_failure: null, last_failure: null, last: null };
+        diagnostic.calls++; diagnostic.last = counts;
+        if (!view) {
+          diagnostic.failures++; diagnostic.reasons[reason] = (diagnostic.reasons[reason] ?? 0) + 1;
+          diagnostic.first_failure ??= counts; diagnostic.last_failure = counts;
+        }
+      }
+      return view;
+    };
+    const host = container(counts);
+    counts.owned_host = Boolean(host);
+    if (!host) return finish(null, "owned_host_unavailable");
+    const allScrolls = [...host.querySelectorAll(".chat-transcript-scroll")];
+    const scrolls = allScrolls.filter(visible);
+    counts.scroll_candidates = allScrolls.length; counts.visible_scrolls = scrolls.length;
+    if (scrolls.length !== 1) return finish(null, "visible_scroll_count");
     const scroll = scrolls[0];
     const scope = parse(scroll.getAttribute("data-chat-page-scope"));
     // ChatMarkdown emits one DOM text newline between plain paragraphs. Keep
     // every character and paragraph boundary exact; wire proof uses raw body.
     const renderedBody = config.body.split("\n\n").join("\n");
-    const bodies = [...scroll.querySelectorAll(".chat-message-content")].filter((node) => visible(node) && node.textContent === renderedBody);
-    if (bodies.length !== 1) return null;
+    const allBodies = [...scroll.querySelectorAll(".chat-message-content")];
+    const bodies = allBodies.filter((node) => visible(node) && node.textContent === renderedBody);
+    counts.body_candidates = allBodies.length; counts.exact_visible_bodies = bodies.length;
+    if (bodies.length !== 1) {
+      counts.exact_bodies = allBodies.filter((node) => node.textContent === renderedBody).length;
+      return finish(null, "exact_visible_body_count");
+    }
     const node = bodies[0];
     const range = document.createRange();
     range.selectNodeContents(node);
     const viewport = scroll.getBoundingClientRect();
-    if (![...range.getClientRects()].some((rect) => rect.bottom > Math.max(0, viewport.top) && rect.top < Math.min(innerHeight, viewport.bottom)
-      && rect.right > Math.max(0, viewport.left) && rect.left < Math.min(innerWidth, viewport.right))) return null;
+    const rects = [...range.getClientRects()];
+    counts.range_rects = rects.length;
+    counts.range_intersects = rects.some((rect) => rect.bottom > Math.max(0, viewport.top) && rect.top < Math.min(innerHeight, viewport.bottom)
+      && rect.right > Math.max(0, viewport.left) && rect.left < Math.min(innerWidth, viewport.right));
+    if (!counts.range_intersects) return finish(null, "range_intersection_missing");
     const row = node.closest("[data-chat-row-key]");
     const key = row?.getAttribute("data-chat-row-key");
     const identity = parse(row?.getAttribute("data-chat-row-identity"));
@@ -1022,7 +1061,7 @@ export function installChatPreviewTiming(config) {
     const controlSequence = state.receipts.reduce((latest, item) => item.control === "unscoped_reset"
       ? Math.max(latest, item.last_sequence) : latest, 0);
     const transcriptError = [...scroll.querySelectorAll(':scope > [role="alert"]')].some(visible);
-    return { host, scroll, node, row, key, identity, committed, turnKey, anchor, anchorKey, scope, controlSequence, transcriptError };
+    return finish({ host, scroll, node, row, key, identity, committed, turnKey, anchor, anchorKey, scope, controlSequence, transcriptError }, "selected");
   };
   const presentedCandidate = () => {
     const view = contentView();
@@ -1174,7 +1213,10 @@ export function installChatPreviewTiming(config) {
     const at = now();
     if (config.synthetic !== true) return { status: "EXCLUDED_NON_SYNTHETIC", at, reason };
     try {
-      const host = container(); const scroll = host?.querySelector(".chat-transcript-scroll");
+      const selector = {}; contentView(selector);
+      const host = container();
+      const scrolls = host ? [...host.querySelectorAll(".chat-transcript-scroll")].filter(visible) : [];
+      const scroll = scrolls.length === 1 ? scrolls[0] : null;
       const allowedText = new Set([config.body, ...(latestApiCandidate?.events ?? []).map((event) => event.text)]
         .filter((text) => typeof text === "string" && text.length).map((text) => text.split("\n\n").join("\n")));
       const bodies = [...(scroll?.querySelectorAll(".chat-message-content") ?? [])].filter((node) => allowedText.has(node.textContent));
@@ -1198,7 +1240,7 @@ export function installChatPreviewTiming(config) {
         if (bytes > 16_384) dom = { status: "EXCLUDED_DOM_BYTE_BOUND", matching_body_count: bodies.length, bytes };
       }
       return { status: "CAPTURED", at, reason, label: phase?.label ?? null, wait,
-        before_deadline: wait ? at < wait.deadline_at : null, api_observed_at: latestApiAt, api: latestApiCandidate, dom };
+        before_deadline: wait ? at < wait.deadline_at : null, api_observed_at: latestApiAt, api: latestApiCandidate, selector, dom };
     } catch (error) {
       return { status: "DIAGNOSTIC_CAPTURE_FAILED", at, reason, api_observed_at: latestApiAt, api: latestApiCandidate,
         error: String(error?.message ?? error).slice(0, 256) };
@@ -1760,11 +1802,14 @@ export async function observeChatOpening({ measureM1, observeM2, snapshot, recor
 /** Retain partial evidence before propagating the original failure; never turn a failed case into a timing. */
 export async function recordChatTimingCase(report, label, operation, snapshot, save) {
   const result = { label, status: "RUNNING", observation: null, metrics: null };
+  const diagnostic = report.timing_qualification === "DIAGNOSTIC_ONLY_NOT_BENCHMARK";
+  if (diagnostic) Object.assign(result, { diagnostic_only: true, accepted_metrics: null, M1: null, M2: null });
   report.cases.push(result);
   const failures = [];
   try {
-    result.metrics = await operation();
-    result.status = "OBSERVED_UI_ENDPOINTS";
+    const metrics = await operation();
+    result.metrics = diagnostic ? null : metrics;
+    result.status = diagnostic ? "DIAGNOSTIC_OBSERVED_NO_METRICS" : "OBSERVED_UI_ENDPOINTS";
   } catch (error) {
     failures.push(error);
     result.status = "FAILED";
@@ -1788,10 +1833,53 @@ export async function recordChatTimingCase(report, label, operation, snapshot, s
   if (failures.length > 1) throw new AggregateError(failures, "Chat timing case and evidence persistence failed", { cause: failures[0] });
 }
 
-/** Reports stay in the owned evidence home; full content is bounded to synthetic-target diagnostics, never credentials. */
+/** Storage-only policy: raw failed cases and their predecessors; summaries never change in-memory verdicts. */
+export function retainChatTimingReport(report) {
+  const raw = new Set();
+  for (const [index, record] of (report.cases ?? []).entries()) {
+    if (record.status === "FAILED" || record.error || record.observation_error || record.report_error || record.m2_error) {
+      raw.add(index); if (index > 0) raw.add(index - 1);
+    }
+  }
+  const cases = (report.cases ?? []).map((record, index) => {
+    if (!record.observation) return { ...record };
+    const observation = record.observation;
+    const serialized = JSON.stringify(observation);
+    const full = raw.has(index);
+    // The current phase is also the last phases[] entry. Earlier phases have their own case records.
+    const retained = full ? { ...observation } : Object.fromEntries([
+      "ruler_version", "surface", "source_key", "source_epoch", "phase", "health", "subscription", "diagnostics",
+      "faults", "busy_retries", "rejected_scopes", "prewarmed_request_observed", "disposed",
+      ...Object.keys(observation).filter((key) => key.endsWith("_count") || key.endsWith("_bytes")),
+    ].filter((key) => Object.hasOwn(observation, key)).map((key) => [key, observation[key]]));
+    if (!full) {
+      const pick = (value, keys) => value && typeof value === "object"
+        ? Object.fromEntries(keys.filter((key) => Object.hasOwn(value, key)).map((key) => [key, value[key]])) : value;
+      if (Array.isArray(observation.calls)) retained.calls = observation.calls.map((call) => pick(call, ["at", "last_at"]));
+      if (Array.isArray(observation.receipts)) retained.receipts = observation.receipts.map((receipt) => {
+        const minimal = pick(receipt, ["scope", "retains_exact_scope", "control", "last_request", "first_sequence", "last_sequence"]);
+        if (minimal && Object.hasOwn(receipt, "nativeOpening")) minimal.nativeOpening = pick(receipt.nativeOpening,
+          ["verified", "backing_ids", "source_refs", "source_body_verified", "window_verified", "session", "source_epoch", "provider", "dom_identity_binding"]);
+        return minimal;
+      });
+    }
+    if (Array.isArray(observation.phases)) {
+      retained.phase_count = observation.phases.length;
+      if (observation.phases[0]?.clickAt !== undefined) retained.first_phase_click_at = observation.phases[0].clickAt;
+    }
+    delete retained.phases;
+    return { ...record, observation: { ...retained, retention: { version: 1, kind: full ? "full_failure_or_predecessor" : "passing_summary",
+      raw_sha256: sha256(serialized), raw_bytes: Buffer.byteLength(serialized) } } };
+  });
+  return { ...report, cases, retention: { version: 1, limit_bytes: 512 * 1024, raw_case_indices: [...raw] } };
+}
+
+/** Minified report stays bounded; an overflow reports its exact size and leaves prior evidence intact. */
 export function writeChatTimingReport(file, report) {
-  const bytes = JSON.stringify(report, null, 2);
-  assert.ok(Buffer.byteLength(bytes) <= 512 * 1024, "timing report exceeded its retention bound");
+  const bytes = JSON.stringify(retainChatTimingReport(report)) + "\n";
+  const measured = Buffer.byteLength(bytes);
+  need(measured <= 512 * 1024, "chat_timing_report_retention_exceeded",
+    `timing report exceeded its retention bound: measured_bytes=${measured}, limit_bytes=${512 * 1024}`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, bytes + "\n");
+  fs.writeFileSync(file, bytes);
 }
