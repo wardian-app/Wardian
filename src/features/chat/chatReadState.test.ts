@@ -136,6 +136,14 @@ describe("bounded Chat state", () => {
     expect(applyChatPage(current, page([older]), "older").map((row) => row.id)).toEqual(["older", "latest"]);
   });
 
+  it("places newly captured history before the retained answer in producer order", () => {
+    const answer = event("answer");
+    const initial = applyChatPage([], page([event("loaded-history"), answer], { progress: "indexing" }), "recent");
+    const refreshed = applyChatPage(initial, page([event("newly-captured-history"), answer], { progress: "indexing" }), "recent");
+    expect(refreshed.map((row) => row.id)).toEqual(["loaded-history", "newly-captured-history", "answer"]);
+    expect(refreshed[2].metadata.chat_display_key).toBe("answer");
+  });
+
   it("retains a requested older page beyond 640 rows and updates its loaded window without snapping to recent", () => {
     const current = Array.from({ length: 640 }, (_, index) => event(String(index + 361)));
     const older = Array.from({ length: 80 }, (_, index) => event(String(index + 281)));

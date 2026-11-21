@@ -106,9 +106,41 @@ export function applyChatPage(
     && (mode === "older" || windowDirection === "recent" || page.reset || confirmed.has(event.id))).map((event) => ({
     ...event, metadata: { ...event.metadata, chat_display_key: confirmed.get(event.id) ?? event.id },
   }));
-  const merged = mode === "older" && !page.reset ? [...additions, ...result] : [...result, ...additions];
+  const merged = mode === "older" && !page.reset ? [...additions, ...result]
+    : mode === "recent" && windowDirection === "recent" ? orderRecentChatRows(result, additions, page.events)
+    : [...result, ...additions];
   merged.push(...pending);
   return boundedChatEvents(merged, page.reset ? "recent" : windowDirection);
+}
+
+/** Stitch one producer window through its loaded slots without moving unmentioned history. */
+function orderRecentChatRows(
+  retained: AgentChatEvent[], additions: AgentChatEvent[], incoming: AgentChatEvent[],
+): AgentChatEvent[] {
+  const loadedIds = new Set(retained.map((event) => event.id));
+  const available = new Map([...retained, ...additions].map((event) => [event.id, event]));
+  const ordered = incoming.flatMap(({ id }) => {
+    const event = available.get(id);
+    if (!event) return [];
+    available.delete(id);
+    return [event];
+  });
+  const merged: AgentChatEvent[] = [];
+  let index = 0;
+  for (const event of retained) {
+    if (available.has(event.id)) {
+      merged.push(event);
+      continue;
+    }
+    // Each shared slot consumes the producer prefix through its next shared row.
+    // Rows newly captured before that row land before it, even on a later poll.
+    while (index < ordered.length) {
+      const next = ordered[index++];
+      merged.push(next);
+      if (loadedIds.has(next.id)) break;
+    }
+  }
+  return merged.concat(ordered.slice(index));
 }
 
 /** A requested page must fit completely before either client advances its cursor. */
