@@ -12,15 +12,16 @@ import { JSDOM } from "jsdom";
 import { randomUUID, createHash } from "node:crypto";
 import { acquireHomeLock } from "../lib/sessionHome.mjs";
 import {
-  CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, chatPreviewWatchdogMs,
+  CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, CHAT_PREVIEW_RULER_VERSION, chatPreviewWatchdogMs,
   syntheticCodexSource, stageSyntheticStoppedSource, verifySyntheticSource, pendingCaptureWitness, seedNativePreviewSource,
   assertPendingCaptureBracket, trustedClickWithPendingCapture,
-  chatTimingReceipt, chatTimingCandidateDetails, chatPreviewObserverScript, assertChatTimingSample, recordChatTimingCase, writeChatTimingReport,
-  recordRejectedChatScope, driveChatPreviewProbe,
+  chatTimingReceipt, chatTimingNativeEvidence, chatTimingCandidateDetails, chatPreviewObserverScript, assertChatTimingSample, recordChatTimingCase, writeChatTimingReport,
+  recordRejectedChatScope, driveChatPreviewProbe, assertChatOpeningSample, chatTimingHandoffEvidence, recordChatContinuity, assertChatFixtureShape,
 } from "../lib/chatPreviewTiming.mjs";
 
 const fixture = { sessionId: "owned-agent", provider: "codex", body: "A uniquely completed synthetic answer.", name: "Synthetic Agent",
-  synthetic: true, sourceKey: "native-source", targetTurn: "synthetic-completed-unit", targetMessageId: "answer-128" };
+  synthetic: true, sourceKey: "native-source", sourceEpoch: "source-epoch", targetTurn: "synthetic-completed-unit", targetMessageId: "answer-128" };
+const v8Probe = "synthetic-unsent-timing-probe";
 
 test("setup watchdog adds one 180-second preparation allowance per surface/mode without changing the UI budget", () => {
   assert.equal(CHAT_PREVIEW_SEED_TIMEOUT_MS, 180_000); assert.equal(CHAT_PREVIEW_BUDGET_MS, 1_000);
@@ -32,11 +33,13 @@ test("setup watchdog adds one 180-second preparation allowance per surface/mode 
 
 function page({ preview = false, provider = "codex", complete = true, body = fixture.body } = {}) {
   return { session_id: fixture.sessionId, conversation_id: preview ? null : "conversation", generation: preview ? null : "generation",
-    source_epoch: null, revision: preview ? "recent-revision" : "canonical-revision", recent_admission: preview ? "admission" : null,
+    source_epoch: preview ? null : fixture.sourceEpoch, revision: preview ? "recent-revision" : "canonical-revision", recent_admission: preview ? "admission" : null,
     progress: preview ? "provisional" : "ready", events: [{ id: preview ? "preview-id" : "canonical-id", session_id: fixture.sessionId,
-      provider, kind: "message", role: "assistant", text: body, metadata: {} }],
+      provider, kind: "message", role: "assistant", text: body,
+      metadata: preview ? {} : { chat_source_ref: "canonical-record", chat_source_epoch: fixture.sourceEpoch } }],
     presentation: preview ? null : { version: 1, payload: { turns: [{ turn_key: "committed-turn", membership_complete: complete, status: "completed" }],
-      items: [{ turn_key: "committed-turn", kind: "answer", provenance: "canonical", evidence: { kind: "source" }, event_refs: ["canonical-id"] }] } } };
+      items: [{ item_key: "canonical-answer", turn_key: "committed-turn", kind: "answer", provenance: "canonical",
+        evidence: { kind: "source", source_key: fixture.sourceKey, source_epoch: fixture.sourceEpoch, record_key: "canonical-record" }, event_refs: ["canonical-id"] }] } } };
 }
 
 function presentedPreview() {
@@ -60,7 +63,60 @@ function unscopedReset() {
     progress: "projection_pending", aliases: [], removed_ids: [], detail: null, bytes_read: 0, records_decoded: 0 };
 }
 
-function browser({ surface = "remote", disclosure = false, modeNeedsToggle = false, body = fixture.body, captureDetails = false } = {}) {
+function nativeLegacyPage({ id = "producer literal / ? λ", sourceRef = "different physical source reference", sequence = 17 } = {}) {
+  return { ...unscopedReset(), reset: false, source_epoch: fixture.sourceEpoch, revision: "opaque-native-revision",
+    progress: "provisional", events: [{ ...page({ preview: true }).events[0], id, sequence,
+      metadata: { chat_source_ref: sourceRef, chat_source_epoch: fixture.sourceEpoch } }] };
+}
+
+function canonicalNativePage() {
+  const dto = presentedPreview(); dto.events[0].metadata.chat_provisional = false;
+  dto.presentation.payload.items[0].provenance = "canonical";
+  return dto;
+}
+
+test("v8 native opening evidence preserves each producer's literal IDs without ordinal or DOM identity inference", () => {
+  assert.equal(CHAT_PREVIEW_RULER_VERSION, 8);
+  for (const dto of [nativeLegacyPage(), nativeLegacyPage({ id: "other producer literal", sequence: 38712743 })]) {
+    const receipt = chatTimingReceipt(dto, fixture);
+    assert.equal(receipt.nativeOpening.verified, true);
+    assert.deepEqual(receipt.nativeOpening.backing_ids, [dto.events[0].id]);
+    assert.deepEqual(receipt.nativeOpening.source_refs, [dto.events[0].metadata.chat_source_ref]);
+    assert.equal(receipt.nativeOpening.dom_identity_binding, "NOT_CLAIMED");
+    assert.equal(receipt.nativeOpening.ordinal_or_canonical_key_inference, false);
+    assert.equal(receipt.targets[0].qualifiedTurn, null);
+    assert.equal(receipt.targets[0].presentedAnswer, null);
+    assert.equal(receipt.scope.admission, null);
+  }
+});
+
+test("v8 native opening rejects foreign, optimistic, missing-source and mismatched body evidence", () => {
+  const cases = {
+    foreignSession: (p) => { p.events[0].session_id = "foreign"; },
+    foreignProvider: (p) => { p.events[0].provider = "mock"; },
+    optimistic: (p) => { p.events[0].metadata.optimistic = true; },
+    noId: (p) => { p.events[0].id = ""; },
+    longId: (p) => { p.events[0].id = "😀".repeat(129); },
+    noSource: (p) => { delete p.events[0].metadata.chat_source_ref; },
+    sourceEpoch: (p) => { p.events[0].metadata.chat_source_epoch = "other"; },
+    body: (p) => { p.events[0].text = "different body"; },
+  };
+  for (const [name, mutate] of Object.entries(cases)) {
+    const dto = nativeLegacyPage(); mutate(dto);
+    const proof = chatTimingNativeEvidence(dto, fixture);
+    assert.equal(proof.verified, false, name); assert.deepEqual(proof.backing_ids, [], name);
+  }
+  assert.equal(chatTimingNativeEvidence(unscopedReset(), fixture).verified, false);
+  assert.equal(chatTimingNativeEvidence({ ...nativeLegacyPage(), events: [] }, fixture).verified, false);
+});
+
+test("v8 source-legacy admission cannot conceal a partial scope or claimed presentation", () => {
+  for (const change of [{ conversation_id: "partial" }, { generation: "partial" }, { presentation: { version: 1, payload: {} } }]) {
+    assert.throws(() => chatTimingReceipt({ ...nativeLegacyPage(), ...change }, fixture), /invalid_page_scope/);
+  }
+});
+
+function browser({ surface = "remote", disclosure = false, modeNeedsToggle = false, body = fixture.body, captureDetails = false, rulerVersion = 7 } = {}) {
   const observedFixture = { ...fixture, body };
   let time = 10; let ordinal = 0;
   const frames = new Map(); const listeners = new Map();
@@ -78,15 +134,17 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
   host.contains = (node) => [input, workButton, scroll, row, content].includes(node);
   host.querySelector = (selector) => selector === "h1" ? { textContent: fixture.name } : selector === ".chat-transcript-scroll" ? scroll : null;
   host.querySelectorAll = (selector) => selector === ".chat-transcript-scroll" ? [scroll] : selector === "textarea" ? [input]
-    : selector.includes("Switch to Chat") ? [modeButton] : selector.includes("chat-turn-work") && disclosure ? [workButton] : [];
+    : selector.includes("Switch to Chat") ? [modeButton] : (selector.includes("chat-turn-work") || selector.includes("data-chat-anchor-keys")) && disclosure ? [workButton] : [];
   scroll.scrollTop = 50; scroll.scrollHeight = 1_000; scroll.clientHeight = 400;
   const transcriptAlert = element(); transcriptAlert.hidden = true;
-  scroll.querySelectorAll = (selector) => selector === ':scope > [role="alert"]' ? [transcriptAlert] : [content];
+  scroll.querySelectorAll = (selector) => selector === ':scope > [role="alert"]' ? [transcriptAlert]
+    : selector === "[data-chat-row-identity]" ? [row] : [content];
   scroll.contains = (value) => value === content;
   content.textContent = body;
   Object.defineProperty(content, "outerHTML", { get: () => `<div class="chat-message-content">${content.textContent}</div>` });
   content.contains = (node) => node === content;
   let shared = false;
+  row.querySelector = () => shared ? committed : null;
   content.closest = (selector) => selector === "[data-chat-row-key]" ? row
     : selector === "[data-chat-anchor-key]" ? shared ? anchor : null
       : selector === '[data-testid="chat-committed-turn"]' && shared ? committed : null;
@@ -104,17 +162,20 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
     getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
     requestAnimationFrame: (callback) => { frames.set(++ordinal, callback); return ordinal; },
     cancelAnimationFrame: (id) => frames.delete(id), setTimeout, clearTimeout, TextEncoder });
-  vm.runInContext(chatPreviewObserverScript({ ...observedFixture, surface, probe: "probe", captureDetails }), context);
+  vm.runInContext(chatPreviewObserverScript({ ...observedFixture, surface, probe: rulerVersion === 8 ? v8Probe : "probe", captureDetails, rulerVersion }), context);
   const api = window.__chatPreviewTiming;
   const adopt = (dto, marker = true, rendered = dto) => {
     const receipt = chatTimingReceipt(dto, observedFixture);
     // Both provisional and canonical presentations use the real shared renderer.
     shared = Boolean(rendered.presentation?.payload?.turns.length);
     scroll.attributes["data-chat-page-scope"] = marker ? JSON.stringify(receipt.scope) : undefined;
-    row.attributes["data-chat-row-key"] = shared ? rendered.presentation.payload.turns[0].turn_key : "preview-id";
+    row.attributes["data-chat-row-key"] = shared ? rendered.presentation.payload.turns[0].turn_key : rendered.events[0]?.id;
+    row.attributes["data-chat-row-identity"] = shared ? undefined : JSON.stringify({ id: rendered.events[0]?.id });
+    workButton.attributes["data-chat-anchor-keys"] = JSON.stringify(rendered.events.map((event) => event.id));
     committed.attributes["data-turn-key"] = row.attributes["data-chat-row-key"];
     anchor.attributes["data-chat-anchor-key"] = rendered.events[0].metadata.chat_display_key ?? rendered.events[0].id;
-    api.receive(receipt, captureDetails ? chatTimingCandidateDetails(dto, observedFixture) : null);
+    const request = rulerVersion === 8 ? api.noteRequest({ sessionId: fixture.sessionId }) : undefined;
+    api.receive(receipt, captureDetails ? chatTimingCandidateDetails(dto, observedFixture) : null, request);
   };
   return { api, adopt, input, content, document, listeners, tab, scroll, workButton, row, committed, anchor, transcriptAlert,
     async deliver(dto, args = { sessionId: fixture.sessionId }) { requests++; await callback(args, Promise.resolve(dto)); },
@@ -130,6 +191,12 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
     },
     wheelEvent(trusted = true, deltaY) { for (const handler of listeners.get("wheel")) handler({ isTrusted: trusted, target: scroll, deltaY }); },
     inputEvent(trusted = true) { for (const handler of listeners.get("input")) handler({ isTrusted: trusted, target: input }); },
+    expandWork() {
+      const plan = api.prepareExpansion(); assert.ok(plan, "actual provisional/legacy work disclosure required");
+      for (const handler of listeners.get("click")) handler({ isTrusted: true, target: workButton });
+      workButton.attributes["aria-expanded"] = workButton.attributes["aria-expanded"] === "true" ? "false" : "true";
+    },
+    elapse(ms) { time += ms; },
     advance(count = 1) {
       for (let index = 0; index < count; index++) {
         time += 16; const current = [...frames.values()]; frames.clear(); for (const callback of current) callback();
@@ -137,6 +204,317 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
     },
   };
 }
+
+function v8Opening(b, dto = nativeLegacyPage(), marker = false) {
+  b.api.arm("v8-opening"); b.click(); b.adopt(dto, marker); b.advance(3);
+  const plan = b.api.prepareInteraction();
+  assert.equal(plan?.kind, "input"); assert.equal(v8Probe.length, 29); b.input.value = v8Probe; b.document.activeElement = b.input;
+  b.inputEvent(); b.advance(3);
+  return b.api.snapshot();
+}
+
+test("v8 common M1 has literal native wire evidence plus separate visible content without Remote DOM markers or M2 credit", () => {
+  const b = browser({ rulerVersion: 8 });
+  const snapshot = v8Opening(b);
+  const result = assertChatOpeningSample(snapshot, { sourceRole: "baseline" });
+  assert.ok(result.m1.usable_ms < 1_000); assert.equal(result.m1.dom_identity_binding, "NOT_CLAIMED");
+  assert.equal(result.m2.status, "N/A_LEGACY_UNSUPPORTED");
+  assert.equal(snapshot.phase.projectionAt, null); assert.equal(snapshot.phase.qualifiedAt, null);
+  assert.throws(() => assertChatOpeningSample(snapshot), /missing_qualified_handoff/);
+  b.api.dispose();
+});
+
+test("v8 disabled composer never falls back to wheel; API-only, reset and unrelated visible content cannot start M1", () => {
+  const b = browser({ rulerVersion: 8 }); b.api.arm("no-credit"); b.click();
+  b.adopt(nativeLegacyPage(), false); b.content.textContent = "unrelated"; b.advance(4);
+  assert.equal(b.api.snapshot().phase.readableAt, null);
+  b.content.textContent = fixture.body; b.advance(3); b.input.disabled = true;
+  assert.equal(b.api.prepareInteraction(), null); b.wheelEvent(); b.scroll.scrollTop += 10; b.advance(4);
+  assert.equal(b.api.snapshot().phase.usableAt, null);
+  b.api.receive(chatTimingReceipt(unscopedReset(), fixture)); b.advance(3);
+  assert.equal(b.api.snapshot().health.current_native, false); b.api.dispose();
+});
+
+test("v8 a control or changed source between M1 frames fences old evidence and requires fresh producer and input frames", () => {
+  const b = browser({ rulerVersion: 8 }); b.api.arm("fenced"); b.click();
+  b.adopt(nativeLegacyPage(), false); b.advance(2);
+  b.api.receive(chatTimingReceipt(unscopedReset(), fixture)); b.advance(3);
+  assert.equal(b.api.snapshot().phase.readableAt, null);
+  b.adopt(nativeLegacyPage({ id: "fresh literal source ID" }), false); b.advance(3);
+  const plan = b.api.prepareInteraction(); assert.equal(plan.kind, "input");
+  b.input.value = v8Probe; b.document.activeElement = b.input; b.inputEvent(); b.advance(1);
+  b.adopt(nativeLegacyPage({ id: "replacement literal ID" }), false); b.advance(3);
+  assert.equal(b.api.snapshot().phase.usableAt, null); b.api.dispose();
+});
+
+test("v8 M2 separately requires admitted item/turn/source DOM proofs; M1 never qualifies a provisional answer as canonical", () => {
+  const b = browser({ rulerVersion: 8, disclosure: true });
+  const first = v8Opening(b, presentedPreview(), true);
+  const result = assertChatOpeningSample(first, { requireStableHandoff: false });
+  assert.equal(result.m2.status, "QUALIFIED_PRESENTATION"); assert.equal(result.m2.provenance, "provisional");
+  assert.equal(result.m2.canonical_qualified_ms, null); assert.equal(first.phase.qualifiedAt, null);
+  assert.throws(() => assertChatOpeningSample(first, { requireCanonical: true, requireStableHandoff: false }), /missing_canonical_qualification/);
+  assert.throws(() => assertChatOpeningSample(first), /unproven_handoff_continuity/);
+  b.expandWork(); b.advance(3);
+  b.adopt(canonicalNativePage(), true); b.advance(3);
+  assert.equal(assertChatOpeningSample(b.api.snapshot(), { requireCanonical: true }).m2.status, "QUALIFIED_HANDOFF");
+  assert.equal(b.api.snapshot().phase.continuity.source_switches, 0);
+  assert.equal(b.api.snapshot().phase.continuity.in_place_replacements, 1);
+  assert.equal(b.api.snapshot().phase.usableAt, first.phase.usableAt); b.api.dispose();
+});
+
+test("v8 M2 rejects wrong scope/key/ref/evidence, ambiguous answer and missing/wrong bridge or item admission", () => {
+  const mutations = [
+    (d) => { d.presentation.payload.items[0].event_refs = ["foreign"]; },
+    (d) => { d.presentation.payload.items[0].evidence.record_key = "foreign"; },
+    (d) => { d.presentation.payload.items[0].evidence.source_key = "foreign"; },
+    (d) => { d.presentation.payload.items.push(structuredClone(d.presentation.payload.items[0])); },
+    (d) => { delete d.presentation.payload.preview_bridge; },
+    (d) => { d.presentation.payload.preview_bridge.admission_id = "foreign"; },
+    (d) => { delete d.presentation.payload.items[0].admission_id; },
+    (d) => { d.presentation.payload.items[0].admission_id = "foreign"; },
+  ];
+  for (const mutate of mutations) {
+    const b = browser({ rulerVersion: 8 }); const dto = presentedPreview(); mutate(dto);
+    const snapshot = v8Opening(b, dto, true);
+    assert.equal(snapshot.phase.projectionAt, null); assert.equal(snapshot.phase.qualifiedAt, null);
+    assert.throws(() => assertChatOpeningSample(snapshot), /missing_qualified_handoff/); b.api.dispose();
+  }
+  for (const corrupt of [
+    (b) => { b.anchor.attributes["data-chat-anchor-key"] = "foreign"; },
+    (b) => { b.row.attributes["data-chat-row-key"] = "foreign"; },
+    (b) => { b.scroll.attributes["data-chat-page-scope"] = JSON.stringify({ ...chatTimingReceipt(presentedPreview(), fixture).scope, revision: "stale" }); },
+  ]) {
+    const b = browser({ rulerVersion: 8 }); b.api.arm("bad-dom"); b.click(); b.adopt(presentedPreview(), true); b.advance(2);
+    corrupt(b); b.advance(3); assert.equal(b.api.snapshot().phase.projectionAt, null); b.api.dispose();
+  }
+});
+
+test("v8 canonical M2 binds the literal answer anchor and cannot borrow an item changed between frame witnesses", () => {
+  const b = browser({ rulerVersion: 8 }); const legacy = presentedPreview(); legacy.presentation = null;
+  v8Opening(b, legacy, true);
+  b.adopt(canonicalNativePage(), true); b.advance(2); b.anchor.attributes["data-chat-anchor-key"] = "wrong-answer"; b.advance();
+  assert.equal(b.api.snapshot().phase.projectionAt, null); assert.equal(b.api.snapshot().phase.qualifiedAt, null);
+  b.adopt(canonicalNativePage(), true); b.advance(2);
+  const changed = canonicalNativePage(); changed.presentation.payload.items[0].item_key = "new-literal-item";
+  b.adopt(changed, true); b.advance(1);
+  assert.equal(b.api.snapshot().phase.projectionAt, null);
+  b.advance(3); assert.ok(b.api.snapshot().phase.projectionAt); b.api.dispose();
+});
+
+test("v8 review canonical evidence rejects each missing or foreign source component", () => {
+  for (const field of ["source_key", "source_epoch", "record_key"]) {
+    for (const value of [undefined, "foreign"]) {
+      const dto = canonicalNativePage();
+      if (value === undefined) delete dto.presentation.payload.items[0].evidence[field];
+      else dto.presentation.payload.items[0].evidence[field] = value;
+      assert.equal(chatTimingReceipt(dto, fixture).targets[0].qualifiedAnswer, null, `${field}:${value}`);
+    }
+  }
+  for (const provisional of [false, true]) {
+    const dto = provisional ? presentedPreview() : canonicalNativePage();
+    dto.source_epoch = "self-consistent-foreign"; dto.events[0].metadata.chat_source_epoch = dto.source_epoch;
+    dto.presentation.payload.items[0].evidence.source_epoch = dto.source_epoch;
+    const target = chatTimingReceipt(dto, fixture).targets[0];
+    assert.equal(target.qualifiedTurn, null); assert.equal(target.qualifiedAnswer, null); assert.equal(target.presentedAnswer, null);
+  }
+  assert.equal(chatTimingReceipt(canonicalNativePage(), { ...fixture, sourceEpoch: undefined }).targets[0].qualifiedAnswer, null);
+  for (const returnedId of ["canonical-id", "display:logical-returned-id"]) {
+    const missingPhysical = canonicalNativePage(); delete missingPhysical.events[0].metadata.chat_source_ref;
+    missingPhysical.events[0].id = returnedId;
+    missingPhysical.presentation.payload.items[0].event_refs = [returnedId];
+    missingPhysical.presentation.payload.items[0].evidence.record_key = returnedId;
+    const rejected = chatTimingReceipt(missingPhysical, fixture).targets[0];
+    assert.equal(rejected.qualifiedTurn, null, "returned ID is not physical-owner evidence");
+    assert.equal(rejected.qualifiedAnswer, null);
+  }
+  const certified = canonicalNativePage(); delete certified.events[0].metadata.chat_source_ref;
+  certified.events[0].metadata.chat_display_member_ids = ["literal-physical-owner", "other-physical-member"];
+  certified.presentation.payload.items[0].evidence.record_key = "literal-physical-owner";
+  assert.ok(chatTimingReceipt(certified, fixture).targets[0].qualifiedAnswer, "explicit producer physical-member certificate");
+  delete certified.events[0].metadata.chat_display_member_ids;
+  certified.events[0].metadata.chat_display_physical_id = "literal-physical-owner";
+  assert.ok(chatTimingReceipt(certified, fixture).targets[0].qualifiedAnswer, "explicit producer physical identity");
+});
+
+test("v8 review merged canonical/provisional answer evidence uses the literal producer member certificate, not the display ID", () => {
+  for (const provisional of [false, true]) {
+    const dto = provisional ? presentedPreview() : canonicalNativePage();
+    dto.events[0].id = "display:literal-mirror";
+    dto.events[0].metadata.chat_source_ref = "physical-second";
+    dto.events[0].metadata.chat_display_member_ids = ["physical-first", "physical-second"];
+    dto.presentation.payload.items[0].event_refs = [dto.events[0].id];
+    dto.presentation.payload.items[0].evidence.record_key = "physical-first";
+    const target = chatTimingReceipt(dto, fixture).targets[0];
+    assert.ok(provisional ? target.presentedAnswer : target.qualifiedAnswer);
+    for (const members of [undefined, [], ["physical-second"], ["foreign-first", "physical-second"], ["physical-first", "physical-first"]]) {
+      const bad = structuredClone(dto); bad.events[0].metadata.chat_display_member_ids = members;
+      const rejected = chatTimingReceipt(bad, fixture).targets[0];
+      assert.equal(provisional ? rejected.presentedAnswer : rejected.qualifiedAnswer, null);
+    }
+  }
+});
+
+test("v8 review shared provisional promotion is one in-place replacement, independently of the one Legacy source switch", () => {
+  const state = { samples: [], raw_frames: 0, coalesced_frames: 0, blank_frames: 0, mixed_frames: 0,
+    source_switches: 0, in_place_replacements: 0, invalid_replacements: 0, extra_reflows: 0, overflow_count: 0,
+    disclosure_requested: true, disclosure_confirmed: true, disclosure_frames: 2, expected_expanded: "true" };
+  const base = { at: 1, content_count: 1, renderer: "shared", qualified: true, mixed_source_rows: 0,
+    anchor_bound: true, anchor_top: 10, geometry: "stable", expansion_bound: true, expanded: "true",
+    representation: { kind: "provisional", item_key: "literal-item", turn_key: "literal-turn",
+      source_key: "native-source", source_epoch: "source-epoch", record_key: "source-record" } };
+  recordChatContinuity(state, base);
+  recordChatContinuity(state, { ...base, at: 2, representation: { ...base.representation, kind: "canonical" } });
+  assert.equal(state.source_switches, 0); assert.equal(state.in_place_replacements, 1);
+  assert.equal(state.anchor_preserved, true); assert.equal(state.expansion_preserved, true);
+  recordChatContinuity(state, { ...base, at: 3 });
+  assert.ok(state.invalid_replacements > 0, "canonical-to-provisional regression must fail");
+});
+
+test("v8 review Legacy handoff plus shared promotion permits one of each with preserved literal anchor and work expansion", () => {
+  const b = browser({ rulerVersion: 8, disclosure: true }); const legacy = presentedPreview(); legacy.presentation = null;
+  v8Opening(b, legacy, true); b.expandWork(); b.advance(3);
+  b.adopt(presentedPreview(), true); b.advance(3);
+  b.adopt(canonicalNativePage(), true); b.advance(3);
+  const result = assertChatOpeningSample(b.api.snapshot(), { requireCanonical: true });
+  assert.equal(result.m2.source_switches, 1); assert.equal(result.m2.in_place_replacements, 1);
+  assert.equal(result.m2.continuity, "PROVED"); b.api.dispose();
+});
+
+test("v8 review shared promotion rejects missing expansion, lost anchor, changed item and repeated/regressing provenance", () => {
+  for (const defect of ["no-expansion", "lost-anchor", "changed-item", "repeat"]) {
+    const b = browser({ rulerVersion: 8, disclosure: true }); v8Opening(b, presentedPreview(), true);
+    if (defect !== "no-expansion") { b.expandWork(); b.advance(3); }
+    const canonical = canonicalNativePage();
+    if (defect === "lost-anchor") b.content.getBoundingClientRect = () => ({ top: 20, left: 0, bottom: 420, right: 400, width: 400, height: 400 });
+    if (defect === "changed-item") canonical.presentation.payload.items[0].item_key = "other-literal-item";
+    b.adopt(canonical, true); b.advance(3);
+    if (defect === "repeat") { b.adopt(presentedPreview(), true); b.advance(3); b.adopt(canonical, true); b.advance(3); }
+    assert.throws(() => assertChatOpeningSample(b.api.snapshot(), { requireCanonical: true }), /unproven_handoff_continuity/);
+    b.api.dispose();
+  }
+});
+
+test("v8 review ordinary M1 miss retains null metrics and observes independent M2 at ten seconds", async () => {
+  const timing = await import("../lib/chatPreviewTiming.mjs");
+  const b = browser({ rulerVersion: 8 }); const record = { metrics: null };
+  b.api.arm("m1-miss"); b.click(); b.input.disabled = true;
+  const miss = Object.assign(new Error("readable/probe deadline"), { code: "probe_deadline_exceeded" });
+  assert.equal(typeof timing.observeChatOpening, "function");
+  await assert.rejects(timing.observeChatOpening({ record, options: { sourceRole: "candidate", requireCanonical: true },
+    measureM1: async () => { b.elapse(5_000); throw miss; },
+    observeM2: async () => { b.elapse(5_000); b.adopt(canonicalNativePage(), true); b.advance(6); },
+    snapshot: async () => b.api.snapshot(),
+  }), (error) => error === miss);
+  assert.equal(record.metrics, null); assert.equal(record.m2_observed.status, "QUALIFIED_FIRST_FRAME");
+  assert.ok(record.m2_observed.open_to_qualified_handoff_ms >= 10_000);
+  b.api.dispose();
+});
+
+test("v8 review fatal authority errors do not enter the passive continuation and M2 after the original 30 seconds receives no credit", async () => {
+  const timing = await import("../lib/chatPreviewTiming.mjs");
+  const b = browser({ rulerVersion: 8 }); b.api.arm("fatal"); b.click();
+  const fatal = new Error("invalid_page_scope"); let observed = false;
+  await assert.rejects(timing.observeChatOpening({ record: {}, options: {}, measureM1: async () => { throw fatal; },
+    observeM2: async () => { observed = true; }, snapshot: async () => b.api.snapshot(),
+  }), (error) => error === fatal);
+  assert.equal(observed, false);
+  b.elapse(30_001); b.adopt(canonicalNativePage(), true); b.advance(6);
+  const snapshot = b.api.snapshot(); assert.equal(snapshot.phase.projectionAt, null); assert.equal(snapshot.phase.qualifiedAt, null);
+  assert.throws(() => timing.assertChatHandoffSample(snapshot), /missing_qualified_handoff/);
+  await b.api.finishObservation(); b.api.dispose();
+  await assert.rejects(b.api.finishObservation(), /timing observation invalidated/);
+});
+
+test("v8 old-phase wire replies and a request begun before the click cannot credit otherwise identical visible content", () => {
+  const b = browser({ rulerVersion: 8 }); b.api.arm("old-phase");
+  const old = b.api.noteRequest(); b.advance(); b.click();
+  b.api.receive(chatTimingReceipt(nativeLegacyPage(), fixture), null, old); b.advance(4);
+  assert.equal(b.api.snapshot().phase.readableAt, null);
+  assert.equal(b.api.snapshot().prewarmed_request_observed, true); b.api.dispose();
+});
+
+test("v8 historical first endpoints cannot bypass a reset fence before fresh current health frames", () => {
+  const b = browser({ rulerVersion: 8 }); const first = v8Opening(b);
+  b.api.receive(chatTimingReceipt(unscopedReset(), fixture)); b.advance(3);
+  b.adopt(nativeLegacyPage(), false);
+  assert.throws(() => assertChatOpeningSample(b.api.snapshot(), { sourceRole: "baseline" }), /missing_fresh_post_control_health/);
+  b.advance(2);
+  assert.throws(() => assertChatOpeningSample(b.api.snapshot(), { sourceRole: "baseline" }), /missing_fresh_post_control_health/);
+  b.advance();
+  assert.equal(assertChatOpeningSample(b.api.snapshot(), { sourceRole: "baseline" }).m1.usable_ms, first.phase.usableAt - first.phase.clickAt);
+  b.api.dispose();
+});
+
+test("v8 older/detail responses and duplicate literal IDs grant neither opening nor handoff credit", () => {
+  for (const purpose of ["older", "detail"]) {
+    const b = browser({ rulerVersion: 8 }); b.api.arm("non-opening-request"); b.click();
+    const request = b.api.noteRequest({ purpose });
+    b.api.receive(chatTimingReceipt(nativeLegacyPage(), fixture), null, request); b.advance(4);
+    assert.equal(b.api.snapshot().phase.readableAt, null); b.api.dispose();
+  }
+  const duplicate = nativeLegacyPage(); duplicate.events.push(structuredClone(duplicate.events[0]));
+  assert.equal(chatTimingNativeEvidence(duplicate, fixture).verified, false);
+});
+
+test("v8 first healthy M1 survives a later busy fact but final acceptance needs fresh post-rejection receipt and clear two-frame health", async () => {
+  const b = browser({ rulerVersion: 8, surface: "desktop" });
+  const first = v8Opening(b, nativeLegacyPage(), false);
+  await b.reject(new Error("chat source temporarily busy")); b.transcriptAlert.hidden = false; b.advance(3);
+  assert.throws(() => assertChatOpeningSample(b.api.snapshot(), { sourceRole: "baseline" }), /unhealthy_opening/);
+  b.adopt(nativeLegacyPage(), false); b.advance(3);
+  assert.equal(b.api.snapshot().busy_retries[0].recovered_at, null);
+  b.transcriptAlert.hidden = true; b.advance(1);
+  assert.equal(b.api.snapshot().busy_retries[0].recovered_at, null);
+  b.advance(3);
+  const recovered = b.api.snapshot();
+  assert.equal(recovered.phase.usableAt, first.phase.usableAt);
+  assert.equal(assertChatOpeningSample(recovered, { sourceRole: "baseline" }).m1.usable_ms, first.phase.usableAt - first.phase.clickAt);
+  b.api.dispose();
+});
+
+test("v8 whole-window handoff uses all 80 producer aliases, never the latest-eight hint subset", () => {
+  const before = chatTimingReceipt(nativeLegacyPage(), fixture);
+  before.nativeOpening.window_ids = Array.from({ length: 80 }, (_, index) => `literal-${index}`);
+  before.scope.admission = "actual-admission";
+  const after = structuredClone(before);
+  after.nativeOpening.window_ids = before.nativeOpening.window_ids.map((id) => `published-${id}`);
+  after.aliases = before.nativeOpening.window_ids.map((id, index) => ({ observation_id: id, canonical_id: after.nativeOpening.window_ids[index] }));
+  assert.equal(chatTimingHandoffEvidence(before, after).verified, true);
+  for (const mutate of [
+    (p) => { p.aliases = p.aliases.slice(-8); },
+    (p) => { p.nativeOpening.window_ids.reverse(); },
+    (p) => { p.scope.epoch = "foreign"; },
+    (p) => { p.scope.admission = "other admission"; },
+    (p) => { p.aliases.push({ observation_id: "literal-0", canonical_id: "ambiguous" }); },
+  ]) { const wrong = structuredClone(after); mutate(wrong); assert.equal(chatTimingHandoffEvidence(before, wrong).verified, false); }
+});
+
+test("v8 continuity retains one switch, expansion and anchor with bounded duplicate frames and rejects blank/mixed/reflow", () => {
+  const state = { raw_frames: 0, blank_frames: 0, mixed_frames: 0, source_switches: 0, extra_reflows: 0,
+    samples: [], coalesced_frames: 0, overflow_count: 0, disclosure_requested: true, disclosure_frames: 0, expected_expanded: "true" };
+  const legacy = { at: 1, content_count: 1, renderer: "legacy", mixed_source_rows: 0, anchor_bound: true,
+    anchor_top: 10, geometry: "original", expanded: "true", expansion_bound: true, representation: { kind: "legacy" } };
+  for (let at = 1; at <= 1_000; at++) recordChatContinuity(state, { ...legacy, at });
+  const representation = { kind: "provisional", item_key: "item", turn_key: "turn", source_key: "source", source_epoch: "epoch", record_key: "record" };
+  recordChatContinuity(state, { ...legacy, at: 1_001, renderer: "shared", qualified: true, representation });
+  assert.equal(state.samples.length, 2); assert.equal(state.coalesced_frames, 999);
+  assert.equal(state.source_switches, 1); assert.equal(state.anchor_preserved, true); assert.equal(state.expansion_preserved, true);
+  recordChatContinuity(state, { ...legacy, at: 1_002, renderer: "shared", representation, geometry: "changed", content_count: 0, mixed_source_rows: 1 });
+  assert.equal(state.blank_frames, 1); assert.equal(state.mixed_frames, 1); assert.equal(state.extra_reflows, 1);
+  for (let at = 2_000; at < 2_100; at++) recordChatContinuity(state, { ...legacy, at, geometry: String(at) });
+  assert.ok(state.samples.length <= 64); assert.ok(state.bytes <= 16_384); assert.ok(state.overflow_count > 0);
+});
+
+test("v8 fixture shape catches per-turn workspace length bias before clock without normalizing literal source hashes", () => {
+  const a = syntheticCodexSource({ workspace: path.resolve("fixed-source-A"), turns: 128, padding: 128 });
+  const b = syntheticCodexSource({ workspace: path.resolve("fixed-source-B"), turns: 128, padding: 128 });
+  const expected = { generation_sha256: a.generationSha256, source_bytes: a.bytes.length };
+  assert.deepEqual(a.generation, b.generation); assert.notEqual(a.sourceSha256, b.sourceSha256);
+  assertChatFixtureShape({ ...b, sourceBytes: b.bytes.length }, expected);
+  const longer = syntheticCodexSource({ workspace: path.resolve("longer-fixed-source"), turns: 128, padding: 128 });
+  assert.throws(() => assertChatFixtureShape({ ...longer, sourceBytes: longer.bytes.length }, expected), /fixture_generation_mismatch_before_clock/);
+});
 
 test("raw synthetic Codex source has explicit request, native turn bracket and successful final output", () => {
   const source = syntheticCodexSource({ workspace: path.resolve("synthetic-workspace"), turns: 128, padding: 128 });
