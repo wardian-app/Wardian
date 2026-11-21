@@ -239,7 +239,9 @@ test("real local AF_UNIX and raw WebSocket proxy perform the startup subset and 
   const rpc = (method, params) => bounded(new Promise((resolve) => {
     const id = ++sequence; pending.set(id, resolve); ws.send(JSON.stringify({ id, method, params }));
   }));
-  assert.equal((await rpc("initialize", { clientInfo: { name: "wardian" } })).codexHome, f.codexHome);
+  const initialized = await rpc("initialize", { clientInfo: { name: "wardian" } });
+  assert.equal(initialized.userAgent, "wardian/0.160.0 (Wardian synthetic fixture peer v1)");
+  assert.equal(initialized.codexHome, f.codexHome);
   ws.send(JSON.stringify({ method: "initialized" }));
   assert.deepEqual((await rpc("thread/loaded/list", { limit: 2 })).data, []);
   assert.equal((await rpc("config/read", { cwd: f.root })).config.windows.sandbox, "unelevated");
