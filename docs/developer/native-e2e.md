@@ -35,6 +35,10 @@ result report in separate isolated homes. It verifies an editable draft survives
 a correlated peer delivery without delivery keystrokes, then verifies the
 hooks-disabled terminal fallback and its recorded reason. A skipped probe is
 not native acceptance evidence.
+Set `WARDIAN_E2E_CLAUDE_MOD_COMPOSER=1` with the same prerequisites to run only
+the single-prompt composer case. It verifies the claimed interaction in the
+provider transcript, the visible prompt and answer, and zero terminal writes
+during the send.
 
 The legacy command is kept as an alias:
 

@@ -2920,6 +2920,7 @@ describe("AgentChatView", () => {
     });
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
       chatComposer: true,
+      terminalAttachments: true,
       sessionId: "agent-1",
       prompt: `Review these.\n\nAttached files:\n- ${selectedImage}\n- ${selectedText}`,
     }));
@@ -3058,6 +3059,7 @@ describe("AgentChatView", () => {
     await waitFor(() => expect(writeImageMock).toHaveBeenCalledWith(clipboardImage));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
       chatComposer: true,
+      terminalAttachments: true,
       sessionId: "agent-1",
       prompt: "Review this screenshot.\n\nAttached files:\n- pasted-image-1.png",
     }));

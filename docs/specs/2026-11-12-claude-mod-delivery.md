@@ -265,9 +265,11 @@ are bound to the generation.
 
 ## Non-goals
 
-- The user's own prompts from Wardian's Chat composer keep the current path for
-  now. Routing them through the mod (`asUser: true`) is a possible follow-up
-  once the mod path has proven itself.
+- #1773 adds `asUser: true` for ordinary prompts from the Chat composer.
+  The pending and durable records identify this mode. The exact Wardian
+  interaction envelope in the owned Claude transcript proves entry. Staged
+  images, file mentions, permissions and slash commands stay on the terminal
+  route. Once Wardian publishes, that mod generation owns the attempt.
 - Permission prompts and approvals are unchanged.
 - Claude's cross-session inbox and channels are not used. Channels remain the
   documented fallback if the mods API is withdrawn.

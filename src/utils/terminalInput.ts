@@ -56,6 +56,7 @@ export async function submitInputToAgent(
   input: string,
   inputMode: "message" | "command" = isSlashCommand(input) ? "command" : "message",
     chatComposer = false,
+    terminalAttachments = false,
 ): Promise<PromptDeliveryDetail | undefined> {
   if (!sessionId || !input.trim()) {
     return undefined;
@@ -66,6 +67,7 @@ export async function submitInputToAgent(
     prompt: input,
     ...(inputMode === "command" ? { inputMode: "command" as const } : {}),
     ...(chatComposer ? { chatComposer: true } : {}),
+    ...(terminalAttachments ? { terminalAttachments: true } : {}),
   });
 }
 

@@ -9,7 +9,7 @@ pub(crate) async fn deliver_prompt_to_agent(
     prompt: &str,
     input_mode: MessageInputMode,
 ) -> Result<DeliveryDetail, ControlError> {
-    let delivery = deliver_message_to_target_with_headless_timeout(
+    let delivery = deliver_message_to_target(
         app,
         state,
         target,
@@ -20,7 +20,6 @@ pub(crate) async fn deliver_prompt_to_agent(
         None,
         None,
         false,
-        crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
     )
     .await?;
 

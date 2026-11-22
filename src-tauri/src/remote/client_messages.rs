@@ -1684,6 +1684,7 @@ pub(crate) async fn dispatch_if_admitted(
                     &operation.native_intent_id,
                     &operation.delivery_deadline_at,
                     authority,
+                    None,
                 )
                 .await;
                 match result {

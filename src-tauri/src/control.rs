@@ -1491,36 +1491,6 @@ async fn deliver_message_to_target(
     origin: Option<&MessageOrigin>,
     scope_all: bool,
 ) -> Result<Vec<DeliveryDetail>, ControlError> {
-    deliver_message_to_target_with_headless_timeout(
-        app,
-        state,
-        target,
-        message,
-        thread,
-        input_mode,
-        queue_policy,
-        approval_action,
-        origin,
-        scope_all,
-        crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn deliver_message_to_target_with_headless_timeout(
-    app: Option<&AppHandle>,
-    state: &AppState,
-    target: &str,
-    message: &str,
-    thread: Option<&str>,
-    input_mode: MessageInputMode,
-    queue_policy: QueuePolicy,
-    approval_action: Option<&ApprovalAction>,
-    origin: Option<&MessageOrigin>,
-    scope_all: bool,
-    headless_timeout: Duration,
-) -> Result<Vec<DeliveryDetail>, ControlError> {
     deliver_message_to_target_with_delivery_options(
         app,
         state,
@@ -1532,11 +1502,11 @@ async fn deliver_message_to_target_with_headless_timeout(
         approval_action,
         origin,
         scope_all,
-        headless_timeout,
+        crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
         None,
         None,
         None,
-        None,
+        Default::default(),
     )
     .await
 }

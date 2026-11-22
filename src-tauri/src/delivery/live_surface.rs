@@ -206,6 +206,8 @@ pub struct LiveSurfacePromptRequest {
     pub input_mode: MessageInputMode,
     pub queue_policy: QueuePolicy,
     pub approval_action: Option<ApprovalAction>,
+    /// This Chat send may use a provider prompt API without losing staged input.
+    pub chat_composer: bool,
     pub origin: Option<MessageOrigin>,
     pub write_fence: Option<crate::utils::delivery_transaction::AutomatedInputWriteFence>,
     pub runtime_state: &'static str,
@@ -247,6 +249,7 @@ impl LiveSurfacePromptRequest {
             input_mode: MessageInputMode::Message,
             queue_policy: QueuePolicy::LiveOnly,
             approval_action: None,
+            chat_composer: false,
             origin: None,
             write_fence: None,
             runtime_state: "live_pty_available",
@@ -423,7 +426,9 @@ async fn submit_live_surface_prompt_inner(
         }
     };
     let mut claude_mod_fallback = None;
-    if super::claude_mod::is_peer_delivery(&provider, &request) {
+    if super::claude_mod::is_composer_delivery(&provider, &request)
+        || super::claude_mod::is_peer_delivery(&provider, &request)
+    {
         match super::claude_mod::try_deliver(
             app,
             state,
@@ -431,6 +436,7 @@ async fn submit_live_surface_prompt_inner(
             &config,
             &interaction_id,
             broker_state.runtime_generation,
+            authority.as_ref(),
         )
         .await
         {

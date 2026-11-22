@@ -63,9 +63,9 @@ async function fixture() {
   return {
     files, writes, submissions, timers, dispatch,
     start: () => dispatch("session.start", { isInteractive: true }),
-    pending(id, sequence, generation = 7) {
+    pending(id, sequence, generation = 7, asUser) {
       files.set(`${inbox}/pending/${String(sequence).padStart(12, "0")}-${id}.json`,
-        JSON.stringify({ schema: 1, interaction_id: id, runtime_generation: generation, text: `body-${id}` }));
+        JSON.stringify({ schema: 1, interaction_id: id, runtime_generation: generation, text: `body-${id}`, as_user: asUser }));
     },
     record: (kind, id) => {
       const raw = files.get(recordPath(kind, id));
@@ -89,6 +89,7 @@ test("interactive start passes middleware through and binds readiness to the rea
   assert.equal(ready.generation, 7);
   assert.equal(ready.session_id, "session-A");
   assert.equal(typeof ready.mod_version, "string");
+  assert.equal(ready.supports_as_user, true);
   assert.deepEqual(f.timers.map((timer) => timer.milliseconds), [1000, 1000]);
   assert.deepEqual(f.submissions, []);
 });
@@ -102,6 +103,19 @@ test("noninteractive or invalid launch cannot register delivery timers", async (
   await invalid.start();
   assert.deepEqual(invalid.timers, []);
   assert.deepEqual(invalid.writes, []);
+});
+
+test("selects asUser only for valid composer deliveries and submits each once", async () => {
+  const f = await fixture();
+  f.pending("composer", 1, 7, true);
+  f.pending("peer", 2);
+  f.pending("malformed", 3, 7, "true");
+  await f.start();
+  await f.tick(1);
+  await f.tick(1);
+  assert.deepEqual(f.submissions, [{ text: "body-composer", asUser: true }, { text: "body-peer" }]);
+  assert.equal(f.record("queued", "composer")?.interaction_id, "composer");
+  assert.equal(f.record("rejected", "malformed")?.reason, "invalid as_user");
 });
 
 test("poll sorts pending sequence, serializes submissions, and never replays settled claims", async () => {

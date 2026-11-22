@@ -424,20 +424,7 @@ fn required_turn_id(
 }
 
 fn render_envelope(envelope: &NativeMessageEnvelope) -> String {
-    let mut header = format!(
-        "[Wardian message_id={} interaction_id={} generation={} target={}]",
-        envelope.message_id, envelope.interaction_id, envelope.generation, envelope.target_agent_id
-    );
-    if let Some(sender) = envelope.sender_agent_id.as_deref() {
-        header.push_str(&format!(" sender={sender}"));
-    }
-    if let Some(parent) = envelope.parent_interaction_id.as_deref() {
-        header.push_str(&format!(" reply_to={parent}"));
-    }
-    if let Some(deadline) = envelope.deadline_at.as_deref() {
-        header.push_str(&format!(" deadline={deadline}"));
-    }
-    format!("{header}\n{}", envelope.body)
+    format!("{}\n{}", envelope.transcript_header(), envelope.body)
 }
 
 fn parse_claude_event(value: &Value) -> Vec<NativeProtocolEvent> {

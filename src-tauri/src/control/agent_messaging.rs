@@ -622,6 +622,7 @@ pub(super) async fn dispatch_pending_wakeable_information(
                     input_mode: MessageInputMode::Message,
                     queue_policy: QueuePolicy::LiveOnly,
                     approval_action: None,
+                    chat_composer: false,
                     origin: claim
                         .record
                         .sender_session_id
@@ -983,6 +984,7 @@ pub(super) async fn dispatch_pending_reply_continuations(
                     input_mode: MessageInputMode::Message,
                     queue_policy: QueuePolicy::LiveOnly,
                     approval_action: None,
+                    chat_composer: false,
                     origin: claim
                         .record
                         .sender_session_id
@@ -1746,6 +1748,7 @@ async fn dispatch_one_with_request(
             input_mode: MessageInputMode::Message,
             queue_policy: QueuePolicy::LiveOnly,
             approval_action: None,
+            chat_composer: false,
             origin: claim
                 .record
                 .sender_session_id

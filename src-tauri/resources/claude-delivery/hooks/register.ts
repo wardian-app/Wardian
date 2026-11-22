@@ -33,9 +33,10 @@ type Pending = {
   interaction_id: string
   runtime_generation: number
   text: string
+  as_user?: boolean
 }
 
-const MOD_VERSION = '0.1.0'
+const MOD_VERSION = '0.2.0'
 const POLL_MS = 1000
 const HEARTBEAT_MS = 1000
 const ID = /^[A-Za-z0-9_-]{1,128}$/
@@ -70,6 +71,7 @@ const parsePending = (raw: string): Pending | string => {
     return 'invalid interaction_id'
   }
   if (!Number.isSafeInteger(value.runtime_generation)) return 'invalid runtime_generation'
+  if (value.as_user !== undefined && typeof value.as_user !== 'boolean') return 'invalid as_user'
   if (typeof value.text !== 'string' || value.text.trim() === '') return 'empty text'
   if (value.text.length > MAX_TEXT) return 'text too long'
   return value
@@ -144,6 +146,7 @@ export const register: Register = on => {
           generation,
           session_id: await currentSession(),
           mod_version: MOD_VERSION,
+          supports_as_user: true,
           at: Date.now(),
         }),
       )
@@ -199,7 +202,9 @@ export const register: Register = on => {
           await record(`${inbox}/claimed/${key}.json`, key, {})
           let outcome: { drop?: string; text?: string } | undefined
           try {
-            outcome = await $.prompt.submit({ text: parsed.text })
+            outcome = parsed.as_user
+              ? await $.prompt.submit({ text: parsed.text, asUser: true })
+              : await $.prompt.submit({ text: parsed.text })
           } catch {
             await noteSession?.(await currentSession()).catch(() => undefined)
             // Uncertain: leave the claim alone. Wardian never replays it.

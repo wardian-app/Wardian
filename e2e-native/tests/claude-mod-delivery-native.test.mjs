@@ -18,6 +18,7 @@ import { assertTerminalDebugAvailable, resolveAgentTerminalPresentationId, readT
 
 const OPT_IN = "WARDIAN_E2E_REAL_CLAUDE_MOD";
 const MODEL_ENV = "WARDIAN_E2E_CLAUDE_MOD_MODEL";
+const COMPOSER_ENV = "WARDIAN_E2E_CLAUDE_MOD_COMPOSER";
 
 // Only transient absence/partial JSON is retryable. Permissions and other I/O
 // errors remain failures, rather than looking like a mod which has not started.
@@ -63,11 +64,20 @@ function canonicalReply(DatabaseSync, home, requestId, sender, recipient, expect
   } finally { db.close(); }
 }
 
-for (const modAbsent of [false, true]) {
-  test(`interactive Claude ${modAbsent ? "records mod_not_loaded and delivers through the terminal" : "delivers a peer task through its generation mod without disturbing a draft"}`,
+for (const mode of ["draft", "fallback", "composer"]) {
+  const modAbsent = mode === "fallback";
+  const composer = mode === "composer";
+  const title = { draft: "delivers a peer task through its generation mod without disturbing a draft",
+    fallback: "records mod_not_loaded and delivers through the terminal",
+    composer: "submits one Chat prompt as user through the mod without writing terminal input" };
+  test(`interactive Claude ${title[mode]}`,
     { timeout: 420_000 }, async (t) => {
       if (process.env[OPT_IN] !== "1") {
         t.skip(`Set ${OPT_IN}=1; real-provider acceptance was not run`);
+        return;
+      }
+      if (composer !== (process.env[COMPOSER_ENV] === "1")) {
+        t.skip("Only the selected Claude mod acceptance mode runs");
         return;
       }
       const model = process.env[MODEL_ENV]?.trim();
@@ -80,14 +90,14 @@ for (const modAbsent of [false, true]) {
       // Each case retains its own report and trace; preparing the same home
       // twice would erase the first case's evidence.
       harness.isolatedHome = await fs.mkdtemp(path.join(os.tmpdir(),
-        `wardian-e2e-native-claude-mod-${modAbsent ? "fallback" : "draft"}-`));
+        `wardian-e2e-native-claude-mod-${mode}-`));
       prepareIsolatedHome(harness);
       const report = {
-        schema: 1, provider: "claude", model, mod_absent: modAbsent,
+        schema: 1, provider: "claude", model, mod_absent: modAbsent, mode,
         status: "running", started_at: new Date().toISOString(),
         app_sha256: createHash("sha256").update(await fs.readFile(harness.appPath)).digest("hex"),
       };
-      const reportPath = path.join(harness.isolatedHome, `claude-mod-${modAbsent ? "fallback" : "draft"}-report.json`);
+      const reportPath = path.join(harness.isolatedHome, `claude-mod-${mode}-report.json`);
       const save = () => fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
       const owned = { session: undefined, agent: undefined, spawnAttempted: false, startupAttempted: false };
       t.after(() => cleanupConformanceSession({
@@ -124,7 +134,7 @@ for (const modAbsent of [false, true]) {
         assert.ok(catalog.models.some((entry) => entry.id === model), "Explicit model absent from refreshed catalog");
         report.provider_version = catalog.version;
         assert.ok(report.provider_version, "Retain the real Claude version for early-access mod API acceptance");
-        const sender = await invokeTauri(driver, "spawn_agent", { req: {
+        const sender = composer ? null : await invokeTauri(driver, "spawn_agent", { req: {
           sessionName: `Mod-Peer-${token}`, agentClass: "TestClass", folder: workspace,
           isOff: true, resumeSession: null, configOverride: { provider: "mock" },
         } });
@@ -155,6 +165,7 @@ for (const modAbsent of [false, true]) {
             const ready = await readJson(path.join(inbox, "ready.json"));
             const heartbeat = await readJson(path.join(inbox, "heartbeat.json"));
             return ready?.generation === generation && heartbeat?.generation === generation
+              && (!composer || ready.supports_as_user === true)
               && ready.session_id === launch.expected_claude_session_id
               && heartbeat.session_id === ready.session_id
               && Number.isFinite(heartbeat.at) && Date.now() - heartbeat.at >= 0
@@ -180,6 +191,55 @@ for (const modAbsent of [false, true]) {
           await driver.wait(() => draftRow(draft), 10_000, "Typed draft was not rendered");
         }
         const traceBefore = inputLines(await fs.readFile(tracePath, "utf8"));
+        if (composer) {
+          const answer = `COMPOSER_REPLY_${token}`;
+          const prompt = `Reply only with ${answer}. Do not run any tools.`;
+          const receipt = await invokeTauri(driver, "submit_prompt_to_agent", {
+            sessionId: sid, prompt, chatComposer: true,
+          });
+          assert.equal(receipt.observed_state, `claude_mod;runtime_generation=${generation};as_user=true`);
+          assert.equal(receipt.delivery_state, "provider_accepted");
+          const id = receipt.message_id;
+          assert.ok(id);
+          const names = (await fs.readdir(path.join(inbox, "pending"))).filter((name) => name.endsWith(`-${id}.json`));
+          assert.equal(names.length, 1, "Composer published the interaction more than once");
+          const pending = await readJson(path.join(inbox, "pending", names[0]));
+          assert.equal(pending.as_user, true);
+          assert.equal(pending.text, `[Wardian message_id=${id} interaction_id=${id} generation=${generation} target=${sid}]\n${prompt}`);
+          await idle(driver, sid);
+          const { DatabaseSync } = await import("node:sqlite");
+          await driver.wait(async () => {
+            const db = new DatabaseSync(path.join(harness.isolatedHome, "state.db"), { readOnly: true });
+            try {
+              const record = db.prepare("SELECT phase, record_json FROM native_deliveries WHERE interaction_id=?").get(id);
+              report.native_delivery_last_observed_phase = record?.phase;
+              if (!["turn_started", "completed"].includes(record?.phase)) return false;
+              return JSON.parse(record.record_json).claude_mod_as_user === true;
+            } finally { db.close(); }
+          }, 30_000, "The owned Claude transcript did not prove the exact composer interaction");
+          await driver.wait(async () => {
+            const rows = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId: sid });
+            const user = rows.filter((row) => row.role === "user" && row.text === prompt && row.metadata?.provider_log === true);
+            const final = rows.filter((row) => row.role === "assistant" && row.text?.trim() === answer && row.metadata?.provider_log === true);
+            return user.length === 1 && final.length === 1;
+          }, 30_000, "Chat did not show one native user prompt and one native answer");
+          assert.deepEqual(inputLines(await fs.readFile(tracePath, "utf8")), traceBefore);
+          assert.ok(await draftRow(draft), "Draft disappeared during the mod composer send");
+          await driver.wait(() => driver.executeScript((sessionId, expected) => {
+            const card = document.getElementById(`agent-card-${sessionId}`);
+            const chat = card?.querySelector('[data-testid="agent-chat-view"]');
+            if (chat) return chat.textContent.includes(expected);
+            [...(card?.querySelectorAll("button") ?? [])]
+              .find((button) => button.title.startsWith("Switch to Chat"))?.click();
+            return false;
+          }, sid, answer), 30_000, "The synthetic reply did not render in Chat");
+          const chat = await driver.findElement(By.css(`#agent-card-${sid} [data-testid="agent-chat-view"]`));
+          await fs.writeFile(path.join(harness.isolatedHome, "claude-composer.png"),
+            Buffer.from(await chat.takeScreenshot(), "base64"));
+          Object.assign(report, { generation, draft_preserved: true, delivery_pty_writes: 0, status: "pass" });
+          await save();
+          return;
+        }
         const logPath = path.join(harness.isolatedHome, "wardian_debug.log");
         const logBefore = (await fs.readFile(logPath, "utf8")).length;
         const cli = path.join(harness.isolatedHome, "bin", process.platform === "win32" ? "wardian-cli.exe" : "wardian-cli");

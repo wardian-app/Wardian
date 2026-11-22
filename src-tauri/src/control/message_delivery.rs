@@ -2,6 +2,12 @@
 
 use super::*;
 
+#[derive(Default)]
+pub(super) struct DeliveryContext {
+    pub(super) client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
+    pub(super) chat_composer: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn deliver_message_to_target_with_delivery_options(
     app: Option<&AppHandle>,
@@ -18,8 +24,12 @@ pub(super) async fn deliver_message_to_target_with_delivery_options(
     orchestration: Option<&wardian_core::control::OrchestrationDeliveryOptions>,
     parent_interaction_id: Option<&str>,
     stable_interaction_id: Option<&str>,
-    client_send_authority: Option<crate::remote::client_messages::ClientSendAuthority>,
+    context: DeliveryContext,
 ) -> Result<Vec<DeliveryDetail>, ControlError> {
+    let DeliveryContext {
+        client_send_authority,
+        chat_composer,
+    } = context;
     validate_send_message_options(target, thread, input_mode)?;
     let sender_session_id = origin
         .as_ref()
@@ -189,6 +199,7 @@ pub(super) async fn deliver_message_to_target_with_delivery_options(
                     input_mode,
                     queue_policy,
                     approval_action: approval_action.cloned(),
+                    chat_composer: chat_composer && info.status != "action_required",
                     origin: origin.cloned(),
                     write_fence: None,
                     runtime_state: "live_pty_available",

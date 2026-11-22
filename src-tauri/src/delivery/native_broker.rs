@@ -644,6 +644,7 @@ impl NativeDeliveryBroker {
             canonical_hash,
             provider: protocol.provider().to_string(),
             transport: protocol.transport().to_string(),
+            claude_mod_as_user: false,
             phase: NativeDeliveryPhase::Queued,
             provider_request_id: None,
             provider_turn_id: None,

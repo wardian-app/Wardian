@@ -79,7 +79,9 @@ pub(crate) async fn try_deliver(
     config: &AgentConfig,
     interaction_id: &str,
     generation: u64,
+    authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
 ) -> Result<Result<LiveSurfacePromptResult, LiveSurfaceDeliveryError>, FallbackReason> {
+    let as_user = is_composer_delivery("claude", request);
     // Ownership precedes readiness. A stale heartbeat must never reroute a
     // delivery already published to a still-possibly-live older generation.
     match wardian_core::db::native_delivery(interaction_id) {
@@ -112,7 +114,7 @@ pub(crate) async fn try_deliver(
     let mut resolver = resolver.lock().await;
     let tracked: BTreeSet<_> = tracked_sessions(config).into_iter().collect();
     resolver
-        .readiness(chrono::Utc::now(), &tracked)
+        .readiness(chrono::Utc::now(), &tracked, as_user)
         .map_err(|_| FallbackReason::ModNotLoaded)??;
     if let Some(fence) = &request.write_fence {
         let agents = state.agents.lock().await;
@@ -211,6 +213,7 @@ pub(crate) async fn try_deliver(
             canonical_hash: format!("{:x}", Sha256::digest(request.prompt.as_bytes())),
             provider: "claude".into(),
             transport: "claude_mod".into(),
+            claude_mod_as_user: as_user,
             phase: NativeDeliveryPhase::SubmittedUnconfirmed,
             provider_request_id: None,
             provider_turn_id: None,
@@ -218,6 +221,17 @@ pub(crate) async fn try_deliver(
             created_at: now.clone(),
             updated_at: now,
         }
+    };
+    let remote_permit = if let Some(authority) = authority {
+        match authority.acquire().await {
+            Ok(permit) => Some(permit),
+            Err(code) => {
+                let _ = lease.release();
+                return Ok(Err(before_submit(code)));
+            }
+        }
+    } else {
+        None
     };
     if let Err(error) = wardian_core::db::upsert_native_delivery(&record) {
         let _ = lease.release();
@@ -241,7 +255,19 @@ pub(crate) async fn try_deliver(
         .max()
         .unwrap_or(0)
         .saturating_add(1);
-    let publication = resolver.publish(seq, interaction_id, &request.prompt);
+    let tagged_prompt;
+    let text = if as_user {
+        tagged_prompt = format!(
+            "{}\n{}",
+            record.envelope.transcript_header(),
+            request.prompt
+        );
+        &tagged_prompt
+    } else {
+        &request.prompt
+    };
+    let publication = resolver.publish(seq, interaction_id, text, as_user);
+    drop(remote_permit);
     let _ = lease.release();
     drop(_generation_fence);
     drop(_lifecycle);
@@ -304,7 +330,24 @@ pub(crate) async fn try_deliver(
     }
 }
 
-/// User composer submissions and approval keys retain their existing path.
+/// A composer send with terminal-only input must use the existing input sink.
+pub(crate) fn is_composer_delivery(provider: &str, request: &LiveSurfacePromptRequest) -> bool {
+    provider == "claude"
+        && request.chat_composer
+        && request.input_mode == wardian_core::control::MessageInputMode::Message
+        && request.approval_action.is_none()
+        && !request
+            .prompt
+            .chars()
+            .any(|character| character.is_ascii_control() && !matches!(character, '\t' | '\r' | '\n'))
+        // The mod submits literal text and Claude expands @file only in the TUI.
+        && !request
+            .prompt
+            .split_whitespace()
+            .any(|word| word.starts_with('@') && word.len() > 1)
+}
+
+/// Peer messages and automatic follow-ups keep the framed mod delivery.
 pub(crate) fn is_peer_delivery(provider: &str, request: &LiveSurfacePromptRequest) -> bool {
     provider == "claude"
         && matches!(
@@ -404,8 +447,13 @@ fn delivery_detail(
         message_id: Some(record.envelope.message_id.clone()),
         delivery_phase: Some(phase.into()),
         observed_state: Some(format!(
-            "claude_mod;runtime_generation={}",
-            record.envelope.generation
+            "claude_mod;runtime_generation={}{}",
+            record.envelope.generation,
+            if record.claude_mod_as_user {
+                ";as_user=true"
+            } else {
+                ""
+            }
         )),
         reason: record.detail.clone(),
         profile: Some("claude".into()),
@@ -447,7 +495,12 @@ async fn persist_detail(
         .map(|_| ())
 }
 
-fn transcript_contains(config: &AgentConfig, resolver: &ClaudeModResolver, id: &str) -> bool {
+fn transcript_contains(
+    config: &AgentConfig,
+    resolver: &ClaudeModResolver,
+    record: &NativeDeliveryRecord,
+) -> bool {
+    let id = &record.envelope.interaction_id;
     let tracked = tracked_sessions(config).into_iter().collect();
     let Ok(sessions) = resolver.session_history(&tracked) else {
         return false;
@@ -464,7 +517,17 @@ fn transcript_contains(config: &AgentConfig, resolver: &ClaudeModResolver, id: &
                 continue;
             }
             if let Ok(row) = serde_json::from_str(&line) {
-                if wardian_core::claude_mod::transcript_row_matches(&row, session, &sessions, id) {
+                let matches = if record.claude_mod_as_user {
+                    wardian_core::claude_mod::composer_transcript_row_matches(
+                        &row,
+                        session,
+                        &sessions,
+                        &record.envelope,
+                    )
+                } else {
+                    wardian_core::claude_mod::transcript_row_matches(&row, session, &sessions, id)
+                };
+                if matches {
                     return true;
                 }
             }
@@ -496,7 +559,11 @@ async fn reconcile(
         return Ok(record);
     }
     let projection = resolver.project(id).map_err(|error| error.to_string())?;
-    let next = if transcript_contains(config, &resolver, id) {
+    let bound_claim = !record.claude_mod_as_user
+        || resolver
+            .has_bound_claim(id)
+            .map_err(|error| error.to_string())?;
+    let next = if bound_claim && transcript_contains(config, &resolver, &record) {
         NativeDeliveryPhase::TurnStarted
     } else {
         projection.phase
@@ -695,7 +762,7 @@ mod tests {
     use wardian_core::control::{MessageInputMode, MessageOrigin};
 
     #[test]
-    fn only_peer_messages_use_the_mod() {
+    fn peer_messages_stay_on_the_existing_framed_mod_route() {
         let mut request = LiveSurfacePromptRequest::message("agent", "prompt");
         request.require_provider_turn_receipt = true;
         assert!(!is_peer_delivery("claude", &request));
@@ -712,6 +779,28 @@ mod tests {
         request.input_mode = MessageInputMode::Message;
         request.runtime_state = "agent_messaging_reply_continuation";
         assert!(is_peer_delivery("claude", &request));
+    }
+
+    #[test]
+    fn composer_selects_the_mod_only_for_claude_prompt_input() {
+        let mut request = LiveSurfacePromptRequest::message("agent", "Inspect the notes.");
+        assert!(!is_composer_delivery("claude", &request));
+        request.chat_composer = true;
+        assert!(is_composer_delivery("claude", &request));
+        assert!(!is_composer_delivery("codex", &request));
+        assert!(!is_peer_delivery("claude", &request));
+
+        request.prompt = "Inspect the notes.\n\nAttached files:\n- /workspace/notes.md".into();
+        assert!(is_composer_delivery("claude", &request));
+        request.prompt = "Inspect @/workspace/notes.md".into();
+        assert!(!is_composer_delivery("claude", &request));
+        request.prompt = "\u{1b}".into();
+        assert!(!is_composer_delivery("claude", &request));
+        request.prompt = "1".into();
+        request.input_mode = MessageInputMode::ApprovalAction;
+        assert!(!is_composer_delivery("claude", &request));
+        request.input_mode = MessageInputMode::Command;
+        assert!(!is_composer_delivery("claude", &request));
     }
 
     #[test]

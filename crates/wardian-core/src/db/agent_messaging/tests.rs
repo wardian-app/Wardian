@@ -1228,6 +1228,7 @@ fn claude_mod_native(
         canonical_hash: "hash".into(),
         provider: "claude".into(),
         transport: "claude_mod".into(),
+        claude_mod_as_user: false,
         phase,
         provider_request_id: None,
         provider_turn_id: None,

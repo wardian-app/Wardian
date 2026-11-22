@@ -10,6 +10,7 @@ import { useSettingsStore } from "../../store/useSettingsStore";
 import { reasoningEffortForConfig } from "../agents/configUtils";
 import { ProviderModelSelector, type ModelSelection } from "../agents/ProviderModelSelector";
 import {
+  isImageChatAttachment,
   promptWithChatAttachments,
   stageChatImageAttachments,
   submitInputToAgent,
@@ -299,7 +300,8 @@ export function AgentChatView({
     try {
       await stageChatImageAttachments(sessionId, providerName, selectedAttachments);
       if (!chat.isCurrentScope(submissionScope)) return;
-      await submitInputToAgent(sessionId, submittedPrompt, undefined, true);
+      await submitInputToAgent(sessionId, submittedPrompt, undefined, true,
+        selectedAttachments.some(isImageChatAttachment));
       if (!chat.isCurrentScope(submissionScope)) return;
       if (clearDraft) setActiveDraft("");
       if (selectedAttachments.length > 0) setAttachments([]);

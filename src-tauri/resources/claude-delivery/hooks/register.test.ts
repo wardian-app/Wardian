@@ -13,6 +13,7 @@ function fixture($: Engine, on: On) {
   const clock = mock.clock(on)
   const files = new Map<string, string>()
   const submissions: string[] = []
+  const origins: unknown[] = []
   let submit = async (text: string): Promise<{ text: string } | { drop: string }> => ({ text })
   let beforeWrite = async (_path: string) => {}
   let session = 'session-A'
@@ -41,14 +42,16 @@ function fixture($: Engine, on: On) {
   })
   on('prompt.submit', async (_$, e) => {
     submissions.push(e.text)
+    origins.push(e.origin)
     return submit(e.text)
   })
   return {
-    files, submissions, clock,
+    files, submissions, origins, clock,
     start: () => $.session.start({ cwd: '/owned/workspace', surface: 'terminal', isInteractive: true }),
-    pending(id: string, seq: number, generation = 7) {
+    pending(id: string, seq: number, generation = 7, asUser?: boolean) {
       files.set(`${inbox}/pending/${String(seq).padStart(12, '0')}-${id}.json`, JSON.stringify({
         schema: 1, interaction_id: id, runtime_generation: generation, text: `body-${id}`,
+        as_user: asUser,
       }))
     },
     record(kind: string, id: string) {
@@ -61,6 +64,17 @@ function fixture($: Engine, on: On) {
     heartbeatAttempts: () => heartbeatAttempts,
   }
 }
+
+test('composer submission remains attributable to Wardian in the Claude engine', async ($, on) => {
+  const f = fixture($, on)
+  f.pending('composer', 1, 7, true)
+  await f.start()
+  await f.clock.advance(1000)
+  await f.clock.advance(1000)
+  expect(f.submissions).toEqual(['body-composer'])
+  expect(f.origins).toEqual([{ kind: 'plugin', name: 'wardian', asUser: true }])
+  expect(f.record('queued', 'composer').interaction_id).toEqual('composer')
+})
 
 test('sequence ordering and busy poll serialize submissions without replay', async ($, on) => {
   const f = fixture($, on)
