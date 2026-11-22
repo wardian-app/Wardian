@@ -487,6 +487,29 @@ impl ClaudeModResolver {
         Ok(self.outcome("claimed", id)?.is_some())
     }
 
+    /// Check the complete claim and the exact owned session in this generation.
+    /// Session switches use the same generation's keyed history record.
+    pub fn has_composer_source_claim(&self, id: &str, session_id: &str) -> io::Result<bool> {
+        validate_id(id)?;
+        validate_id(session_id)?;
+        let Some(claim) = self.outcome("claimed", id)? else {
+            return Ok(false);
+        };
+        if claim.session_id == session_id || self.config.expected_claude_session_id == session_id {
+            return Ok(true);
+        }
+        Ok(read_record::<SessionRecord>(
+            &self
+                .config
+                .inbox
+                .join("sessions")
+                .join(format!("{session_id}.json")),
+        )?
+        .is_some_and(|record| {
+            record.generation == self.config.runtime_generation && record.session_id == session_id
+        }))
+    }
+
     /// Conflicting outcomes fail closed. A lone claim or rejection remains
     /// uncertain until transcript evidence or the proof-bearing resolver acts.
     pub fn project(&self, id: &str) -> io::Result<DeliveryProjection> {
@@ -619,26 +642,38 @@ pub fn composer_transcript_row_matches(
     session_history: &BTreeSet<String>,
     envelope: &NativeMessageEnvelope,
 ) -> bool {
+    session_history.contains(session_id)
+        && composer_transcript_token(row, session_id).is_some_and(|(id, header)| {
+            id == envelope.interaction_id && header == envelope.transcript_header()
+        })
+}
+
+/// Read the interaction selector and complete literal envelope from an owned
+/// Claude file record. A caller must still verify the durable delivery and claim.
+pub fn composer_transcript_token(row: &Value, session_id: &str) -> Option<(String, String)> {
     let other_plugin = row
         .pointer("/origin/name")
         .and_then(Value::as_str)
         .is_some_and(|name| name != "wardian");
-    if validate_id(&envelope.interaction_id).is_err()
-        || row.get("isMeta").and_then(Value::as_bool) == Some(true)
+    if row.get("isMeta").and_then(Value::as_bool) == Some(true)
         || row.get("isSidechain").and_then(Value::as_bool) == Some(true)
         || other_plugin
     {
-        return false;
+        return None;
     }
-    let Some(text) = transcript_user_text(row, session_id, session_history) else {
-        return false;
-    };
+    let text = user_text_in_session(row, session_id)?;
     // Some rows still carry the plugin frame. The bound claim and first-line
     // envelope supply the same identity in either representation.
     let payload = text
         .strip_prefix(PLUGIN_PREFIX)
         .map_or(text.as_str(), str::trim_start);
-    payload.lines().next() == Some(envelope.transcript_header().as_str())
+    let header = payload.lines().next()?;
+    let (_, fields) = header
+        .strip_prefix("[Wardian message_id=")?
+        .split_once(" interaction_id=")?;
+    let (interaction, _) = fields.split_once(" generation=")?;
+    validate_id(interaction).ok()?;
+    Some((interaction.to_owned(), header.to_owned()))
 }
 
 fn transcript_user_text(
@@ -646,8 +681,14 @@ fn transcript_user_text(
     session_id: &str,
     session_history: &BTreeSet<String>,
 ) -> Option<String> {
-    if !session_history.contains(session_id)
-        || row.get("type").and_then(Value::as_str) != Some("user")
+    if !session_history.contains(session_id) {
+        return None;
+    }
+    user_text_in_session(row, session_id)
+}
+
+fn user_text_in_session(row: &Value, session_id: &str) -> Option<String> {
+    if row.get("type").and_then(Value::as_str) != Some("user")
         || row
             .get("sessionId")
             .is_some_and(|v| v.as_str() != Some(session_id))

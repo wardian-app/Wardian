@@ -1,13 +1,15 @@
 //! Interactive Claude delivery through the bundled generation-owned mod.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::io::BufRead;
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use tauri::{AppHandle, Manager};
 use wardian_core::claude_mod::{ClaudeModLaunchPlan, ClaudeModResolver, FallbackReason, ModAsset};
 use wardian_core::control::{DeliveryDetail, DeliveryTransportKind};
+use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
+use wardian_core::models::chat_presentation::ChatSubmissionStatus;
 use wardian_core::models::AgentConfig;
 use wardian_core::native_transport::{
     NativeDeliveryPhase, NativeDeliveryRecord, NativeMessageEnvelope, NativeMessageOperation,
@@ -493,6 +495,152 @@ async fn persist_detail(
         )
         .await
         .map(|_| ())
+}
+
+pub(crate) const PROMPT_STATUS: &str = "_wardian_claude_prompt_status";
+pub(crate) const PROMPT_DELIVERY: &str = "_wardian_claude_prompt_delivery";
+
+/// A private, bounded page or capture lookup. Reading the optional badge cannot
+/// wait on an interaction writer or hold Wardian's global database mutex.
+#[derive(Default)]
+pub(crate) struct ChatPromptReceipts(std::cell::OnceCell<Option<rusqlite::Connection>>);
+
+impl ChatPromptReceipts {
+    fn connection(&self) -> Option<&rusqlite::Connection> {
+        self.0
+            .get_or_init(|| {
+                let connection = rusqlite::Connection::open_with_flags(
+                    wardian_core::paths::state_db_path()?,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .ok()?;
+                connection.busy_timeout(std::time::Duration::ZERO).ok()?;
+                Some(connection)
+            })
+            .as_ref()
+    }
+
+    /// Recover a terminal state whose durable delivery update raced capture.
+    /// Nonterminal deliveries keep the window eligible for receipt polling.
+    pub(crate) fn terminal_status(
+        &self,
+        event: &AgentChatEvent,
+    ) -> io::Result<(Option<ChatSubmissionStatus>, bool)> {
+        let Some(binding) = event.metadata[PROMPT_DELIVERY].as_str() else {
+            return Ok((None, false));
+        };
+        let (generation, interaction) = binding
+            .split_once(':')
+            .ok_or_else(|| io::Error::other("invalid archived prompt receipt selector"))?;
+        let phase = wardian_core::db::claude_composer_delivery_phase(
+            self.connection()
+                .ok_or_else(|| io::Error::other("prompt receipt database unavailable"))?,
+            &event.session_id,
+            interaction,
+            generation.parse().map_err(io::Error::other)?,
+        )
+        .map_err(io::Error::other)?;
+        Ok(match phase.as_deref() {
+            Some("failed") => (Some(ChatSubmissionStatus::Failed), false),
+            Some("cancelled") => (Some(ChatSubmissionStatus::Cancelled), false),
+            Some(
+                "queued"
+                | "dispatching"
+                | "submitted_unconfirmed"
+                | "provider_accepted"
+                | "turn_started"
+                | "cancel_requested",
+            ) => (None, true),
+            _ => (None, false),
+        })
+    }
+
+    /// Keep proof on this source event only. The archived identity allows a
+    /// terminal delivery outcome to follow the prompt through capture or restart.
+    pub(crate) fn annotate_owned_prompt(
+        &self,
+        event: &mut AgentChatEvent,
+        provider_session: &str,
+        raw: &str,
+        provisional: bool,
+    ) {
+        if event.provider != "claude"
+            || event.kind != AgentChatEventKind::Message
+            || event.role != Some(AgentChatRole::User)
+        {
+            return;
+        }
+        let Some((delivery, status)) =
+            self.transcript_prompt_status(&event.session_id, provider_session, raw)
+        else {
+            return;
+        };
+        if provisional
+            || matches!(
+                status,
+                ChatSubmissionStatus::Failed | ChatSubmissionStatus::Cancelled
+            )
+        {
+            event.metadata[PROMPT_STATUS] = serde_json::json!(status);
+        }
+        if !provisional {
+            event.metadata[PROMPT_DELIVERY] = serde_json::json!(delivery);
+        }
+    }
+
+    /// Verify a token from an already owned native row. Lookups are keyed by the
+    /// untrusted selector, then fenced by the full envelope and its mod generation.
+    fn transcript_prompt_status(
+        &self,
+        agent_id: &str,
+        provider_session: &str,
+        raw: &str,
+    ) -> Option<(String, ChatSubmissionStatus)> {
+        if !raw.contains("[Wardian message_id=") {
+            return None;
+        }
+        let row = serde_json::from_str(raw).ok()?;
+        let (interaction, header) =
+            wardian_core::claude_mod::composer_transcript_token(&row, provider_session)?;
+        let record = wardian_core::db::native_delivery_with_conn(self.connection()?, &interaction)
+            .ok()??;
+        if record.provider != "claude"
+            || record.transport != "claude_mod"
+            || !record.claude_mod_as_user
+            || record.envelope.interaction_id != interaction
+            || record.envelope.target_agent_id != agent_id
+            || record.envelope.transcript_header() != header
+        {
+            return None;
+        }
+        let inbox = generation_root(agent_id, record.envelope.generation)
+            .ok()?
+            .join("inbox");
+        let resolver = ClaudeModResolver::open(&inbox).ok()?;
+        if !resolver
+            .has_composer_source_claim(&interaction, provider_session)
+            .ok()?
+        {
+            return None;
+        }
+        let status = match record.phase {
+            NativeDeliveryPhase::Failed => ChatSubmissionStatus::Failed,
+            NativeDeliveryPhase::Cancelled => ChatSubmissionStatus::Cancelled,
+            NativeDeliveryPhase::Completed | NativeDeliveryPhase::TurnStarted => {
+                ChatSubmissionStatus::Delivered
+            }
+            _ => match resolver.project(&interaction).ok()?.phase {
+                NativeDeliveryPhase::ProviderAccepted => ChatSubmissionStatus::Queued,
+                NativeDeliveryPhase::Failed => ChatSubmissionStatus::Failed,
+                // The source row proves that this delivery is already visible.
+                _ => ChatSubmissionStatus::Delivered,
+            },
+        };
+        Some((
+            format!("{}:{interaction}", record.envelope.generation),
+            status,
+        ))
+    }
 }
 
 fn transcript_contains(

@@ -141,7 +141,14 @@ function previewBrowserPages() {
   const provenByObservation = new Map(extensionEvents.map((event, index) => [event.id, provenEvents[index]]));
   proven.events = [...extension.events.map((event) => provenByObservation.get(event.id) ?? canonicalEvents.get(event.id)
     ?? { ...event, metadata: { ...event.metadata, chat_provisional: false } }), canonical.events.at(-1)!];
-  return { legacy: wrap(native.cold), bridge: wrap({ ...native.bridge, revision: "browser-bridge-H1" }), running: runningPage, extension, canonical: proven };
+  const asClaude = (current: AgentChatPage, pending = false): AgentChatPage => {
+    const value = current.presentation?.payload as ChatPresentationV1 | undefined;
+    return { ...current, events: current.events.map((event) => ({ ...event, provider: "claude" })),
+      ...(value ? { presentation: { version: 1, payload: { ...value, items: value.items.map((item) =>
+        item.kind === "prompt" && pending ? { ...item, submission_status: "delivered" } : item) } } } : {}) };
+  };
+  return { legacy: asClaude(wrap(native.cold)), bridge: asClaude(wrap({ ...native.bridge, revision: "browser-bridge-H1" }), true),
+    running: asClaude(runningPage, true), extension: asClaude(extension, true), canonical: asClaude(proven) };
 }
 
 // Browser transport only. These phases prove rendering and state continuity,
@@ -158,7 +165,7 @@ for (const surface of ["desktop", "remote"] as const) {
     type Read = { phase: Phase; detail: string | null; cursor: string | null; revision?: string; previewBackingIds?: string[] };
     const reads: Read[] = [];
     const agent = { session_id: pages.legacy.session_id, session_name: "Synthetic preview identity", agent_class: "Coder",
-      provider: "codex", workspace: "Sample", status: "Processing", latest_text: null };
+      provider: "claude", workspace: "Sample", status: "Processing", latest_text: null };
     await page.setViewportSize(surface === "desktop" ? { width: 1920, height: 1080 } : { width: 390, height: 844 });
     if (surface === "desktop") {
       await page.addInitScript(() => localStorage.setItem("wardian-settings", JSON.stringify({ state: { gridCardDisplayMode: "chat" }, version: 2 })));
@@ -256,6 +263,21 @@ for (const surface of ["desktop", "remote"] as const) {
       expect(position.remaining).toBeGreaterThan(48);
       return relativeTop(anchor);
     };
+    const capturePrompt = async (prompt: Locator, state: "pending" | "captured") => {
+      const directory = process.env.WARDIAN_PREVIEW_IDENTITY_SCREENSHOT_DIR;
+      if (!directory) return;
+      const scroll = prompt.locator("xpath=ancestor::*[contains(@class, 'chat-transcript-scroll')][1]");
+      const top = await scroll.evaluate((element) => element.scrollTop);
+      try {
+        await prompt.screenshot({ path: path.join(directory, surface + "-prompt-" + state + ".png"),
+          animations: "disabled" });
+      } finally {
+        await scroll.evaluate((element, offset) => {
+          element.scrollTop = offset;
+          element.dispatchEvent(new Event("scroll", { bubbles: true }));
+        }, top);
+      }
+    };
     const turn = page.getByTestId("chat-committed-turn");
     const legacy = page.getByTestId("chat-work-group");
     await expect(legacy).toBeVisible({ timeout: 15_000 });
@@ -273,6 +295,11 @@ for (const surface of ["desktop", "remote"] as const) {
     await expect.poll(async () => Math.abs(await relativeTop(turn.locator("button[data-chat-anchor-keys]")) - initialAnchor)).toBeLessThanOrEqual(2);
     const bridgeAnchor = await relativeTop(turn.locator("button[data-chat-anchor-keys]"));
     await expect(turn.getByText("Provisional · history is updating")).toBeVisible();
+    const pendingPrompt = turn.locator("[data-chat-item-key]").filter({ hasText: "Pending" });
+    await expect(pendingPrompt.getByText("Pending", { exact: true })).toBeVisible();
+    await expect(pendingPrompt).toHaveCount(1);
+    const promptItemKey = await pendingPrompt.getAttribute("data-chat-item-key");
+    const anchoredPrompt = await pendingPrompt.elementHandle();
     const sharedKeys = JSON.parse(await turn.locator("button[data-chat-anchor-keys]").getAttribute("data-chat-anchor-keys") ?? "[]") as string[];
     expect(sharedKeys).toEqual(expect.arrayContaining(legacyKeys));
     const promptId = pages.legacy.events.find((event) => event.role === "user")!.id;
@@ -281,6 +308,7 @@ for (const surface of ["desktop", "remote"] as const) {
     await expect(turn.getByText(/4 steps/)).toHaveCount(0);
     await expect(turn.getByText("All 42 tests passed.")).toHaveCount(0);
     await capture("bridge");
+    await capturePrompt(pendingPrompt, "pending");
     await advance("running");
     await expect(turn.getByText("The focused check is still running.")).toBeVisible({ timeout: 15_000 });
     expect(await turn.evaluate((element, original) => element === original, shared)).toBe(true);
@@ -307,6 +335,11 @@ for (const surface of ["desktop", "remote"] as const) {
     const canonicalAnchor = await relativeTop(turn.locator("button[data-chat-anchor-keys]"));
     await expect(turn.getByText("All 42 tests passed.")).toBeVisible();
     await expect(turn.getByText("Provisional · history is updating")).toHaveCount(0);
+    await expect(turn.getByText("Pending", { exact: true })).toHaveCount(0);
+    const capturedPrompt = turn.locator("[data-chat-item-key]");
+    await expect(capturedPrompt).toHaveCount(1);
+    await expect(capturedPrompt).toHaveAttribute("data-chat-item-key", promptItemKey!);
+    expect(await capturedPrompt.evaluate((element, original) => element === original, anchoredPrompt)).toBe(true);
     await expect(legacy).toHaveCount(0);
     expect(await turn.evaluate((element, original) => element === original, shared)).toBe(true);
     await expect(turn.locator("[data-chat-anchor-key]").first()).toHaveAttribute("data-chat-anchor-key", promptId);
@@ -320,6 +353,7 @@ for (const surface of ["desktop", "remote"] as const) {
     expect(observed.every((read) => read.detail === null && read.cursor === null)).toBe(true);
     expect(await turn.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     await capture("canonical");
+    await capturePrompt(capturedPrompt, "captured");
     const measurements = JSON.stringify({ surface, synthetic: true,
       coldHandoff: { before: initialAnchor, after: bridgeAnchor, delta: bridgeAnchor - initialAnchor, expanded: true },
       uncertifiedExtensionUpgrade: { before: extensionAnchor, after: canonicalAnchor, delta: canonicalAnchor - extensionAnchor,

@@ -723,6 +723,10 @@ async fn load_agent_chat_transcript_inner(
     canonicalize_provider_input_projection(&mut events);
     for event in &mut events {
         normalize_chat_event_visible_text(event);
+        if let Some(metadata) = event.metadata.as_object_mut() {
+            metadata.remove(crate::delivery::claude_mod::PROMPT_DELIVERY);
+            metadata.remove(crate::delivery::claude_mod::PROMPT_STATUS);
+        }
     }
     let conversation_started_at = active_conversation_started_at(state, &session_id);
     events.extend(memory_chat_events(

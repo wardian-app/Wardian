@@ -16,11 +16,15 @@ use wardian_core::paths::agent_conversations_dir;
 
 use super::chat_read_store::{digest, valid_ref, Dependency, SeekCache, Store};
 use super::ConversationArchiveContext;
+use crate::delivery::claude_mod::{ChatPromptReceipts, PROMPT_DELIVERY, PROMPT_STATUS};
 
 #[path = "chat_archive_bootstrap.rs"]
 mod cold_bootstrap;
 #[path = "chat_read_packed_recent.rs"]
 pub(super) mod packed_recent;
+#[cfg(test)]
+#[path = "chat_pending_bridge_tests.rs"]
+mod pending_bridge_tests;
 #[path = "chat_preview_bridge.rs"]
 mod preview_bridge;
 #[path = "chat_preview_projection.rs"]
@@ -2314,6 +2318,8 @@ pub(crate) fn header(event: &AgentChatEvent) -> AgentChatEvent {
         "chat_turn_membership_contradiction",
         "chat_turn_membership_contradicted_root",
         "chat_turn_membership_expected_provider_turn",
+        PROMPT_DELIVERY,
+        PROMPT_STATUS,
     ] {
         if let Some(value) = event.metadata.get(key) {
             if let Some(value) = value.as_str() {
@@ -3766,7 +3772,116 @@ pub(crate) fn archive_page_is_current(
     check().unwrap_or(false)
 }
 
-pub(crate) fn finish(mut page: AgentChatPage) -> io::Result<AgentChatPage> {
+const PROMPT_RECEIPT_REVISION: &str = ":prompt-receipts:";
+
+fn prompt_receipt_base(revision: &str) -> Option<String> {
+    let (seed, source) = revision.rsplit_once('~')?;
+    let (base, digest) = seed.rsplit_once(PROMPT_RECEIPT_REVISION)?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("{base}~{source}"))
+}
+
+#[derive(Default)]
+struct PromptRefresh {
+    changed: bool,
+    tracked: bool,
+    unavailable: bool,
+    digest: String,
+}
+
+/// Project delivery state onto the one prompt already owned by this page.
+fn decorate_prompt_submissions(
+    presentation: &mut wardian_core::models::chat_presentation::ChatPresentationV1,
+    events: &[AgentChatEvent],
+) -> io::Result<PromptRefresh> {
+    use wardian_core::models::chat_presentation::{
+        ChatEvidenceIdentity, ChatItemProvenance, ChatPresentedItemKind, ChatSubmissionStatus,
+    };
+
+    let by_id = events
+        .iter()
+        .filter(|event| {
+            event.provider == "claude"
+                && (event.metadata[PROMPT_STATUS].is_string()
+                    || event.metadata[PROMPT_DELIVERY].is_string())
+        })
+        .map(|event| (event.id.as_str(), event))
+        .collect::<BTreeMap<_, _>>();
+    let mut refresh = PromptRefresh::default();
+    if by_id.is_empty() {
+        return Ok(refresh);
+    }
+
+    let receipts = ChatPromptReceipts::default();
+    let mut states = Vec::new();
+    for item in &mut presentation.items {
+        if item.kind != ChatPresentedItemKind::Prompt {
+            continue;
+        }
+        let ChatEvidenceIdentity::Source {
+            source_epoch,
+            record_key,
+            ..
+        } = &item.evidence
+        else {
+            continue;
+        };
+        let [event_id] = item.event_refs.as_slice() else {
+            continue;
+        };
+        let Some(event) = by_id.get(event_id.as_str()).filter(|event| {
+            event.metadata["chat_source_ref"].as_str() == Some(record_key.as_str())
+                && event.metadata["chat_source_epoch"].as_str() == Some(source_epoch.as_str())
+        }) else {
+            continue;
+        };
+        let live = item.provenance == ChatItemProvenance::Provisional
+            && presentation.preview_bridge.as_ref().is_some_and(|bridge| {
+                item.admission_id.as_deref() == Some(bridge.admission_id.as_str())
+            })
+            && event.metadata["chat_provisional"] == true;
+        let (status, unresolved) = match event.metadata[PROMPT_STATUS].as_str() {
+            Some("failed") => (Some(ChatSubmissionStatus::Failed), false),
+            Some("cancelled") => (Some(ChatSubmissionStatus::Cancelled), false),
+            Some("queued") if live => (Some(ChatSubmissionStatus::Queued), false),
+            Some("delivered") if live => (Some(ChatSubmissionStatus::Delivered), false),
+            _ => match receipts.terminal_status(event) {
+                Ok(result) => result,
+                Err(_) => {
+                    refresh.unavailable = true;
+                    (None, true)
+                }
+            },
+        };
+        if item.provenance == ChatItemProvenance::Canonical
+            && event.metadata[PROMPT_DELIVERY].is_string()
+        {
+            // Only an unresolved delivery requires an independent poll.
+            refresh.tracked |= unresolved;
+            states.push((item.item_key.clone(), status.clone()));
+        }
+        if item.submission_status != status {
+            item.submission_status = status;
+            refresh.changed = true;
+        }
+    }
+    if refresh.tracked {
+        refresh.digest = digest(&serde_json::to_vec(&states).map_err(io::Error::other)?);
+    }
+    Ok(refresh)
+}
+
+pub(crate) fn finish(page: AgentChatPage) -> io::Result<AgentChatPage> {
+    finish_page(page, false, None)
+}
+
+fn finish_page(
+    mut page: AgentChatPage,
+    staging: bool,
+    receipt_revision: Option<(&str, &str)>,
+) -> io::Result<AgentChatPage> {
     // Ownership is an internal staging fact, never a claim accepted from or
     // exposed to a client. The versioned payload carries the admitted result.
     for event in &mut page.events {
@@ -3774,9 +3889,10 @@ pub(crate) fn finish(mut page: AgentChatPage) -> io::Result<AgentChatPage> {
             metadata.remove("_wardian_canonical_row");
         }
     }
-    if let Some(presentation) = &page.presentation {
+    let mut receipt_retry = false;
+    if let Some(presentation) = &mut page.presentation {
         match presentation.decode_v1() {
-            Ok(Some(value)) => {
+            Ok(Some(mut value)) => {
                 if value
                     .detail
                     .as_ref()
@@ -3784,6 +3900,25 @@ pub(crate) fn finish(mut page: AgentChatPage) -> io::Result<AgentChatPage> {
                 {
                     eprintln!("Stale Chat step detail; using legacy events");
                     page.presentation = None;
+                } else if !staging {
+                    let refresh = decorate_prompt_submissions(&mut value, &page.events)?;
+                    let canonical_recent = !page.older_page
+                        && page.detail.is_none()
+                        && page.recent_admission.is_none()
+                        && value.preview_bridge.is_none();
+                    receipt_retry = canonical_recent && refresh.unavailable;
+                    if canonical_recent && refresh.tracked {
+                        if let Some((seed, source)) = page.revision.rsplit_once('~') {
+                            page.revision = format!(
+                                "{seed}{PROMPT_RECEIPT_REVISION}{}~{source}",
+                                refresh.digest
+                            );
+                        }
+                    }
+                    if refresh.changed {
+                        presentation.payload =
+                            serde_json::to_value(value).map_err(io::Error::other)?;
+                    }
                 }
             }
             Ok(None) => {
@@ -3799,9 +3934,30 @@ pub(crate) fn finish(mut page: AgentChatPage) -> io::Result<AgentChatPage> {
             }
         }
     }
+    if let Some((requested, base)) = receipt_revision {
+        let scope_unchanged = prompt_receipt_base(&page.revision)
+            .as_deref()
+            .unwrap_or(&page.revision)
+            == base;
+        if !page.reset && (page.revision == requested || (receipt_retry && scope_unchanged)) {
+            // Keep the previous view on a transient receipt read failure. The
+            // same revision asks for another bounded check on the next poll.
+            page.revision = requested.to_owned();
+            page.unchanged = true;
+            page.events.clear();
+            page.aliases.clear();
+            page.removed_ids.clear();
+            page.presentation = None;
+            page.next_before = None;
+        }
+    }
     for event in &mut page.events {
         if let Some(metadata) = event.metadata.as_object_mut() {
             metadata.remove(crate::providers::chat_transcript::CODEX_DISPLAY_IDENTITY_SHA256);
+            if !staging {
+                metadata.remove(PROMPT_DELIVERY);
+                metadata.remove(PROMPT_STATUS);
+            }
         }
     }
     if page.presentation.is_some()
@@ -4739,9 +4895,16 @@ fn read_with_recent_limit(
     detail_ref: Option<&str>,
     options: ReadOptions,
 ) -> io::Result<AgentChatPage> {
+    // Current canonical prompt statuses can advance without a source or
+    // archive change. Only readers holding such a revision refresh the window.
+    let receipt_base = revision
+        .filter(|_| context.provider == "claude" && cursor.is_none() && detail_ref.is_none())
+        .and_then(prompt_receipt_base);
+    let receipt_revision = revision.zip(receipt_base.as_deref());
+    let revision = receipt_base.as_deref().or(revision);
     let finish = |page: AgentChatPage| -> io::Result<AgentChatPage> {
         if !options.staging {
-            return self::finish(page);
+            return finish_page(page, false, receipt_revision);
         }
         // Finish may trim the window. Restore only exact authenticated Row
         // identities that survived, never a raw header sharing a display ID.
@@ -4755,7 +4918,7 @@ fn read_with_recent_limit(
                     .map(|key| (event.id.clone(), key.to_owned()))
             })
             .collect();
-        let mut page = self::finish(page)?;
+        let mut page = finish_page(page, true, None)?;
         for event in &mut page.events {
             if event.metadata["chat_page_key"]
                 .as_str()
@@ -4841,8 +5004,11 @@ fn read_with_recent_limit(
             progress: "projection_pending".into(),
             ..Default::default()
         }
+    } else if options.staging {
+        crate::commands::chat_recent_seed::read_qualifying(snapshot, limit)?
     } else if cursor.is_none() && detail_ref.is_none() {
-        let previous_seed = previous_seed.filter(|_| !refresh_claude_seed);
+        let previous_seed =
+            previous_seed.filter(|_| !refresh_claude_seed && receipt_revision.is_none());
         crate::commands::chat_recent_seed::read_limited(snapshot, previous_seed, limit)?
     } else {
         crate::commands::chat_recent_seed::Seed {
@@ -5471,7 +5637,9 @@ fn read_with_recent_limit(
             let compatible_delta = delta.is_some();
             let qualified_snapshot = (qualified_mock_canonical || covered_claude_window)
                 && revision != Some(token.as_str());
-            if let Some(mut delta) = delta.filter(|_| !qualified_snapshot) {
+            if let Some(mut delta) =
+                delta.filter(|_| !qualified_snapshot && receipt_revision.is_none())
+            {
                 delta.sort_by_key(|event| event.sequence);
                 result.events = delta;
                 let keys = store.page(&published.root, None, PAGE_ROWS + 1)?;

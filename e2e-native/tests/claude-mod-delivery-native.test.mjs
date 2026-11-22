@@ -192,50 +192,115 @@ for (const mode of ["draft", "fallback", "composer"]) {
         }
         const traceBefore = inputLines(await fs.readFile(tracePath, "utf8"));
         if (composer) {
+          const warmAnswer = `WARM_REPLY_${token}`;
+          const warmPrompt = `Reply only with ${warmAnswer}. Do not run any tools.`;
+          const warm = await invokeTauri(driver, "submit_prompt_to_agent", {
+            sessionId: sid, prompt: warmPrompt, chatComposer: true,
+          });
+          assert.equal(warm.observed_state, `claude_mod;runtime_generation=${generation};as_user=true`);
+          await driver.wait(async () => {
+            const rows = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId: sid });
+            return rows.some((row) => row.role === "assistant" && row.text?.trim() === warmAnswer
+              && row.metadata?.provider_log === true);
+          }, 30_000, "The real warmup did not produce captured Claude history");
+          await idle(driver, sid);
+          const card = `#agent-card-${sid}`;
+          await driver.findElement(By.css(`${card} button[title^="Switch to Chat"]`)).click();
+          await driver.wait(() => driver.executeScript((sessionId, expected) => {
+            const view = document.getElementById(`agent-card-${sessionId}`);
+            return [...(view?.querySelectorAll('[data-testid="chat-committed-turn"]') ?? [])]
+              .some((turn) => turn.textContent.includes(expected));
+          }, sid, warmPrompt), 30_000, "Chat did not render the qualified warmup prompt");
+
           const answer = `COMPOSER_REPLY_${token}`;
           const prompt = `Reply only with ${answer}. Do not run any tools.`;
-          const receipt = await invokeTauri(driver, "submit_prompt_to_agent", {
-            sessionId: sid, prompt, chatComposer: true,
-          });
-          assert.equal(receipt.observed_state, `claude_mod;runtime_generation=${generation};as_user=true`);
-          assert.equal(receipt.delivery_state, "provider_accepted");
-          const id = receipt.message_id;
-          assert.ok(id);
+          // Observe normal Chat renders. Some real runs can capture the prompt
+          // before the first paint. Deterministic transition cases cover that
+          // intermediate revision separately.
+          await driver.executeScript((sessionId, expected) => {
+            const card = document.getElementById(`agent-card-${sessionId}`);
+            const observations = [];
+            const observer = new MutationObserver(() => {
+              const rows = [...card.querySelectorAll("[data-chat-item-key]")]
+                .filter((row) => row.textContent.includes(expected));
+              const row = rows[0];
+              if (!row) return;
+              const entry = {
+                count: rows.length, item_key: row.dataset.chatItemKey,
+                turn_key: row.closest("[data-turn-key]")?.dataset.turnKey ?? null,
+                label: row.querySelector("p[role=status]")?.textContent ?? null,
+              };
+              if (JSON.stringify(observations.at(-1)) !== JSON.stringify(entry) && observations.length < 32) {
+                observations.push(entry);
+              }
+            });
+            observer.observe(card, { childList: true, subtree: true, characterData: true });
+            window.readComposerBridgeSmoke = () => { observer.disconnect(); return observations; };
+          }, sid, prompt);
+          const input = await driver.findElement(By.css(`${card} [aria-label="Message agent"]`));
+          await input.sendKeys(prompt);
+          const composerForm = await input.findElement(By.xpath("ancestor::form[1]"));
+          // The same submit button can say Send or Queue while Claude settles.
+          const submit = await driver.wait(async () => {
+            const buttons = await composerForm.findElements(By.css('button[type="submit"]:enabled'));
+            return buttons.length === 1 && await buttons[0].isDisplayed() ? buttons[0] : false;
+          }, 10_000, "Chat composer did not expose one enabled submit button");
+          report.composer_submit_label = await submit.getAttribute("aria-label");
+          await submit.click();
+          const { DatabaseSync } = await import("node:sqlite");
+          const id = await driver.wait(async () => {
+            const db = new DatabaseSync(path.join(harness.isolatedHome, "state.db"), { readOnly: true });
+            try {
+              const rows = db.prepare("SELECT interaction_id, phase, record_json FROM native_deliveries WHERE target_agent_id=? AND interaction_id<>?").all(sid, warm.message_id);
+              assert.ok(rows.length <= 1, "Composer submitted more than one new native interaction");
+              const [record] = rows;
+              report.native_delivery_last_observed_phase = record?.phase;
+              if (!["turn_started", "completed"].includes(record?.phase)) return false;
+              assert.equal(JSON.parse(record.record_json).claude_mod_as_user, true);
+              return record.interaction_id;
+            } finally { db.close(); }
+          }, 30_000, "The owned Claude transcript did not prove the exact composer interaction");
           const names = (await fs.readdir(path.join(inbox, "pending"))).filter((name) => name.endsWith(`-${id}.json`));
           assert.equal(names.length, 1, "Composer published the interaction more than once");
           const pending = await readJson(path.join(inbox, "pending", names[0]));
           assert.equal(pending.as_user, true);
           assert.equal(pending.text, `[Wardian message_id=${id} interaction_id=${id} generation=${generation} target=${sid}]\n${prompt}`);
-          await idle(driver, sid);
-          const { DatabaseSync } = await import("node:sqlite");
-          await driver.wait(async () => {
-            const db = new DatabaseSync(path.join(harness.isolatedHome, "state.db"), { readOnly: true });
-            try {
-              const record = db.prepare("SELECT phase, record_json FROM native_deliveries WHERE interaction_id=?").get(id);
-              report.native_delivery_last_observed_phase = record?.phase;
-              if (!["turn_started", "completed"].includes(record?.phase)) return false;
-              return JSON.parse(record.record_json).claude_mod_as_user === true;
-            } finally { db.close(); }
-          }, 30_000, "The owned Claude transcript did not prove the exact composer interaction");
           await driver.wait(async () => {
             const rows = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId: sid });
             const user = rows.filter((row) => row.role === "user" && row.text === prompt && row.metadata?.provider_log === true);
             const final = rows.filter((row) => row.role === "assistant" && row.text?.trim() === answer && row.metadata?.provider_log === true);
             return user.length === 1 && final.length === 1;
-          }, 30_000, "Chat did not show one native user prompt and one native answer");
+          }, 30_000, "Chat did not capture one native user prompt and one native answer");
+          await driver.wait(() => driver.executeScript((sessionId, expected, response) => {
+            const view = document.getElementById(`agent-card-${sessionId}`);
+            const rows = [...(view?.querySelectorAll("[data-chat-item-key]") ?? [])]
+              .filter((row) => row.textContent.includes(expected));
+            const answerVisible = [...(view?.querySelectorAll('[aria-label="assistant message"]') ?? [])]
+              .some((message) => message.textContent.trim() === response && message.getClientRects().length > 0);
+            return rows.length === 1 && !rows[0].querySelector("p[role=status]") && answerVisible;
+          }, sid, prompt, answer), 30_000, "Chat did not render the one captured prompt and response");
+          report.composer_bridge_observations = await driver.executeScript(() => window.readComposerBridgeSmoke());
+          assert.ok(report.composer_bridge_observations.length > 0);
+          const last = report.composer_bridge_observations.at(-1);
+          assert.equal(last.label, null);
+          for (const observed of report.composer_bridge_observations) {
+            assert.equal(observed.count, 1);
+            assert.equal(observed.item_key, last.item_key);
+            assert.equal(observed.turn_key, last.turn_key);
+          }
+          report.pending_painted = report.composer_bridge_observations.some(({ label }) =>
+            label === "Pending" || label === "Queued");
           assert.deepEqual(inputLines(await fs.readFile(tracePath, "utf8")), traceBefore);
-          assert.ok(await draftRow(draft), "Draft disappeared during the mod composer send");
-          await driver.wait(() => driver.executeScript((sessionId, expected) => {
-            const card = document.getElementById(`agent-card-${sessionId}`);
-            const chat = card?.querySelector('[data-testid="agent-chat-view"]');
-            if (chat) return chat.textContent.includes(expected);
-            [...(card?.querySelectorAll("button") ?? [])]
-              .find((button) => button.title.startsWith("Switch to Chat"))?.click();
-            return false;
-          }, sid, answer), 30_000, "The synthetic reply did not render in Chat");
           const chat = await driver.findElement(By.css(`#agent-card-${sid} [data-testid="agent-chat-view"]`));
           await fs.writeFile(path.join(harness.isolatedHome, "claude-composer.png"),
             Buffer.from(await chat.takeScreenshot(), "base64"));
+          await driver.findElement(By.css(`${card} button[title^="Switch to Terminal"]`)).click();
+          const restored = await resolveAgentTerminalPresentationId(driver, sid);
+          await driver.wait(async () => {
+            const snapshot = await readTerminalDebugSnapshot(driver, restored);
+            return snapshot?.lines?.some((line) => line.includes(draft));
+          }, 10_000, "The Claude draft did not survive the Chat composer send");
+          assert.deepEqual(inputLines(await fs.readFile(tracePath, "utf8")), traceBefore);
           Object.assign(report, { generation, draft_preserved: true, delivery_pty_writes: 0, status: "pass" });
           await save();
           return;

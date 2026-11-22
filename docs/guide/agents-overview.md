@@ -122,6 +122,11 @@ as history becomes available, including when a large source record is skipped.
 The history status describes capture progress while available messages remain readable.
 The composer shows when a prompt is sending. The transcript shows the prompt
 when the provider's conversation record is available.
+Claude Chat shows **Pending** on the prompt once Wardian verifies the exact
+interaction in the agent's live transcript. A verified queued outcome shows
+**Queued**. Capture clears the badge in place and retains any **Failed** or
+**Cancelled** state. Sends without a verified transcript link keep their
+feedback in the composer.
 Claude Chat sends ordinary prompts and plain file references through the
 bundled Claude mod when it is ready. Images staged in the terminal, Claude
 file mentions, permission responses, and slash commands use the terminal.

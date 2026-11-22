@@ -9,6 +9,7 @@ use wardian_core::models::chat::{AgentChatDetail, AgentChatEvent};
 
 use super::chat::AgentArchiveCaptureSnapshot;
 use super::provider_log_acquisition::{native_file_identity, ProviderLogNativeIdentity};
+use crate::delivery::claude_mod::{ChatPromptReceipts, PROMPT_STATUS};
 
 const HEADER_BYTES: u64 = 4096;
 const TAIL_BYTES: u64 = 128 * 1024;
@@ -254,7 +255,15 @@ pub(crate) fn read_limited(
     previous: Option<&str>,
     limit: usize,
 ) -> io::Result<Seed> {
-    read_window_limited(snapshot, previous, None, limit)
+    read_window_limited(snapshot, previous, None, limit, false)
+}
+
+/// Read prompt proof during deferred qualification under an existing owner.
+pub(crate) fn read_qualifying(
+    snapshot: &AgentArchiveCaptureSnapshot,
+    limit: usize,
+) -> io::Result<Seed> {
+    read_window_limited(snapshot, None, None, limit, true)
 }
 
 /// A background checkpoint seeks backward inside one independently admitted
@@ -264,7 +273,7 @@ pub(crate) fn read_window(
     previous: Option<&str>,
     before: Option<u64>,
 ) -> io::Result<Seed> {
-    read_window_limited(snapshot, previous, before, RECORDS)
+    read_window_limited(snapshot, previous, before, RECORDS, false)
 }
 
 fn read_window_limited(
@@ -272,6 +281,7 @@ fn read_window_limited(
     previous: Option<&str>,
     before: Option<u64>,
     limit: usize,
+    resolve_prompts: bool,
 ) -> io::Result<Seed> {
     if !(1..=RECORDS).contains(&limit) {
         return Err(io::Error::new(
@@ -415,6 +425,23 @@ fn read_window_limited(
     let mut event_groups = Vec::<Vec<AgentChatEvent>>::new();
     let mut event_count = 0usize;
     let mut malformed = false;
+    let claude_session = (resolve_prompts && snapshot.provider == "claude")
+        .then(|| {
+            snapshot
+                .resume_session
+                .as_deref()
+                .or(snapshot.fresh_provider_session_id.as_deref())
+        })
+        .flatten()
+        .filter(|session| {
+            snapshot
+                .log_path
+                .as_deref()
+                .and_then(std::path::Path::file_stem)
+                .and_then(|stem| stem.to_str())
+                == Some(*session)
+        });
+    let receipts = ChatPromptReceipts::default();
     for (offset, raw) in window {
         let frame_end = offset + raw.len() as u64;
         if !policy.admits(offset, frame_end) {
@@ -455,6 +482,9 @@ fn read_window_limited(
         }
         let mut observations = normalize(snapshot, &identity, offset, raw, &mut normalizer);
         for (ordinal, event) in observations.iter_mut().enumerate() {
+            if let Some(session) = claude_session {
+                receipts.annotate_owned_prompt(event, session, raw, true);
+            }
             // Source coordinates cover the complete framed record; detail
             // references below continue to hash only the trimmed JSON payload.
             event.metadata["chat_source_end"] = json!(frame_end);
@@ -525,6 +555,15 @@ fn read_window_limited(
     if !stable {
         events.clear();
     }
+    let statuses = events
+        .iter()
+        .filter_map(|event| Some((&event.id, event.metadata[PROMPT_STATUS].as_str()?)))
+        .collect::<Vec<_>>();
+    let revision = if statuses.is_empty() {
+        revision
+    } else {
+        hash(&serde_json::to_vec(&(revision, statuses)).map_err(io::Error::other)?)
+    };
     checkpoint.before = physical_before;
     checkpoint.window_complete = window_complete;
     checkpoint.normalizer_complete = !normalizer.has_pending_events();
