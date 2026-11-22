@@ -79,6 +79,165 @@ pub(super) fn attach(
     Ok(())
 }
 
+/// A complete native replay can account for frames skipped by the small seed.
+/// Only authenticated Rows participate in the turn index. A visible status
+/// after the published closure stays an independently owned provisional row.
+pub(super) fn attach_captured_claude_window(
+    store: &mut Store,
+    head: &Head,
+    native: &super::super::chat_source_index::SourcePage,
+    page: &mut AgentChatPage,
+) -> io::Result<()> {
+    use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
+    use wardian_core::models::chat_presentation::*;
+
+    if head.progress != "ready"
+        || head.source_epoch.as_deref() != Some(native.epoch.as_str())
+        || page.source_epoch != head.source_epoch
+        || page.conversation_id.as_deref() != Some(head.conversation_id.as_str())
+        || native.events.is_empty()
+    {
+        return Ok(());
+    }
+
+    let coordinates = |event: &AgentChatEvent| {
+        event.metadata["chat_source_start"]
+            .as_u64()
+            .zip(event.metadata["chat_source_end"].as_u64())
+            .filter(|(start, end)| start < end && *end <= native.target_extent)
+    };
+    let mut canonical = Vec::new();
+    let mut tail = Vec::new();
+    let mut present = BTreeMap::new();
+    for event in &page.events {
+        let Some(reference) = event.metadata["chat_source_ref"].as_str() else {
+            return Ok(());
+        };
+        let Some(position) = coordinates(event) else {
+            return Ok(());
+        };
+        if event.session_id != head.agent_id
+            || event.provider != "claude"
+            || event.metadata["chat_source_epoch"].as_str() != Some(native.epoch.as_str())
+            || present.insert(reference, (position, &event.kind)).is_some()
+        {
+            return Ok(());
+        }
+        if event.metadata["_wardian_canonical_row"] == true
+            && event.metadata["chat_provisional"] != true
+            && event.metadata["chat_identity_resolution"] != "unresolved"
+        {
+            let mut row = event.clone();
+            if event.kind == AgentChatEventKind::Message
+                && event.role == Some(AgentChatRole::Assistant)
+                && event.metadata["provider_log"] == true
+                && event.id == reference
+                && event.metadata["chat_display_physical_id"].as_str() == Some(reference)
+            {
+                // The exact native Row owns this item. Its collapsed Watch
+                // mirror is a display alias and has no native membership.
+                // Keep the alias on the returned page for existing readers.
+                if let Some(metadata) = row.metadata.as_object_mut() {
+                    metadata.remove("chat_display_member_ids");
+                }
+            }
+            canonical.push(row);
+        } else if event.kind == AgentChatEventKind::Status
+            && event.id == reference
+            && event.metadata["raw_type"] == "turn_duration"
+            && event.metadata["chat_provisional"] == true
+            && event.metadata["chat_source_admission"].as_str() == Some(native.admission.as_str())
+        {
+            tail.push(event);
+        } else {
+            return Ok(());
+        }
+    }
+    // Require the same physical rows in both windows. Replay alone cannot
+    // explain an uncaptured observation or authorize an old archive row.
+    if native.events.iter().any(|event| {
+        event.metadata["chat_source_ref"]
+            .as_str()
+            .and_then(|reference| present.remove(reference))
+            .is_none_or(|(position, kind)| {
+                coordinates(event) != Some(position) || kind != &event.kind
+            })
+    }) || !present.is_empty()
+    {
+        return Ok(());
+    }
+    let Some(latest) = canonical.iter().max_by_key(|event| coordinates(event)) else {
+        return Ok(());
+    };
+    let Some(root) = latest.metadata["request_root_id"].as_str() else {
+        return Ok(());
+    };
+    let scope = super::super::chat_turn_index::Scope {
+        agent_id: &head.agent_id,
+        conversation_id: &head.conversation_id,
+        source_key: head.source_key.as_deref(),
+        source_epoch: head.source_epoch.as_deref(),
+        can_activate: false,
+    };
+    let qualified = store.read_allowance(
+        super::super::chat_read_store::READ_OBJECTS,
+        super::super::chat_read_store::READ_BYTES,
+        |store| {
+            let closed = head.turns.closed_roots_reusing_nodes(
+                store,
+                &scope,
+                &BTreeSet::from([root.to_owned()]),
+                &mut SeekCache::default(),
+            )?;
+            let Some(order) = closed.get(root) else {
+                return Ok(None);
+            };
+            if tail.iter().any(|event| {
+                coordinates(event)
+                    .zip(coordinates(latest))
+                    .is_none_or(|(tail, latest)| tail.0 < latest.1)
+                    || !super::super::chat_turn_index::Index::after_closed_source_order(
+                        event, order,
+                    )
+            }) {
+                return Ok(None);
+            }
+            head.turns.page(store, &canonical, true)
+        },
+    );
+    let Some(mut value) = qualified.ok().flatten() else {
+        return Ok(());
+    };
+    if let Some(first) = tail.first() {
+        value.legacy_turns.push(ChatLegacyTurn {
+            turn_key: format!("legacy:{}", digest(first.id.as_bytes())),
+            order_key: presentation_order(first).unwrap_or_else(|| first.id.clone()),
+            event_refs: tail.iter().map(|event| event.id.clone()).collect(),
+            kind: ChatLegacyTurnKind::EarlierActivity,
+            membership_complete: false,
+        });
+    }
+    if value.validate().is_err() {
+        return Ok(());
+    }
+    // The exception supplies presentation only. It cannot extend native
+    // coverage or issue detail and Older cursors across a provisional tail.
+    for item in &mut value.items {
+        if let Some(step) = &mut item.step {
+            if step.detail_ref.take().is_some() {
+                step.detail_availability = ChatDetailAvailability::Pending;
+            }
+        }
+    }
+    page.next_before = None;
+    page.progress = "provisional".into();
+    page.presentation = Some(ChatPresentation {
+        version: CHAT_PRESENTATION_VERSION,
+        payload: serde_json::to_value(value).map_err(io::Error::other)?,
+    });
+    Ok(())
+}
+
 /// Resolve a reference through the committed step owner and retain only its
 /// final output chunks. No source file or archive JSONL is opened here.
 pub(super) fn detail_tail(

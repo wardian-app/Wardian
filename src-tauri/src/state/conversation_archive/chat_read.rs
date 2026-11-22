@@ -4829,6 +4829,12 @@ fn read_with_recent_limit(
         .and_then(|(_, seed)| seed.rsplit_once('~').map(|(_, source)| source));
     let source_head_changed = previous_source
         .is_some_and(|previous| previous != source_pointer.as_deref().unwrap_or("none"));
+    // The independent index can finish after the archive and the first seed.
+    // Keep the seed's overflow evidence when a new source Head can explain it.
+    let refresh_claude_seed = options.qualify_turns
+        && !options.staging
+        && context.provider == "claude"
+        && source_head_changed;
     let mut seed = if cold_rejected {
         crate::commands::chat_recent_seed::Seed {
             revision: "scope_changed".into(),
@@ -4836,6 +4842,7 @@ fn read_with_recent_limit(
             ..Default::default()
         }
     } else if cursor.is_none() && detail_ref.is_none() {
+        let previous_seed = previous_seed.filter(|_| !refresh_claude_seed);
         crate::commands::chat_recent_seed::read_limited(snapshot, previous_seed, limit)?
     } else {
         crate::commands::chat_recent_seed::Seed {
@@ -4878,9 +4885,19 @@ fn read_with_recent_limit(
             && (detail_ref.is_none() || result.detail.is_some());
         finish(result)
     };
+    let deferred_claude_window = !options.qualify_turns
+        && context.provider == "claude"
+        && seed.progress == "oversized_record";
     let seed_token = |seed: &str| {
-        if limit == PAGE_ROWS {
+        // A deferred open has not attempted the indexed repair. Let the next
+        // ordinary read try it even when the native file and Heads are unchanged.
+        let seed = if deferred_claude_window {
+            digest(format!("deferred-claude-window:{seed}").as_bytes())
+        } else {
             seed.to_owned()
+        };
+        if limit == PAGE_ROWS {
+            seed
         } else {
             format!("{seed}{window_suffix}")
         }
@@ -4965,6 +4982,7 @@ fn read_with_recent_limit(
     let mut source_scope_valid = !source_scope_attempted;
     let mut mock_source_progress = None;
     let mut qualified_mock_canonical = false;
+    let mut covered_claude_window = false;
     if context.provider == "mock" && snapshot.log_path.is_some() && source_pointer.is_none() {
         mock_source_progress = Some("indexing".to_owned());
     }
@@ -4973,6 +4991,19 @@ fn read_with_recent_limit(
         result.records_decoded += 2;
         match super::chat_source_index::qualification(snapshot, &mut store, reference) {
             Ok(scope) => {
+                covered_claude_window = options.qualify_turns
+                    && context.provider == "claude"
+                    && seed.progress == "oversized_record"
+                    && scope.complete
+                    && seed.checkpoint.as_ref().is_some_and(|checkpoint| {
+                        checkpoint.epoch == scope.epoch
+                            && checkpoint.admission == scope.admission
+                            && checkpoint.extent == scope.extent
+                    })
+                    && current_head.as_ref().is_some_and(|published| {
+                        published.progress == "ready"
+                            && published.source_epoch.as_deref() == Some(scope.epoch.as_str())
+                    });
                 qualified_mock_canonical = context.provider == "mock"
                     && current_head.as_ref().is_some_and(|published| {
                         published.progress == "ready"
@@ -5438,7 +5469,8 @@ fn read_with_recent_limit(
                         .flatten()
                 };
             let compatible_delta = delta.is_some();
-            let qualified_snapshot = qualified_mock_canonical && revision != Some(token.as_str());
+            let qualified_snapshot = (qualified_mock_canonical || covered_claude_window)
+                && revision != Some(token.as_str());
             if let Some(mut delta) = delta.filter(|_| !qualified_snapshot) {
                 delta.sort_by_key(|event| event.sequence);
                 result.events = delta;
@@ -6160,6 +6192,34 @@ fn read_with_recent_limit(
         result.older_page = false;
     }
     project_display_result(&mut result);
+    if covered_claude_window && result.progress == "oversized_record" {
+        if let (Some(published), Some(source_ref), Some(checkpoint)) = (
+            current_head.as_ref(),
+            source_pointer.as_deref(),
+            seed.checkpoint.as_ref(),
+        ) {
+            result.bytes_read += (2 * HEAD_BYTES + POLICY_BYTES) as usize;
+            result.records_decoded += 2;
+            if let Ok(native) = super::chat_source_index::page_limited(
+                snapshot, &mut store, source_ref, None, None, limit,
+            ) {
+                if native.counts_complete
+                    && native.range_covered
+                    && !native.reset
+                    && native.epoch == checkpoint.epoch
+                    && native.admission == checkpoint.admission
+                    && native.target_extent == checkpoint.extent
+                {
+                    turn_read::attach_captured_claude_window(
+                        &mut store,
+                        published,
+                        &native,
+                        &mut result,
+                    )?;
+                }
+            }
+        }
+    }
     // Qualification describes this canonical interval on both fresh and
     // unchanged reads. A source page loaded for validation is independently
     // provisional; it does not demote the canonical rows assembled above.
@@ -6176,7 +6236,7 @@ fn read_with_recent_limit(
             result.progress = progress;
         }
     }
-    if detail_ref.is_none() && options.qualify_turns {
+    if detail_ref.is_none() && options.qualify_turns && result.presentation.is_none() {
         turn_read::attach(
             &mut store,
             current_head.as_ref(),

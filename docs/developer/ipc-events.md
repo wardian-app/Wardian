@@ -396,8 +396,14 @@ Settled recent metadata is packed with canonical headers and bound to the same
 Head. Reads select one committed representation; recent previews keep their
 existing fast path. The canonical Row owner certifies every member of an admitted
 archive window; raw-source headers cannot issue that certificate. An unavailable
-live source does not demote committed archive rows. A window containing provisional
-or uncertified source rows retains the whole legacy view until canonical admission.
+live source does not demote committed archive rows. Provisional or uncertified
+source rows normally keep the window on the legacy path. When the bounded Claude
+preview skips a large frame, a complete native index for the same source interval
+can prove the returned rows against the same archive Head. A captured closed turn
+can then render while a trailing native duration row stays provisional in Earlier
+activity. A collapsed Watch mirror keeps its display alias. The captured native
+row owns turn membership. This presentation issues no Older, detail or renewal
+authority.
 Optional metadata seeks share the existing read allowance,
 including failed attempts. They never scan a turn, enter the archive gate or
 open raw logs. Provider state evidence updates turn status through

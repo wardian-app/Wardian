@@ -3211,6 +3211,192 @@ fn claude_parent_chain_composition_publishes_partial_live_and_complete_closed_co
 }
 
 #[test]
+fn claude_preview_qualifies_with_captured_large_bookkeeping_and_a_provisional_tail() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("synthetic-session.jsonl");
+    let mut source = snapshot(&ConversationArchiveContext::for_agent_id(
+        "agent-1", "claude",
+    ));
+    source.log_path = Some(path.clone());
+    source.resume_session = Some("synthetic-session".into());
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    let archive = ConversationArchiveState::default();
+    let capture = |previous| {
+        let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "claude",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            previous,
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut batch.events,
+            "claude",
+            &path,
+        );
+        batch
+    };
+    let append = |frames: &[Value]| {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .unwrap();
+        for frame in frames {
+            writeln!(file, "{frame}").unwrap();
+        }
+    };
+    let sized = |mut row: Value, field: &str, bytes: usize| {
+        let extra = bytes - row.to_string().len() - 1;
+        *row.pointer_mut(field).unwrap() = json!("x".repeat(extra));
+        assert_eq!(row.to_string().len() + 1, bytes);
+        row
+    };
+    let answer = format!("Synthetic answer. {}", "x".repeat(1_600));
+    let mut mirror = event("agent-1:0000000000000003:stream_json", &answer);
+    mirror.provider = "claude".into();
+    mirror.role = Some(AgentChatRole::Assistant);
+    mirror.source = Some("stream_json".into());
+    mirror.turn_id = Some("synthetic-message".into());
+    mirror.metadata = json!({"provider_source":"event","transcript_cursor":"watch:3"});
+    append(&[
+        json!({"type":"custom-title","sessionId":"synthetic-session","customTitle":"Synthetic"}),
+    ]);
+    let prime = capture(None);
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &prime.events,
+            None,
+            &prime.next,
+            prime.source_proof(),
+        )
+        .unwrap();
+    append(&[
+        json!({"type":"user","uuid":"request","sessionId":"synthetic-session","parentUuid":null,"message":{"role":"user","content":"Reply with a synthetic answer."}}),
+        sized(
+            json!({"type":"api-request-shape","sessionId":"synthetic-session","messages":[{"role":"user","content":""}]}),
+            "/messages/0/content",
+            85_952,
+        ),
+        json!({"type":"attachment","sessionId":"synthetic-session","uuid":"attachment-before","parentUuid":"request","attachment":{"type":"deferred_tools_record","entries":[]}}),
+        json!({"type":"assistant","uuid":"answer","sessionId":"synthetic-session","parentUuid":"attachment-before","message":{"id":"synthetic-message","role":"assistant","content":[{"type":"text","text":answer}],"stop_reason":"end_turn"}}),
+        sized(
+            json!({"type":"attachment","sessionId":"synthetic-session","uuid":"attachment-after","parentUuid":"answer","attachment":{"type":"deferred_tools_record","description":""}}),
+            "/attachment/description",
+            127_670,
+        ),
+        json!({"type":"system","subtype":"turn_duration","sessionId":"synthetic-session","uuid":"duration","parentUuid":"attachment-after","durationMs":140}),
+    ]);
+    archive
+        .append_chat_events_with_context(context.clone(), std::slice::from_ref(&mirror))
+        .unwrap();
+    let captured = capture(Some(prime.next.clone()));
+    assert_eq!(
+        captured.next.committed_offset,
+        fs::metadata(&path).unwrap().len()
+    );
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &captured.events,
+            Some(&prime.next),
+            &captured.next,
+            captured.source_proof(),
+        )
+        .unwrap();
+    super::tests::finish_projection(&archive);
+    let settle_native = || {
+        for _ in 0..16 {
+            if !advance_source_index(&source).unwrap() {
+                return;
+            }
+        }
+        panic!("source projection did not settle");
+    };
+    let raw = read_legacy_source(&context, &source, None, Some(PAGE_ROWS)).unwrap();
+    assert_eq!(raw.progress, "oversized_record");
+    let waiting = read(&context, &source, None, Some(&raw.revision), None).unwrap();
+    assert!(waiting.presentation.is_none());
+    assert_eq!(waiting.progress, "oversized_record");
+    settle_native();
+    let ready_legacy = read_legacy_source(&context, &source, None, Some(PAGE_ROWS)).unwrap();
+    assert_eq!(ready_legacy.progress, "oversized_record");
+    let hints = raw
+        .events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    let (bridged, _) = preview_bridge::read(
+        &source,
+        "6aa3ac11-38df-460d-a95b-d427866205d8",
+        &[],
+        None,
+        None,
+        PAGE_ROWS,
+        preview_bridge::Selection {
+            mode: preview_bridge::Mode::Legacy,
+            hints: Some(&hints),
+            revision: Some(&raw.revision),
+        },
+    )
+    .unwrap()
+    .expect("captured Claude turn must qualify even with a provisional status tail");
+    let ordinary = read(&context, &source, None, Some(&ready_legacy.revision), None).unwrap();
+    let caught_up = read(&context, &source, None, Some(&waiting.revision), None).unwrap();
+    let poll = read(&context, &source, None, Some(&ordinary.revision), None).unwrap();
+    assert!(poll.unchanged);
+    assert_eq!(poll.generation, ordinary.generation);
+    for page in [bridged, ordinary, caught_up] {
+        let presented = value(&page);
+        assert_eq!(presented.turns.len(), 1);
+        assert!(presented.turns[0].membership_complete);
+        assert_eq!(presented.turns[0].answer_item_keys.len(), 1);
+        let final_answer = presented
+            .items
+            .iter()
+            .find(|item| item.kind == ChatPresentedItemKind::Answer)
+            .unwrap();
+        assert_eq!(final_answer.event_refs.len(), 1);
+        assert!(page.aliases.iter().any(|alias| {
+            alias.observation_id == mirror.id && alias.canonical_id == final_answer.event_refs[0]
+        }));
+        let duration = page
+            .events
+            .iter()
+            .find(|event| event.metadata["raw_type"] == "turn_duration")
+            .unwrap();
+        assert_eq!(duration.metadata["chat_provisional"], true);
+        assert!(presented
+            .legacy_turns
+            .iter()
+            .any(|group| group.event_refs.contains(&duration.id)));
+        assert!(page.next_before.is_none());
+    }
+
+    let mut unowned = source.clone();
+    unowned.resume_session = Some("foreign-session".into());
+    let unowned_context =
+        crate::commands::chat::conversation_archive_context_from_snapshot(&unowned);
+    let denied = read(&unowned_context, &unowned, None, None, None).unwrap();
+    assert!(denied.presentation.is_none() && denied.events.is_empty());
+
+    // Replay can see this record. The recent seed skips it and the unchanged
+    // archive Head does not own it, so replay alone cannot explain the gap.
+    let previous_head = head("agent-1").unwrap();
+    append(&[
+        json!({"type":"user","uuid":"uncaptured","sessionId":"synthetic-session","parentUuid":"duration","message":{"role":"user","content":"x".repeat(20*1024)}}),
+    ]);
+    settle_native();
+    assert_eq!(head("agent-1").unwrap(), previous_head);
+    let blocked = read(&context, &source, None, None, None).unwrap();
+    assert_eq!(blocked.progress, "oversized_record");
+    assert!(blocked.presentation.is_none());
+}
+
+#[test]
 fn claude_combined_native_results_cannot_publish_complete_work_evidence() {
     let (_guard, _temp) = isolated_home();
     let fixture =
