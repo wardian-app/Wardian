@@ -3,6 +3,7 @@
 // WARDIAN_NATIVE_APP=<frozen-app> WARDIAN_NATIVE_CLI=<matching-frozen-cli> \
 // npm run test:e2e:native:fast -- e2e-native/tests/chat-preview-identity-native.test.mjs
 // Opt-in compact pending-only 3x Desktop/Remote cold+warm: WARDIAN_E2E_CHAT_PREVIEW_MINIMAL_TIMING=1.
+// Opt-in Remote cold/warm plus five same-session reopens: WARDIAN_E2E_CHAT_PREVIEW_REMOTE_REOPENS=1.
 // Same frozen inputs/real observer/cleanup; one input attempt per opening, no opening resampling.
 // Optional module override: export async function seedStoppedChatPreviewSource({ harness, fixture, mode }).
 // It must use the backend acquisition owner, NOT write invented capture/projection DTOs.
@@ -37,15 +38,16 @@ import {
   recordRejectedChatScope, driveChatPreviewProbe, assertChatOpeningSample, assertChatFixtureShape, CHAT_PREVIEW_RULER_VERSION, observeChatOpening,
 } from "../lib/chatPreviewTiming.mjs";
 import { minimalChatTimingSchedule, minimalChatTimingLabel, driveMinimalChatProbe, observeMinimalChatOpening,
-  writeMinimalChatTimingReport } from "../lib/chatPreviewMinimalTiming.mjs";
+  writeMinimalChatTimingReport, remoteReopenLabels, remoteReopenSample } from "../lib/chatPreviewMinimalTiming.mjs";
 
-const minimalTiming = process.env.WARDIAN_E2E_CHAT_PREVIEW_MINIMAL_TIMING === "1";
+const remoteRepeatedOpen = process.env.WARDIAN_E2E_CHAT_PREVIEW_REMOTE_REOPENS === "1";
+const minimalTiming = remoteRepeatedOpen || process.env.WARDIAN_E2E_CHAT_PREVIEW_MINIMAL_TIMING === "1";
 const enabled = minimalTiming || process.env.WARDIAN_E2E_CHAT_PREVIEW_TIMING === "1";
 const diagnostic = !minimalTiming && process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC === "1";
 const desktopPendingDiagnostic = !minimalTiming && process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC_DESKTOP_PENDING === "1";
 const requestedFixtureModes = minimalTiming ? ["pending"] : (process.env.WARDIAN_CHAT_PREVIEW_FIXTURES ?? "pending,qualified").split(",");
 // Invalid selectors retain the maximum watchdog until the existing preflight reports them.
-const watchdogMs = chatPreviewWatchdogMs(requestedFixtureModes.length === 1 ? 1 : 2) * (minimalTiming ? 3 : 1);
+const watchdogMs = chatPreviewWatchdogMs(requestedFixtureModes.length === 1 ? 1 : 2) * (minimalTiming && !remoteRepeatedOpen ? 3 : 1);
 const probe = "synthetic-unsent-timing-probe";
 
 function endpointResult(snapshot, options) {
@@ -220,6 +222,7 @@ async function measureRemote(page, fixture, label, report, save, options, afterU
           }
         } finally { await expansion.dispose(); }
       }, observeM2: () => page.evaluate(() => window.__chatPreviewTiming.finishObservation(30_000)) });
+    if (options.remoteRepeatedOpen) return remoteReopenSample(report.cases.at(-1), final, options);
     return endpointResult(final, options);
   }, () => page.evaluate(() => window.__chatPreviewTiming.snapshot()), save);
 }
@@ -233,7 +236,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
   const defaultHome = defaultNativeE2EHome(runId);
   assertChatPreviewHomeBinding(process.env.WARDIAN_E2E_NATIVE_HOME, suppliedRunId, defaultHome);
   const homes = chatPreviewHomePaths({ runId, baseHome: defaultHome });
-  const selectedSurfaceCases = minimalTiming ? minimalChatTimingSchedule(homes)
+  const selectedSurfaceCases = minimalTiming ? minimalChatTimingSchedule(homes, { remoteRepeatedOpen })
     : chatPreviewSurfaceCases(requestedFixtureModes, diagnostic, desktopPendingDiagnostic, process.env.WARDIAN_CHAT_PREVIEW_SOURCE_ROLE);
   if (suppliedRunId === undefined) assertFreshChatPreviewHome(homes.baseHome);
   else assertPreclaimedChatPreviewBase(homes.baseHome, runId);
@@ -249,6 +252,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
   process.stdout.write(`[chat-preview-timing] evidence: ${file}\n`);
   const report = { schema_version: 2, ruler_version: CHAT_PREVIEW_RULER_VERSION, outcome_protocol_version: 1,
     method_revision: CHAT_PREVIEW_METHOD_REVISION, status: "RUNNING", cases: [], surfaces: [],
+    ...(remoteRepeatedOpen ? { remoteRepeatedOpen } : {}),
     ...(diagnostic ? { diagnostic_only: true, accepted_metrics: null, M1: null, M2: null } : {}),
     coordinator_claim: { run_id: runId, home: homes.baseHome, owner_pid: base.homeLock.pid,
       origin: suppliedRunId === undefined ? "standalone_fresh" : "live_parent_preclaim" },
@@ -365,7 +369,8 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         const observerConfig = { surface, sessionId: fixture.sessionId, provider: fixture.provider, name: fixture.name, body: fixture.body, probe,
           synthetic: fixture.synthetic, sourceKey: fixture.sourceKey, sourceEpoch: fixture.sourceEpoch, targetTurn: fixture.targetTurn,
           targetMessageId: fixture.targetMessageId, captureDetails: diagnostic, rulerVersion: CHAT_PREVIEW_RULER_VERSION,
-          ...(minimalTiming ? { minimalTiming: true } : {}) };
+          ...(minimalTiming ? { minimalTiming: true } : {}),
+          ...(remoteRepeatedOpen ? { remoteRepeatedOpen, phaseLimit: remoteReopenLabels.length } : {}) };
         if (surface === "desktop") {
           await session.driver.executeScript(chatPreviewObserverScript(observerConfig));
         } else {
@@ -404,6 +409,12 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
               const context = await contexts.get(request);
               assert.ok(context && request.timing().startTime >= 0, "Actual Remote Request association/startTime unavailable");
               const requestContext = { ...context, request_epoch_ms: request.timing().startTime };
+              if (remoteRepeatedOpen && response.status() === 503) {
+                const problem = await response.json().catch(() => null);
+                if (problem?.code === "agent_chat_read_retryable") {
+                  throw new Error("remote_chat_http_503: agent_chat_read_retryable");
+                }
+              }
               assert.ok(response.ok(), `remote_chat_http_${response.status()}`);
               const dto = await response.json();
               const details = diagnostic ? chatTimingCandidateDetails(dto, fixture) : null;
@@ -436,22 +447,24 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         await adapter.beforeColdOpen?.({ harness, fixture, session, mode });
         if (mode === "pending") detail.cold_open_capture = pendingCaptureWitness(fixture);
         const measure = (label) => {
-          const options = { sourceRole, requireProjection: sourceRole === "candidate", requireCanonical: sourceRole === "candidate" && mode === "qualified",
+          const options = { sourceRole, requireProjection: sourceRole === "candidate" && !remoteRepeatedOpen, requireCanonical: sourceRole === "candidate" && mode === "qualified",
             pendingFixture: mode === "pending" ? fixture : null,
+            remoteRepeatedOpen,
             ...(diagnostic || minimalTiming ? { budgetMs: Number.MAX_SAFE_INTEGER } : {}),
             ...(minimalTiming ? { minimalTiming: true } : {}) };
           const afterUsable = () => adapter.afterUsable?.({ harness, fixture, session, mode, surface, label });
           return surface === "desktop" ? measureDesktop(session.driver, fixture, label, report, save, options, afterUsable)
             : measureRemote(page, fixture, label, report, save, options, afterUsable);
         };
-        const openings = diagnostic ? ["diagnostic-first-chat", ...(desktopPendingDiagnostic || process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC_WARM === "1"
+        const openings = remoteRepeatedOpen ? remoteReopenLabels : diagnostic ? ["diagnostic-first-chat", ...(desktopPendingDiagnostic || process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC_WARM === "1"
           ? ["diagnostic-same-process-warm-reopen"] : [])] : ["cold-process-first-chat", "same-process-warm-reopen"];
         for (const [index, temperature] of openings.entries()) {
-          if (index === 1) {
+          if (index > 0) {
             if (surface === "desktop") await closeDesktopChat(session.driver, fixture);
             else await page.getByRole("button", { name: "Back to remote agents", exact: true }).click();
           }
-          const label = minimalTiming ? minimalChatTimingLabel(surface, repetition, temperature) : `${surface}-${mode}-${temperature}`;
+          const label = remoteRepeatedOpen ? temperature : minimalTiming
+            ? minimalChatTimingLabel(surface, repetition, temperature) : `${surface}-${mode}-${temperature}`;
           try { await measure(label); }
           catch (error) {
             failures.push(error);

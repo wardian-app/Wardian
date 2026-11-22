@@ -1039,6 +1039,23 @@ the largest signed anchor displacement in CSS pixels, with the outcome for each
 opening. A failed opening stays in its scheduled slot. The complete V8 report
 continues to use its existing writer and evidence policy.
 
+The compact cold/warm pairs use independent app homes and Remote browser profiles
+between repetitions. To check repeated Remote navigation, set
+`WARDIAN_E2E_CHAT_PREVIEW_REMOTE_REOPENS=1` with the same prebuilt release and
+synthetic pending fixture inputs. The runner opens Chat cold, reopens it warm,
+then performs five more back-and-open cycles in the same authenticated browser
+session and app home. Capture must still be pending at each click. Each opening
+gets one input attempt and retains its own outcome in the compact report.
+
+The Remote report records first usability when the native response, visible
+answer and trusted composer input pass their frame checks. A later indexing reply
+or gateway failure stays in the passive observation and does not replace the
+first-usable evidence. The report includes the observed renderer sequence and
+separately records directly witnessed source switches. A zero switch count can
+occur when the shared renderer is present from the start or when an intervening
+frame lacks the matching producer receipt. The renderer sequence alone grants
+no anchor or handoff proof.
+
 The current harness revision is `v9-retention-selector-diagnostics`. It uses the
 unchanged V8 endpoint predicates, numeric ruler version, workload, probe, clocks,
 budgets and authority checks. Historical V8 artifacts remain immutable and receive

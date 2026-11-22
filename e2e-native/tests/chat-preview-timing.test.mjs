@@ -26,6 +26,7 @@ import {
   recordChatPreviewOpeningError, assertChatPreviewSourceUnchanged, assertChatPreviewSurfaceErrorsEmpty,
   recordChatPreviewSurfaceError, recordChatPreviewCleanupOutcome, chatPreviewRunOutcome, classifyChatPreviewCycleOutcome,
 } from "../lib/chatPreviewTiming.mjs";
+import { remoteReopenSample } from "../lib/chatPreviewMinimalTiming.mjs";
 
 const fixture = { sessionId: "owned-agent", provider: "codex", body: "A uniquely completed synthetic answer.", name: "Synthetic Agent",
   synthetic: true, sourceKey: "native-source", sourceEpoch: "source-epoch", targetTurn: "synthetic-completed-unit", targetMessageId: "answer-128" };
@@ -260,7 +261,7 @@ test("v8 source-legacy admission cannot conceal a partial scope or claimed prese
 });
 
 function browser({ surface = "remote", disclosure = false, modeNeedsToggle = false, body = fixture.body, captureDetails = false, rulerVersion = 7,
-  minimalTiming = false } = {}) {
+  minimalTiming = false, remoteRepeatedOpen = false } = {}) {
   const observedFixture = { ...fixture, body };
   let time = 10; let ordinal = 0;
   const frames = new Map(); const listeners = new Map();
@@ -281,7 +282,8 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
     : selector.includes("Switch to Chat") ? [modeButton] : (selector.includes("chat-turn-work") || selector.includes("data-chat-anchor-keys")) && disclosure ? [workButton] : [];
   scroll.scrollTop = 50; scroll.scrollHeight = 1_000; scroll.clientHeight = 400;
   const transcriptAlert = element(); transcriptAlert.hidden = true;
-  scroll.querySelectorAll = (selector) => selector === ':scope > [role="alert"]' ? [transcriptAlert]
+  const alertSelector = remoteRepeatedOpen ? ':scope > .chat-transcript-list > [role="alert"]' : ':scope > [role="alert"]';
+  scroll.querySelectorAll = (selector) => selector.endsWith('[role="alert"]') ? selector === alertSelector ? [transcriptAlert] : []
     : selector === "[data-chat-row-identity]" ? [row] : [content];
   scroll.contains = (value) => value === content;
   content.textContent = body;
@@ -306,7 +308,8 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
     getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
     requestAnimationFrame: (callback) => { frames.set(++ordinal, callback); return ordinal; },
     cancelAnimationFrame: (id) => frames.delete(id), setTimeout, clearTimeout, TextEncoder });
-  vm.runInContext(chatPreviewObserverScript({ ...observedFixture, surface, probe: rulerVersion === 8 ? v8Probe : "probe", captureDetails, rulerVersion, minimalTiming }), context);
+  vm.runInContext(chatPreviewObserverScript({ ...observedFixture, surface, probe: rulerVersion === 8 ? v8Probe : "probe",
+    captureDetails, rulerVersion, minimalTiming, remoteRepeatedOpen }), context);
   const api = window.__chatPreviewTiming;
   const adopt = (dto, marker = true, rendered = dto) => {
     const receipt = chatTimingReceipt(dto, observedFixture);
@@ -356,6 +359,25 @@ function v8Opening(b, dto = nativeLegacyPage(), marker = false, delay = 0) {
   b.inputEvent(); b.advance(3);
   return b.api.snapshot();
 }
+
+test("Remote reopens retain verified first usability through a later indexing hold and still reject a visible error", () => {
+  const b = browser({ rulerVersion: 8, minimalTiming: true, remoteRepeatedOpen: true });
+  const page = presentedPreview();
+  const options = { requireProjection: false };
+  const first = assertChatOpeningSample(v8Opening(b, page, true), options);
+  const pending = { ...page, events: [], presentation: null, recent_admission: null,
+    generation: "successor-generation", revision: "indexing-revision", progress: "indexing" };
+  // Remote keeps the preceding rendered window while waiting for a qualified successor.
+  b.api.receive(chatTimingReceipt(pending, fixture), null, b.api.noteRequest({ purpose: "recent_preview" }));
+  b.advance(3);
+  const final = b.api.snapshot();
+  assert.throws(() => assertChatOpeningSample(final, options), /missing_current_healthy_view/);
+  assert.throws(() => remoteReopenSample({}, final, options), /Missing verified first-usable witness/);
+  assert.deepEqual(remoteReopenSample({ m1_observed: first.m1 }, final, options).m1, first.m1);
+  b.transcriptAlert.hidden = false;
+  assert.throws(() => remoteReopenSample({ m1_observed: first.m1 }, b.api.snapshot(), options), /unhealthy_m2_observation/);
+  b.api.dispose();
+});
 
 test("minimal timing captures the actual first usable frame/anchor once, independently of later handoff geometry", () => {
   const normal = browser({ rulerVersion: 8 });
