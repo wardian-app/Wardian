@@ -23,6 +23,7 @@ name = "Wardian"
 path = "src/main.rs"
 
 [features]
+adoption-throughput = []
 retained-codex-replay = []
 terminal-trace = []
 
