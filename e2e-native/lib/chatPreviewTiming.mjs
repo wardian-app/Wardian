@@ -1006,6 +1006,10 @@ export function installChatPreviewTiming(config) {
   };
   const parse = (value) => { try { return JSON.parse(value); } catch { return null; } };
   const scopeKey = (scope) => scope && JSON.stringify([scope.session, scope.conversation, scope.generation, scope.epoch, scope.revision, scope.admission ?? null]);
+  const transcriptErrorVisible = (scroll) => {
+    const selector = config.remoteRepeatedOpen ? ':scope > .chat-transcript-list > [role="alert"]' : ':scope > [role="alert"]';
+    return Boolean(scroll && [...scroll.querySelectorAll(selector)].some(visible));
+  };
   const contentView = (selection) => {
     const counts = { at: now(), reason: "selected", host_candidates: 0, visible_hosts: 0,
       owned_host: false, scroll_candidates: 0, visible_scrolls: 0, body_candidates: 0,
@@ -1060,7 +1064,7 @@ export function installChatPreviewTiming(config) {
     const anchorKey = anchor?.getAttribute("data-chat-anchor-key") ?? null;
     const controlSequence = state.receipts.reduce((latest, item) => item.control === "unscoped_reset"
       ? Math.max(latest, item.last_sequence) : latest, 0);
-    const transcriptError = [...scroll.querySelectorAll(':scope > [role="alert"]')].some(visible);
+    const transcriptError = transcriptErrorVisible(scroll);
     return finish({ host, scroll, node, row, key, identity, committed, turnKey, anchor, anchorKey, scope, controlSequence, transcriptError }, "selected");
   };
   const presentedCandidate = () => {
@@ -1536,7 +1540,7 @@ export function installChatPreviewTiming(config) {
           disclosure_frames: 0, disclosure_confirmed: false, anchor_preserved: null, expansion_preserved: null, closed: false },
         trustedInteractionAt: null, interaction: null, frames: {}, checking: {},
         probe: { limit: 3, deadline_at: null, attempts: [], evidence_bytes: 0, evidence_overflow_count: 0, error: null } };
-      boundedPush(state.phases, phase, 4); state.phase = phase;
+      boundedPush(state.phases, phase, config.phaseLimit ?? 4); state.phase = phase;
     },
     wait(field, timeoutMs) {
       if (!["readableAt", "usableAt", "qualifiedAt", "projectionAt"].includes(field) || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -1654,7 +1658,7 @@ export function installChatPreviewTiming(config) {
           current_projection: Boolean(strong?.admitted && (strong.presentedAnswer || strong.target?.qualifiedAnswer)) } : null,
         candidate_diagnostic: openingDiagnostic ?? captureDiagnostic("snapshot"),
         diagnostics: { owned_container: Boolean(host), mode_titles: host ? [...host.querySelectorAll('button[title="Switch to Chat"], button[title="Switch to Terminal"]')]
-          .map((node) => node.getAttribute("title")) : [], transcript_error_visible: scroll ? [...scroll.querySelectorAll(':scope > [role="alert"]')].some(visible) : false,
+          .map((node) => node.getAttribute("title")) : [], transcript_error_visible: transcriptErrorVisible(scroll),
         scroll: scroll ? { height: scroll.clientHeight, extent: scroll.scrollHeight, top: scroll.scrollTop,
           scope_marker: scroll.getAttribute("data-chat-page-scope") } : null } }));
     },

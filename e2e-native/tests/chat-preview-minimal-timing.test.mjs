@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { chatPreviewHomePaths, recordChatTimingCase } from "../lib/chatPreviewTiming.mjs";
 import { MINIMAL_CHAT_TIMING_BYTES, minimalChatTimingSchedule, minimalChatTimingLabel, driveMinimalChatProbe,
-  observeMinimalChatOpening, compactMinimalChatTiming, writeMinimalChatTimingReport } from "../lib/chatPreviewMinimalTiming.mjs";
+  observeMinimalChatOpening, compactMinimalChatTiming, writeMinimalChatTimingReport, remoteReopenLabels } from "../lib/chatPreviewMinimalTiming.mjs";
 
 const temperatures = ["cold-process-first-chat", "same-process-warm-reopen"];
 const label = minimalChatTimingLabel("desktop", 1, temperatures[0]);
@@ -35,6 +35,31 @@ test("three repetitions schedule both surfaces with fresh fixed-width homes and 
   assert.deepEqual(report.cases.map((entry) => entry.label), schedule.flatMap((entry) =>
     temperatures.map((temperature) => minimalChatTimingLabel(entry.surface, entry.repetition, temperature))));
   assert.ok(report.cases.every((entry) => entry.status === "NOT_ATTEMPTED" && entry.first_usable_ms === null && entry.anchor_delta_px === null));
+});
+
+test("Remote repeat diagnostics schedule seven openings for one home and distinguish renderer changes from proven switches", () => {
+  const homes = { cases: [{ surface: "remote", mode: "pending", home: "synthetic-r-p" }] };
+  assert.deepEqual(minimalChatTimingSchedule(homes, { remoteRepeatedOpen: true }), [
+    { surface: "remote", mode: "pending", repetition: 1, home: "synthetic-r-1" },
+  ]);
+  const report = { ...observedReport(), remoteRepeatedOpen: true };
+  const record = report.cases[0];
+  record.label = remoteReopenLabels[0];
+  const phase = record.observation.phase;
+  phase.continuity = { source_switches: 0, samples: [
+    { renderer: "legacy", representation: { kind: "legacy" } },
+    { renderer: "shared", representation: { kind: "unknown" } },
+    { renderer: "shared", representation: { kind: "provisional" } },
+  ] };
+  const compact = compactMinimalChatTiming(report);
+  assert.equal(compact.cases.length, 7);
+  assert.equal(new Set(compact.cases.map((entry) => entry.label)).size, 7);
+  assert.equal(compact.cases[0].source_switch_count, 0);
+  assert.equal(compact.cases[0].first_usable_ms, null);
+  assert.deepEqual(compact.cases[0].evidence.renderer_path, ["legacy/legacy", "shared/unknown", "shared/provisional"]);
+  assert.ok(compact.cases.slice(1).every((entry) => entry.status === "NOT_ATTEMPTED"));
+  record.m1_observed = { usable_ms: 1_235.125 };
+  assert.equal(compactMinimalChatTiming(report).cases[0].first_usable_ms, 1_235.125);
 });
 
 test("compact writer retains an over-budget first usable and real anchor delta despite handoff failure and oversized raw details", () => {
