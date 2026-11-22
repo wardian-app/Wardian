@@ -677,6 +677,7 @@ pub(super) fn recover_unlinked_observations(
     recover_only_ids: Option<&HashSet<String>>,
     next_seq: &mut u64,
 ) -> io::Result<Vec<RecoveredObservation>> {
+    let vacancies = wardian_core::archive_vacancy::validate_vacancies(directory, conversation_id)?;
     super::mock_mirrors::recover_pending(context, directory, records, events)?;
     let mut occupied_sequences = HashSet::new();
     for record in records.iter() {
@@ -689,6 +690,7 @@ pub(super) fn recover_unlinked_observations(
     }
     let retired_sequences = verified_coalesced_narrative_sequences(records, events)?;
     occupied_sequences.extend(retired_sequences.iter().copied());
+    occupied_sequences.extend(vacancies.iter().copied());
     if let Some(last_reserved_sequence) = records
         .iter()
         .map(|record| record.seq)
@@ -902,6 +904,7 @@ pub(super) fn recover_unlinked_observations(
         let mut all_sequences = records.iter().map(|record| record.seq).collect::<Vec<_>>();
         all_sequences.extend(recovered.iter().map(|observation| observation.record.seq));
         all_sequences.extend(retired_sequences);
+        all_sequences.extend(vacancies);
         validate_sequence_prefix(all_sequences)?;
     }
 
@@ -1014,12 +1017,15 @@ fn validate_sequence_prefix(sequences: impl IntoIterator<Item = u64>) -> io::Res
 }
 
 pub(super) fn publish_recovered_observations(
+    publication: &super::vacancy::publication::Publication,
     conversation_path: &Path,
     sources_path: &Path,
     records: &mut Vec<ConversationNarrativeRecord>,
     events: &[AgentChatEvent],
     observations: Vec<RecoveredObservation>,
 ) -> io::Result<usize> {
+    publication.check_records(records)?;
+    publication.check_events(events)?;
     let count = observations.len();
     if count == 0 {
         return Ok(0);
@@ -1036,7 +1042,10 @@ pub(super) fn publish_recovered_observations(
         .map(|record| record.seq)
         .collect::<Vec<_>>();
     all_sequences.extend(retired_sequences);
+    all_sequences.extend(publication.sequences());
     validate_sequence_prefix(all_sequences)?;
+    repaired_records.sort_by_key(|record| record.seq);
+    let replacement_bytes = publication.prepare_records(conversation_path, &repaired_records)?;
 
     let mut cached_sources = None;
     for observation in &observations {
@@ -1044,10 +1053,14 @@ pub(super) fn publish_recovered_observations(
             append_source_if_needed(sources_path, &mut cached_sources, source, true)?;
         }
     }
-    repaired_records.sort_by_key(|record| record.seq);
     records.clear();
     records.extend(repaired_records);
-    write_jsonl_atomic(conversation_path, records)?;
+    if let Some(bytes) = replacement_bytes {
+        crate::utils::codex_messaging::atomic_replace(conversation_path, &bytes)
+            .map_err(io::Error::other)?;
+    } else {
+        write_jsonl_atomic(conversation_path, records)?;
+    }
     Ok(count)
 }
 
@@ -1144,7 +1157,8 @@ fn rebuild_derived_projections_inner(
     };
     let mut all_events = events.to_vec();
     if reconcile && provenance::bind_delivered_inputs(&mut all_events, records)? {
-        write_jsonl_atomic(&directory.join("events.jsonl"), &all_events)?;
+        super::vacancy::publication::Publication::load(directory, &handle.conversation_id)?
+            .write_events(&directory.join("events.jsonl"), &all_events)?;
     }
     let sources: Vec<ConversationSourceRecord> =
         read_jsonl_records(&directory.join("sources.jsonl"))?;

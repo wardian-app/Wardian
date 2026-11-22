@@ -106,6 +106,7 @@ pub fn load_conversation_show(conversation_id: &str) -> io::Result<ConversationS
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "unsafe conversation path")
             })?;
+    wardian_core::archive_vacancy::validate_vacancies(&conversation_dir, conversation_id)?;
     let manifest = read_conversation_manifest(&conversation_dir.join("manifest.json"))?;
     let conversation = read_jsonl_records::<ConversationNarrativeRecord>(
         &conversation_dir.join("conversation.jsonl"),

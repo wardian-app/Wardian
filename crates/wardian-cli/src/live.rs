@@ -50,6 +50,7 @@ enum ControlOperation {
     AgentNewSession,
     AgentReleaseHold,
     AgentAdoptArchive,
+    AgentArchiveVacancy,
     AgentPause,
     AgentResume,
     AgentModels,
@@ -380,6 +381,26 @@ pub fn agent_adopt_archive(
             target: target.to_string(),
             request,
             origin: require_current_message_origin().ok(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+/// Submit one vacancy authorization to the desktop; errors never permit an offline write.
+pub fn agent_archive_vacancy(
+    target: &str,
+    request: wardian_core::control::ArchiveVacancyRequest,
+) -> io::Result<wardian_core::control::ArchiveVacancyResponse> {
+    request
+        .validate()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentArchiveVacancy,
+        send_request(ControlRequest::AgentArchiveVacancy {
+            target: target.to_string(),
+            request,
         }),
     )?;
     serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
@@ -929,6 +950,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentNewSession
         | ControlOperation::AgentReleaseHold
         | ControlOperation::AgentAdoptArchive
+        | ControlOperation::AgentArchiveVacancy
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
         | ControlOperation::AgentModels
@@ -1516,6 +1538,34 @@ mod tests {
         );
         assert_eq!(
             operation_timeout(&ControlOperation::AgentWorktreeDisable),
+            CONTROL_MUTATION_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn archive_vacancy_uses_mutation_budget_and_preserves_older_endpoint_rejection() {
+        let runtime = build_runtime().unwrap();
+        let error = timeout_block(
+            &runtime,
+            ControlOperation::AgentArchiveVacancy,
+            std::future::ready(Err(io::Error::other(ControlEndpointError::new(
+                "bad_request",
+                "older desktop does not support agent_archive_vacancy",
+            )))),
+        )
+        .unwrap_err();
+        let endpoint = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<ControlEndpointError>()
+            .unwrap();
+        assert_eq!(endpoint.code(), "bad_request");
+        assert_eq!(
+            endpoint.to_string(),
+            "older desktop does not support agent_archive_vacancy"
+        );
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentArchiveVacancy),
             CONTROL_MUTATION_TIMEOUT
         );
     }

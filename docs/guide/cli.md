@@ -326,12 +326,71 @@ operator guidance. The diagnostic survives restart and also appears through
 Chat's existing error surface. Explicit `--field` and `--fields` identity
 projections retain their existing output.
 
-Request operator review and an approved repair before resuming the damaged
-archive. A retired adoption may require a new `adopt-archive` authorization.
+Request operator review before resuming the damaged archive. Use the
+[vacancy repair procedure](#repair-an-archive-sequence-vacancy) only when the
+missing slot qualifies. A retired adoption may require a new `adopt-archive` authorization.
 Do not delete archive files, renumber records or repeatedly re-grant an
 unrepaired adoption. Capture status is inspectable in
 `<wardian-home>/agents/<agent-id>/archive-capture-stop.json`; adoption job status
 and its terminal reason remain under the agent's `archive-adoptions/` directory.
+
+### Repair an archive sequence vacancy
+
+Use a rebuilt desktop and CLI that support `archive-vacancy`. Preserve the
+archive. Replace the placeholders with the target, saved conversation ID and
+missing narrative sequence from the terminal diagnostic.
+
+1. Run the read-only evidence report:
+
+   ```bash
+   wardian agent archive-vacancy <agent> --conversation-id <conversation-id> --sequence <N> --dry-run
+   ```
+
+   PowerShell:
+
+   ```powershell
+   wardian agent archive-vacancy <agent> --conversation-id <conversation-id> --sequence <N> --dry-run
+   ```
+
+2. Check `eligible` and every named rule. Stop if any rule fails. The initial
+   command accepts only an interior never-written slot with intact physical
+   neighbours on both sides and no record, body, artifact or explicit sequence
+   reference at that slot. A turn range spanning the slot alone does not reject
+   it. The report grants no repair authority and writes no files.
+
+3. Obtain recorded approval for the exact agent, conversation and sequence.
+   With the desktop running, submit that approval:
+
+   ```bash
+   wardian agent archive-vacancy <agent> \
+     --conversation-id <conversation-id> --sequence <N> \
+     --authorization-id <authorization-uuid> \
+     --approval-reference '<recorded-approval-reference>' \
+     --approval-text '<recorded-approval-text>'
+   ```
+
+   PowerShell:
+
+   ```powershell
+   wardian agent archive-vacancy <agent> `
+     --conversation-id <conversation-id> --sequence <N> `
+     --authorization-id <authorization-uuid> `
+     --approval-reference '<recorded-approval-reference>' `
+     --approval-text '<recorded-approval-text>'
+   ```
+
+4. Check the response. If `adoption_regrant_required` is true, use the normal
+   `adopt-archive` procedure with recorded approval for the provider interval.
+   Otherwise the existing adoption can resume through normal capture. After a
+   timeout, retry the identical vacancy authorization; do not create another
+   approval or edit the ledger to guess whether the write succeeded.
+
+The authorization is inspectable in
+`<wardian-home>/agents/<agent-id>/conversations/<conversation-id>/vacancies.jsonl`.
+It contributes no displayed content or count. A later record at the slot or a
+changed neighbour produces a fail-closed conflict. Preserve the files and run
+the dry run for operator review. Never truncate, renumber or repair a malformed
+ledger by hand.
 
 ## Communication Topology & Scope
 

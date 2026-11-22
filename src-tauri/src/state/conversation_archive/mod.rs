@@ -34,6 +34,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 mod turns;
+mod vacancy;
 
 use records::{
     current_rfc3339_millis, generated_event_from_record, generated_sources_from_record,
@@ -497,7 +498,12 @@ impl ConversationArchiveState {
         handle: &ActiveConversationHandle,
         error: io::Error,
     ) -> io::Error {
-        let Some(sequence) = repair::narrative_sequence_gap(&error) else {
+        let conflict = error.get_ref().and_then(|cause| {
+            cause.downcast_ref::<wardian_core::archive_vacancy::VacancyConflict>()
+        });
+        let Some(sequence) = repair::narrative_sequence_gap(&error)
+            .or_else(|| conflict.map(|conflict| conflict.sequence))
+        else {
             return error;
         };
         let result = (|| {
@@ -505,6 +511,7 @@ impl ConversationArchiveState {
                 conversation_id: handle.conversation_id.clone(),
                 provider_source_key: context.provider_source_key.clone(),
                 sequence,
+                vacancy_rule: conflict.map(|conflict| conflict.rule.clone()),
             };
             self.retire_adoption_locked(&context.agent_id, &gap.reason())?;
             write_json_atomic(
@@ -614,6 +621,10 @@ impl ConversationArchiveState {
         let agent_lock = agent_lock_for(&self.agent_locks, &entry.agent_id)?;
         let _guard = lock_agent_archive(&agent_lock)?;
         let conversation_dir = conversation_dir(&entry.agent_id, &entry.conversation_id)?;
+        wardian_core::archive_vacancy::validate_vacancies(
+            &conversation_dir,
+            &entry.conversation_id,
+        )?;
         let manifest =
             read_manifest(&conversation_dir.join("manifest.json"))?.ok_or_else(|| {
                 io::Error::new(
@@ -638,6 +649,7 @@ impl ConversationArchiveState {
             let agent_lock = agent_lock_for(&self.agent_locks, &entry.agent_id)?;
             let _guard = lock_agent_archive(&agent_lock)?;
             let directory = conversation_dir(&entry.agent_id, &entry.conversation_id)?;
+            wardian_core::archive_vacancy::validate_vacancies(&directory, &entry.conversation_id)?;
             let turns: Vec<ConversationTurnRecord> =
                 read_jsonl_records(&directory.join("turns.jsonl"))?;
             records.extend(turns.into_iter().map(|turn| (entry.clone(), turn)));
@@ -658,6 +670,7 @@ impl ConversationArchiveState {
             let agent_lock = agent_lock_for(&self.agent_locks, &entry.agent_id)?;
             let _guard = lock_agent_archive(&agent_lock)?;
             let directory = conversation_dir(&entry.agent_id, &entry.conversation_id)?;
+            wardian_core::archive_vacancy::validate_vacancies(&directory, &entry.conversation_id)?;
             let (turns, skipped) = read_jsonl_records_resilient(&directory.join("turns.jsonl"))?;
             skipped_records += skipped;
             records.extend(turns.into_iter().map(|turn| (entry.clone(), turn)));
@@ -689,6 +702,7 @@ impl ConversationArchiveState {
         let mut events = Vec::new();
         for entry in entries {
             let directory = conversation_dir(&entry.agent_id, &entry.conversation_id)?;
+            wardian_core::archive_vacancy::validate_vacancies(&directory, &entry.conversation_id)?;
             let mut conversation_events: Vec<AgentChatEvent> = read_chat_events(&directory)?;
             for event in &mut conversation_events {
                 if let Some(metadata) = event.metadata.as_object_mut() {
@@ -968,6 +982,8 @@ impl ConversationArchiveState {
         };
         let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
         let effective_context = effective_context_for_handle(&context, &handle, &conversation_dir)?;
+        let vacancy_publication =
+            self.validate_vacancy_capture(&context, &handle, &conversation_dir)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
         let events_path = conversation_dir.join("events.jsonl");
         let sources_path = conversation_dir.join("sources.jsonl");
@@ -1127,6 +1143,7 @@ impl ConversationArchiveState {
         } else {
             HashSet::new()
         };
+        vacancy_publication.normalize_replays(&conversation_dir, &mut existing_events)?;
         let observed = existing_events
             .iter()
             .filter(|event| {
@@ -1150,21 +1167,18 @@ impl ConversationArchiveState {
         for record in &mut existing_records {
             reconcile_codex_request_root_from_archived_mirror(record, &existing_events);
         }
-        let before_refresh_by_seq = index_records_by_sequence(&before_refresh_records);
-        for record in &mut existing_records {
-            if !record_was_present(record, &before_refresh_by_seq) {
-                materialize_record_text(&conversation_dir, record)?;
-            }
-        }
-        for event in &mut existing_events {
-            if provenance::completed_native_tool(event) || native_ids.contains(&event.id) {
-                if let Some(record) = existing_records
-                    .iter()
-                    .find(|record| record.event_refs.contains(&event.id))
-                {
-                    *event = event_record_for_jsonl(event, record);
-                }
-            }
+        vacancy_publication
+            .check_records(&existing_records)
+            .and_then(|_| vacancy_publication.check_events(&existing_events))
+            .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
+        if !vacancy_publication.has_vacancies() {
+            vacancy_publication.materialize_refresh(
+                &conversation_dir,
+                &before_refresh_records,
+                &mut existing_records,
+                &mut existing_events,
+                &native_ids,
+            )?;
         }
         events_refreshed |= before_refresh_events != existing_events;
         let mut records_refreshed = before_refresh_records != existing_records;
@@ -1204,15 +1218,32 @@ impl ConversationArchiveState {
         if adoption.is_some() {
             adoption::profile::mark(&context.agent_id, "archive_recovered", 0);
         }
+        vacancy_publication
+            .check_records(&existing_records)
+            .and_then(|_| vacancy_publication.check_events(&existing_events))
+            .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
+        if vacancy_publication.has_vacancies() {
+            vacancy_publication.materialize_refresh(
+                &conversation_dir,
+                &before_refresh_records,
+                &mut existing_records,
+                &mut existing_events,
+                &native_ids,
+            )?;
+        }
+        events_refreshed |= before_refresh_events != existing_events;
         records_refreshed |= before_refresh_records != existing_records;
         refreshed |= records_refreshed;
         if let Some(authority) = native_messages {
             authority.require_current()?;
         }
         if events_refreshed {
-            write_jsonl_atomic(&events_path, &existing_events)?;
+            vacancy_publication
+                .write_events(&events_path, &existing_events)
+                .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
         }
         let recovered_count = publish_recovered_observations(
+            &vacancy_publication,
             &conversation_path,
             &sources_path,
             &mut existing_records,
@@ -1220,7 +1251,9 @@ impl ConversationArchiveState {
             recovered_observations,
         )?;
         if records_refreshed && recovered_count == 0 {
-            write_jsonl_atomic(&conversation_path, &existing_records)?;
+            vacancy_publication
+                .write_records(&conversation_path, &existing_records)
+                .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
         }
         let mut appended: Vec<ConversationNarrativeRecord> = Vec::new();
         let mut pending_publications: Vec<PendingChatPublication> = Vec::new();
@@ -1376,6 +1409,20 @@ impl ConversationArchiveState {
                 } else {
                     source_record
                 };
+                if vacancy_publication.protects(record_seq) {
+                    let known = cached_source_rows(&mut cached_sources, &sources_path)?;
+                    vacancy_publication
+                        .check_retry(
+                            &existing_records[record_index],
+                            event,
+                            &conversation_dir,
+                            existing_event_index.and_then(|index| existing_events.get(index)),
+                            source_record.as_ref(),
+                            known,
+                        )
+                        .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
+                    continue;
+                }
                 let mut record_changed = false;
                 record_changed |= refresh_codex_completion_narrative(
                     &mut existing_records[record_index],
@@ -1461,6 +1508,13 @@ impl ConversationArchiveState {
                 matching_delivered_input_record_index(&existing_records, event)?
             {
                 let record_seq = existing_records[record_index].seq;
+                if vacancy_publication.protects(record_seq) {
+                    return Err(self.record_recovery_failure(
+                        &context,
+                        &handle,
+                        vacancy_publication.conflict_for(record_seq),
+                    ));
+                }
                 let source_record = source_record_from_chat_event(event, record_seq);
                 if let Some(source_record) = source_record {
                     append_source_if_needed(
@@ -1592,7 +1646,9 @@ impl ConversationArchiveState {
         }
 
         if merged_existing_count > 0 {
-            write_jsonl_atomic(&conversation_path, &existing_records)?;
+            vacancy_publication
+                .write_records(&conversation_path, &existing_records)
+                .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
         }
 
         for publication in &pending_publications {
@@ -1628,7 +1684,9 @@ impl ConversationArchiveState {
             .collect::<Vec<_>>();
         let mut all_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
         if provenance::bind_delivered_inputs(&mut all_events, &all_records)? {
-            write_jsonl_atomic(&events_path, &all_events)?;
+            vacancy_publication
+                .write_events(&events_path, &all_events)
+                .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
         }
         let all_sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path)?;
         let turns = derive_turn_records_with_context(
@@ -1719,8 +1777,14 @@ impl ConversationArchiveState {
                 &mut candidate.events,
                 &capture.provider_log_sources,
             )? {
+                let publication = vacancy::publication::Publication::load(
+                    &directory,
+                    &candidate.conversation_id,
+                )?;
+                publication.check_records(&records)?;
+                publication.check_events(&candidate.events)?;
                 // Evidence precedes its narrative, matching ordinary archive recovery.
-                write_jsonl_atomic(&directory.join("events.jsonl"), &candidate.events)?;
+                publication.write_events(&directory.join("events.jsonl"), &candidate.events)?;
                 #[cfg(test)]
                 if self
                     .fail_compatibility_stage
@@ -1731,7 +1795,7 @@ impl ConversationArchiveState {
                         "injected Mock reconciliation failure after events",
                     ));
                 }
-                write_jsonl_atomic(&path, &records)?;
+                publication.write_records(&path, &records)?;
                 candidate.committed_output_bytes =
                     std::fs::metadata(directory.join("events.jsonl"))?.len();
             }
@@ -2078,6 +2142,10 @@ impl ConversationArchiveState {
         let event = generated_event_from_record(&context, &conversation_id, &mut record);
         self.chat_projection
             .commit_input(&context, &conversation_id, fence, || {
+                let handle = active
+                    .get(&context.agent_id)
+                    .ok_or_else(|| io::Error::other("chat archive owner disappeared"))?;
+                self.validate_vacancy_capture(&context, handle, &dir)?;
                 // Admission can decline without invoking this callback. Keep
                 // that case allocation-free, but reserve before any partial
                 // write so an archive failure cannot recycle the identity.
@@ -2223,6 +2291,8 @@ impl ConversationArchiveState {
         let mut handle = active_handle_for_context(&self.active, &context, provider_source_key)?;
         let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
         let effective_context = effective_context_for_handle(&context, &handle, &conversation_dir)?;
+        let vacancy_publication =
+            self.validate_vacancy_capture(&context, &handle, &conversation_dir)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
         let events_path = conversation_dir.join("events.jsonl");
         let sources_path = conversation_dir.join("sources.jsonl");
@@ -2248,6 +2318,7 @@ impl ConversationArchiveState {
         )
         .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
         publish_recovered_observations(
+            &vacancy_publication,
             &conversation_path,
             &sources_path,
             &mut existing_records,
@@ -2316,7 +2387,9 @@ impl ConversationArchiveState {
         };
         let mut all_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
         if provenance::bind_delivered_inputs(&mut all_events, &all_records)? {
-            write_jsonl_atomic(&events_path, &all_events)?;
+            vacancy_publication
+                .write_events(&events_path, &all_events)
+                .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
         }
         rebuild_derived_projections(
             &context.agent_id,

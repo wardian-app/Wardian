@@ -572,7 +572,17 @@ pub(super) fn recover_pending(
     // Validate the entire result before its only durable mutation. A failed
     // replacement leaves the same provable intent available to the next owner.
     retired_sequences(records, events)?;
-    write_jsonl_atomic(&directory.join("conversation.jsonl"), records)?;
+    let conversation_id = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "archive directory lacks a conversation identifier",
+            )
+        })?;
+    vacancy::publication::Publication::load(directory, conversation_id)?
+        .write_records(&directory.join("conversation.jsonl"), records)?;
     Ok(true)
 }
 

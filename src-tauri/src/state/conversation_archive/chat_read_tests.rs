@@ -28,6 +28,7 @@ fn terminal_archive_stop_declines_receipt_without_writing_or_allocating() {
         conversation_id: fence.conversation_id.clone(),
         provider_source_key: ctx.provider_source_key.clone(),
         sequence: 2,
+        vacancy_rule: None,
     };
     wardian_core::conversations::write_json_atomic(
         &wardian_core::conversations::archive_capture_status_path(&ctx.agent_id).unwrap(),

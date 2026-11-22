@@ -1,6 +1,18 @@
 use super::*;
 
 mod reconciliation;
+
+#[test]
+fn vacancy_ledger_failure_before_replace_preserves_every_prior_byte() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("vacancies.jsonl");
+    let prior = b"{\"prior\":true}\r\n";
+    std::fs::write(&path, prior).unwrap();
+    FAIL_BEFORE_REPLACE.with(|fault| fault.set(true));
+    assert!(atomic_replace(&path, b"{\"prior\":true}\r\n{\"new\":true}\n").is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), prior);
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+}
 #[cfg(windows)]
 mod windows_long_paths;
 
