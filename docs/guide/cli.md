@@ -318,6 +318,21 @@ wardian agent coder-a1
 wardian agent show uuid-1
 ```
 
+When capture finds an unmarked narrative sequence gap, it stops automatic
+attempts for that provider source and preserves the conversation archive.
+Default `wardian agent show <agent>` output includes an `archive_capture`
+diagnostic with `status: "blocked"`, the conversation ID, missing sequence and
+operator guidance. The diagnostic survives restart and also appears through
+Chat's existing error surface. Explicit `--field` and `--fields` identity
+projections retain their existing output.
+
+Request operator review and an approved repair before resuming the damaged
+archive. A retired adoption may require a new `adopt-archive` authorization.
+Do not delete archive files, renumber records or repeatedly re-grant an
+unrepaired adoption. Capture status is inspectable in
+`<wardian-home>/agents/<agent-id>/archive-capture-stop.json`; adoption job status
+and its terminal reason remain under the agent's `archive-adoptions/` directory.
+
 ## Communication Topology & Scope
 
 Wardian maintains a communication topology that shapes which agents you see and interact with by default. Your **neighbors** are determined by the graph topology: manual edges (including team-seeded edges) or your workspace-mates (if you have no manual edges).

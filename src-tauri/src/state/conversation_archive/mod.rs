@@ -478,6 +478,48 @@ pub fn effective_conversation_logging(
 }
 
 impl ConversationArchiveState {
+    /// Terminal metadata is source-scoped and survives a process restart.
+    /// Reading it never validates or mutates conversation contents.
+    pub(crate) fn archive_sequence_gap(
+        &self,
+        context: &ConversationArchiveContext,
+    ) -> io::Result<Option<wardian_core::conversations::ArchiveSequenceGap>> {
+        Ok(
+            wardian_core::conversations::read_archive_sequence_gap(&context.agent_id)?
+                .filter(|gap| gap.provider_source_key == context.provider_source_key),
+        )
+    }
+
+    // Called only under the per-agent archive lock, before recovery publishes.
+    fn record_recovery_failure(
+        &self,
+        context: &ConversationArchiveContext,
+        handle: &ActiveConversationHandle,
+        error: io::Error,
+    ) -> io::Error {
+        let Some(sequence) = repair::narrative_sequence_gap(&error) else {
+            return error;
+        };
+        let result = (|| {
+            let gap = wardian_core::conversations::ArchiveSequenceGap {
+                conversation_id: handle.conversation_id.clone(),
+                provider_source_key: context.provider_source_key.clone(),
+                sequence,
+            };
+            self.retire_adoption_locked(&context.agent_id, &gap.reason())?;
+            write_json_atomic(
+                &wardian_core::conversations::archive_capture_status_path(&context.agent_id)?,
+                &gap,
+            )
+        })();
+        match result {
+            Ok(()) => error,
+            Err(status_error) => io::Error::other(format!(
+                "{error}; terminal capture status could not be saved: {status_error}"
+            )),
+        }
+    }
+
     /// Records the provider-session boundary before startup events are
     /// emitted. This remains available when conversation logging is disabled,
     /// because live Chat still projects memory activity.
@@ -849,6 +891,9 @@ impl ConversationArchiveState {
             context.provider_session_ids = provider_session_ids_from_events(events);
         }
         let capture_state = read_capture_state(&context.agent_id)?;
+        if let Some(gap) = self.archive_sequence_gap(&context)? {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, gap.reason()));
+        }
         if let Some(authority) = native_messages {
             authority.require_current()?;
             if events
@@ -1153,7 +1198,8 @@ impl ConversationArchiveState {
             &existing_events,
             Some(&durable_event_ids),
             &mut next_seq,
-        )?;
+        )
+        .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
         #[cfg(all(test, feature = "adoption-throughput"))]
         if adoption.is_some() {
             adoption::profile::mark(&context.agent_id, "archive_recovered", 0);
@@ -2006,6 +2052,10 @@ impl ConversationArchiveState {
             Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
             Err(_) => return Err(io::Error::other("chat archive owner poisoned")),
         };
+        // Serialize the stop check with the owner that persists it.
+        if self.archive_sequence_gap(&context)?.is_some() {
+            return Ok(None);
+        }
         let mut active = match self.active.try_lock() {
             Ok(active) => active,
             Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
@@ -2026,12 +2076,16 @@ impl ConversationArchiveState {
         let mut record = narrative_from_delivered_input(&current_rfc3339_millis(), text, None, seq);
         let sources = generated_sources_from_record(&context, &mut record);
         let event = generated_event_from_record(&context, &conversation_id, &mut record);
-        // Reserve the actual writer identity before any partial write. An
-        // archive failure must not recycle it for a later identical prompt.
-        handle.next_seq += 1;
-        drop(active);
         self.chat_projection
             .commit_input(&context, &conversation_id, fence, || {
+                // Admission can decline without invoking this callback. Keep
+                // that case allocation-free, but reserve before any partial
+                // write so an archive failure cannot recycle the identity.
+                active
+                    .get_mut(&context.agent_id)
+                    .ok_or_else(|| io::Error::other("chat archive owner disappeared"))?
+                    .next_seq += 1;
+                drop(active);
                 append_jsonl_record(&dir.join("events.jsonl"), &event)?;
                 for source in &sources {
                     append_jsonl_record(&dir.join("sources.jsonl"), source)?;
@@ -2159,6 +2213,9 @@ impl ConversationArchiveState {
     ) -> io::Result<usize> {
         let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
+        if let Some(gap) = self.archive_sequence_gap(&context)? {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, gap.reason()));
+        }
         let provider_source_key = context.provider_source_key.clone();
         if context.provider_source_key.is_none() {
             context.provider_source_key = provider_source_key.clone();
@@ -2188,7 +2245,8 @@ impl ConversationArchiveState {
             &existing_events,
             None,
             &mut next_seq,
-        )?;
+        )
+        .map_err(|error| self.record_recovery_failure(&context, &handle, error))?;
         publish_recovered_observations(
             &conversation_path,
             &sources_path,

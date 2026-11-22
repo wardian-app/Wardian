@@ -270,6 +270,13 @@ pub(crate) async fn load_agent_chat_page_with_preview_for_state(
     // provider paths or queues behind a lifecycle write to the roster.
     let (snapshot, incarnation) = chat_read_snapshot_for_state(state, &session_id)?;
     let context = conversation_archive_context_from_snapshot(&snapshot);
+    if let Some(gap) = state
+        .conversation_archive
+        .archive_sequence_gap(&context)
+        .map_err(|error| format!("archive capture status unavailable: {error}"))?
+    {
+        return Err(gap.reason());
+    }
     let expected_source = context.provider_source_key.clone();
     let previous_preview = recent.preview
         && state
@@ -1168,6 +1175,23 @@ async fn archive_agent_chat_events_bound(
 
     // This bounded, nonauthoritative prelude precedes saved bootstrap, complete
     // DB merge and legacy archive reads. Failure never skips the durable path.
+    if state
+        .conversation_archive
+        .archive_sequence_gap(&context)
+        .map_err(|error| AgentChatTranscriptFailure {
+            stage: ChatTranscriptFailureStage::ArchiveWrite,
+            message: format!("archive capture status unavailable: {error}"),
+        })?
+        .is_some()
+    {
+        return Ok(ArchiveCaptureResult {
+            events: Vec::new(),
+            context,
+            continue_immediately: false,
+            background_stop: CaptureStop::Retired,
+            watch_mirrors: None,
+        });
+    }
     let recent_tags = publish_watch_recent(state, &snapshot).unwrap_or_default();
 
     // Historical display admission has its own bounded checkpoints. It runs
@@ -2001,6 +2025,28 @@ pub(crate) async fn background_capture_request(
             snapshot.agent_conversation_logging,
         ) == ConversationLoggingSetting::Enabled,
     }))
+}
+
+/// A terminal archive diagnostic suppresses admission even for a forced tick.
+/// Construct the same source binding used by capture without acquiring history.
+pub(crate) fn background_capture_is_archive_blocked(
+    state: &AppState,
+    request: &CaptureRequest,
+) -> bool {
+    let context = conversation_archive_context(ConversationArchiveContextInput {
+        session_id: &request.session_id,
+        provider: &request.provider,
+        agent_name: "",
+        agent_class: "",
+        workspace: "",
+        resume_session: request.conversation.as_deref(),
+        fresh_provider_session_id: None,
+        log_path: request.source_path.as_deref(),
+    });
+    state
+        .conversation_archive
+        .archive_sequence_gap(&context)
+        .is_ok_and(|gap| gap.is_some())
 }
 
 /// Each bounded pass revalidates after the policy gate. A disabled policy or

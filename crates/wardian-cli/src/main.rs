@@ -31,7 +31,7 @@ use args::{
 };
 use clap::Parser;
 use errors::{handle_parse_error, parse_error, CliError, ExitCode};
-use output::{render_list, render_show, RenderOptions};
+use output::{render_list, render_show, render_show_status, RenderOptions};
 use std::{
     collections::HashMap,
     fs,
@@ -1676,7 +1676,7 @@ fn handle_show(target: Option<&str>, args: &AgentArgs) -> Result<String, CliErro
                 .ok_or_else(|| CliError::not_found(target))?,
             None => resolve_live_self_for_show(&agents)?.clone(),
         };
-        return render_show(&agent, &render_options(args));
+        return render_show_status(&agent, &render_options(args));
     }
 
     let conn = open_db()?;
@@ -1684,7 +1684,7 @@ fn handle_show(target: Option<&str>, args: &AgentArgs) -> Result<String, CliErro
         Some(target) => identity::resolve_by_name_or_uuid(&conn, target).map_err(identity_error)?,
         None => identity::resolve_self(&conn).map_err(identity_error)?,
     };
-    render_show(&agent, &render_options(args))
+    render_show_status(&agent, &render_options(args))
 }
 
 fn handle_list(

@@ -778,6 +778,21 @@ pub(super) fn recover_unlinked_observations(
                 )));
             }
             if record.seq != recovery_seq {
+                if record.seq > recovery_seq
+                    && sequence_has_no_recovery_evidence(
+                        conversation_id,
+                        records,
+                        events,
+                        &occupied_sequences,
+                        &recovered_event_ids,
+                        recovery_seq,
+                    )?
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        NarrativeSequenceGap(recovery_seq),
+                    ));
+                }
                 return Err(recoverable_recovery_error(format!(
                     "generated observation {} is out of recovery sequence order: expected {}, found {}",
                     event.id, recovery_seq, record.seq
@@ -896,6 +911,53 @@ pub(super) fn recover_unlinked_observations(
     Ok(recovered)
 }
 
+// A higher generated event can expose a real hole before the final prefix
+// check. Inspect all retained evidence: a later predecessor, an unassigned
+// native observation, or ambiguous payload must keep its existing failure
+// classification rather than being treated as a permanently empty slot.
+fn sequence_has_no_recovery_evidence(
+    conversation_id: &str,
+    records: &[ConversationNarrativeRecord],
+    events: &[AgentChatEvent],
+    occupied: &HashSet<u64>,
+    recovered_ids: &HashSet<String>,
+    sequence: u64,
+) -> io::Result<bool> {
+    let mut generated_sequences = HashSet::new();
+    for event in events {
+        if event_identity_ids(event)
+            .iter()
+            .any(|id| recovered_ids.contains(*id))
+            || matching_record_index(records, event, events)?.is_some()
+        {
+            continue;
+        }
+        if event.metadata["generated"] != true {
+            if narrative_from_chat_event(event, sequence).is_some() {
+                return Ok(false);
+            }
+            continue;
+        }
+        let Some(payload) = event.metadata.get("archive_record") else {
+            return Ok(false);
+        };
+        let Ok(record) = serde_json::from_value::<ConversationNarrativeRecord>(payload.clone())
+        else {
+            return Ok(false);
+        };
+        if record.schema != wardian_core::conversations::CONVERSATION_SCHEMA
+            || record.seq == 0
+            || event.id != format!("generated:{conversation_id}:{}", record.seq)
+            || record.seq == sequence
+            || occupied.contains(&record.seq)
+            || !generated_sequences.insert(record.seq)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn first_missing_sequence(occupied: &HashSet<u64>) -> io::Result<u64> {
     let mut candidate = 1;
     while occupied.contains(&candidate) {
@@ -904,6 +966,28 @@ fn first_missing_sequence(occupied: &HashSet<u64>) -> io::Result<u64> {
         })?;
     }
     Ok(candidate)
+}
+
+#[derive(Debug)]
+pub(super) struct NarrativeSequenceGap(pub u64);
+
+impl std::fmt::Display for NarrativeSequenceGap {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "narrative sequence gap before {} prevents recovery",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for NarrativeSequenceGap {}
+
+pub(super) fn narrative_sequence_gap(error: &io::Error) -> Option<u64> {
+    error
+        .get_ref()?
+        .downcast_ref::<NarrativeSequenceGap>()
+        .map(|gap| gap.0)
 }
 
 fn validate_sequence_prefix(sequences: impl IntoIterator<Item = u64>) -> io::Result<()> {
@@ -920,10 +1004,10 @@ fn validate_sequence_prefix(sequences: impl IntoIterator<Item = u64>) -> io::Res
     }
     for expected in 1..=maximum {
         if !occupied.contains(&expected) {
-            return Err(recoverable_recovery_error(format!(
-                "narrative sequence gap before {} prevents recovery",
-                expected
-            )));
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                NarrativeSequenceGap(expected),
+            ));
         }
     }
     Ok(())
