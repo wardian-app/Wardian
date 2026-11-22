@@ -506,6 +506,8 @@ pub struct RemoteAgentActionRequest {
     #[serde(default)]
     pub attachment_ids: Vec<String>,
     pub submission_id: Option<String>,
+    #[serde(default)]
+    pub chat_composer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -213,7 +213,7 @@ describe("AgentSessionSurface", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Message agent" }), { target: { value: "Explicit Off prompt" } });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(vi.mocked(invoke)).toHaveBeenCalledWith("submit_prompt_to_agent", {
-      sessionId: "agent-1", prompt: "Explicit Off prompt",
+      sessionId: "agent-1", prompt: "Explicit Off prompt", chatComposer: true,
     }));
     expect(terminalSpy).not.toHaveBeenCalled();
   });

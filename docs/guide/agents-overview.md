@@ -120,6 +120,8 @@ the original input alongside the tool's output.
 Chat can stay open before the first turn. Readable messages appear automatically
 as history becomes available, including when a large source record is skipped.
 The history status describes capture progress while available messages remain readable.
+The composer shows when a prompt is sending. The transcript shows the prompt
+when the provider's conversation record is available.
 As earlier history arrives, Desktop Chat keeps your reading position. When you
 are at the bottom, it follows new messages at the end of the conversation.
 

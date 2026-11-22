@@ -9,8 +9,13 @@ pub(crate) async fn deliver_prompt_to_agent_with_chat_receipt(
     target: &str,
     prompt: &str,
     input_mode: MessageInputMode,
+    chat_composer: bool,
 ) -> Result<wardian_core::models::chat::ChatPromptDeliveryDetail, ControlError> {
-    let before = crate::commands::chat::chat_read_snapshot_for_state(state, target).ok();
+    // Chat's transcript waits for an owned provider row. A generated archive
+    // receipt only proves Wardian stored the submitted text.
+    let before = (!chat_composer)
+        .then(|| crate::commands::chat::chat_read_snapshot_for_state(state, target).ok())
+        .flatten();
     let before_fence = before.as_ref().and_then(|before| {
         crate::state::conversation_archive::chat_read::input_fence(
             &crate::commands::chat::conversation_archive_context_from_snapshot(&before.0),
@@ -37,7 +42,8 @@ pub(crate) async fn deliver_prompt_to_agent_with_chat_receipt(
         ControlError::request_failed("prompt delivery produced no result".to_string())
     })?;
     let mut chat_receipt = None;
-    if detail.message_id.is_none()
+    if before_fence.is_some()
+        && detail.message_id.is_none()
         && detail.error.is_none()
         && matches!(
             detail.delivery_state.as_str(),

@@ -129,7 +129,7 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
     h.hook.unmount();
   });
 
-  it.each([false, true])("preserves public functional updates and submissions made during a held recent read (reset=%s)", async (reset) => {
+  it.each([false, true])("preserves public functional updates made during a held recent read (reset=%s)", async (reset) => {
     const h = await setup();
     const recent = deferred();
     h.recent(() => recent.promise);
@@ -138,25 +138,19 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
     const beforeScope = h.hook.result.current.submissionScope();
     const publicRow = generatedRow("public-during-recent");
     const publicSecond = generatedRow("public-second-during-recent");
-    const submitted = row("submitted-during-recent", { optimistic: true, chat_receipt: {
-      chat_event_id: generatedId("submitted-during-recent"), chat_agent_id: "agent",
-      chat_conversation_id: "conversation", chat_source_epoch: "source",
-    } });
     act(() => {
       h.hook.result.current.setEvents(current => [
         ...current.map(event => event.id === h.ready.id ? { ...event, text: "synthetic prefix extended while pending" } : event),
         publicRow,
       ]);
-      h.hook.result.current.addSubmitted(submitted);
       h.hook.result.current.setEvents(current => {
-        expect(current.some(event => event.id === submitted.id)).toBe(true);
+        expect(current.some(event => event.id === publicRow.id)).toBe(true);
         return [...current, publicSecond];
       });
     });
     const changedIds = h.hook.result.current.events.map(event => event.id);
     expect(changedIds).toContain(publicRow.id);
     expect(changedIds).toContain(publicSecond.id);
-    expect(changedIds).toContain(submitted.id);
     await tick(5000); expect(h.calls).toHaveLength(3);
     await act(async () => {
       recent.resolve(page({ reset, revision: "r2", next_before: "unrelated-newest-cursor",
@@ -167,7 +161,6 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
       text: "synthetic prefix extended while pending",
       metadata: { chat_body_binding: "body", chat_detail_ref: "synthetic-detail:0" },
     });
-    expect(h.hook.result.current.events.find(event => event.id === submitted.id)?.metadata.optimistic).toBe(true);
     expect(h.hook.result.current.page?.next_before).toBe("cursor");
     expect(h.hook.result.current.page?.revision).toBe("r2");
     expect(h.hook.result.current.submissionScope()).toEqual(beforeScope);
@@ -179,7 +172,7 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
       h.older[1].resolve(page({ events: [generatedRow("older")], revision: "r2", next_before: "next" }));
       await h.demand;
     });
-    for (const id of [publicRow.id, publicSecond.id, submitted.id]) {
+    for (const id of [publicRow.id, publicSecond.id]) {
       expect(h.hook.result.current.events.some(event => event.id === id)).toBe(true);
     }
     expect(h.hook.result.current.events.find(event => event.id === h.ready.id)?.text).toBe("synthetic prefix extended while pending");
@@ -230,27 +223,21 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
     const beforeScope = hook.result.current.submissionScope();
     const publicRow = generatedRow("canonical-public-one");
     const publicSecond = generatedRow("canonical-public-two");
-    const submitted = row("canonical-local-submission", { optimistic: true, chat_receipt: {
-      chat_event_id: generatedId("canonical-local-submission"), chat_agent_id: "agent",
-      chat_conversation_id: "conversation", chat_source_epoch: null,
-    } });
     act(() => {
       hook.result.current.setEvents(current => [
         ...current.map(event => event.id === target.id ? { ...event, text: "a longer body prefix kept while the canonical poll is held" } : event),
         publicRow,
       ]);
-      hook.result.current.addSubmitted(submitted);
       hook.result.current.setEvents(current => {
-        expect(current.some(event => event.id === submitted.id)).toBe(true);
+        expect(current.some(event => event.id === publicRow.id)).toBe(true);
         return [...current, publicSecond];
       });
     });
     const pinnedIds = hook.result.current.events.map(event => event.id);
-    expect(pinnedIds).toHaveLength(83);
+    expect(pinnedIds).toHaveLength(82);
     expect(pinnedIds.slice(0, 80)).toEqual(initialIds);
     expect(pinnedIds).toContain(publicRow.id);
     expect(pinnedIds).toContain(publicSecond.id);
-    expect(pinnedIds).toContain(submitted.id);
     expect(hook.result.current.loadOlder()).toBe(demand);
 
     await tick(5000);
@@ -263,10 +250,7 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
       }));
     });
     const recentIds = hook.result.current.events.map(event => event.id);
-    expect(recentIds).toHaveLength(83);
-    expect(new Set(recentIds)).toEqual(new Set(pinnedIds));
-    expect(recentIds.filter(id => id !== submitted.id)).toEqual(pinnedIds.filter(id => id !== submitted.id));
-    expect(hook.result.current.events.find(event => event.id === submitted.id)?.metadata.optimistic).toBe(true);
+    expect(recentIds).toEqual(pinnedIds);
     expect(hook.result.current.events.find(event => event.id === target.id)).toMatchObject({
       text: "a longer body prefix kept while the canonical poll is held",
       metadata: { generated: true, chat_body_binding: "canonical-body", chat_detail_ref: "canonical-detail:0", chat_body_pending: false },

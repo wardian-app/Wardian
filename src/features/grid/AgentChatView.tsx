@@ -18,7 +18,7 @@ import {
 import { ChatTranscriptRow } from "../chat/ChatTranscriptRows";
 import { useChatPages } from "../chat/useChatPages";
 import { loadChatPage } from "../chat/chatPageLoader";
-import { chatReadProgress, submittedChatEvent } from "../chat/chatReadState";
+import { chatReadProgress } from "../chat/chatReadState";
 import { chatEventDisplayKey } from "../chat/chatEventIdentity";
 import { captureChatScrollAnchor, restoreChatScrollAnchor, type ChatScrollAnchor } from "../chat/chatScrollAnchor";
 import { useChatReadingPresentation } from "../chat/useChatReadingPresentation";
@@ -299,11 +299,10 @@ export function AgentChatView({
     try {
       await stageChatImageAttachments(sessionId, providerName, selectedAttachments);
       if (!chat.isCurrentScope(submissionScope)) return;
-      const acknowledgement = await submitInputToAgent(sessionId, submittedPrompt);
+      await submitInputToAgent(sessionId, submittedPrompt, undefined, true);
       if (!chat.isCurrentScope(submissionScope)) return;
       if (clearDraft) setActiveDraft("");
       if (selectedAttachments.length > 0) setAttachments([]);
-      chat.addSubmitted(submittedChatEvent(sessionId, providerName, submittedPrompt, acknowledgement));
       setAwaitingResponse({
         id: `awaiting-response-${sessionId}-${Date.now()}`,
         response_ids: new Set(responseEvents(events).map((event) => event.id)),

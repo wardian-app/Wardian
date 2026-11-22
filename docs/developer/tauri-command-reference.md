@@ -60,6 +60,11 @@ with raw `send_input_to_agent` calls for prompt injection. Fixed sleeps before
 injection are not a correctness mechanism; delivery should wait for readiness
 evidence or queue the interaction.
 
+Desktop Chat passes `chatComposer: true` to keep submission feedback in the
+composer and let the transcript wait for the provider projection. The Remote
+Chat action passes `chat_composer: true` for the same behavior. These optional
+flags skip the generated archive receipt and use the ordinary delivery route.
+
 `read_agent_pty` drains buffered terminal output after `agent-pty-output-ready`. It is display data and compatibility evidence only. Structured ask/reply completion, Inbox evidence, and provider status transitions must not depend on replaying this text.
 
 ## Chat (`commands/chat.rs`)

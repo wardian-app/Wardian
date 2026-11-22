@@ -3,7 +3,7 @@ import type { AgentChatEvent, AgentChatPage } from "../../types";
 import { chatPresentationV1 } from "./committedChatPresentation";
 import { previewBackingIdsForWindow } from "./chatPreviewBacking";
 import { holdsBoundChatWindow, qualifiedChatPreviewBridge } from "./chatPreviewIdentity";
-import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, chatRecentRefreshDelay, type ChatWindowDirection } from "./chatReadState";
+import { applyChatPage, canAdmitOlderChatPage, chatRecentRefreshDelay, type ChatWindowDirection } from "./chatReadState";
 import {
   ChatRevalidationError,
   chatNeedsRevalidation,
@@ -555,15 +555,11 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
   const loadDetail = useCallback(async (reference: string) => (await loadDetailPage(reference)).detail!, [loadDetailPage]);
   const loadStepDetail = useCallback(async (reference: string) => chatPresentationV1(await loadDetailPage(reference, true))!.detail!, [loadDetailPage]);
 
-  const addSubmitted = useCallback((event: AgentChatEvent) => {
-    setEvents((current) => addChatSubmission(current, latest.current, event));
-  }, [setEvents]);
-
   const submissionScope = useCallback(() => ({ activation: scope.current, conversation: latest.current?.conversation_id, source: latest.current?.source_epoch }), []);
   const isCurrentScope = useCallback((submitted: ReturnType<typeof submissionScope>) => submitted.activation === scope.current
     && (!submitted.conversation || !latest.current?.conversation_id || submitted.conversation === latest.current.conversation_id)
     && (!submitted.source || !latest.current?.source_epoch || submitted.source === latest.current.source_epoch), []);
   const errorDirection = error === null ? null : failedReadDirection.current;
-  return { events, setEvents, page, error, errorDirection, loading, waiting, loadingOlder, browsingOlder, loadOlder, loadDetail, loadStepDetail, retry, addSubmitted,
+  return { events, setEvents, page, error, errorDirection, loading, waiting, loadingOlder, browsingOlder, loadOlder, loadDetail, loadStepDetail, retry,
     submissionScope, isCurrentScope, reset, jumpToLatest };
 }

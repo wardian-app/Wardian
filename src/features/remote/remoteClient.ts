@@ -256,15 +256,15 @@ export const remoteClient = {
     return result.snapshot;
   },
   async sendPrompt(target: string, prompt: string, inputMode: RemoteAgentInputMode = "message", inboxItemId?: string,
-    attachments?: { attachment_ids: string[]; submission_id: string }) {
+    options?: Pick<RemoteAgentActionRequest, "attachment_ids" | "submission_id" | "chat_composer">) {
     const request: RemoteAgentActionRequest =
       inputMode === "command"
         ? { action: "send_prompt", target, prompt, input_mode: "command", ...(inboxItemId ? { inbox_item_id: inboxItemId } : {}) }
         : { action: "send_prompt", target, prompt, ...(inboxItemId ? { inbox_item_id: inboxItemId } : {}) };
     return remoteJson<{ ok: true } & ChatReceiptFields & Partial<Pick<RemoteAttachmentSubmission, "submission_id" | "state">>>("/remote/api/agents/action", {
       method: "POST",
-      body: JSON.stringify({ ...request, ...attachments }),
-      ...(attachments ? { signal: AbortSignal.timeout(60_000) } : {}),
+      body: JSON.stringify({ ...request, ...options }),
+      ...(options?.submission_id ? { signal: AbortSignal.timeout(60_000) } : {}),
     });
   },
   /** Upload raw bytes; transfer completion remains validating until HTTP acceptance. */

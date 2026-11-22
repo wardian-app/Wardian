@@ -897,7 +897,7 @@ describe("AgentChatView", () => {
         ]);
       }
       if (command === "submit_prompt_to_agent") {
-        expect(args).toEqual({ sessionId: "agent-1", prompt: "2" });
+        expect(args).toEqual({ chatComposer: true, sessionId: "agent-1", prompt: "2" });
         return Promise.resolve(undefined);
       }
       return Promise.reject(new Error(`unexpected command: ${command}`));
@@ -911,6 +911,7 @@ describe("AgentChatView", () => {
     fireEvent.click(allowButton);
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      chatComposer: true,
       sessionId: "agent-1",
       prompt: "2",
     }));
@@ -2404,26 +2405,32 @@ describe("AgentChatView", () => {
     }
   });
 
-  it("keeps a receipted submitted row visible while the same first read enters passive waiting", async () => {
+  it("keeps an unbridged send in the composer during a pending first read", async () => {
     vi.useFakeTimers();
     const first = deferred<AgentChatEvent[]>();
-    invokeMock.mockImplementation((command) => command === "load_agent_chat_page" ? first.promise : Promise.resolve({
-      chat_event_id: "generated:conversation:pending", chat_agent_id: "agent-1",
-      chat_conversation_id: "conversation", chat_source_epoch: null,
-    }));
+    const delivery = deferred<unknown>();
+    invokeMock.mockImplementation((command) => command === "load_agent_chat_page" ? first.promise : delivery.promise);
     try {
       render(<AgentChatView sessionId="agent-1" refreshIntervalMs={60_000} />);
-      fireEvent.change(screen.getByLabelText("Message agent"), { target: { value: "Retained pending message" } });
+      const input = screen.getByLabelText("Message agent");
+      fireEvent.change(input, { target: { value: "Retained pending message" } });
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
       await act(async () => {});
-      expect(screen.getByLabelText("user message")).toHaveTextContent("Retained pending message");
+      expect(input).toHaveValue("Retained pending message");
+      expect(screen.getByRole("button", { name: "Sending message" })).toBeInTheDocument();
+      expect(screen.queryByLabelText("user message")).not.toBeInTheDocument();
       await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
       expect(screen.getByText("Waiting for transcript read")).toBeInTheDocument();
-      expect(screen.getByLabelText("user message")).toHaveTextContent("Retained pending message");
+      expect(input).toHaveValue("Retained pending message");
       expect(invokeMock.mock.calls.filter(([command]) => command === "load_agent_chat_page")).toHaveLength(1);
+      await act(async () => { delivery.resolve({
+        chat_event_id: "generated:conversation:pending", chat_agent_id: "agent-1",
+        chat_conversation_id: "conversation", chat_source_epoch: null,
+      }); });
       await act(async () => { first.resolve([event({ text: "Settled first read" })]); });
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
-      expect(screen.getByLabelText("user message")).toHaveTextContent("Retained pending message");
+      expect(input).toHaveValue("");
+      expect(screen.queryByLabelText("user message")).not.toBeInTheDocument();
       expect(screen.getByText("Settled first read")).toBeInTheDocument();
     } finally {
       await settleOwnedDeferreds();
@@ -2431,11 +2438,11 @@ describe("AgentChatView", () => {
     }
   });
 
-  it("submits chat input through the provider command and renders its receipted user message", async () => {
+  it("submits through the provider command without treating a generated receipt as transcript content", async () => {
     invokeMock.mockImplementation((command, args) => {
       if (command === "load_agent_chat_page") return Promise.resolve([]);
       if (command === "submit_prompt_to_agent") {
-        expect(args).toEqual({ sessionId: "agent-1", prompt: "Run the focused tests." });
+        expect(args).toEqual({ chatComposer: true, sessionId: "agent-1", prompt: "Run the focused tests." });
         return Promise.resolve({ chat_event_id: "generated:conversation:focused", chat_agent_id: "agent-1",
           chat_conversation_id: "conversation", chat_source_epoch: null });
       }
@@ -2450,18 +2457,19 @@ describe("AgentChatView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      chatComposer: true,
       sessionId: "agent-1",
       prompt: "Run the focused tests.",
     }));
-    await waitFor(() => expect(screen.getByLabelText("user message")).toHaveTextContent("Run the focused tests."));
-    expect(input).toHaveValue("");
+    await waitFor(() => expect(input).toHaveValue(""));
+    expect(screen.queryByLabelText("user message")).not.toBeInTheDocument();
   });
 
   it("keeps the composer available for an offline agent", async () => {
     invokeMock.mockImplementation((command, args) => {
       if (command === "load_agent_chat_page") return Promise.resolve([]);
       if (command === "submit_prompt_to_agent") {
-        expect(args).toEqual({ sessionId: "agent-1", prompt: "Run offline." });
+        expect(args).toEqual({ chatComposer: true, sessionId: "agent-1", prompt: "Run offline." });
         return Promise.resolve({
           runtime_state: "headless_process",
           delivery_state: "provider_applied",
@@ -2486,6 +2494,7 @@ describe("AgentChatView", () => {
 
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+        chatComposer: true,
         sessionId: "agent-1",
         prompt: "Run offline.",
       }),
@@ -2521,6 +2530,7 @@ describe("AgentChatView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      chatComposer: true,
       sessionId: "agent-1",
       prompt: "/compact",
       inputMode: "command",
@@ -2531,7 +2541,7 @@ describe("AgentChatView", () => {
     invokeMock.mockImplementation((command, args) => {
       if (command === "load_agent_chat_page") return Promise.resolve([]);
       if (command === "submit_prompt_to_agent") {
-        expect(args).toEqual({ sessionId: "agent-1", prompt: "just text /with/slashes later" });
+        expect(args).toEqual({ chatComposer: true, sessionId: "agent-1", prompt: "just text /with/slashes later" });
         return Promise.resolve(undefined);
       }
       return Promise.reject(new Error(`unexpected command: ${command}`));
@@ -2549,6 +2559,7 @@ describe("AgentChatView", () => {
     fireEvent.change(input, { target: { value: "just text /with/slashes later" } });
     fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      chatComposer: true,
       sessionId: "agent-1",
       prompt: "just text /with/slashes later",
     }));
@@ -2908,6 +2919,7 @@ describe("AgentChatView", () => {
       text: "\u0016",
     });
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      chatComposer: true,
       sessionId: "agent-1",
       prompt: `Review these.\n\nAttached files:\n- ${selectedImage}\n- ${selectedText}`,
     }));
@@ -3045,6 +3057,7 @@ describe("AgentChatView", () => {
 
     await waitFor(() => expect(writeImageMock).toHaveBeenCalledWith(clipboardImage));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      chatComposer: true,
       sessionId: "agent-1",
       prompt: "Review this screenshot.\n\nAttached files:\n- pasted-image-1.png",
     }));
@@ -3086,6 +3099,7 @@ describe("AgentChatView", () => {
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+        chatComposer: true,
         sessionId: "agent-1",
         prompt: "Stay at the newest message.",
       }));
@@ -3175,6 +3189,7 @@ describe("AgentChatView", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      chatComposer: true,
       sessionId: "agent-1",
       prompt: "line one\nline two",
     }));
@@ -3194,13 +3209,14 @@ describe("AgentChatView", () => {
     fireEvent.keyDown(input, { code: "NumpadEnter", key: "NumpadEnter" });
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      chatComposer: true,
       sessionId: "agent-1",
       prompt: "Inject this",
     }));
     await waitFor(() => expect(input).toHaveValue(""));
   });
 
-  it("does not clear repeated receipted prompts from older matching transcript text", async () => {
+  it("keeps an older identical prompt and waits for producer rows for new submissions", async () => {
     let sends = 0;
     invokeMock.mockImplementation((command) => {
       if (command === "load_agent_chat_page") {
@@ -3233,10 +3249,12 @@ describe("AgentChatView", () => {
     fireEvent.change(input, { target: { value: "run tests" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
-    await waitFor(() => expect(screen.getAllByText("run tests")).toHaveLength(3));
+    await waitFor(() => expect(input).toHaveValue(""));
+    expect(sends).toBe(2);
+    expect(screen.getAllByText("run tests")).toHaveLength(1);
   });
 
-  it("confirms the exact receipt even when the committed prompt sequence is below the send snapshot", async () => {
+  it("renders one producer prompt even when its sequence is below the send snapshot", async () => {
     let loadCount = 0;
     invokeMock.mockImplementation((command) => {
       if (command === "load_agent_chat_page") {
@@ -3254,12 +3272,11 @@ describe("AgentChatView", () => {
         return Promise.resolve([
           ...baseEvents,
           event({
-            id: "generated:conversation:1",
+            id: "captured-prompt",
             kind: "message",
             role: "user",
             text: "Summarize my status.",
             sequence: 2,
-            metadata: { generated: true },
           }),
         ]);
       }
@@ -3358,6 +3375,7 @@ describe("AgentChatView", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Queue message" }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      chatComposer: true,
       sessionId: "agent-1",
       prompt: "Follow up while you work",
     }));

@@ -1687,6 +1687,7 @@ pub async fn run_remote_agent_action(
                 &prompt,
                 request.input_mode.unwrap_or_default(),
                 request.inbox_item_id.as_deref(),
+                request.chat_composer,
             )
             .await
         }
@@ -1725,6 +1726,7 @@ async fn send_remote_prompt_with_idempotency(
     prompt: &str,
     input_mode: MessageInputMode,
     inbox_item_id: Option<&str>,
+    chat_composer: bool,
 ) -> Result<Option<wardian_core::models::chat::ChatInputReceipt>, String> {
     if let Some(item_id) = inbox_item_id {
         let mut persisted = crate::utils::queue::load_items();
@@ -1819,6 +1821,7 @@ async fn send_remote_prompt_with_idempotency(
         target,
         prompt,
         input_mode,
+        chat_composer,
     )
     .await
     .map(|detail| detail.chat_receipt)
@@ -3132,6 +3135,7 @@ mod tests {
             inbox_item_id: None,
             attachment_ids: Vec::new(),
             submission_id: None,
+            chat_composer: false,
         };
 
         assert_eq!(
@@ -3150,6 +3154,7 @@ mod tests {
             inbox_item_id: None,
             attachment_ids: Vec::new(),
             submission_id: None,
+            chat_composer: false,
         };
 
         validate_remote_agent_action(&request).expect("command mode should be accepted");
@@ -3165,6 +3170,7 @@ mod tests {
             inbox_item_id: None,
             attachment_ids: Vec::new(),
             submission_id: None,
+            chat_composer: false,
         };
 
         assert_eq!(
@@ -3183,6 +3189,7 @@ mod tests {
             inbox_item_id: None,
             attachment_ids: Vec::new(),
             submission_id: None,
+            chat_composer: false,
         };
 
         assert_eq!(
