@@ -543,6 +543,7 @@ async fn terminal_archive_gap_blocks_forced_and_changed_source_capture_and_reach
         conversation_id: "damaged-conversation".into(),
         provider_source_key: Some("codex:session:off-provider-conversation".into()),
         sequence: 2,
+        vacancy_rule: None,
     };
     let status_path = home
         .path()

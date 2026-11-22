@@ -280,6 +280,7 @@ fn select(
         {
             continue;
         }
+        wardian_core::archive_vacancy::validate_vacancies(&directory, &entry.conversation_id)?;
         let narrative = Stamp::read(&directory.join("conversation.jsonl"))?;
         let events = Stamp::read(&directory.join("events.jsonl"))?;
         selection.index.validate(&index_path)?;
@@ -482,6 +483,9 @@ pub(super) fn archive_display_ready(context: &ConversationArchiveContext) -> io:
     {
         return Ok(false);
     }
+    let directory =
+        super::super::storage::conversation_dir(&context.agent_id, &published.conversation_id)?;
+    wardian_core::archive_vacancy::validate_vacancies(&directory, &published.conversation_id)?;
     Ok(published
         .bootstrap
         .as_ref()
@@ -555,6 +559,7 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
     let directory =
         super::super::storage::conversation_dir(&context.agent_id, &published.conversation_id)?;
     let index_path = super::super::storage::index_path(&context.agent_id)?;
+    wardian_core::archive_vacancy::validate_vacancies(&directory, &published.conversation_id)?;
     let narrative_path = directory.join("conversation.jsonl");
     let event_path = directory.join("events.jsonl");
     if progress

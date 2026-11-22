@@ -1,6 +1,7 @@
 mod agent_lifecycle;
 mod agent_spawn;
 mod archive_adoption;
+mod archive_vacancy;
 mod hold_release;
 mod operator;
 mod pi_startup;
@@ -422,15 +423,14 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                 .map_err(ControlError::bad_request)?;
             ok_json(&OkResponse::new())
         }
-
         request @ (ControlRequest::AgentRename { .. }
         | ControlRequest::AgentReleaseHold { .. }
         | ControlRequest::AgentAdoptArchive { .. }
+        | ControlRequest::AgentArchiveVacancy { .. }
         | ControlRequest::AgentRestart { .. }
         | ControlRequest::AgentResume { .. }
         | ControlRequest::AgentNewSession { .. }
         | ControlRequest::AgentPause { .. }) => operator::dispatch(request, app).await,
-
         ControlRequest::AgentModels {
             provider,
             force_refresh,

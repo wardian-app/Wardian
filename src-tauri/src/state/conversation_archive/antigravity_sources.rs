@@ -2,64 +2,15 @@
 
 use std::{io, path::Path};
 
-use sha2::{Digest, Sha256};
-use wardian_core::conversations::{ConversationSourceRecord, CONVERSATION_SCHEMA};
-use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind};
+use wardian_core::conversations::ConversationSourceRecord;
+use wardian_core::models::chat::AgentChatEvent;
 
-use super::records::{fallback_source_record_from_chat_event, metadata_string};
+use super::records::fallback_source_record_from_chat_event;
 
 /// Creates stable provenance for each message or wire-ordered tool slot. Payloads
 /// can evolve, so neither content hashes nor tool arguments identify the source.
 pub(super) fn source_record(event: &AgentChatEvent) -> Option<ConversationSourceRecord> {
-    if !event.provider.eq_ignore_ascii_case("antigravity")
-        || event.source.as_deref() != Some("conversation_database")
-        || event.metadata["provider_log"] != true
-        || metadata_string(&event.metadata, "sender_agent_id").is_some()
-        || (event
-            .id
-            .starts_with(&format!("{}:watch_native:", event.session_id))
-            && event.metadata.get("transcript_cursor").is_some())
-    {
-        return None;
-    }
-    let path = metadata_string(&event.metadata, "log_path")?;
-    let database = Path::new(&path);
-    if !database.extension()?.to_str()?.eq_ignore_ascii_case("db") {
-        return None;
-    }
-    let step = event.metadata["step_index"].as_u64()?.to_string();
-    let (kind, ordinal) = match event.kind {
-        AgentChatEventKind::Message => ("message", String::new()),
-        AgentChatEventKind::ToolCall => (
-            "tool_call",
-            event.metadata["tool_ordinal"].as_u64()?.to_string(),
-        ),
-        AgentChatEventKind::ToolResult => (
-            "tool_result",
-            event.metadata["tool_ordinal"].as_u64()?.to_string(),
-        ),
-        _ => return None,
-    };
-    let mut identity = Sha256::new();
-    for part in ["antigravity_database_v1", &path, &step, kind, &ordinal] {
-        identity.update(part.as_bytes());
-        identity.update(b"\0");
-    }
-    Some(ConversationSourceRecord {
-        schema: CONVERSATION_SCHEMA,
-        source_id: format!("src_antigravity_observation_{:x}", identity.finalize()),
-        provider: event.provider.clone(),
-        provider_session_id: metadata_string(&event.metadata, "provider_session_id")
-            .or_else(|| database.file_stem()?.to_str().map(str::to_string)),
-        source_kind: "conversation_database".to_string(),
-        source_path: Some(path),
-        cursor: Some(step),
-        offset: None,
-        row_id: None,
-        provider_event_type: Some(kind.to_string()),
-        hash: None,
-        artifact_ref: None,
-    })
+    wardian_core::conversation_event_sources::antigravity_source_record_from_chat_event(event)
 }
 
 /// Reuses a published ordinal-based row only for its exact archived observation

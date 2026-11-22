@@ -1380,6 +1380,29 @@ pub struct AdoptArchiveArgs {
     pub approval_text: String,
 }
 
+/// Inspect a single archive vacancy, or authorize it through the live desktop.
+#[derive(Debug, Args)]
+pub struct ArchiveVacancyArgs {
+    /// Agent name or exact UUID. An exact UUID dry-run needs only its conversation directory.
+    pub target: String,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub conversation_id: String,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub sequence: u64,
+    /// Inspect evidence without connecting to the desktop or modifying local storage.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Stable authorization UUID; reuse it when retrying the same approval.
+    #[arg(long, required_unless_present = "dry_run", value_name = "UUID")]
+    pub authorization_id: Option<String>,
+    /// Reference to the recorded operator approval.
+    #[arg(long, required_unless_present = "dry_run")]
+    pub approval_reference: Option<String>,
+    /// Exact recorded approval text authorizing this vacancy.
+    #[arg(long, required_unless_present = "dry_run")]
+    pub approval_text: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
     /// Show one agent, or the managed session when no target is supplied.
@@ -1431,6 +1454,8 @@ pub enum AgentCommand {
     ReleaseHold(ReleaseHoldArgs),
     /// Adopt one archive range using explicit recorded user approval.
     AdoptArchive(AdoptArchiveArgs),
+    /// Inspect an archive sequence vacancy or authorize an evidence-gated repair.
+    ArchiveVacancy(ArchiveVacancyArgs),
     /// Pause an agent's provider process.
     Pause { target: String },
     /// Resume a paused agent.
@@ -2733,6 +2758,51 @@ mod tests {
             "--approval-text",
             "I approve adopting exactly this range.",
         ]
+    }
+
+    #[test]
+    fn archive_vacancy_dry_run_needs_no_approval_but_writes_require_every_approval_flag() {
+        let base = [
+            "wardian",
+            "agent",
+            "archive-vacancy",
+            "coder-a1",
+            "--conversation-id",
+            "conversation-1",
+            "--sequence",
+            "17",
+        ];
+        let dry_run = Cli::try_parse_from(base.into_iter().chain(["--dry-run"])).unwrap();
+        let Command::Agent(args) = dry_run.command else {
+            panic!("expected agent command")
+        };
+        assert!(
+            matches!(args.command, Some(AgentCommand::ArchiveVacancy(args))
+            if args.dry_run && args.sequence == 17 && args.authorization_id.is_none())
+        );
+        assert!(Cli::try_parse_from(base).is_err());
+        let approval = [
+            ("--authorization-id", "a5f6ad8a-0ac5-4ec2-99e0-b856663594a8"),
+            ("--approval-reference", "recorded-approval-1"),
+            ("--approval-text", "I approve exactly this vacancy."),
+        ];
+        let write = base
+            .into_iter()
+            .chain(approval.into_iter().flat_map(|(k, v)| [k, v]));
+        assert!(Cli::try_parse_from(write).is_ok());
+        for omitted in 0..approval.len() {
+            let incomplete = base.into_iter().chain(
+                approval
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != omitted)
+                    .flat_map(|(_, (k, v))| [k, v]),
+            );
+            assert!(Cli::try_parse_from(incomplete).is_err());
+        }
+        let mut zero_sequence = base;
+        zero_sequence[7] = "0";
+        assert!(Cli::try_parse_from(zero_sequence.into_iter().chain(["--dry-run"])).is_err());
     }
 
     #[test]

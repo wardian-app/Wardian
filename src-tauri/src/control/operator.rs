@@ -1,5 +1,5 @@
 //! Route explicit agent controls to their existing lifecycle or grant owners.
-use super::{agent_lifecycle, archive_adoption, hold_release, ControlError};
+use super::{agent_lifecycle, archive_adoption, archive_vacancy, hold_release, ControlError};
 use tauri::AppHandle;
 use wardian_core::control::ControlRequest;
 
@@ -16,6 +16,9 @@ pub(super) async fn dispatch(
         }
         request @ ControlRequest::AgentAdoptArchive { .. } => {
             archive_adoption::dispatch(request, app).await
+        }
+        request @ ControlRequest::AgentArchiveVacancy { .. } => {
+            archive_vacancy::dispatch(request, app).await
         }
         ControlRequest::AgentRestart { target } | ControlRequest::AgentResume { target } => {
             agent_lifecycle::resume(app, &target).await

@@ -3,6 +3,7 @@ use crate::commands::provider_log_acquisition::{
     ProviderLogContinuityAnchor, ProviderLogDisabledSpan, ProviderLogNativeIdentity,
 };
 use wardian_core::control::ArchiveAdoptionNativeIdentity;
+mod vacancy;
 
 #[test]
 fn adoption_sequence_gap_retires_without_changing_archive_or_retrying_after_restart() {

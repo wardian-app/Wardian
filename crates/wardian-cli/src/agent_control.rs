@@ -2,6 +2,20 @@
 use crate::{control_error, errors::CliError, live};
 use wardian_core::control::{ArchiveAdoptionNativeIdentity, ArchiveAdoptionRequest};
 
+#[path = "archive_vacancy.rs"]
+mod archive_vacancy;
+pub(crate) use archive_vacancy::archive_vacancy;
+
+/// Archive repair must bypass startup migrations, including when live control is unavailable.
+pub(crate) fn dispatch_early(command: &crate::args::Command) -> Option<i32> {
+    if let crate::args::Command::Agent(args) = command {
+        if let Some(crate::args::AgentCommand::ArchiveVacancy(args)) = &args.command {
+            return Some(crate::finish(archive_vacancy(args)));
+        }
+    }
+    crate::early_commands::dispatch(command)
+}
+
 pub(crate) fn models(provider: &str, force_refresh: bool) -> Result<String, CliError> {
     let catalog = live::agent_models(provider, force_refresh).map_err(control_error)?;
     serde_json::to_string(&catalog)

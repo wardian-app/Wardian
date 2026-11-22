@@ -172,6 +172,26 @@ jobs:
       - name: Test Codex home platform security
         run: cargo test --lib utils::codex_home::platform::tests -- --test-threads=1
         working-directory: src-tauri
+      - name: Test archive vacancy filesystem boundaries
+        run: cargo test -p wardian-core --lib archive_vacancy -- --test-threads=1
+
+  backend-macos-intel-vacancy:
+    name: Backend (macOS Intel - Archive Vacancy)
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.100.0
+      - name: Report native Rust compiler
+        run: rustc -vV
+      - name: Report Rust compiler
+        run: rustc --version
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - name: Test archive vacancy filesystem boundaries
+        run: cargo test -p wardian-core --lib archive_vacancy -- --test-threads=1
 
   docs-quality:
     name: Documentation

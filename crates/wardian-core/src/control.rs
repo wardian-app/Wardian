@@ -64,6 +64,11 @@ pub enum ControlRequest {
         #[serde(default)]
         origin: Option<MessageOrigin>,
     },
+    /// Authorize one proven archive sequence vacancy using recorded operator approval.
+    AgentArchiveVacancy {
+        target: String,
+        request: ArchiveVacancyRequest,
+    },
     AgentPause {
         target: String,
     },
@@ -701,6 +706,59 @@ pub struct ArchiveAdoptionResponse {
     pub start_offset: u64,
     pub end_offset: u64,
     pub status: String,
+}
+
+/// Recorded operator approval to account for one absent archive sequence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveVacancyRequest {
+    pub conversation_id: String,
+    pub sequence: u64,
+    pub authorization_id: String,
+    pub approval_reference: String,
+    pub approval_text: String,
+}
+
+impl ArchiveVacancyRequest {
+    /// Validate the wire boundary before resolving an agent or invoking archive authority.
+    /// The authority must independently revalidate approval and current vacancy evidence.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.conversation_id.len() > 255
+            || self.conversation_id.trim() != self.conversation_id
+            || !crate::paths::is_safe_path_component(&self.conversation_id)
+        {
+            return Err(
+                "conversation_id must be a safe path component of at most 255 bytes".into(),
+            );
+        }
+        if self.sequence == 0 {
+            return Err("sequence must be greater than zero".into());
+        }
+        uuid::Uuid::parse_str(&self.authorization_id)
+            .map_err(|_| "authorization_id must be a UUID".to_string())?;
+        for (name, value, limit) in [
+            ("approval_reference", &self.approval_reference, 4096),
+            ("approval_text", &self.approval_text, 16384),
+        ] {
+            if value.trim().is_empty() || value.len() > limit {
+                return Err(format!(
+                    "{name} must contain 1 to {limit} bytes of recorded approval"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Result of the desktop's authoritative vacancy authorization, including retry outcomes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveVacancyResponse {
+    pub schema: u8,
+    pub agent_id: String,
+    pub conversation_id: String,
+    pub sequence: u64,
+    pub created: bool,
+    pub adoption_regrant_required: bool,
+    pub reason: String,
 }
 
 impl OkResponse {
@@ -1401,6 +1459,69 @@ mod tests {
                 "{field}"
             );
         }
+    }
+
+    #[test]
+    fn archive_vacancy_request_round_trips_exact_scope_and_approval() {
+        let value = serde_json::json!({
+            "command": "agent_archive_vacancy", "target": "coder-a1",
+            "request": {
+                "conversation_id": "conversation-1", "sequence": 17,
+                "authorization_id": "a5f6ad8a-0ac5-4ec2-99e0-b856663594a8",
+                "approval_reference": "recorded-user-approval-1",
+                "approval_text": "I approve exactly this vacancy.\nKeep this text verbatim."
+            }
+        });
+        let request: ControlRequest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), value);
+        for field in ["target", "request"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ControlRequest>(missing).is_err());
+        }
+        for field in value["request"].as_object().unwrap().keys() {
+            let mut missing = value.clone();
+            missing["request"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<ControlRequest>(missing).is_err(),
+                "{field}"
+            );
+        }
+        let ControlRequest::AgentArchiveVacancy { request, .. } = request else {
+            panic!("expected archive vacancy")
+        };
+        request.validate().unwrap();
+        for (field, invalid) in [
+            ("authorization_id", serde_json::json!("not-a-uuid")),
+            ("conversation_id", serde_json::json!("../conversation-1")),
+            ("conversation_id", serde_json::json!(" conversation-1 ")),
+            ("conversation_id", serde_json::json!("x".repeat(256))),
+            ("sequence", serde_json::json!(0)),
+            ("approval_reference", serde_json::json!(" \t")),
+            ("approval_text", serde_json::json!("\n")),
+            ("approval_reference", serde_json::json!("x".repeat(4097))),
+            ("approval_text", serde_json::json!("x".repeat(16385))),
+        ] {
+            let mut invalid_request = value["request"].clone();
+            invalid_request[field] = invalid;
+            let request: ArchiveVacancyRequest = serde_json::from_value(invalid_request).unwrap();
+            assert!(request.validate().is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn archive_vacancy_response_round_trips_and_requires_the_authoritative_verdict() {
+        let value = serde_json::json!({
+            "schema": CONTROL_SCHEMA, "agent_id": "agent-1",
+            "conversation_id": "conversation-1", "sequence": 17, "created": true,
+            "adoption_regrant_required": true, "reason": "sequence_vacancy_authorized"
+        });
+        let response: ArchiveVacancyResponse = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(response).unwrap(), value);
+        assert!(serde_json::from_value::<ArchiveVacancyResponse>(
+            serde_json::json!({"schema": 1, "ok": true})
+        )
+        .is_err());
     }
 
     #[test]

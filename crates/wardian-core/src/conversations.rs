@@ -22,11 +22,29 @@ pub struct ArchiveSequenceGap {
     pub conversation_id: String,
     pub provider_source_key: Option<String>,
     pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vacancy_rule: Option<String>,
 }
 
 impl ArchiveSequenceGap {
     /// Keep operator guidance identical in Chat and CLI diagnostics.
     pub fn reason(&self) -> String {
+        if let Some(rule) = &self.vacancy_rule {
+            if self.sequence == 0 {
+                return format!(
+                    "Archive capture stopped: vacancy ledger conflict in conversation {} \
+                     (rule: {}). No trustworthy sequence could be decoded. Preserve the archive \
+                     and run archive-vacancy --dry-run for operator review.",
+                    self.conversation_id, rule
+                );
+            }
+            return format!(
+                "Archive capture stopped: sequence vacancy conflict at {} in conversation {} \
+                 (rule: {}). The archive is preserved. Run archive-vacancy --dry-run for operator \
+                 review before an approved repair. Do not delete or renumber archive records.",
+                self.sequence, self.conversation_id, rule
+            );
+        }
         format!(
             "Archive capture stopped: narrative sequence gap before {} in conversation {}. \
              The archive is preserved. Request operator review and an approved repair, then \

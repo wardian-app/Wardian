@@ -54,7 +54,7 @@ fn run() -> i32 {
         Ok(cli) => cli,
         Err(error) => return handle_parse_error(error),
     };
-    if let Some(status) = early_commands::dispatch(&cli.command) {
+    if let Some(status) = agent_control::dispatch_early(&cli.command) {
         return status;
     }
     if let Err(error) = wardian_core::automation_migration::migrate_current_home() {
@@ -84,7 +84,6 @@ fn run() -> i32 {
         Command::Notify(args) => handle_notify(args),
         Command::Remote(_) => unreachable!("remote control runs without local migrations"),
     };
-
     finish(result)
 }
 
@@ -278,6 +277,7 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
         Some(AgentCommand::NewSession { target }) => agent_control::new_session(target),
         Some(AgentCommand::ReleaseHold(args)) => agent_control::release_hold(args),
         Some(AgentCommand::AdoptArchive(args)) => agent_control::adopt_archive(args),
+        Some(AgentCommand::ArchiveVacancy(args)) => agent_control::archive_vacancy(args),
         Some(AgentCommand::Pause { target }) => agent_control::pause(target),
         Some(AgentCommand::Resume { target }) => agent_control::resume(target),
         Some(command @ AgentCommand::Spawn { .. }) => handle_agent_spawn(command, &args),
