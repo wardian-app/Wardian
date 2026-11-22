@@ -30,6 +30,9 @@ test("Desktop pending Chat keeps its answer in view when earlier history arrives
   const scroll = page.getByTestId("agent-chat-scroll-region");
   const target = scroll.getByText("The synthetic report is ready.", { exact: true });
   await expect(target).toBeAttached({ timeout: 20_000 });
+  // The initial card layout can put the composer partly below the viewport.
+  // Wait for it to fit before setting the scroll position we will preserve.
+  await expect(page.getByTestId("chat-composer")).toBeInViewport({ ratio: 1 });
   await scroll.evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await expect(target).toBeInViewport({ ratio: 0.95 });
   expect(await scroll.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
