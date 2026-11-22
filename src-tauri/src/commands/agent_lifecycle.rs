@@ -288,6 +288,50 @@ pub(super) async fn acquire_agent_lifecycle_guard(
     }
 }
 
+/// Stop the closing conversation's native delivery owner before clear preflight.
+///
+/// The caller retains lifecycle exclusion. The callback binds the existing
+/// prior-session hold to Codex's captured runtime; archive and replacement
+/// spawning remain in the caller. Return the provider branch and closing config
+/// only after native disposal and canonical conversation-context retirement.
+pub(crate) async fn reset_agent_session_delivery<F>(
+    state: &AppState,
+    session_id: &str,
+    before_capture: F,
+) -> Result<(bool, wardian_core::models::AgentConfig), String>
+where
+    F: FnOnce(
+        &crate::state::ActiveAgent,
+    )
+        -> Result<Option<wardian_core::conversation_lease::ConversationLeaseOwner>, String>,
+{
+    let codex_stops_before_preflight = super::lifecycle_config_for_session(state, session_id)
+        .await?
+        .provider
+        == "codex";
+    if codex_stops_before_preflight {
+        stop_native_owner_with_before_capture(state, session_id, false, before_capture).await?;
+    } else {
+        stop_native_owner(state, session_id, false).await?;
+    }
+    // Join native writers before retiring their context. Normal spawn owns the
+    // next provider-input generation; a clear must not advance it early.
+    state
+        .interactions
+        .fence_agent_conversation_deliveries(session_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let original_config = {
+        let agents = state.agents.lock().await;
+        let agent = agents
+            .get(session_id)
+            .ok_or_else(|| format!("Agent {} not found", session_id))?;
+        let config = agent.config.lock().unwrap().clone();
+        config
+    };
+    Ok((codex_stops_before_preflight, original_config))
+}
+
 /// Caller already holds lifecycle exclusion. A failed stop must block the
 /// pause/replacement rather than release the registry's still-owned process.
 pub(super) async fn stop_native_owner(

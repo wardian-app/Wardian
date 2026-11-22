@@ -58,6 +58,23 @@ pub fn stale_wakeable_information(conn: &Connection, id: &str) -> Result<bool> {
     )? == 1)
 }
 
+/// Fence context belonging to a closing conversation after its native owner has
+/// stopped. Canonical records and explicit replies remain available; unclaimed
+/// tasks and already captured outcomes retain their normal delivery contracts.
+pub fn fence_conversation_deliveries(conn: &Connection, recipient: &str) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("UPDATE agent_message_delivery SET owner='blocked_stale_origin',
+        continuation_state=CASE WHEN operation='reply' THEN 'blocked_stale_origin' ELSE continuation_state END
+        WHERE recipient=?1 AND owner='stored' AND operation IN ('send_message','reply')", [recipient])?;
+    tx.execute(
+        "UPDATE agent_message_task_turns SET settlement='uncertain'
+        WHERE recipient=?1 AND settlement='bound'",
+        [recipient],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Return bounded canonical replies awaiting an automatic continuation.
 pub fn pending_reply_continuations(conn: &Connection, recipient: &str) -> Result<Vec<String>> {
     let mut statement = conn.prepare(

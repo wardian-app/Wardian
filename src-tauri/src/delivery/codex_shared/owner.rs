@@ -330,6 +330,8 @@ async fn prepare_owner_habitat_after_observation(
 #[derive(Clone)]
 pub struct CodexTuiAttachment {
     pub expected_resume_id: Option<String>,
+    /// Conversation exclusions captured from this generation's launch config.
+    pub(crate) cleared_provider_sessions: Vec<String>,
     /// Effective launch preference; never written into AgentConfig.model.
     pub model_override: Option<String>,
     /// Captured from this owner's policy before launch; never reread settings.
@@ -663,6 +665,7 @@ impl CodexSharedOwner {
                         .resume_session
                         .clone()
                         .filter(|id| !id.is_empty()),
+                    cleared_provider_sessions: spec.config.codex_config().cleared_provider_sessions,
                     codex_home,
                     generation: spec.generation,
                 },
@@ -749,6 +752,14 @@ impl CodexSharedOwner {
                 &mut tui_alive,
             )
             .await?;
+            if crate::manager::codex::codex_provider_session_is_excluded(
+                &id,
+                &self.attachment.cleared_provider_sessions,
+            ) {
+                return Err(CodexSharedError::unsupported(
+                    "Codex TUI loaded a cleared thread; retry session clear before sending input",
+                ));
+            }
             attachment::child_alive(child)?;
             tui_alive().await?;
             attachment::inject_initial_context(&self.client, &id, &self.initial_context).await?;

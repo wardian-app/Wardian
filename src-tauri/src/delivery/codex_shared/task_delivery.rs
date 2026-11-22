@@ -3,6 +3,39 @@ use super::*;
 use wardian_core::agent_messaging::AgentMessageContext;
 use wardian_core::control::InteractionKind;
 
+fn routing_context(frame: &AgentMessageContext) -> Result<Value, CodexSharedError> {
+    let mut routing = serde_json::to_value(frame).map_err(|_| {
+        CodexSharedError::unsupported("native task routing could not be serialized")
+    })?;
+    let fields = routing
+        .as_object_mut()
+        .expect("canonical context is an object");
+    fields.remove("body");
+    fields.remove("pending_information");
+    // Only the host supplies application context. Peer text remains literal input.
+    let key = uuid::Uuid::new_v4().to_string();
+    Ok(json!({key: {
+        "kind":"application", "value":routing.to_string()
+    }}))
+}
+
+// A cancelled admission has no completion consumer to retire its receipt slot.
+struct PendingTaskReceipt<'a> {
+    client: &'a CodexSharedClient,
+    request_id: &'a str,
+    armed: bool,
+}
+
+impl Drop for PendingTaskReceipt<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.client.observation.send_modify(|state| {
+                state.task_receipts.cancel(self.request_id);
+            });
+        }
+    }
+}
+
 impl CodexSharedClient {
     pub(super) async fn admit_task(
         &self,
@@ -28,9 +61,7 @@ impl CodexSharedClient {
                         || frame.reply_status.is_none()
                 }
                 InteractionKind::Message => {
-                    frame.request_id.is_some()
-                        || frame.parent_interaction_id.is_some()
-                        || frame.reply_status.is_some()
+                    frame.request_id.is_some() || frame.reply_status.is_some()
                 }
                 _ => true,
             }
@@ -63,25 +94,28 @@ impl CodexSharedClient {
                     ));
                 }
                 version::require_steer_version(receipt.provider_version.as_deref())?;
-                let mut routing = serde_json::to_value(&frame).map_err(|_| {
-                    CodexSharedError::unsupported("native task routing could not be serialized")
-                })?;
-                routing.as_object_mut().unwrap().remove("body");
-                // The key is opaque to Codex. Only the host constructs this metadata;
-                // peer text must never become trusted application instructions.
-                let key = uuid::Uuid::new_v4().to_string();
                 ("turn/steer", json!({
                     "threadId": receipt.provider_session_id,
+                    "clientUserMessageId": message_id,
                     "expectedTurnId": turn_id,
                     "input": [{"type":"text", "text":input_body}],
-                    "additionalContext": {key: {"kind":"application", "value":routing.to_string()}},
+                    "additionalContext": routing_context(&frame)?,
                 }), Some(turn_id.clone()))
             }
+            CodexTurnActivity::Idle(_) | CodexTurnActivity::IdleWithoutTurn
+                if frame.kind == InteractionKind::Task => (
+                "turn/start", json!({
+                    "threadId": receipt.provider_session_id,
+                    "clientUserMessageId": message_id,
+                    "input": [{"type":"text", "text":input_body}],
+                    "additionalContext": routing_context(&frame)?,
+                }), None,
+            ),
             CodexTurnActivity::Idle(_) | CodexTurnActivity::IdleWithoutTurn => (
                 "turn/start", json!({
                     "threadId": receipt.provider_session_id,
                     "input": [], "toolOutput": {
-                        "name":if reply_continuation {"wardian_reply_continuation"} else if informational_message {"wardian_inbox_delivery"} else {"wardian_task_delivery"},
+                        "name":if reply_continuation {"wardian_reply_continuation"} else {"wardian_inbox_delivery"},
                         "namespace":"wardian", "output":context
                     }
                 }), None,
@@ -90,14 +124,41 @@ impl CodexSharedClient {
                 "Codex task requires positively idle state or exact observed active turn; not written",
             )),
         };
-        let result = self
+        let task_input = frame.kind == InteractionKind::Task;
+        if task_input {
+            self.observation.send_modify(|state| {
+                state.task_receipts.prepare(
+                    message_id,
+                    self.generation,
+                    &receipt.provider_session_id,
+                    &input_body,
+                    &frame.body,
+                )
+            });
+        }
+        let mut pending_receipt = task_input.then(|| PendingTaskReceipt {
+            client: self,
+            request_id: message_id,
+            armed: true,
+        });
+        let result = match self
             .request_with_activity(
                 method,
                 params,
                 Some(Duration::from_secs(30)),
                 Some(&activity),
             )
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if task_input {
+                    self.observation
+                        .send_modify(|state| state.task_receipts.cancel(message_id));
+                }
+                return Err(error);
+            }
+        };
         let turn_id = if let Some(expected) = expected_turn {
             let returned = result["turnId"].as_str();
             if returned != Some(expected.as_str()) {
@@ -117,6 +178,17 @@ impl CodexSharedClient {
                 })?
                 .to_owned()
         };
+        if task_input {
+            self.observation.send_modify(|state| {
+                state
+                    .task_receipts
+                    .acknowledge(message_id, &result, &turn_id);
+            });
+            pending_receipt
+                .as_mut()
+                .expect("task receipt is prepared")
+                .armed = false;
+        }
         receipt.provider_turn_id = Some(turn_id);
         receipt.message_id = Some(message_id.to_owned());
         receipt.admission_mode = Some(

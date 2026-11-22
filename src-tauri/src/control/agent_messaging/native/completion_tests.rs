@@ -161,6 +161,15 @@ impl Fixture {
     }
 
     async fn task(&mut self, turn: &str, early: bool) -> store::TaskTurnBinding {
+        self.task_with_receipt(turn, early, true).await
+    }
+
+    async fn task_with_receipt(
+        &mut self,
+        turn: &str,
+        early: bool,
+        receipted: bool,
+    ) -> store::TaskTurnBinding {
         let response = handle_in_state(
             None,
             &self.state,
@@ -201,12 +210,22 @@ impl Fixture {
             let request = self.peer.read().await;
             assert_eq!(request["method"], "turn/start");
             assert_eq!(request["params"]["threadId"], THREAD);
-            assert_eq!(request["params"]["input"], json!([]));
-            let written: Value =
-                serde_json::from_str(request["params"]["toolOutput"]["output"].as_str().unwrap())
-                    .unwrap();
-            assert_eq!(written, serde_json::to_value(&frame).unwrap());
-            assert_eq!(written["request_id"], request_id);
+            assert_eq!(
+                request["params"]["input"],
+                json!([{"type":"text","text":frame.body}])
+            );
+            assert_eq!(request["params"]["clientUserMessageId"], request_id);
+            assert!(request["params"].get("toolOutput").is_none());
+            if receipted {
+                self.peer
+                    .send(json!({"method":"item/started","params":{
+                        "threadId":THREAD,"turnId":turn,"item":{
+                            "type":"userMessage","id":format!("input-{request_id}"),
+                            "clientId":request_id,"content":[{"type":"text","text":frame.body}]
+                        }
+                    }}))
+                    .await;
+            }
             if early {
                 // Both events precede the RPC response in the reader's stream.
                 self.peer.complete(THREAD, turn, FINAL).await;
@@ -519,6 +538,71 @@ async fn automatic_final_wakes_concurrent_waiters_without_ack_or_timeout_settlem
                 .unwrap()
                 .messages
                 .is_empty());
+            fixture.assert_no_process_start(1).await;
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn unreceipted_final_is_informational_and_explicit_reply_can_still_complete() {
+    scenario(|fixture| {
+        Box::pin(async move {
+            let binding = fixture.task_with_receipt("unreceipted", true, false).await;
+            let observed =
+                observe_codex_task(&fixture.state.interactions, &fixture.client, &binding, WAIT)
+                    .await
+                    .unwrap();
+            assert!(observed.0.is_none());
+            assert_eq!(observed.1, FINAL);
+            assert_eq!(
+                store::with_db(|conn| Ok(store::load(conn, &binding.request_id)?.status)).unwrap(),
+                InteractionStatus::AwaitingReply
+            );
+            assert!(fixture
+                .state
+                .interactions
+                .structured_reply(&binding.request_id)
+                .await
+                .is_none());
+            let page = receive(&fixture.state, REQUESTER, 0, None, None)
+                .await
+                .unwrap();
+            assert_eq!(page.messages.len(), 2);
+            assert_eq!(page.messages[0].kind, InteractionKind::Message);
+            assert_eq!(page.messages[0].reply_status, None);
+            assert!(page.messages[0].message.contains(&binding.request_id));
+            assert!(page.messages[0]
+                .message
+                .contains("awaiting explicit reply or redelivery"));
+            assert_eq!(page.messages[1].message, FINAL);
+            let diagnostics =
+                wardian_core::db::list_interaction_delivery_attempts(&binding.request_id).unwrap();
+            assert_eq!(
+                diagnostics.last().unwrap().delivery_state,
+                "delivered_without_receipt"
+            );
+            fixture
+                .state
+                .interactions
+                .reply_agent_message(
+                    RECIPIENT,
+                    &binding.request_id,
+                    ReplyStatus::Done,
+                    "explicit current result",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .state
+                    .interactions
+                    .structured_reply(&binding.request_id)
+                    .await
+                    .unwrap()
+                    .body,
+                "explicit current result"
+            );
             fixture.assert_no_process_start(1).await;
         })
     })
@@ -922,12 +1006,15 @@ async fn codex_deferral_rechecks_idle_after_release_when_normal_dispatch_was_con
                     let request = fixture.peer.read().await;
                     assert_eq!(request["method"], "turn/start");
                     assert_eq!(request["params"]["threadId"], THREAD);
-                    assert_eq!(request["params"]["input"], json!([]));
-                    let written: Value = serde_json::from_str(
-                        request["params"]["toolOutput"]["output"].as_str().unwrap(),
-                    ).unwrap();
-                    assert_eq!(written, serde_json::to_value(&frame).unwrap());
-                    assert_eq!(written["request_id"], task.record.id);
+                    assert_eq!(request["params"]["input"], json!([{"type":"text","text":frame.body}]));
+                    assert_eq!(request["params"]["clientUserMessageId"], task.record.id);
+                    assert!(request["params"].get("toolOutput").is_none());
+                    fixture.peer.send(json!({"method":"item/started","params":{
+                        "threadId":THREAD,"turnId":"T-retry","item":{
+                            "type":"userMessage","id":"retry-input","clientId":task.record.id,
+                            "content":[{"type":"text","text":frame.body}]
+                        }
+                    }})).await;
                     assert!(store::with_db(|conn| store::owns_claim(conn, &released)).unwrap());
                     fixture.peer.send(json!({"id":request["id"],"result":{"turn":{"id":"T-retry"}}})).await;
                 };

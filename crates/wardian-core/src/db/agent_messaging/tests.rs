@@ -1140,6 +1140,22 @@ fn controller_mailbox_receives_durable_native_outcome_without_provider_record() 
     .unwrap();
     let claim = claim_next_task(&conn, "receiver", 4).unwrap().unwrap();
     let binding = bind_task_turn(&conn, &claim, "codex", "session", "turn", "start").unwrap();
+    // The controller needs no provider record, but automatic publication still
+    // requires the receiver's accepted-input evidence.
+    record_task_delivery_receipt(
+        &conn,
+        &binding,
+        &TaskDeliveryReceipt {
+            generation: 4,
+            provider_session_id: "session".into(),
+            provider_turn_id: "turn".into(),
+            source: TaskReceiptSource::AcceptedUserMessage {
+                source_id: "accepted-controller-task".into(),
+                task_body_sha256: format!("{:x}", Sha256::digest(b"work")),
+            },
+        },
+    )
+    .unwrap();
     record_task_turn_outcome(&conn, &binding, ReplyStatus::Done, "native terminal answer").unwrap();
     let replies = recover_task_turn_outcomes(&conn).unwrap();
     assert_eq!(replies.len(), 1);
@@ -1152,6 +1168,7 @@ fn controller_mailbox_receives_durable_native_outcome_without_provider_record() 
     );
     assert_eq!(page.messages[0].sender, "receiver");
     assert_eq!(page.messages[0].message, "native terminal answer");
+    assert_eq!(page.messages[0].reply_status, Some(ReplyStatus::Done));
     assert!(receive(
         &conn,
         "different-controller",

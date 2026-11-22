@@ -43,6 +43,7 @@ pub(crate) mod provider_log_tests;
 mod removal;
 mod spawn;
 mod worktree_enable;
+pub(crate) use agent_lifecycle::reset_agent_session_delivery;
 use agent_lifecycle::{
     acquire_agent_lifecycle_guard, hold_previous_provider_before_rotation, lock_agent_lifecycle,
     lock_agent_roster_for_best_effort_save, lock_agent_roster_for_save, lock_rename_mutation,
@@ -2212,6 +2213,7 @@ pub(crate) async fn prepare_provider_owned_fresh_identity(
     Ok(())
 }
 
+/// Prepare fresh provider identity before initializing a clear replacement.
 fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
     config.resume_session = None;
@@ -2221,6 +2223,40 @@ fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
         config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
     }
     Ok(())
+}
+
+/// Prepare the same fresh identity and retained exclusions used by session and
+/// worktree clear before replacement startup.
+pub(crate) fn prepare_clear_replacement_config(
+    original_config: &AgentConfig,
+) -> Result<AgentConfig, String> {
+    let previous_codex_provider_sessions = if original_config.provider == "codex" {
+        let mut sessions = codex_cleared_provider_sessions(original_config);
+        if let Some(provider_session_id) = original_config
+            .resume_session
+            .clone()
+            .filter(|provider_session_id| !provider_session_id.trim().is_empty())
+        {
+            if !sessions
+                .iter()
+                .any(|existing| existing == &provider_session_id)
+            {
+                sessions.push(provider_session_id);
+            }
+        }
+        sessions
+    } else {
+        Vec::new()
+    };
+    let mut config = original_config.clone();
+    prepare_clear_config(&mut config)?;
+    if config.provider == "codex" {
+        config
+            .codex_config_mut_preserve_encoding()
+            .cleared_provider_sessions = previous_codex_provider_sessions.clone();
+        config.codex_cleared_provider_sessions = previous_codex_provider_sessions;
+    }
+    Ok(config)
 }
 
 async fn is_session_id_available(state: &AppState, session_id: &str) -> bool {
@@ -3529,26 +3565,11 @@ async fn clear_agent_session_inner(
     let _lifecycle_guard =
         acquire_agent_lifecycle_guard(&state, &session_id, lifecycle.guard).await;
     lifecycle_heartbeat.ensure_active("clear")?;
-    let codex_stops_before_preflight = lifecycle_config_for_session(&state, &session_id)
-        .await?
-        .provider
-        == "codex";
-    if codex_stops_before_preflight {
-        stop_native_owner_with_before_capture(&state, &session_id, false, |agent| {
+    let (codex_stops_before_preflight, original_config) =
+        reset_agent_session_delivery(&state, &session_id, |agent| {
             hold_previous_provider_before_rotation(agent, &lifecycle_lease)
         })
         .await?;
-    } else {
-        stop_native_owner(&state, &session_id, false).await?;
-    }
-    let original_config = {
-        let agents = state.agents.lock().await;
-        let agent = agents
-            .get(&session_id)
-            .ok_or_else(|| format!("Agent {} not found", session_id))?;
-        let config = agent.config.lock().unwrap().clone();
-        config
-    };
     lifecycle_heartbeat.ensure_active("clear")?;
     let boundary_reason = conversation_boundary_for_clear_reason(reason.as_deref());
     crate::commands::chat::archive_agent_chat_events_until_stable_for_lifecycle(
@@ -3572,24 +3593,6 @@ async fn clear_agent_session_inner(
 
     // Establish fresh identity before the remaining runtime transition. Codex
     // writers were joined above; a later failure retains config/status, not a live TUI.
-    let previous_codex_provider_sessions = if original_config.provider == "codex" {
-        let mut sessions = codex_cleared_provider_sessions(&original_config);
-        if let Some(provider_session_id) = original_config
-            .resume_session
-            .clone()
-            .filter(|provider_session_id| !provider_session_id.trim().is_empty())
-        {
-            if !sessions
-                .iter()
-                .any(|existing| existing == &provider_session_id)
-            {
-                sessions.push(provider_session_id);
-            }
-        }
-        sessions
-    } else {
-        Vec::new()
-    };
     let previous_antigravity_conversations = if original_config.provider == "antigravity" {
         let mut conversations = antigravity_cleared_conversations(&original_config);
         if let Some(conversation_id) = original_config
@@ -3613,14 +3616,7 @@ async fn clear_agent_session_inner(
     } else {
         Vec::new()
     };
-    let mut config = original_config.clone();
-    prepare_clear_config(&mut config)?;
-    if config.provider == "codex" {
-        config
-            .codex_config_mut_preserve_encoding()
-            .cleared_provider_sessions = previous_codex_provider_sessions.clone();
-        config.codex_cleared_provider_sessions = previous_codex_provider_sessions;
-    }
+    let mut config = prepare_clear_replacement_config(&original_config)?;
     if config.provider == "antigravity" {
         // The exclusion is a provider-owned safety boundary. Promote legacy
         // configs to the nested encoding so it survives an app restart.

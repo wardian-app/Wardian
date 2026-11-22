@@ -5,6 +5,16 @@ use wardian_core::agent_messaging::AgentMessagingError;
 use wardian_core::db::agent_messaging as store;
 
 impl InteractionState {
+    /// Retire old conversation context after the lifecycle owner has joined its
+    /// native transports. Admission after this boundary belongs to new work.
+    pub async fn fence_agent_conversation_deliveries(
+        &self,
+        recipient: &str,
+    ) -> Result<(), AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        store::with_db(|conn| store::fence_conversation_deliveries(conn, recipient))
+    }
+
     /// Bind only an acknowledged native Codex task in the current incarnation.
     pub async fn bind_agent_task_turn(
         &self,
@@ -67,8 +77,41 @@ impl InteractionState {
         let replied = store::with_db(|conn| store::publish_task_turn_outcome(conn, binding))?;
         if let Some(replied) = &replied {
             self.cache_agent_reply(replied).await;
+        } else {
+            for information in store::with_db(|conn| store::task_turn_information(conn, binding))? {
+                self.records
+                    .lock()
+                    .await
+                    .insert(information.id.clone(), information.clone());
+                for recipient in &information.target_session_ids {
+                    self.notify_agent_mailbox(recipient, false).await;
+                }
+            }
         }
         Ok(replied)
+    }
+
+    /// Read the already committed informational notice and output for delivery
+    /// through the normal conversation-bound information route.
+    pub async fn agent_task_turn_information(
+        &self,
+        binding: &store::TaskTurnBinding,
+    ) -> Result<Vec<InteractionRecord>, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        store::with_db(|conn| store::task_turn_information(conn, binding))
+    }
+
+    /// Fence accepted-input evidence with the same runtime/deletion gate as the
+    /// outcome. A retired owner cannot lend its receipt to a replacement.
+    pub async fn record_agent_task_delivery_receipt(
+        &self,
+        binding: &store::TaskTurnBinding,
+        receipt: &store::TaskDeliveryReceipt,
+    ) -> Result<(), AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        self.validate_task_turn_generation(&binding.recipient, binding.generation)
+            .await?;
+        store::with_db(|conn| store::record_task_delivery_receipt(conn, binding, receipt))
     }
 
     /// Observation loss cannot produce a terminal reply or authorize replay.

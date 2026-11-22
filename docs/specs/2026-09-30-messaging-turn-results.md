@@ -2,6 +2,11 @@
 
 ## Decision
 
+The [exact delivery receipt amendment](./2026-11-22-task-delivery-receipts.md)
+adds accepted-input authority to automatic terminal publication. It supersedes
+the idle synthetic task-output representation below; literal task input now
+carries the existing client message ID on both start and steer.
+
 Canonical tasks dispatched to a native Codex turn return its final result to
 the task requester. Wardian retains peer-directed ownership rather than imposing
 a spawn-parent tree. Information and completion delivery never start an idle

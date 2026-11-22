@@ -1,4 +1,9 @@
 // Regression coverage for lifecycle contention at the live delivery boundary.
+#[cfg(windows)]
+mod session_reset {
+    include!("session_reset.rs");
+}
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -49,8 +54,7 @@ async fn pi_capability_query_uses_ready_live_binding_for_current_generation() {
     let session_file = temp.path().join("session.jsonl");
     std::fs::write(&session_file, "{}\n").expect("write Pi session fixture");
     let extension_path = temp.path().join("extension.mjs");
-    std::fs::write(&extension_path, "export default {};\n")
-        .expect("write Pi extension fixture");
+    std::fs::write(&extension_path, "export default {};\n").expect("write Pi extension fixture");
     let config = AgentConfig {
         provider: "pi".to_string(),
         session_id: target_agent_id.to_string(),
@@ -198,11 +202,10 @@ async fn codex_capability_response_hides_unqualified_persisted_bindings() {
                 provider: stored_provider.to_string(),
                 transport: "codex_app_server_ws".to_string(),
                 provider_session_id: provider_session_id.map(str::to_string),
-                capabilities:
-                    wardian_core::native_transport::NativeTransportCapabilities::degraded(
-                        stored_provider,
-                        "codex_app_server_ws",
-                    ),
+                capabilities: wardian_core::native_transport::NativeTransportCapabilities::degraded(
+                    stored_provider,
+                    "codex_app_server_ws",
+                ),
                 observed_at: "2026-09-17T00:00:00Z".to_string(),
             },
         )
