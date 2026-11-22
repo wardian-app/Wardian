@@ -2,8 +2,8 @@ import { act, fireEvent, render, renderHook, screen } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useRef } from "react";
 import type { AgentChatPage } from "../../types";
-import { canonicalOlderIdentityFixture, coldSourcePreviewIdentityFixture, partitionedPreviewIdentityFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
-import { chatPresentationScope, qualifiedChatPreviewBridge, sourceLegacyBridgeCoversWindow, useChatPresentationScope } from "./chatPreviewIdentity";
+import { canonicalOlderIdentityFixture, coldSourcePreviewIdentityFixture, partitionedPreviewIdentityFixture, previewGenerationRolloverFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
+import { chatPresentationScope, holdsBoundChatWindow, previewBridgeRollover, qualifiedChatPreviewBridge, sourceLegacyBridgeCoversWindow, useChatPresentationScope } from "./chatPreviewIdentity";
 import { chatPageScopeRelation } from "./chatRevalidation";
 import { addChatSubmission, applyChatPage, submittedChatEvent } from "./chatReadState";
 import { chatEventDisplayKey } from "./chatEventIdentity";
@@ -134,6 +134,20 @@ describe("exact producer preview identity", () => {
     expect(new Set([legacy, provisional, canonical].map((page) => chatPresentationScope(page, page.session_id, "codex"))).size).toBe(1);
     expect(chatPresentationV1(legacy)).toBeNull();
     expect(qualifiedChatPreviewBridge({ ...provisional, conversation_id: null })).toBeNull();
+  });
+
+  it("holds an unproven generation successor and refuses to hold an explicit retirement", () => {
+    const { provisional, pending, replacement, loss } = previewGenerationRolloverFixture();
+    const invalid = { ...replacement, aliases: replacement.aliases.slice(1) };
+    expect(previewBridgeRollover(provisional, invalid, provisional.events)).toBe(false);
+    expect(holdsBoundChatWindow(provisional, invalid, provisional.events)).toBe(true);
+    expect(previewBridgeRollover(provisional, replacement, provisional.events)).toBe(true);
+    expect(holdsBoundChatWindow(provisional, replacement, provisional.events)).toBe(false);
+    expect(holdsBoundChatWindow(provisional, loss, provisional.events)).toBe(false);
+    expect(holdsBoundChatWindow(provisional,
+      { ...pending[0], revision: "head:retired-view-v1:prior~source" }, provisional.events)).toBe(false);
+    expect(holdsBoundChatWindow(provisional,
+      { ...pending[0], progress: "privacy_disabled" }, provisional.events)).toBe(false);
   });
 
   it("resets on retraction, another admission, a malformed head or another source", () => {

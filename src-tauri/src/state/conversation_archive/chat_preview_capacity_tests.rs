@@ -107,6 +107,7 @@ fn a_normalized_running_prefix_fills_the_default_window_without_retiring_its_adm
                 } else {
                     preview_bridge::Mode::First
                 },
+                revision: None,
                 hints: None,
             },
         ) {

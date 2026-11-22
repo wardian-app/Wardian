@@ -43,19 +43,21 @@ export function restoreChatScrollAnchor(scroll: HTMLElement, anchor: ChatScrollA
 }
 
 /** Snapshot before replacement and restore exact event anchors when the renderer changes. */
-export function useChatHandoffAnchor(scrollRef: RefObject<HTMLElement | null>, scope: string, rowKeys: string): void {
-  const saved = useRef<{ scope: string; rowKeys: string; anchor: ChatScrollAnchor; following: boolean } | null>(null);
+export function useChatHandoffAnchor(
+  scrollRef: RefObject<HTMLElement | null>, scope: string, rowKeys: string, bridgeGeneration?: string | null,
+): void {
+  const saved = useRef<{ scope: string; rowKeys: string; bridgeGeneration?: string | null; anchor: ChatScrollAnchor; following: boolean } | null>(null);
   useLayoutEffect(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
     const previous = saved.current;
-    // Ordinary prepends already restore their retained row root. Handoffs need
-    // a second identity only when that root was replaced by the turn section.
-    if (previous?.scope === scope && previous.rowKeys !== rowKeys && !previous.following && previous.anchor.key
-      && !Array.from(scroll.querySelectorAll<HTMLElement>("[data-chat-row-key]")).some((row) => row.dataset.chatRowKey === previous.anchor.key)) {
-      restoreChatScrollAnchor(scroll, previous.anchor);
+    if (previous?.scope === scope && previous.anchor.key) {
+      const rollover = previous.bridgeGeneration != null && bridgeGeneration != null && previous.bridgeGeneration !== bridgeGeneration;
+      const replacedRoot = previous.rowKeys !== rowKeys && !previous.following
+        && !Array.from(scroll.querySelectorAll<HTMLElement>("[data-chat-row-key]")).some((row) => row.dataset.chatRowKey === previous.anchor.key);
+      if (rollover || replacedRoot) restoreChatScrollAnchor(scroll, previous.anchor, rollover ? "position" : "prepend");
     }
-    const capture = () => { saved.current = { scope, rowKeys, anchor: captureChatScrollAnchor(scroll),
+    const capture = () => { saved.current = { scope, rowKeys, bridgeGeneration, anchor: captureChatScrollAnchor(scroll),
       following: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 48 }; };
     capture();
     scroll.addEventListener("scroll", capture);

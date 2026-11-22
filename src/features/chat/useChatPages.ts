@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type SetStateAction } from "r
 import type { AgentChatEvent, AgentChatPage } from "../../types";
 import { chatPresentationV1 } from "./committedChatPresentation";
 import { previewBackingIdsForWindow } from "./chatPreviewBacking";
-import { qualifiedChatPreviewBridge } from "./chatPreviewIdentity";
+import { holdsBoundChatWindow, qualifiedChatPreviewBridge } from "./chatPreviewIdentity";
 import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, chatRecentRefreshDelay, type ChatWindowDirection } from "./chatReadState";
 import {
   ChatRevalidationError,
@@ -252,6 +252,11 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
           if (readingOlder && next.session_id !== sessionId) throw new Error("Conversation changed during older read");
           if (epoch !== scope.current || requestedWindow !== windowVersion.current || next.session_id !== sessionId) return;
           const previous = latest.current;
+          if (!readingOlder && holdsBoundChatWindow(previous, next, eventWindow.current)) {
+            setError(null);
+            schedule(pollInterval.current);
+            return;
+          }
           const browsingOlder = readingOlder || windowDirection.current === "older";
           const scopeRelation = chatPageScopeRelation(previous, next, eventWindow.current,
             demand !== null || olderCursor.current !== null || browsingOlder
@@ -263,7 +268,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
             throw new ChatRevalidationError("Invalid recent preview capability.", scopeRelation === "changed");
           }
           const compatible = scopeRelation === "same" || (scopeRelation === "bridge"
-            && previous?.recent_admission == null && next.recent_admission == null);
+            && previous?.generation === next.generation && previous?.recent_admission == null && next.recent_admission == null);
           const ordinaryCompatible = chatPageScopeAllowsOrdinaryRead(scopeRelation);
           if (previous && scopeRelation === "unknown") {
             throw new ChatRevalidationError("Chat source scope is incomplete. The current window and history position were kept; retry Chat.");

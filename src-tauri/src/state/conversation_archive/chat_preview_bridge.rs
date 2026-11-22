@@ -2,7 +2,7 @@
 use super::*;
 use wardian_core::models::chat::AgentChatAlias;
 use wardian_core::models::chat_presentation::{
-    ChatPresentation, ChatPresentationV1, ChatPreviewBridge,
+    ChatPresentation, ChatPresentationV1, ChatPreviewBridge, ChatPreviewBridgeReplacement,
 };
 
 const REVISION_TAG: &str = ":preview-bridge-v1:";
@@ -112,17 +112,27 @@ pub(super) struct Binding {
     conversation_id: String,
     generation: String,
     source_epoch: Option<String>,
+    source_key: Option<String>,
     source_revision: String,
+    rows: BTreeMap<String, String>,
+    rollover: Option<Rollover>,
     openings: BTreeSet<String>,
     owners: super::preview_projection::Owners,
     presentation: super::preview_projection::State,
+}
+
+#[derive(Clone, Serialize)]
+struct Rollover {
+    generation: String,
+    source_revision: String,
+    rows: BTreeMap<String, String>,
 }
 
 impl Binding {
     /// Presentation and owner metadata mirror the same source certificates.
     /// Charge the larger logical set; serialized duplication is charged in bytes.
     pub(super) fn record_count(&self) -> usize {
-        self.presentation.record_count().max(
+        self.presentation.record_count().max(self.rows.len()).max(
             self.owners
                 .values()
                 .map(|owners| owners.record_count())
@@ -135,9 +145,15 @@ impl Binding {
     }
 
     fn matches(&self, head: &Head) -> bool {
+        self.same_source(head) && self.generation == head.generation
+    }
+
+    fn same_source(&self, head: &Head) -> bool {
         self.conversation_id == head.conversation_id
-            && self.generation == head.generation
             && self.source_epoch == head.source_epoch
+            && self.source_key == head.source_key
+            && (self.generation == head.generation
+                || (self.source_epoch.is_some() && self.source_key.is_some()))
     }
 }
 
@@ -156,7 +172,10 @@ impl Proof {
             conversation_id: head.conversation_id,
             generation: head.generation,
             source_epoch: head.source_epoch,
+            source_key: head.source_key,
             source_revision: String::new(),
+            rows: BTreeMap::new(),
+            rollover: None,
             openings: BTreeSet::new(),
             owners: Default::default(),
             presentation: Default::default(),
@@ -333,6 +352,7 @@ pub(super) enum Mode {
 pub(super) struct Selection<'a> {
     pub(super) mode: Mode,
     pub(super) hints: Option<&'a [String]>,
+    pub(super) revision: Option<&'a str>,
 }
 
 fn normalize_aliases(page: &mut AgentChatPage) -> bool {
@@ -418,6 +438,38 @@ fn retain_recent_window(
     true
 }
 
+/// Check an older reader against its immutable Head, scoped to the current native owner.
+fn reads_generation(
+    store: &mut Store,
+    agent_id: &str,
+    binding: &Binding,
+    revision: Option<&str>,
+    generation: &str,
+) -> bool {
+    let Some((reference, _)) = revision.and_then(|value| value.split_once('.')) else {
+        return false;
+    };
+    if !valid_ref(reference) {
+        return false;
+    }
+    if binding
+        .source_revision
+        .starts_with(&format!("{reference}."))
+    {
+        return binding.generation == generation;
+    }
+    if let Some(prior) = binding
+        .rollover
+        .as_ref()
+        .filter(|prior| prior.source_revision.starts_with(&format!("{reference}.")))
+    {
+        return prior.generation == generation;
+    }
+    store.read::<Head>(reference).is_ok_and(|prior| {
+        prior.agent_id == agent_id && binding.same_source(&prior) && prior.generation == generation
+    })
+}
+
 /// Ordinary canonical pagination remains inside the admitted view. Its normal
 /// reader remains the sole authority for the events, cursor and detail refs.
 /// Passive latest reads may acknowledge only the validated admission lifetime
@@ -428,6 +480,7 @@ pub(super) fn continue_canonical(
     runtime: &Arc<Mutex<String>>,
     requested_admission: &str,
     page: &mut AgentChatPage,
+    requested_revision: Option<&str>,
     ordinary_recent: bool,
 ) -> io::Result<()> {
     let value = page
@@ -497,16 +550,44 @@ pub(super) fn continue_canonical(
     let mut store = store(&snapshot.session_id)?;
     let published: Head = store.read(&reference)?;
     let context = crate::commands::chat::conversation_archive_context_from_snapshot(snapshot);
-    if !binding.matches(&published)
+    if !binding.same_source(&published)
         || !cold_bootstrap::scope_matches(&published, &context)
         || published.source_key != context.provider_source_key
         || page.conversation_id.as_deref() != Some(published.conversation_id.as_str())
-        || page.generation.as_deref() != Some(published.generation.as_str())
         || page.source_epoch != published.source_epoch
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "bound source scope retired",
+        ));
+    }
+    let rollover = binding.generation != published.generation
+        || if let Some(previous) = &binding.rollover {
+            reads_generation(
+                &mut store,
+                &published.agent_id,
+                &binding,
+                requested_revision,
+                &previous.generation,
+            )
+        } else {
+            false
+        };
+    if !rollover && page.generation.as_deref() != Some(published.generation.as_str()) {
+        if ordinary_recent && has_native_source_generation(snapshot, &mut store, page, &published)?
+        {
+            page.generation = Some(published.generation.clone());
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "canonical scope is pending",
+            ));
+        }
+    }
+    if rollover && !ordinary_recent {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "canonical generation changed",
         ));
     }
     if page.revision.split('.').next() != Some(reference.as_str()) {
@@ -515,7 +596,7 @@ pub(super) fn continue_canonical(
             "canonical revision changed",
         ));
     }
-    let value = if unqualified {
+    let value = if unqualified || rollover {
         None
     } else {
         match value {
@@ -543,10 +624,12 @@ pub(super) fn continue_canonical(
                 && slot.published
                 && slot.scope == scope
                 && slot.native_source == native_source
-                && slot
-                    .binding
-                    .as_ref()
-                    .is_some_and(|binding| binding.matches(&published))
+                && slot.binding.as_ref().is_some_and(|current| {
+                    current.matches(&published)
+                        || (rollover
+                            && current.generation == binding.generation
+                            && current.same_source(&published))
+                })
                 && slot.runtime.ptr_eq(&Arc::downgrade(runtime))
                 && slot.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
         })
@@ -569,6 +652,7 @@ pub(super) fn continue_canonical(
                 preview_bridge: Some(ChatPreviewBridge {
                     admission_id: admission.clone(),
                     canonical_head: reference,
+                    replaces: None,
                 }),
             };
             continuity.validate().map_err(io::Error::other)?;
@@ -582,10 +666,18 @@ pub(super) fn continue_canonical(
             page.recent_admission = None;
             page.reset = false;
             page.older_page = false;
-            page.presentation = Some(ChatPresentation {
-                version: 1,
-                payload: serde_json::to_value(continuity).map_err(io::Error::other)?,
-            });
+            page.presentation = if rollover {
+                // Until the active reader proves the replacement aliases, the
+                // same physical source has no new presentation or authority.
+                page.progress = "indexing".into();
+                page.generation = Some(published.generation.clone());
+                None
+            } else {
+                Some(ChatPresentation {
+                    version: 1,
+                    payload: serde_json::to_value(continuity).map_err(io::Error::other)?,
+                })
+            };
             stamp_page(page, &admission)?;
         }
         return Ok(());
@@ -599,6 +691,7 @@ pub(super) fn continue_canonical(
     value.preview_bridge = Some(ChatPreviewBridge {
         admission_id: admission.clone(),
         canonical_head: reference,
+        replaces: None,
     });
     if !normalize_aliases(page) {
         return Ok(());
@@ -622,7 +715,11 @@ pub(super) fn read(
     limit: usize,
     selection: Selection<'_>,
 ) -> io::Result<Option<(AgentChatPage, Binding)>> {
-    let Selection { mode, hints } = selection;
+    let Selection {
+        mode,
+        hints,
+        revision,
+    } = selection;
     if !(1..=PAGE_ROWS).contains(&limit) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -669,7 +766,7 @@ pub(super) fn read(
             Ok(None)
         };
     }
-    if !source_selectors && prior.is_some_and(|binding| !binding.matches(&published)) {
+    if !source_selectors && prior.is_some_and(|binding| !binding.same_source(&published)) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "bound canonical scope changed",
@@ -726,7 +823,7 @@ pub(super) fn read(
     if source_selectors && proof.is_none() {
         return Ok(None);
     }
-    if prior.is_some_and(|binding| !binding.matches(&published)) {
+    if prior.is_some_and(|binding| !binding.same_source(&published)) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "bound canonical scope changed",
@@ -741,7 +838,10 @@ pub(super) fn read(
                 conversation_id: published.conversation_id.clone(),
                 generation: published.generation.clone(),
                 source_epoch: published.source_epoch.clone(),
+                source_key: published.source_key.clone(),
                 source_revision: String::new(),
+                rows: BTreeMap::new(),
+                rollover: None,
                 openings: BTreeSet::new(),
                 owners: Default::default(),
                 presentation: Default::default(),
@@ -750,8 +850,24 @@ pub(super) fn read(
     else {
         return Ok(None);
     };
-    if !binding.matches(&published) {
-        return Ok(None);
+    if binding.generation != published.generation {
+        if mode != Mode::Bound
+            || binding.rows.is_empty()
+            || !reads_generation(
+                &mut store,
+                &published.agent_id,
+                &binding,
+                revision,
+                &binding.generation,
+            )
+        {
+            return Ok(None);
+        }
+        binding.rollover = Some(Rollover {
+            generation: std::mem::replace(&mut binding.generation, published.generation.clone()),
+            source_revision: std::mem::take(&mut binding.source_revision),
+            rows: std::mem::take(&mut binding.rows),
+        });
     }
     if let Some(proof) = proof {
         binding
@@ -899,6 +1015,48 @@ pub(super) fn read(
             canonical_id: event.id.clone(),
         });
     }
+    let replaces = if let Some(rollover) = binding.rollover.as_ref().filter(|_| mode == Mode::Bound)
+    {
+        reads_generation(
+            &mut store,
+            &published.agent_id,
+            &binding,
+            revision,
+            &rollover.generation,
+        )
+        .then(|| ChatPreviewBridgeReplacement {
+            admission_id: admission.to_owned(),
+            generation: rollover.generation.clone(),
+        })
+    } else {
+        None
+    };
+    let exact_rows = page
+        .events
+        .iter()
+        .map(|event| {
+            let physical = event.metadata["chat_source_ref"]
+                .as_str()
+                .filter(|reference| !reference.is_empty() && reference.len() <= 512)?;
+            (event.metadata["chat_source_epoch"].as_str() == published.source_epoch.as_deref())
+                .then(|| (event.id.clone(), physical.to_owned()))
+        })
+        .collect::<Option<BTreeMap<_, _>>>();
+    if let (Some(_), Some(rollover)) = (&replaces, &binding.rollover) {
+        if exact_rows.is_none() {
+            return Ok(None);
+        }
+        for (old_id, physical) in &rollover.rows {
+            let Some(Some(event)) = backings.get(physical.as_str()) else {
+                return Ok(None);
+            };
+            aliases.push(AgentChatAlias {
+                observation_id: old_id.clone(),
+                canonical_id: event.id.clone(),
+            });
+        }
+    }
+    binding.rows = exact_rows.unwrap_or_default();
     drop(backings);
     let required: BTreeSet<_> = aliases
         .iter()
@@ -930,6 +1088,7 @@ pub(super) fn read(
     value.preview_bridge = Some(ChatPreviewBridge {
         admission_id: admission.to_owned(),
         canonical_head: reference.clone(),
+        replaces,
     });
     value.validate().map_err(io::Error::other)?;
     // A native transport generation never becomes canonical authority. Only

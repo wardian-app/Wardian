@@ -86,3 +86,29 @@ export function coldSourcePreviewIdentityFixture(sessionId = "synthetic-agent") 
     aliases: cold.events.map((event, index) => ({ observation_id: event.id, canonical_id: provisional.events[index].id })) };
   return { cold, bridge, canonical };
 }
+
+
+/** Replay the same-source rollover using two intermediate transport snapshots. */
+export function previewGenerationRolloverFixture(sessionId = "synthetic-agent") {
+  const { legacy, provisional, prefix } = previewIdentityFixture(sessionId);
+  const generation = "next-archive-generation";
+  const admission = "successor-admission";
+  const pending = [1, 2].map((index): AgentChatPage => ({
+    ...provisional, generation, recent_admission: null, revision: `pending-${index}`, progress: "indexing", presentation: undefined,
+    events: provisional.events.map((event) => ({ ...event, id: `pending:${event.id}` })), aliases: [],
+  }));
+  const ids = new Map(provisional.events.map((event) => [event.id, `successor:${event.id}`]));
+  const payload = provisional.presentation!.payload as ChatPresentationV1;
+  const replacement: AgentChatPage = {
+    ...provisional, generation, recent_admission: admission, revision: "successor-bridge",
+    events: provisional.events.map((event) => ({ ...event, id: ids.get(event.id)! })),
+    aliases: [...ids].map(([observation_id, canonical_id]) => ({ observation_id, canonical_id })),
+    presentation: { version: 1, payload: { ...payload,
+      items: payload.items.map((item) => ({ ...item, admission_id: admission, event_refs: item.event_refs.map((id) => ids.get(id)!) })),
+      preview_bridge: { admission_id: admission, canonical_head: "d".repeat(64),
+        replaces: { admission_id: prefix.preview_bridge!.admission_id, generation: provisional.generation } },
+    } },
+  };
+  const loss: AgentChatPage = { ...pending[0], revision: "retracted", source_epoch: "replaced-source", progress: "source_changed" };
+  return { legacy, provisional, pending, replacement, loss };
+}

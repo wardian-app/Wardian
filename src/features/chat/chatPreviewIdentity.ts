@@ -15,6 +15,9 @@ export function qualifiedChatPreviewBridge(page: AgentChatPage | null): ChatPres
   const bridge = payload.preview_bridge;
   if (!bridge || !nonempty(bridge.admission_id) || bridge.admission_id.length > 256
     || typeof bridge.canonical_head !== "string" || !/^[0-9a-f]{64}$/i.test(bridge.canonical_head)) return null;
+  if (bridge.replaces !== undefined && (!bridge.replaces || !nonempty(bridge.replaces.admission_id)
+    || bridge.replaces.admission_id.length > 256 || !nonempty(bridge.replaces.generation)
+    || bridge.replaces.generation.length > 256 || bridge.replaces.generation === page.generation)) return null;
   if (page.recent_admission != null && (page.recent_admission !== bridge.admission_id
     || page.progress !== "provisional" || page.next_before !== null || page.detail !== null || payload.detail != null
     || page.older_page === true || page.revalidated_ids != null || page.events.length > 80)) return null;
@@ -57,6 +60,45 @@ export function canonicalPresentationBridgeKeepsScope(previous: AgentChatPage | 
     && (["conversation_id", "generation", "source_epoch"] as const).every((field) => previous[field] === next[field]);
 }
 
+function sameNativeScope(previous: AgentChatPage, next: AgentChatPage): boolean {
+  return previous.session_id === next.session_id && nonempty(previous.conversation_id)
+    && previous.conversation_id === next.conversation_id && nonempty(previous.source_epoch)
+    && previous.source_epoch === next.source_epoch;
+}
+
+/** Hold the admitted window until the producer gives a qualified replacement or an explicit retraction. */
+export function holdsBoundChatWindow(
+  previous: AgentChatPage | null, next: AgentChatPage, loaded: readonly AgentChatEvent[],
+): boolean {
+  if (!previous || !qualifiedChatPreviewBridge(previous) || !sameNativeScope(previous, next)
+    || next.revision.includes(":retired-view-v1:") || next.revision.endsWith(":retired")) return false;
+  const bridge = qualifiedChatPreviewBridge(next);
+  if (bridge?.replaces && previous.generation !== next.generation) return !previewBridgeRollover(previous, next, loaded);
+  return next.recent_admission == null && chatPresentationPayload(next) === null
+    && (next.progress === "indexing" || next.progress === "pending");
+}
+
+/** A producer-marked successor must cover the prior returned window with literal IDs or aliases. */
+export function previewBridgeRollover(
+  previous: AgentChatPage | null, next: AgentChatPage | null, loaded: readonly AgentChatEvent[],
+): boolean {
+  if (!previous || !next || !sameNativeScope(previous, next) || previous.generation === next.generation
+    || !next.reset || next.unchanged || next.older_page === true) return false;
+  const prior = qualifiedChatPreviewBridge(previous);
+  const replaces = qualifiedChatPreviewBridge(next)?.replaces;
+  if (!prior || !replaces || replaces.admission_id !== prior.admission_id || replaces.generation !== previous.generation) return false;
+  const priorRows = (previous.events.length > 0 ? previous.events : loaded).filter((event) => event.metadata.optimistic !== true);
+  const positions = new Map(next.events.map((event, index) => [event.id, index]));
+  const aliases = new Map(next.aliases.map(({ observation_id, canonical_id }) => [observation_id, canonical_id]));
+  let priorPosition = -1;
+  return priorRows.length > 0 && priorRows.every((event) => {
+    const position = positions.get(aliases.get(event.id) ?? event.id);
+    if (event.session_id !== next.session_id || position === undefined || position <= priorPosition) return false;
+    priorPosition = position;
+    return true;
+  });
+}
+
 /** A legacy admission and its qualified bridge share one presentation lifetime. */
 export function chatPresentationScope(page: AgentChatPage | null, sessionId: string, provider?: string): string {
   const admission = qualifiedChatPreviewBridge(page)?.admission_id ?? page?.recent_admission;
@@ -72,12 +114,13 @@ export function useChatPresentationScope(page: AgentChatPage | null, sessionId: 
   if (saved.page !== page || saved.token !== token || saved.events !== windowEvents) {
     const prior = qualifiedChatPreviewBridge(saved.page);
     const next = qualifiedChatPreviewBridge(page);
-    const retired = prior && (!next || prior.admission_id !== next.admission_id
+    const rollover = previewBridgeRollover(saved.page, page, saved.events);
+    const retired = prior && !rollover && (!next || prior.admission_id !== next.admission_id
       || (["conversation_id", "generation", "source_epoch"] as const).some((field) => saved.page?.[field] !== page?.[field]));
     const epoch = saved.epoch + (retired ? 1 : 0);
     const coveredColdSource = sourceLegacyBridgeCoversWindow(saved.page, page, saved.events);
     const canonicalScope = canonicalPresentationBridgeKeepsScope(saved.page, page);
-    const displayToken = !retired && (saved.token === token || coveredColdSource || canonicalScope) ? saved.displayToken : token;
+    const displayToken = !retired && (saved.token === token || coveredColdSource || canonicalScope || rollover) ? saved.displayToken : token;
     setSaved({ page, token, displayToken, events: windowEvents, epoch });
     return JSON.stringify([displayToken, epoch]);
   }

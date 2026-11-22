@@ -1,5 +1,5 @@
 import type { AgentChatEvent, AgentChatPage } from "../../types";
-import { canonicalPresentationBridgeKeepsScope, qualifiedChatPreviewBridge, sourceLegacyBridgeCoversWindow } from "./chatPreviewIdentity";
+import { canonicalPresentationBridgeKeepsScope, previewBridgeRollover, qualifiedChatPreviewBridge, sourceLegacyBridgeCoversWindow } from "./chatPreviewIdentity";
 import { isUnscopedSourceLegacy } from "./chatPreviewBacking";
 import {
   MAX_LOADED_CHAT_HEADERS,
@@ -237,6 +237,7 @@ export function chatPageScopeRelation(
   if ((previousBridge || nextBridge) && !requireAdmissionProof) {
     // Continuity is a producer capability, never a source-renewal proof.
     if (!nextBridge) return "changed";
+    if (previousBridge && previewBridgeRollover(previous, next, previousEvents)) return "bridge";
     if (previousBridge) return previousBridge.admission_id === nextBridge.admission_id
       && (["conversation_id", "generation", "source_epoch"] as const).every((field) => previous[field] === next[field])
       ? "bridge" : "changed";

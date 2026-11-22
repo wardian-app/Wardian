@@ -43,6 +43,15 @@ pub struct ChatPresentationV1 {
 pub struct ChatPreviewBridge {
     pub admission_id: String,
     pub canonical_head: String,
+    /// The prior generation this same-source snapshot can replace atomically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<ChatPreviewBridgeReplacement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatPreviewBridgeReplacement {
+    pub admission_id: String,
+    pub generation: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

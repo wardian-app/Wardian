@@ -32,6 +32,12 @@ impl ChatPresentationV1 {
         if self.preview_bridge.as_ref().is_some_and(|bridge| {
             bridge.admission_id.is_empty()
                 || bridge.admission_id.len() > 256
+                || bridge.replaces.as_ref().is_some_and(|prior| {
+                    prior.admission_id.is_empty()
+                        || prior.admission_id.len() > 256
+                        || prior.generation.is_empty()
+                        || prior.generation.len() > 256
+                })
                 || bridge.canonical_head.len() != 64
                 || !bridge
                     .canonical_head

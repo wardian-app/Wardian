@@ -986,7 +986,8 @@ fn coverage_from_another_head_cannot_issue_a_handoff_even_with_identical_scope()
         8,
         preview_bridge::Selection {
             mode: preview_bridge::Mode::Legacy,
-            hints: None
+            revision: None,
+            hints: None,
         }
     )
     .unwrap()
@@ -1004,7 +1005,8 @@ fn coverage_from_another_head_cannot_issue_a_handoff_even_with_identical_scope()
         8,
         preview_bridge::Selection {
             mode: preview_bridge::Mode::Legacy,
-            hints: None
+            revision: None,
+            hints: None,
         }
     )
     .unwrap()
@@ -1761,7 +1763,7 @@ fn passive_bound_recent_refresh_keeps_empty_continuity_for_unchanged_and_unquali
             let active = owner.recent_reader_with_hints(
                 source.clone(),
                 runtime.clone(),
-                Some(bound.revision),
+                Some(bound.revision.clone()),
                 8,
                 Some(Vec::new()),
             )()
@@ -1775,8 +1777,102 @@ fn passive_bound_recent_refresh_keeps_empty_continuity_for_unchanged_and_unquali
                 receipt.0
             );
         }
+        let mut current_revision = continued.revision;
+        if !append_tail {
+            // Replay a new immutable archive generation over the same proven
+            // source, before either client has a replacement presentation.
+            let mut store = store("agent-1").unwrap();
+            let mut next: Head = store.read(&current_head).unwrap();
+            next.generation = "successor-generation".into();
+            next.progress = "indexing".into();
+            next.recent_page = None;
+            let next_head = store.put(&next).unwrap();
+            let (pointer, _) = locations("agent-1").unwrap();
+            write_json_atomic(&pointer, &next_head).unwrap();
+
+            for _ in 0..2 {
+                let hold = owner
+                    .canonical_bridge_reader(
+                        source.clone(),
+                        runtime.clone(),
+                        request(current_revision.clone()),
+                    )
+                    .unwrap()()
+                .unwrap();
+                assert_eq!(hold.progress, "indexing");
+                assert_eq!(hold.conversation_id, bound.conversation_id);
+                assert_eq!(hold.source_epoch, bound.source_epoch);
+                assert_eq!(hold.generation.as_deref(), Some("successor-generation"));
+                assert!(hold.recent_admission.is_none() && hold.presentation.is_none());
+                assert!(hold.events.is_empty() && hold.aliases.is_empty() && !hold.reset);
+                assert!(
+                    hold.next_before.is_none() && hold.detail.is_none() && !hold.archive_read_ready
+                );
+                assert!(retired_view::split(&hold.revision).is_none());
+            }
+            let successor = owner.recent_reader_with_hints(
+                source.clone(),
+                runtime.clone(),
+                Some(current_revision.clone()),
+                8,
+                Some(Vec::new()),
+            )()
+            .unwrap()
+            .unwrap();
+            let bridge = value(&successor).preview_bridge.unwrap();
+            let previous = bridge.replaces.unwrap();
+            assert_eq!(bridge.admission_id, receipt.0);
+            assert_eq!(previous.admission_id, receipt.0);
+            assert_eq!(Some(previous.generation), bound.generation);
+            assert_eq!(
+                successor.generation.as_deref(),
+                Some("successor-generation")
+            );
+            assert!(successor.reset);
+            assert!(bound
+                .events
+                .iter()
+                .all(
+                    |event| successor
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.observation_id == event.id
+                            && successor
+                                .events
+                                .iter()
+                                .any(|current| current.id == alias.canonical_id))
+                ));
+            assert_eq!(
+                value(&successor).turns[0].turn_key,
+                value(&bound).turns[0].turn_key
+            );
+
+            // Current readers no longer need the predecessor aliases or its
+            // retained rows. An old reader can still consume the same proof.
+            let current = owner.recent_reader_with_hints(
+                source.clone(),
+                runtime.clone(),
+                Some(successor.revision.clone()),
+                8,
+                Some(Vec::new()),
+            )()
+            .unwrap()
+            .unwrap();
+            assert!(value(&current).preview_bridge.unwrap().replaces.is_none());
+            let delayed = owner.recent_reader_with_hints(
+                source.clone(),
+                runtime.clone(),
+                Some(current_revision),
+                8,
+                Some(Vec::new()),
+            )()
+            .unwrap()
+            .unwrap();
+            assert!(value(&delayed).preview_bridge.unwrap().replaces.is_some());
+            current_revision = successor.revision;
+        }
         let pending = owner
-            .canonical_bridge_reader(source.clone(), runtime.clone(), request(continued.revision))
+            .canonical_bridge_reader(source.clone(), runtime.clone(), request(current_revision))
             .unwrap();
         let _fence = owner.recent_boundary(Some("agent-1")).unwrap();
         let retired = pending().unwrap();

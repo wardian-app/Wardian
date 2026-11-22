@@ -394,7 +394,7 @@ export function AgentChatView({
         scrollRef={transcriptScrollRef}
         rows={visibleChatRows}
         eventKeys={eventKeys}
-        bridged={committedPresentation?.preview_bridge != null}
+        bridgeGeneration={committedPresentation?.preview_bridge ? page?.generation ?? null : null}
         layout={JSON.stringify([loadState, progressText, error, chat.waiting, chat.browsingOlder, loadingOlder, page?.next_before])}
         onCommit={restoreTranscriptScroll}
         pageScope={page ? JSON.stringify({ session: page.session_id,
@@ -487,7 +487,7 @@ type TranscriptScrollBoundaryProps = {
   scrollRef: RefObject<HTMLDivElement | null>;
   rows: ChatTranscriptRowModel[];
   eventKeys: string[];
-  bridged: boolean;
+  bridgeGeneration: string | null;
   layout: string;
   pageScope: string | undefined;
   onCommit: (snapshot: TranscriptScrollSnapshot | null) => void;
@@ -498,14 +498,14 @@ type TranscriptScrollBoundaryProps = {
 /** Read the old viewport before React mutates its rows and restore it before paint. */
 class TranscriptScrollBoundary extends Component<TranscriptScrollBoundaryProps, object, TranscriptScrollSnapshot | null> {
   getSnapshotBeforeUpdate(previous: TranscriptScrollBoundaryProps): TranscriptScrollSnapshot | null {
-    const { scrollRef, rows, eventKeys, bridged, layout } = this.props;
+    const { scrollRef, rows, eventKeys, bridgeGeneration, layout } = this.props;
     const scroll = scrollRef.current;
     if (!scroll || !previous.rows.length || (previous.rows === rows && previous.layout === layout)) return null;
     const priorTail = previous.eventKeys[previous.eventKeys.length - 1];
     const tailIndex = priorTail === undefined ? -1 : eventKeys.indexOf(priorTail);
     const tail = eventKeys[eventKeys.length - 1];
     const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 1;
-    const followTail = previous.bridged === bridged && atBottom && tailIndex >= 0 && tailIndex < eventKeys.length - 1
+    const followTail = previous.bridgeGeneration === bridgeGeneration && atBottom && tailIndex >= 0 && tailIndex < eventKeys.length - 1
       && tail !== undefined && !previous.eventKeys.includes(tail);
     return { anchor: captureChatScrollAnchor(scroll), followTail };
   }

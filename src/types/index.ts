@@ -122,7 +122,8 @@ export interface ChatPresentationV1 {
     legacy_turns: ChatLegacyTurn[];
     detail: ChatStepDetail | null;
     /** Producer-owned recent continuity, without detail, Older, or renewal authority. */
-    preview_bridge?: { admission_id: string; canonical_head: string } | null;
+    preview_bridge?: { admission_id: string; canonical_head: string;
+      replaces?: { admission_id: string; generation: string } } | null;
 }
 
 export type ChatTurnStatus = "running" | "completed" | "action_required" | "failed" | "cancelled" | "incomplete" | "unknown";

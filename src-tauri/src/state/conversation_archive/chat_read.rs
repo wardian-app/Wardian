@@ -1103,6 +1103,7 @@ impl ProjectionOwner {
                 &runtime,
                 &admission,
                 &mut page,
+                request.revision.as_deref(),
                 ordinary_recent,
             ) {
                 Err(error) if error.kind() == io::ErrorKind::InvalidData => {
@@ -1351,6 +1352,7 @@ impl ProjectionOwner {
                                 preview_bridge::Mode::First
                             },
                             hints: hints.as_deref().filter(|ids| !ids.is_empty()),
+                            revision: revision.as_deref(),
                         },
                     )
                 };
@@ -1360,7 +1362,7 @@ impl ProjectionOwner {
                 let lost_binding = binding.is_some()
                     && handoff
                         .as_ref()
-                        .is_err_and(|error| error.kind() != io::ErrorKind::WouldBlock);
+                        .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData);
                 let handoff = handoff.ok().flatten();
                 // Validate again after copying the bounded cohort. The final
                 // cache check linearizes this response against privacy guards
@@ -1497,7 +1499,7 @@ impl ProjectionOwner {
                     page.unchanged = false;
                     page.revision = format!("{prefix}retired");
                     page.progress = "source_changed".into();
-                } else if binding.is_some() && (requested_binding.is_some() || lost_binding) {
+                } else if binding.is_some() && lost_binding {
                     // A lost proof retires the admission. Later publications
                     // need a new receipt and cannot resurrect this handoff.
                     current.slots.retain(|slot| {
@@ -1509,6 +1511,10 @@ impl ProjectionOwner {
                     page.unchanged = false;
                     page.revision = format!("{prefix}retired");
                     page.progress = "source_changed".into();
+                } else if requested_binding.is_some() && binding.is_some() {
+                    // The ordinary reader can hold the authenticated lifetime
+                    // while this producer window lacks a replacement proof.
+                    return Ok(None);
                 } else if !refresh_legacy
                     && binding.is_none()
                     && canonical.as_ref().is_ok_and(|(proof, _)| proof.is_some())

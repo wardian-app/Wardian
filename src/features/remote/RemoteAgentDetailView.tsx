@@ -26,7 +26,7 @@ import {
 } from "../chat/chatPresentation";
 import { chatTranscriptRowKey } from "../chat/chatTurns";
 import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
-import { useChatPresentationScope } from "../chat/chatPreviewIdentity";
+import { qualifiedChatPreviewBridge, useChatPresentationScope } from "../chat/chatPreviewIdentity";
 import { useChatHandoffAnchor } from "../chat/chatScrollAnchor";
 import { RemoteAttachmentComposer } from "./RemoteAttachmentComposer";
 import { RemoteAgentActions } from "./RemoteAgentActions";
@@ -476,6 +476,8 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const sendPromptToActiveAgent = useRemoteStore((state) => state.sendPromptToActiveAgent);
   const contentEndRef = useRef<HTMLDivElement | null>(null);
   const lastVisibleChatEventIdRef = useRef<string | undefined>(undefined);
+  const chatGeneration = scopePage?.generation;
+  const lastChatScope = useRef<{ presentation: string; generation: typeof chatGeneration } | null>(null);
 
   const visibleEvents = useMemo(
     () =>
@@ -491,10 +493,14 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
     const lastVisibleChatEventId = lastEvent?.metadata.chat_display_key as string | undefined ?? lastEvent?.id;
     const shouldScroll = activeAgentViewMode === "terminal" || lastVisibleChatEventId !== lastVisibleChatEventIdRef.current;
     lastVisibleChatEventIdRef.current = lastVisibleChatEventId;
+    const previous = lastChatScope.current;
+    lastChatScope.current = { presentation: presentationScope, generation: chatGeneration };
+    if (activeAgentViewMode === "chat" && previous?.presentation === presentationScope
+      && previous.generation != null && chatGeneration != null && previous.generation !== chatGeneration) return;
     const scroll = contentEndRef.current?.closest("section");
     const nearBottom = scroll ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 48 : true;
     if (shouldScroll && (activeAgentViewMode === "terminal" || nearBottom)) contentEndRef.current?.scrollIntoView({ block: "end" });
-  }, [activeAgentViewMode, visibleEvents]);
+  }, [activeAgentViewMode, visibleEvents, chatGeneration, presentationScope]);
 
   const refresh = () => {
     if (activeAgentViewMode === "chat") {
@@ -1066,7 +1072,8 @@ function ChatPane({
         readingPresentation.boundaries, hasOlder),
     [hasOlder, visibleEvents, committedPresentation, readingPresentation.boundaries],
   );
-  useChatHandoffAnchor(scrollRef, presentationScope, JSON.stringify(rows.map((row) => [row.kind, chatTranscriptRowKey(row)])));
+  useChatHandoffAnchor(scrollRef, presentationScope, JSON.stringify(rows.map((row) => [row.kind, chatTranscriptRowKey(row)])),
+    qualifiedChatPreviewBridge(presentationPage) ? presentationPage?.generation : undefined);
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
   return (
     <section className="chat-transcript-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}

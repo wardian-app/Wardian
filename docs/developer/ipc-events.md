@@ -346,6 +346,15 @@ fresh opens under that admission retain the same unresolved extension gaps and
 sticky overflow state. Re-evaluation requires admission turnover. Display
 limits and backing hints remain reader-specific and grant no extra authority.
 
+A bound reader keeps its current window through same-conversation, same-source-epoch
+indexing or pending responses without an admission. The pending response cannot
+replace the displayed revision or grant new capabilities. When an ordinary
+read proves the replacement window under the new archive generation, its
+`preview_bridge.replaces` names the prior admission and generation. Exact
+aliases accompany that revision. Readers apply the replacement in producer
+order through the same presentation lifetime and preserve the visible anchor.
+Source, privacy and ownership retirement still retract the binding.
+
 #### Versioned canonical turn presentation
 
 `AgentChatPage.presentation` is an optional version envelope for producer-owned

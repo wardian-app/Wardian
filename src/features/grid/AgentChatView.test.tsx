@@ -14,7 +14,7 @@ import type { WorkbenchNavigationService } from "../workbench/navigationService"
 import { AgentChatView } from "./AgentChatView";
 import { chatPageInvokeFixture } from "../../test/chatPageTestFixture";
 import { actualProducerBatch, actualProducerPage } from "../../test/chatRevalidationTestFixture";
-import { coldSourcePreviewIdentityFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
+import { coldSourcePreviewIdentityFixture, previewGenerationRolloverFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
 
 const markdownWork = vi.hoisted(() => vi.fn());
 vi.mock("react-markdown", async (importOriginal) => {
@@ -180,6 +180,57 @@ describe("AgentChatView", () => {
       }
       expect(screen.getByRole("button", { name: /Worked.*4 steps/ })).toHaveAttribute("aria-expanded", "true");
       expect(screen.getByText("All 42 tests passed.")).toBeVisible();
+    } finally {
+      geometry.mockRestore();
+      view.unmount();
+    }
+  });
+
+  it("holds the bound transcript and anchor through two indexing reads and a successor admission", async () => {
+    vi.useFakeTimers();
+    const { legacy, provisional, pending, replacement, loss } = previewGenerationRolloverFixture("agent-1");
+    let current = legacy;
+    invokeMock.mockImplementation((command) => Promise.resolve(command === "load_agent_chat_page" ? current : []));
+    const view = render(<AgentChatView sessionId="agent-1" provider="codex" refreshIntervalMs={100} readOnly deferModelDiscovery />);
+    const geometry = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+    const poll = async (page: AgentChatPage) => {
+      current = page;
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    };
+    try {
+      await act(async () => {});
+      expect(screen.queryByTestId("chat-committed-turn")).toBeNull();
+      expect(screen.getByTestId("chat-work-group")).toBeVisible();
+
+      await poll(provisional);
+      const section = screen.getByTestId("chat-committed-turn");
+      const anchorKey = legacy.events[0].id;
+      const scroll = screen.getByTestId("agent-chat-scroll-region");
+      Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1_200 });
+      Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 200 });
+      geometry.mockImplementation(function (this: HTMLElement) {
+        if (this === scroll) return new DOMRect(0, 0, 300, 200);
+        if (this.dataset.chatAnchorKey === anchorKey) {
+          const documentTop = scroll.dataset.chatPageScope?.includes("successor-bridge") ? 410 : 370;
+          return new DOMRect(0, documentTop - scroll.scrollTop, 300, 40);
+        }
+        return new DOMRect();
+      });
+      scroll.scrollTop = 300;
+      fireEvent.scroll(scroll);
+
+      for (const page of [...pending, replacement]) {
+        await poll(page);
+        expect(screen.getAllByTestId("chat-committed-turn")).toEqual([section]);
+        expect(screen.queryByTestId("chat-work-group")).toBeNull();
+        const anchor = section.querySelector("[data-chat-anchor-key]");
+        expect(anchor).toHaveAttribute("data-chat-anchor-key", anchorKey);
+        expect(anchor?.getBoundingClientRect().top).toBe(70);
+        expect(scroll.scrollTop).toBe(page === replacement ? 340 : 300);
+      }
+      expect(scroll.getAttribute("data-chat-page-scope")).toContain("successor-bridge");
+      await poll(loss);
+      expect(screen.queryByTestId("chat-committed-turn")).toBeNull();
     } finally {
       geometry.mockRestore();
       view.unmount();

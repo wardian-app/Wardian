@@ -46,6 +46,7 @@ fn preview_bridge_and_running_prefix_cannot_grant_final_authority() {
     value.preview_bridge = Some(ChatPreviewBridge {
         admission_id: "recent-owner".into(),
         canonical_head: "a".repeat(64),
+        replaces: None,
     });
     value.turns[0].prefix_attributed = true;
     value.turns[0].membership_complete = false;

@@ -6,7 +6,7 @@ import { useRemoteStore } from "./useRemoteStore";
 import { actualEmptyOwnedCapture, actualProducerBatch, actualProducerPage } from "../../test/chatRevalidationTestFixture";
 import { applyChatPage } from "../chat/chatReadState";
 import { committedChatFixture } from "../../test/committedChatFixture";
-import { canonicalOlderIdentityFixture, coldSourcePreviewIdentityFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
+import { canonicalOlderIdentityFixture, coldSourcePreviewIdentityFixture, previewGenerationRolloverFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
 import { chatEventDisplayKey } from "../chat/chatEventIdentity";
 
 type StatusStreamHandlers = Parameters<typeof remoteClient.openStatusStream>[0];
@@ -164,6 +164,73 @@ describe("useRemoteStore watchlists", () => {
       }
     }
     expect(useRemoteStore.getState().chatEvents).toHaveLength(closed.events.length);
+  });
+
+  it("holds the bound remote window through both indexing replies, then atomically replaces or retracts it", async () => {
+    vi.useFakeTimers();
+    const { legacy, provisional, pending, replacement, loss } = previewGenerationRolloverFixture("agent-1");
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: legacy.events, chatPage: legacy, chatPresentationPage: legacy, chatNextBefore: null, chatHasOlder: false });
+    const loadPage = vi.mocked(remoteClient.loadAgentChatPage);
+    loadPage.mockResolvedValueOnce(provisional);
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    const admitted = useRemoteStore.getState();
+    const displayKeys = admitted.chatEvents.map(chatEventDisplayKey);
+    expect(admitted.chatPage).toEqual(provisional);
+    expect(admitted.chatPresentationPage).toBe(provisional);
+    expect(displayKeys).toEqual(legacy.events.map((event) => event.id));
+
+    const publications: Array<ReturnType<typeof useRemoteStore.getState>> = [];
+    let previous = admitted;
+    const unsubscribe = useRemoteStore.subscribe((state) => {
+      if (state.chatPage !== previous.chatPage || state.chatPresentationPage !== previous.chatPresentationPage
+        || state.chatEvents !== previous.chatEvents) publications.push(state);
+      previous = state;
+    });
+    try {
+      for (const page of pending) {
+        loadPage.mockResolvedValueOnce(page);
+        await useRemoteStore.getState().refreshActiveAgentChat();
+        const held = useRemoteStore.getState();
+        expect(held.chatPage).toBe(admitted.chatPage);
+        expect(held.chatPresentationPage).toBe(admitted.chatPresentationPage);
+        expect(held.chatEvents).toBe(admitted.chatEvents);
+        expect(held.chatError).toBe("");
+        expect(loadPage.mock.calls.at(-1)?.slice(0, 3)).toEqual(["agent-1", undefined, provisional.revision]);
+        expect(publications).toHaveLength(0);
+      }
+
+      loadPage.mockResolvedValueOnce(replacement);
+      await useRemoteStore.getState().refreshActiveAgentChat();
+      const replaced = useRemoteStore.getState();
+      expect(replaced.chatPage).toEqual(replacement);
+      expect(replaced.chatPresentationPage).toBe(replacement);
+      expect(replaced.chatEvents.map((event) => event.id)).toEqual(replacement.events.map((event) => event.id));
+      expect(replaced.chatEvents.map(chatEventDisplayKey)).toEqual(displayKeys);
+      expect(replaced.chatError).toBe("");
+      expect(publications).toHaveLength(1);
+      expect(publications[0].chatPage).toBe(replaced.chatPage);
+      expect(publications[0].chatPresentationPage).toBe(replaced.chatPresentationPage);
+      expect(publications[0].chatEvents).toBe(replaced.chatEvents);
+
+      loadPage.mockResolvedValueOnce(loss);
+      await useRemoteStore.getState().refreshActiveAgentChat();
+      const retracted = useRemoteStore.getState();
+      expect(retracted.chatPage).toEqual(loss);
+      expect(retracted.chatPresentationPage).toBe(loss);
+      expect(retracted.chatPresentationPage?.presentation).toBeUndefined();
+      expect(retracted.chatPage?.recent_admission).toBeNull();
+      expect(retracted.chatEvents.map((event) => event.id)).toEqual(loss.events.map((event) => event.id));
+      expect(retracted.chatEvents.map(chatEventDisplayKey)).not.toEqual(displayKeys);
+      expect(retracted.chatError).toBe("");
+      expect(publications).toHaveLength(2);
+      expect(publications[1].chatPage).toBe(retracted.chatPage);
+      expect(publications[1].chatPresentationPage).toBe(retracted.chatPresentationPage);
+      expect(publications[1].chatEvents).toBe(retracted.chatEvents);
+      expect(loadPage).toHaveBeenCalledTimes(5);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("keeps the desktop connected when a successful older page cannot establish source scope", async () => {

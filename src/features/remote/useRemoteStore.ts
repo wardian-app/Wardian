@@ -12,7 +12,7 @@ import type {
 } from "../../types";
 import { chatPresentationV1 } from "../chat/committedChatPresentation";
 import { isUnscopedSourceLegacy, previewBackingIdsForWindow } from "../chat/chatPreviewBacking";
-import { qualifiedChatPreviewBridge } from "../chat/chatPreviewIdentity";
+import { holdsBoundChatWindow, qualifiedChatPreviewBridge } from "../chat/chatPreviewIdentity";
 import {
   addChatSubmission,
   applyChatPage,
@@ -1236,6 +1236,10 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         browsingOlder ? undefined : previewBackingIdsForWindow(previous, startingEvents));
       if (requestSerial !== chatRefreshRequestSerial || requestedWindow !== chatWindowRequestSerial
         || get().activeAgentId !== activeAgentId || page.session_id !== activeAgentId) return;
+      if (holdsBoundChatWindow(previous, page, startingEvents)) {
+        set({ chatLoading: false, chatError: "" });
+        return;
+      }
       const scopeRelation = chatPageScopeRelation(previous, page, startingEvents,
         before.chatNextBefore !== null || chatOlderCursor !== null || browsingOlder
           || (previous !== null && previous.next_before !== null));
@@ -1271,7 +1275,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       }
       let patchedEvents: AgentChatEvent[] | null = null;
       if (previous && (scopeRelation === "same" || scopeRelation === "canonical"
-        || (scopeRelation === "bridge" && previous.recent_admission == null && page.recent_admission == null)) && browsingOlder) {
+        || (scopeRelation === "bridge" && previous.generation === page.generation
+          && previous.recent_admission == null && page.recent_admission == null)) && browsingOlder) {
         if (page.reset && page.events.length > 80) throw new Error("Recent snapshot exceeds the metadata page limit");
         patchedEvents = patchLoadedRemoteChatMembers(startingEvents, page, scopeRelation === "canonical");
         if (chatNeedsRevalidation(previous, page, true)) {

@@ -271,6 +271,12 @@ other readers. Reopening while the admission lives retains unresolved gaps and
 sticky overflow state. A new admission re-evaluates the source. Reader-specific
 display limits and hints do not reset that shared state.
 
+During a same-source archive generation change, a no-admission pending
+response leaves the bound transcript visible. The successor revision names the
+prior admission and generation in `preview_bridge.replaces` and carries the
+producer's aliases. The client applies the one revision in place and preserves
+its anchor. This continuity grants no Older, detail or row-revalidation authority.
+
 The existing projection owner keeps the recent slot separately from slow
 archive work. Normal selection only coalesces bounded producer work; source
 IO runs off the request thread. Source, privacy or runtime changes invalidate
