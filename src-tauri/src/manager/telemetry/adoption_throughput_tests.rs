@@ -167,7 +167,7 @@ async fn adoption_throughput_synthetic_fixed_range() {
         .conversation_archive
         .chat_projection
         .has_pending_capture_work(&session));
-    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.clone(),
         None,
@@ -192,7 +192,7 @@ async fn adoption_throughput_synthetic_fixed_range() {
     let detail_ref = owned.metadata["chat_detail_ref"]
         .as_str()
         .expect("the imported body must have a normal detail reference");
-    let detail_page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+    let detail_page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.clone(),
         None,
