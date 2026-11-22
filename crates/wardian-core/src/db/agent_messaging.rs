@@ -14,15 +14,17 @@ type Result<T> = std::result::Result<T, Error>;
 mod provider_claims;
 mod task_turns;
 pub use provider_claims::{
-    claim_information, claim_reply_continuation, claim_wakeable_information, information_highwater,
-    message_context, next_pending_task_id, owns_claim, pending_information,
-    pending_reply_continuations, pending_wakeable_information, release_before_write,
-    reply_continuation_is_pending, set_reply_continuation_state, stale_wakeable_information,
+    claim_information, claim_reply_continuation, claim_wakeable_information,
+    fence_conversation_deliveries, information_highwater, message_context, next_pending_task_id,
+    owns_claim, pending_information, pending_reply_continuations, pending_wakeable_information,
+    release_before_write, reply_continuation_is_pending, set_reply_continuation_state,
+    stale_wakeable_information,
 };
 pub use task_turns::{
     abandon_task_turn_observations, bind_task_turn, mark_task_turn_uncertain,
-    pending_task_turn_bindings, publish_task_turn_outcome, record_task_turn_outcome,
-    recover_task_turn_outcomes, TaskTurnBinding,
+    pending_task_turn_bindings, publish_task_turn_outcome, record_task_delivery_receipt,
+    record_task_turn_outcome, recover_task_turn_outcomes, task_turn_information,
+    TaskDeliveryReceipt, TaskReceiptSource, TaskTurnBinding,
 };
 
 /// Availability is append-only and never backfilled from legacy interactions.

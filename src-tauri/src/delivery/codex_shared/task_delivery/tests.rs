@@ -72,6 +72,66 @@ async fn assert_no_write(socket: &mut Peer) {
     );
 }
 
+fn assert_idle_task_input(params: &Value, context: &str) {
+    let mut routing: Value = serde_json::from_str(context).unwrap();
+    assert_eq!(params["threadId"], "owned");
+    assert_eq!(params["clientUserMessageId"], routing["request_id"]);
+    assert_eq!(
+        params["input"],
+        json!([{"type":"text", "text":routing["body"]}])
+    );
+    assert!(params.get("toolOutput").is_none());
+    routing.as_object_mut().unwrap().remove("body");
+    routing
+        .as_object_mut()
+        .unwrap()
+        .remove("pending_information");
+    let contexts = params["additionalContext"].as_object().unwrap();
+    assert_eq!(contexts.len(), 1);
+    let (key, context) = contexts.iter().next().unwrap();
+    assert!(uuid::Uuid::parse_str(key).is_ok());
+    assert_eq!(context["kind"], "application");
+    assert_eq!(
+        serde_json::from_str::<Value>(context["value"].as_str().unwrap()).unwrap(),
+        routing
+    );
+}
+
+fn native_user_item() -> Value {
+    // Independently supplied native source evidence, not an outgoing-RPC echo.
+    let canonical: Value = serde_json::from_str(&frame()).unwrap();
+    json!({"type":"userMessage", "id":"native-user-item", "clientId":"task-id", "content":[
+        {"type":"text", "text":canonical["body"]}
+    ]})
+}
+
+#[test]
+fn application_routing_excludes_task_and_carried_peer_bodies() {
+    let mut canonical: Value = serde_json::from_str(&frame()).unwrap();
+    canonical["pending_information"] =
+        json!([serde_json::from_str::<Value>(&informational_frame("fyi")).unwrap()]);
+    let canonical: AgentMessageContext = serde_json::from_value(canonical).unwrap();
+    let routing = routing_context(&canonical).unwrap();
+    let context = routing.as_object().unwrap().values().next().unwrap();
+    let value: Value = serde_json::from_str(context["value"].as_str().unwrap()).unwrap();
+    assert!(value.get("body").is_none());
+    assert!(value.get("pending_information").is_none());
+    assert_eq!(value["kind"], "task");
+    assert_eq!(value["sender"], "peer-sender");
+    assert_eq!(value["request_id"], "task-id");
+    assert!(!routing.to_string().contains("FYI: the review is ready"));
+}
+
+async fn reader_barrier(client: &CodexSharedClient, socket: &mut Peer) {
+    let request = client.request("test/reader-barrier", json!({}));
+    let provider = async {
+        let request = receive(socket).await;
+        send(socket, json!({"id":request["id"], "result":{}})).await;
+    };
+    let (result, ()) = tokio::join!(request, provider);
+    result.unwrap();
+}
+
 fn active(client: &CodexSharedClient) {
     client.observation.send_modify(|state| {
         state.observe(&json!({
@@ -93,6 +153,7 @@ async fn exact_active_steer_preserves_body_and_host_only_routing() {
         let params = &request["params"];
         assert_eq!(params["threadId"], "owned");
         assert_eq!(params["expectedTurnId"], "active");
+        assert_eq!(params["clientUserMessageId"], "task-id");
         assert_eq!(
             params["input"],
             json!([{"type":"text","text":expected["body"]}])
@@ -155,7 +216,7 @@ async fn exact_active_steer_preserves_body_and_host_only_routing() {
 }
 
 #[tokio::test]
-async fn idle_start_keeps_tool_output_for_older_versions_and_cached_terminal_status() {
+async fn idle_task_uses_literal_input_for_supported_versions_and_keeps_terminal_status() {
     for (version, terminal) in [
         ("0.154.0", "completed"),
         ("0.154.0-alpha.6", "interrupted"),
@@ -167,12 +228,7 @@ async fn idle_start_keeps_tool_output_for_older_versions_and_cached_terminal_sta
         let provider = async {
             let request = receive(&mut socket).await;
             assert_eq!(request["method"], "turn/start");
-            assert_eq!(
-                request["params"],
-                json!({"threadId":"owned","input":[],"toolOutput":{
-                    "name":"wardian_task_delivery","namespace":"wardian","output":context
-                }})
-            );
+            assert_idle_task_input(&request["params"], &context);
             // A completed item and turn are sufficient exact evidence even if
             // turn/started has not arrived before the acknowledgement.
             send(&mut socket, json!({"method":"item/completed","params":{
@@ -199,6 +255,10 @@ async fn idle_start_keeps_tool_output_for_older_versions_and_cached_terminal_sta
                 .await
                 .unwrap(),
             (terminal.into(), "legacy final".into())
+        );
+        assert!(
+            client.task_delivery_receipt("task-id", "new").is_none(),
+            "a bare ack and final answer are not accepted-input proof"
         );
         client.close().await;
     }
@@ -231,6 +291,221 @@ async fn idle_information_wake_starts_one_turn_as_inbox_context_without_task_rep
     );
     assert_eq!(receipt.message_id.as_deref(), Some("message-id"));
     assert_no_write(&mut socket).await;
+    client.close().await;
+}
+
+#[tokio::test]
+async fn exact_native_user_input_receipts_cover_early_late_and_ack_items() {
+    use sha2::{Digest, Sha256};
+    use wardian_core::db::agent_messaging::TaskReceiptSource;
+
+    for evidence in ["started", "completed", "ack-items", "late"] {
+        let (client, mut socket) = connected("0.154.0", json!({"type":"idle"})).await;
+        let context = frame();
+        let provider = async {
+            let request = receive(&mut socket).await;
+            assert_idle_task_input(&request["params"], &context);
+            assert!(client.task_delivery_receipt("task-id", "new").is_none());
+            if matches!(evidence, "started" | "completed") {
+                let event = json!({"method":if evidence == "completed" {"item/completed"} else {"item/started"}, "params":{
+                    "threadId":"owned", "turnId":"new", "item":native_user_item()
+                }});
+                send(&mut socket, event).await;
+            }
+            let mut result = json!({"turn":{"id":"new"}});
+            if evidence == "ack-items" {
+                result["turn"]["items"] = json!([native_user_item()]);
+            }
+            send(&mut socket, json!({"id":request["id"], "result":result})).await;
+        };
+        let (result, ()) = tokio::join!(client.followup("task-id", &context), provider);
+        result.unwrap();
+        if evidence == "late" {
+            assert!(client.task_delivery_receipt("task-id", "new").is_none());
+            send(
+                &mut socket,
+                json!({"method":"item/completed", "params":{
+                    "threadId":"owned", "turnId":"new", "item":native_user_item()
+                }}),
+            )
+            .await;
+            reader_barrier(&client, &mut socket).await;
+        }
+        assert!(client.task_delivery_receipt("other-task", "new").is_none());
+        assert!(client
+            .task_delivery_receipt("task-id", "other-turn")
+            .is_none());
+        let receipt = client
+            .task_delivery_receipt("task-id", "new")
+            .expect(evidence);
+        assert_eq!(receipt.generation, 7);
+        assert_eq!(receipt.provider_session_id, "owned");
+        assert_eq!(receipt.provider_turn_id, "new");
+        let canonical: Value = serde_json::from_str(&context).unwrap();
+        let expected_hash = format!(
+            "{:x}",
+            Sha256::digest(canonical["body"].as_str().unwrap().as_bytes())
+        );
+        assert!(
+            matches!(receipt.source, TaskReceiptSource::AcceptedUserMessage { source_id, task_body_sha256 }
+            if source_id == "native-user-item" && task_body_sha256 == expected_hash)
+        );
+        send(
+            &mut socket,
+            json!({"method":"turn/completed", "params":{
+                "threadId":"owned", "turn":{"id":"new", "status":"completed"}
+            }}),
+        )
+        .await;
+        reader_barrier(&client, &mut socket).await;
+        client.close().await;
+        // A closed connection cannot erase already observed terminal input proof.
+        assert!(client.task_delivery_receipt("task-id", "new").is_some());
+        assert!(client.task_delivery_receipt("task-id", "new").is_none());
+    }
+}
+
+#[tokio::test]
+async fn bare_ack_unidentified_foreign_and_wrong_body_items_never_authorize() {
+    let (client, mut socket) = connected("0.159.2", json!({"type":"idle"})).await;
+    let context = frame();
+    let provider = async {
+        let request = receive(&mut socket).await;
+        send(
+            &mut socket,
+            json!({"id":request["id"], "result":{"turn":{"id":"new"}}}),
+        )
+        .await;
+    };
+    let (result, ()) = tokio::join!(client.followup("task-id", &context), provider);
+    result.unwrap();
+    for (thread, turn, request) in [
+        ("owned", "new", Value::Null),
+        ("foreign", "new", json!("task-id")),
+        ("owned", "foreign", json!("task-id")),
+        ("owned", "new", json!("another-task")),
+    ] {
+        let mut item = native_user_item();
+        item["clientId"] = request;
+        send(
+            &mut socket,
+            json!({"method":"item/completed", "params":{
+                "threadId":thread, "turnId":turn, "item":item
+            }}),
+        )
+        .await;
+    }
+    let mut wrong_body = native_user_item();
+    wrong_body["content"][0]["text"] = json!("different input");
+    send(
+        &mut socket,
+        json!({"method":"item/completed", "params":{
+            "threadId":"owned", "turnId":"new", "item":wrong_body
+        }}),
+    )
+    .await;
+    reader_barrier(&client, &mut socket).await;
+    assert!(client.task_delivery_receipt("task-id", "new").is_none());
+    client.close().await;
+}
+
+#[tokio::test]
+async fn same_body_steered_tasks_require_distinct_native_client_ids() {
+    let (client, mut socket) = connected("0.159.2", json!({"type":"active"})).await;
+    active(&client);
+    for id in ["task-one", "task-two"] {
+        let mut canonical: Value = serde_json::from_str(&frame()).unwrap();
+        canonical["interaction_id"] = json!(id);
+        canonical["request_id"] = json!(id);
+        let context = canonical.to_string();
+        let provider = async {
+            let request = receive(&mut socket).await;
+            assert_eq!(request["method"], "turn/steer");
+            assert_eq!(request["params"]["clientUserMessageId"], id);
+            assert_eq!(request["params"]["expectedTurnId"], "active");
+            send(
+                &mut socket,
+                json!({"id":request["id"], "result":{"turnId":"active"}}),
+            )
+            .await;
+        };
+        let (result, ()) = tokio::join!(client.followup(id, &context), provider);
+        result.unwrap();
+    }
+    let mut unidentified = native_user_item();
+    unidentified["clientId"] = Value::Null;
+    send(
+        &mut socket,
+        json!({"method":"item/started", "params":{
+            "threadId":"owned", "turnId":"active", "item":unidentified
+        }}),
+    )
+    .await;
+    reader_barrier(&client, &mut socket).await;
+    assert!(client.task_delivery_receipt("task-one", "active").is_none());
+    assert!(client.task_delivery_receipt("task-two", "active").is_none());
+
+    let mut exact = native_user_item();
+    exact["clientId"] = json!("task-one");
+    send(
+        &mut socket,
+        json!({"method":"item/completed", "params":{
+            "threadId":"owned", "turnId":"active", "item":exact
+        }}),
+    )
+    .await;
+    reader_barrier(&client, &mut socket).await;
+    assert!(client.task_delivery_receipt("task-one", "active").is_some());
+    assert!(
+        client.task_delivery_receipt("task-two", "active").is_none(),
+        "one native item cannot authorize a second identical-body task in the same turn"
+    );
+    client.close().await;
+}
+
+#[tokio::test]
+async fn informational_parent_is_preserved_without_task_or_reply_authority() {
+    let (client, mut socket) = connected("0.159.2", json!({"type":"idle"})).await;
+    for (kind, parent, request_id, status, name) in [
+        (
+            "message",
+            json!("original-task"),
+            Value::Null,
+            Value::Null,
+            "wardian_inbox_delivery",
+        ),
+        (
+            "reply",
+            json!("original-task"),
+            json!("original-task"),
+            json!("done"),
+            "wardian_reply_continuation",
+        ),
+    ] {
+        let mut frame: Value = serde_json::from_str(&informational_frame("message-id")).unwrap();
+        frame["kind"] = json!(kind);
+        frame["parent_interaction_id"] = parent;
+        frame["request_id"] = request_id;
+        frame["reply_status"] = status;
+        let context = frame.to_string();
+        let provider = async {
+            let request = receive(&mut socket).await;
+            assert_eq!(request["params"]["input"], json!([]));
+            assert_eq!(request["params"]["toolOutput"]["name"], name);
+            assert_eq!(request["params"]["toolOutput"]["output"], context);
+            assert!(request["params"].get("clientUserMessageId").is_none());
+            send(
+                &mut socket,
+                json!({"id":request["id"], "result":{"turn":{"id":"information"}}}),
+            )
+            .await;
+        };
+        let (result, ()) = tokio::join!(client.followup("message-id", &context), provider);
+        result.unwrap();
+        assert!(client
+            .task_delivery_receipt("message-id", "information")
+            .is_none());
+    }
     client.close().await;
 }
 

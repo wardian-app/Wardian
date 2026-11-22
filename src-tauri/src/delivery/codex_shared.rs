@@ -31,6 +31,7 @@ mod proxy;
 mod startup_tests;
 mod stderr_capture;
 mod task_delivery;
+mod task_receipts;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod version;
@@ -193,6 +194,7 @@ pub(crate) struct Observation {
     idle_reconciled_turn: Option<String>,
     completed_turn: Option<(String, String)>,
     turn_answers: HashMap<String, final_items::CompletedMessages>,
+    task_receipts: task_receipts::TaskReceipts,
     closed: bool,
     stopped: bool,
     completions: completion::TurnCompletions,
@@ -302,6 +304,7 @@ impl Observation {
         if params["threadId"].as_str() != self.thread_id.as_deref() || self.thread_id.is_none() {
             return;
         }
+        self.task_receipts.observe(value);
         if value["method"] == "thread/status/changed" {
             if let Some(status) = thread_runtime_status(&params["status"]) {
                 self.set_thread_runtime_status(status);
@@ -903,6 +906,9 @@ impl CodexSharedClient {
                 }
                 None => None,
             };
+            self.observation.send_modify(|state| {
+                state.task_receipts.issue(&id, method, &payload["params"]);
+            });
             writer
                 .send(Message::Text(payload.to_string().into()))
                 .await
@@ -1482,8 +1488,11 @@ mod tests {
                 let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
                 let request: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
                 assert_eq!(request["method"], "turn/start");
-                assert_eq!(request["params"]["input"], json!([]));
-                assert_eq!(request["params"]["toolOutput"], json!({"name":"wardian_task_delivery","namespace":"wardian","output":expected_frame}));
+                let expected: Value = serde_json::from_str(&expected_frame).unwrap();
+                assert_eq!(request["params"]["clientUserMessageId"], "task-id");
+                assert_eq!(request["params"]["input"], json!([{"type":"text", "text":expected["body"]}]));
+                assert!(request["params"].get("toolOutput").is_none());
+                assert!(request["params"]["additionalContext"].is_object());
                 socket.send(Message::Text(json!({"id":request["id"],"result":{"turn":{"id":"late","status":"inProgress"}}}).to_string().into())).await.unwrap();
                 advance_rx.await.unwrap();
                 for value in [

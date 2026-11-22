@@ -138,6 +138,7 @@ pub(crate) async fn stop_fixture(
             model_override: None,
             permission_args: Vec::new(),
             expected_resume_id: Some(thread_id.to_owned()),
+            cleared_provider_sessions: Vec::new(),
             codex_home: directory.to_path_buf(),
             generation,
         },

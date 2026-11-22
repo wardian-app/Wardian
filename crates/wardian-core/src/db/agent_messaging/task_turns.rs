@@ -1,6 +1,33 @@
 //! Exact scheduler admissions and a durable terminal outbox. Never replay provider work.
 use super::*;
 
+/// Host observation of accepted task input, separate from a turn-start acknowledgement.
+/// The native adapter assembles this from existing provider input/source records.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TaskDeliveryReceipt {
+    pub generation: u64,
+    pub provider_session_id: String,
+    pub provider_turn_id: String,
+    pub source: TaskReceiptSource,
+}
+
+/// Only literal accepted input or an answer to an exactly issued current call
+/// can authorize automatic completion. Synthetic, uncorrelated outputs cannot.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TaskReceiptSource {
+    AcceptedUserMessage {
+        source_id: String,
+        task_body_sha256: String,
+    },
+    ToolCallOutput {
+        call_id: String,
+        issued_generation: u64,
+        issued_thread_id: String,
+        task_body_sha256: String,
+    },
+}
+
 /// Durable identity of one scheduler task admitted to an exact native Codex turn.
 /// Multiple requests may share a turn; each retains its own claim and requester.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,7 +60,104 @@ pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
            OR (settlement IN ('outcome_recorded','published') AND terminal_status IS NOT NULL AND terminal_body IS NOT NULL)));
         CREATE INDEX IF NOT EXISTS agent_message_task_turn_settlement
         ON agent_message_task_turns(settlement);"
-    ))
+    ))?;
+    let has_receipt = conn
+        .prepare("PRAGMA table_info(agent_message_task_turns)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|column| column == "delivery_receipt");
+    if !has_receipt {
+        // Historical bindings gain no authority during migration.
+        conn.execute_batch(
+            "ALTER TABLE agent_message_task_turns ADD COLUMN delivery_receipt TEXT",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_receipt(
+    conn: &Connection,
+    binding: &TaskTurnBinding,
+    receipt: &TaskDeliveryReceipt,
+) -> Result<()> {
+    let task = load(conn, &binding.request_id)?;
+    let InteractionBodyRef::Inline { body } = task.body_ref else {
+        return Err(Error::new(
+            "invalid_task",
+            "Task receipt requires canonical inline input.",
+        ));
+    };
+    let expected = format!("{:x}", Sha256::digest(body.as_bytes()));
+    let valid_source = match &receipt.source {
+        TaskReceiptSource::AcceptedUserMessage {
+            source_id,
+            task_body_sha256,
+        } => !source_id.trim().is_empty() && task_body_sha256 == &expected,
+        TaskReceiptSource::ToolCallOutput {
+            call_id,
+            issued_generation,
+            issued_thread_id,
+            task_body_sha256,
+        } => {
+            !call_id.trim().is_empty()
+                && *issued_generation == binding.generation
+                && issued_thread_id == &binding.provider_session_id
+                && task_body_sha256 == &expected
+        }
+    };
+    if receipt.generation != binding.generation
+        || receipt.provider_session_id != binding.provider_session_id
+        || receipt.provider_turn_id != binding.provider_turn_id
+        || !valid_source
+    {
+        return Err(Error::new(
+            "invalid_delivery_receipt",
+            "Task input receipt does not match this task, generation, thread and turn.",
+        ));
+    }
+    Ok(())
+}
+
+/// Persist a native adapter's exact accepted-input observation. Callers must
+/// prove source identity and submitted bytes before constructing this receipt.
+/// Repeated observations are idempotent; conflicting evidence fails closed.
+pub fn record_task_delivery_receipt(
+    conn: &Connection,
+    binding: &TaskTurnBinding,
+    receipt: &TaskDeliveryReceipt,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let state = settlement(&tx, binding)?;
+    validate_receipt(&tx, binding, receipt)?;
+    let value = serde_json::to_string(receipt)
+        .map_err(|e| Error::new("invalid_delivery_receipt", e.to_string()))?;
+    let previous: Option<String> = tx.query_row(
+        "SELECT delivery_receipt FROM agent_message_task_turns WHERE request_id=?1",
+        [&binding.request_id],
+        |row| row.get(0),
+    )?;
+    if previous.as_ref().is_some_and(|old| old != &value) {
+        return Err(Error::new(
+            "conflicting_delivery_receipt",
+            "Task already has a different input receipt.",
+        ));
+    }
+    if previous.as_deref() == Some(value.as_str()) {
+        return Ok(());
+    }
+    if state != "bound" {
+        return Err(Error::new(
+            "invalid_state",
+            "Task input receipt must precede its outcome.",
+        ));
+    }
+    tx.execute(
+        "UPDATE agent_message_task_turns SET delivery_receipt=?2 WHERE request_id=?1",
+        params![binding.request_id, value],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Atomically bind a still-dispatching v2 claim and finish accepted delivery.
@@ -204,14 +328,28 @@ pub fn publish_task_turn_outcome(
             [&binding.request_id], |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         validate_message(&body)?;
-        Some(reply_in_transaction(
-            &tx,
-            &binding.recipient,
-            &binding.request_id,
-            super::super::enum_from_value(&status)?,
-            &body,
-            None,
-        )?)
+        let receipt: Option<String> = tx.query_row(
+            "SELECT delivery_receipt FROM agent_message_task_turns WHERE request_id=?1",
+            [&binding.request_id],
+            |row| row.get(0),
+        )?;
+        let receipted = receipt
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<TaskDeliveryReceipt>(value).ok())
+            .is_some_and(|receipt| validate_receipt(&tx, binding, &receipt).is_ok());
+        if receipted {
+            Some(reply_in_transaction(
+                &tx,
+                &binding.recipient,
+                &binding.request_id,
+                super::super::enum_from_value(&status)?,
+                &body,
+                None,
+            )?)
+        } else {
+            publish_unreceipted_information(&tx, binding, &body)?;
+            None
+        }
     };
     tx.execute(
         "UPDATE agent_message_task_turns SET settlement='published' WHERE request_id=?1",
@@ -219,6 +357,98 @@ pub fn publish_task_turn_outcome(
     )?;
     tx.commit()?;
     Ok(replied)
+}
+
+/// Keep a visible result without assigning terminal authority to an unrelated turn.
+/// This and outbox settlement share a transaction, including on restart recovery.
+fn publish_unreceipted_information(
+    conn: &Connection,
+    binding: &TaskTurnBinding,
+    body: &str,
+) -> Result<()> {
+    use crate::control::{DeliveryTransportKind, InteractionDeliveryAttemptRecord};
+    let diagnostic = "Delivered without receipt; awaiting explicit reply or redelivery. Automatic final output is informational and this task remains open.";
+    let timestamp = now();
+    super::super::upsert_interaction_delivery_attempt_with_conn(
+        conn,
+        &InteractionDeliveryAttemptRecord {
+            id: format!("task-receipt:{}", binding.request_id),
+            interaction_id: binding.request_id.clone(),
+            target_session_id: binding.recipient.clone(),
+            transport: DeliveryTransportKind::NativeProvider,
+            generation: binding.generation,
+            runtime_state: "turn_completed".into(),
+            delivery_state: "delivered_without_receipt".into(),
+            delivery_phase: Some("terminal_publication".into()),
+            observed_state: None,
+            reason: Some(diagnostic.into()),
+            error: None,
+            created_at: timestamp.clone(),
+            updated_at: timestamp.clone(),
+        },
+    )?;
+    let task = load(conn, &binding.request_id)?;
+    if let Some(recipient) = task.sender_session_id {
+        // Send the actionable notice separately so the final remains exact,
+        // including at the message byte limit. Both are information, not replies.
+        let origin = requester_origin(conn, &binding.request_id)?;
+        for (id, message) in [
+            (
+                format!("int_unreceipted_notice_{}", binding.request_id),
+                format!("Wardian task {}: {diagnostic}", binding.request_id),
+            ),
+            (
+                format!("int_unreceipted_{}", binding.request_id),
+                body.to_owned(),
+            ),
+        ] {
+            let record = InteractionRecord {
+                id,
+                kind: InteractionKind::Message,
+                sender_session_id: Some(binding.recipient.clone()),
+                target_session_ids: vec![recipient.clone()],
+                status: InteractionStatus::Queued,
+                trigger_policy: InteractionTriggerPolicy::NotifyOnly,
+                body_ref: InteractionBodyRef::Inline { body: message },
+                parent_interaction_id: Some(binding.request_id.clone()),
+                created_at: timestamp.clone(),
+                updated_at: timestamp.clone(),
+                completed_at: None,
+            };
+            super::super::upsert_interaction_record_with_conn(conn, &record)?;
+            conn.execute("INSERT INTO agent_message_delivery(interaction_id,sender,recipient,operation,fingerprint,owner,generation,wake_on_admission,recipient_provider,recipient_conversation_id,recipient_generation)
+            VALUES(?1,?2,?3,'send_message','','stored',0,?4,?5,?6,?7)",
+            params![record.id, binding.recipient, recipient, origin.as_ref().map(|_| 1_i64),
+                origin.as_ref().map(|o| o.provider.as_str()), origin.as_ref().map(|o| o.conversation_id.as_str()),
+                origin.as_ref().map(|o| o.generation)])?;
+            make_available(conn, &recipient, &record.id)?;
+        }
+    }
+    Ok(())
+}
+
+/// Read the informational projection committed by the terminal outbox, if any.
+/// The deterministic identity makes runtime cache publication replay-safe.
+pub fn task_turn_information(
+    conn: &Connection,
+    binding: &TaskTurnBinding,
+) -> Result<Vec<InteractionRecord>> {
+    settlement(conn, binding)?;
+    let mut records = Vec::new();
+    for id in [
+        format!("int_unreceipted_notice_{}", binding.request_id),
+        format!("int_unreceipted_{}", binding.request_id),
+    ] {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM interactions WHERE id=?1)",
+            [&id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            records.push(load(conn, &id)?);
+        }
+    }
+    Ok(records)
 }
 
 fn bindings_in_state(conn: &Connection, state: &str) -> Result<Vec<TaskTurnBinding>> {
@@ -305,7 +535,26 @@ mod tests {
     }
 
     fn bind(conn: &Connection, claim: &TaskClaim) -> TaskTurnBinding {
-        bind_task_turn(conn, claim, "codex", "session", "turn", "start").unwrap()
+        let binding = bind_task_turn(conn, claim, "codex", "session", "turn", "start").unwrap();
+        accepted_input(conn, &binding);
+        binding
+    }
+
+    fn accepted_input(conn: &Connection, binding: &TaskTurnBinding) {
+        record_task_delivery_receipt(
+            conn,
+            binding,
+            &TaskDeliveryReceipt {
+                generation: binding.generation,
+                provider_session_id: binding.provider_session_id.clone(),
+                provider_turn_id: binding.provider_turn_id.clone(),
+                source: TaskReceiptSource::AcceptedUserMessage {
+                    source_id: format!("input:{}", binding.request_id),
+                    task_body_sha256: format!("{:x}", Sha256::digest(b"work")),
+                },
+            },
+        )
+        .unwrap();
     }
 
     fn count(conn: &Connection, table: &str) -> i64 {
@@ -313,6 +562,321 @@ mod tests {
             row.get(0)
         })
         .unwrap()
+    }
+
+    #[test]
+    fn conversation_reset_fences_old_context_without_discarding_tasks_or_results() {
+        let conn = database();
+        let old_information = admit(
+            &conn,
+            Admission {
+                sender: "sender",
+                recipient: "receiver",
+                message: "old information",
+                idempotency_key: None,
+                task: false,
+                generation: 7,
+            },
+        )
+        .unwrap();
+        let lost = bind(&conn, &task(&conn, "sender"));
+        let captured = bind(&conn, &task(&conn, "sender"));
+        record_task_turn_outcome(&conn, &captured, ReplyStatus::Done, "captured result").unwrap();
+        let unclaimed = admit(
+            &conn,
+            Admission {
+                sender: "sender",
+                recipient: "receiver",
+                message: "pending task",
+                idempotency_key: None,
+                task: true,
+                generation: 7,
+            },
+        )
+        .unwrap();
+        let outbound = admit(
+            &conn,
+            Admission {
+                sender: "receiver",
+                recipient: "sender",
+                message: "outbound task",
+                idempotency_key: None,
+                task: true,
+                generation: 7,
+            },
+        )
+        .unwrap();
+        let explicit = reply(
+            &conn,
+            "sender",
+            &outbound.record.id,
+            ReplyStatus::Done,
+            "explicit result",
+        )
+        .unwrap();
+        fence_conversation_deliveries(&conn, "receiver").unwrap();
+        assert!(pending_information(
+            &conn,
+            "receiver",
+            information_highwater(&conn, "receiver").unwrap()
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(settlement(&conn, &lost).unwrap(), "uncertain");
+        assert_eq!(settlement(&conn, &captured).unwrap(), "outcome_recorded");
+        assert_eq!(
+            load(&conn, &old_information.record.id).unwrap(),
+            old_information.record
+        );
+        assert_eq!(load(&conn, &explicit.record.id).unwrap(), explicit.record);
+        let reply_owner: String = conn
+            .query_row(
+                "SELECT owner FROM agent_message_delivery WHERE interaction_id=?1",
+                [&explicit.record.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reply_owner, "blocked_stale_origin");
+        assert_eq!(
+            claim_next_task(&conn, "receiver", 8)
+                .unwrap()
+                .unwrap()
+                .record
+                .id,
+            unclaimed.record.id
+        );
+        assert_eq!(recover_task_turn_outcomes(&conn).unwrap().len(), 1);
+        let fresh = admit(
+            &conn,
+            Admission {
+                sender: "sender",
+                recipient: "receiver",
+                message: "fresh information",
+                idempotency_key: None,
+                task: false,
+                generation: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pending_information(
+                &conn,
+                "receiver",
+                information_highwater(&conn, "receiver").unwrap()
+            )
+            .unwrap(),
+            vec![fresh.record.id]
+        );
+    }
+
+    #[test]
+    fn unreceipted_native_final_leaves_task_awaiting_reply() {
+        let conn = database();
+        let claim = task(&conn, "sender");
+        // A turn/start acknowledgement identifies a turn, but does not prove
+        // this task was received as input or answered a current wait call.
+        let binding = bind_task_turn(
+            &conn,
+            &claim,
+            "codex",
+            "retained-thread",
+            "new-turn",
+            "start",
+        )
+        .unwrap();
+        record_task_turn_outcome(
+            &conn,
+            &binding,
+            ReplyStatus::Done,
+            "answer to an older message",
+        )
+        .unwrap();
+        let _ = publish_task_turn_outcome(&conn, &binding).unwrap();
+        assert_eq!(
+            load(&conn, &claim.record.id).unwrap().status,
+            InteractionStatus::AwaitingReply,
+            "An unreceipted final answer must not complete the new task"
+        );
+        assert_eq!(count(&conn, "structured_replies"), 0);
+        let page = receive(&conn, "sender", None, None, 100).unwrap();
+        assert_eq!(page.messages.len(), 2);
+        assert!(page.messages[0].message.contains(&binding.request_id));
+        assert!(page.messages[0]
+            .message
+            .contains("awaiting explicit reply or redelivery"));
+        assert_eq!(page.messages[0].kind, InteractionKind::Message);
+        assert_eq!(
+            page.messages[0].parent_interaction_id.as_deref(),
+            Some(binding.request_id.as_str())
+        );
+        assert_eq!(page.messages[1].message, "answer to an older message");
+        assert_eq!(page.messages[0].reply_status, None);
+        let diagnostics =
+            crate::db::list_interaction_delivery_attempts_with_conn(&conn, &binding.request_id)
+                .unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].delivery_state, "delivered_without_receipt");
+        assert!(diagnostics[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("awaiting explicit reply or redelivery"));
+        assert!(recover_task_turn_outcomes(&conn).unwrap().is_empty());
+        assert_eq!(
+            receive(&conn, "sender", None, None, 100)
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
+        // Explicit correlation remains sufficient after an informational final.
+        reply(
+            &conn,
+            "receiver",
+            &binding.request_id,
+            ReplyStatus::Done,
+            "explicit result",
+        )
+        .unwrap();
+        assert_eq!(
+            load(&conn, &binding.request_id).unwrap().status,
+            InteractionStatus::Completed
+        );
+    }
+
+    #[test]
+    fn unreceipted_notice_and_maximum_output_follow_only_the_original_requester_conversation() {
+        let conn = database();
+        let origin = RequesterOrigin {
+            provider: "claude".into(),
+            conversation_id: "requester-thread".into(),
+            generation: 4,
+        };
+        let task = admit_with_requester_origin(
+            &conn,
+            Admission {
+                sender: "sender",
+                recipient: "receiver",
+                message: "work",
+                idempotency_key: None,
+                task: true,
+                generation: 7,
+            },
+            Some(&origin),
+        )
+        .unwrap();
+        let claim = claim_next_task(&conn, "receiver", 7).unwrap().unwrap();
+        let binding = bind_task_turn(&conn, &claim, "codex", "thread", "turn", "start").unwrap();
+        let body = "é".repeat(MAX_MESSAGE_BYTES / 2);
+        record_task_turn_outcome(&conn, &binding, ReplyStatus::Done, &body).unwrap();
+        assert!(publish_task_turn_outcome(&conn, &binding)
+            .unwrap()
+            .is_none());
+        let information = task_turn_information(&conn, &binding).unwrap();
+        assert_eq!(information.len(), 2);
+        assert_eq!(
+            pending_wakeable_information(&conn, "sender").unwrap().len(),
+            2
+        );
+        for record in &information {
+            assert_eq!(record.kind, InteractionKind::Message);
+            assert_eq!(
+                record.parent_interaction_id.as_deref(),
+                Some(task.record.id.as_str())
+            );
+            assert_eq!(
+                recipient_origin(&conn, &record.id).unwrap(),
+                Some(RecipientOrigin {
+                    provider: origin.provider.clone(),
+                    conversation_id: origin.conversation_id.clone(),
+                    generation: origin.generation,
+                })
+            );
+        }
+        let InteractionBodyRef::Inline { body: published } = &information[1].body_ref else {
+            panic!("inline output")
+        };
+        assert_eq!(published.as_bytes(), body.as_bytes());
+        assert_eq!(count(&conn, "structured_replies"), 0);
+        assert_eq!(
+            load(&conn, &task.record.id).unwrap().status,
+            InteractionStatus::AwaitingReply
+        );
+        fence_conversation_deliveries(&conn, "sender").unwrap();
+        assert!(pending_wakeable_information(&conn, "sender")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn current_wait_call_receipt_authorizes_but_old_generation_thread_and_body_do_not() {
+        for mismatch in 0..8 {
+            let conn = database();
+            let claim = task(&conn, "sender");
+            let binding =
+                bind_task_turn(&conn, &claim, "codex", "thread", "turn", "start").unwrap();
+            let mut receipt = TaskDeliveryReceipt {
+                generation: 7,
+                provider_session_id: "thread".into(),
+                provider_turn_id: "turn".into(),
+                source: TaskReceiptSource::ToolCallOutput {
+                    call_id: "issued-current-wait-call".into(),
+                    issued_generation: 7,
+                    issued_thread_id: "thread".into(),
+                    task_body_sha256: format!("{:x}", Sha256::digest(b"work")),
+                },
+            };
+            match mismatch {
+                0 => receipt.generation = 6,
+                1 => receipt.provider_session_id = "retained".into(),
+                2 => receipt.provider_turn_id = "old-turn".into(),
+                _ => {
+                    if let TaskReceiptSource::ToolCallOutput {
+                        call_id,
+                        issued_generation,
+                        issued_thread_id,
+                        task_body_sha256,
+                    } = &mut receipt.source
+                    {
+                        match mismatch {
+                            3 => *issued_generation = 6,
+                            4 => *issued_thread_id = "retained".into(),
+                            5 => call_id.clear(),
+                            6 => task_body_sha256.clear(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let recorded = record_task_delivery_receipt(&conn, &binding, &receipt);
+            assert_eq!(recorded.is_ok(), mismatch == 7);
+            record_task_turn_outcome(&conn, &binding, ReplyStatus::Done, "result").unwrap();
+            assert_eq!(
+                publish_task_turn_outcome(&conn, &binding)
+                    .unwrap()
+                    .is_some(),
+                mismatch == 7
+            );
+            assert_eq!(count(&conn, "structured_replies"), i64::from(mismatch == 7));
+        }
+    }
+
+    #[test]
+    fn persisted_receipt_is_revalidated_during_outbox_recovery() {
+        let conn = database();
+        let binding = bind(&conn, &task(&conn, "sender"));
+        record_task_turn_outcome(&conn, &binding, ReplyStatus::Done, "result").unwrap();
+        conn.execute(
+            "UPDATE agent_message_task_turns SET delivery_receipt='{}' WHERE request_id=?1",
+            [&binding.request_id],
+        )
+        .unwrap();
+        assert!(recover_task_turn_outcomes(&conn).unwrap().is_empty());
+        assert_eq!(
+            load(&conn, &binding.request_id).unwrap().status,
+            InteractionStatus::AwaitingReply
+        );
+        assert_eq!(count(&conn, "structured_replies"), 0);
     }
 
     #[test]
@@ -573,6 +1137,8 @@ mod tests {
         let turn = " Turn:Exact ";
         let one = bind_task_turn(&conn, &one, "codex", session, turn, "start").unwrap();
         let two = bind_task_turn(&conn, &two, "codex", session, turn, "steer").unwrap();
+        accepted_input(&conn, &one);
+        accepted_input(&conn, &two);
         assert_ne!(one.request_id, two.request_id);
         assert_ne!(one.claim_token, two.claim_token);
         assert_eq!(one.provider_session_id, session);

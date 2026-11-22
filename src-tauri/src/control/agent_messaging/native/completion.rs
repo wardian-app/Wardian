@@ -104,6 +104,14 @@ pub(super) async fn observe_codex_task(
             "Codex did not report a recognized terminal task outcome.",
         ));
     };
+    if let Some(receipt) =
+        client.task_delivery_receipt(&binding.request_id, &binding.provider_turn_id)
+    {
+        interactions
+            .record_agent_task_delivery_receipt(binding, &receipt)
+            .await
+            .map_err(control_error)?;
+    }
     let reply = interactions
         .complete_agent_task_turn(binding, status, &body)
         .await
@@ -129,7 +137,25 @@ pub(super) fn spawn_codex_task_completion(
     tokio::spawn(async move {
         match observe_codex_task(&interactions, &client, &binding, Duration::from_secs(900)).await {
             Ok((Some(reply), _)) => publish_completion(app.as_ref(), &reply),
-            Ok((None, _)) => {}
+            Ok((None, _)) => {
+                if let Some(app) = app.as_ref() {
+                    match interactions.agent_task_turn_information(&binding).await {
+                        Ok(information) if !information.is_empty() => {
+                            let _ = app.emit("pair-activity-changed", ());
+                            if let Some(recipient) = information
+                                .first()
+                                .and_then(|record| record.target_session_ids.first())
+                            {
+                                super::spawn_information(app, recipient);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            manager::log_debug(&format!("[WARDIAN] task information: {error}"))
+                        }
+                    }
+                }
+            }
             Err(error) => manager::log_debug(&format!("[WARDIAN] task completion: {error}")),
         }
     });

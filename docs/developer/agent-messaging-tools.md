@@ -41,7 +41,12 @@ the backend mailbox remains available for read-only diagnostics.
 Reply takes `request_id`, `status` (`done`, `blocked`, or `failed`), and
 `message`. The request determines the destination. A committed explicit reply
 suppresses automatic final-result publication. Exact native task turns may
-publish their terminal result automatically. Every canonical terminal reply
+publish their terminal result automatically when the turn has an exact accepted
+task-input receipt for the current runtime generation and provider thread.
+A turn acknowledgement alone is insufficient. Without that receipt, the final
+is informational, the task remains open, and its delivery diagnostics report
+`delivered_without_receipt`, awaiting an explicit correlated reply or redelivery.
+Every canonical terminal reply
 inherits the requester's durable provider conversation binding and is resumed
 through that same conversation when a safe continuation route is available.
 

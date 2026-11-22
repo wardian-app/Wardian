@@ -121,6 +121,15 @@ fn apply_provider_identity_with_environment(
             if uuid::Uuid::parse_str(candidate).is_err() {
                 return Err("codex returned a malformed thread identity".to_string());
             }
+            if super::codex::codex_provider_session_is_excluded(
+                candidate,
+                &config.codex_config().cleared_provider_sessions,
+            ) {
+                return Err(
+                    "codex returned a cleared thread; retry session clear before sending input"
+                        .to_string(),
+                );
+            }
             capture_or_confirm_provider_identity(provider, config, candidate)
         }
         "opencode" => {
@@ -339,6 +348,31 @@ mod tests {
             Ok(ProviderIdentityOutcome::Confirmed)
         );
         assert_eq!(config.fresh_provider_session_id, None);
+    }
+
+    #[test]
+    fn codex_cleared_thread_cannot_be_captured_or_confirmed() {
+        let id = "019db2f3-22de-7861-8bc6-1b86db1686db";
+        for resume in [None, Some(id)] {
+            for fresh in [None, Some(id)] {
+                let mut config = test_config("codex", resume, fresh);
+                config
+                    .codex_config_mut_preserve_encoding()
+                    .cleared_provider_sessions = vec![format!(" {id} ")];
+                let before = config.clone();
+                let error =
+                    apply_provider_identity_with_environment("codex", &mut config, id, Vec::new())
+                        .expect_err("a cleared thread cannot acquire current identity");
+                assert!(error.contains("cleared thread"));
+                assert!(!error.contains(id));
+                assert_eq!(config.resume_session, before.resume_session);
+                assert_eq!(
+                    config.fresh_provider_session_id,
+                    before.fresh_provider_session_id
+                );
+                assert_eq!(config.codex_config(), before.codex_config());
+            }
+        }
     }
 
     #[test]
