@@ -80,8 +80,31 @@ const reason = (error) => { const value = compactError(error); return `${value.c
 function remoteOpeningEvidence(record) {
   const observation = record?.observation;
   const phase = observation?.phase;
+  const continuity = phase?.continuity;
+  const samples = continuity?.samples ?? [];
+  const firstShared = samples.findIndex((sample) => sample.renderer === "shared");
   const phaseIndex = observation?.phases?.length - 1;
   const receipts = observation?.receipts?.filter((entry) => entry.last_request?.phase_index === phaseIndex) ?? [];
+  let priorProjection;
+  const receiptPath = receipts.map((receipt) => {
+    const scope = receipt.scope;
+    const step = {
+      progress: text(receipt.progress, 32),
+      presentation_version: finite(receipt.presentation?.version),
+      presented: receipt.presentation?.turns > 0,
+      unchanged: receipt.retains_exact_scope === true,
+      admission: scope.admission != null,
+      generation: scope.generation != null,
+      same_conversation: priorProjection ? priorProjection.scope.conversation === scope.conversation : null,
+      same_generation: priorProjection ? priorProjection.scope.generation === scope.generation : null,
+      same_source_epoch: priorProjection ? priorProjection.scope.epoch === scope.epoch : null,
+      same_bridge_admission: priorProjection?.bridge_admission != null && receipt.bridge_admission != null
+        ? priorProjection.bridge_admission === receipt.bridge_admission : null,
+      retired: scope.revision.includes(":retired-view-v1:") || scope.revision.endsWith(":retired"),
+    };
+    if (step.presented) priorProjection = receipt;
+    return step;
+  }).slice(-16);
   return {
     capture_before_click: record?.capture?.before?.status ?? null,
     capture_after_click: record?.capture?.after?.status ?? null,
@@ -89,10 +112,14 @@ function remoteOpeningEvidence(record) {
     selector: phase?.selector_diagnostics?.last ?? null,
     readable_proved: Number.isFinite(phase?.readableAt),
     usable_proved: record?.m1_observed !== undefined,
-    opening_representation: phase?.continuity?.opening_representation ?? null,
-    renderer_path: (phase?.continuity?.samples ?? [])
+    opening_representation: continuity?.opening_representation ?? null,
+    renderer_path: samples
       .map(({ renderer, representation }) => `${renderer}/${representation?.kind ?? "unproven"}`)
       .filter((renderer, index, renderers) => index === 0 || renderer !== renderers[index - 1]).slice(0, 16),
+    legacy_after_shared: firstShared >= 0 && [...samples.slice(firstShared + 1), continuity.last]
+      .some((sample) => sample?.renderer === "legacy"),
+    transcript_error_frames: continuity?.started ? continuity.error_frames ?? 0 : null,
+    continuity_overflow_count: finite(continuity?.overflow_count),
     projection_witness_ms: Number.isFinite(phase?.projectionAt) ? phase.projectionAt - phase.clickAt : null,
     current_native: observation?.health?.current_native ?? null,
     current_projection: observation?.health?.current_projection ?? null,
@@ -103,6 +130,7 @@ function remoteOpeningEvidence(record) {
     target_projected_receipts: receipts.filter((entry) => entry.presentation?.target_turns?.length > 0).length,
     unscoped_resets: receipts.filter((entry) => entry.control === "unscoped_reset").length,
     latest_progress: text(receipts.at(-1)?.progress, 32),
+    receipt_path: receiptPath,
     faults: (observation?.faults ?? []).slice(0, 4).map((fault) => text(fault, 96)),
   };
 }

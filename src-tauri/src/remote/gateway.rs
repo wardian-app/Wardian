@@ -1302,7 +1302,7 @@ async fn load_client_agent_chat<R: Runtime>(
         }
         _ => RemoteGatewayError::bad_request("agent_chat_projection_unavailable"),
     })?;
-    if page.events.is_empty() && !page.reset && queue_error.is_some() {
+    if queue_error.is_some() && crate::commands::chat::chat_page_needs_recent_capture(&page) {
         return Err(RemoteGatewayError::service_unavailable(
             "agent_chat_read_retryable",
         ));
@@ -2293,7 +2293,7 @@ async fn load_remote_agent_chat<R: Runtime>(
         }
         _ => RemoteGatewayError::bad_request("agent_chat_projection_unavailable"),
     })?;
-    if page.events.is_empty() && !page.reset && queue_error.is_some() {
+    if queue_error.is_some() && crate::commands::chat::chat_page_needs_recent_capture(&page) {
         return Err(RemoteGatewayError::service_unavailable(
             "agent_chat_read_retryable",
         ));

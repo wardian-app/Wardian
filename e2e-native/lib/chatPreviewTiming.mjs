@@ -713,7 +713,7 @@ export function recordChatContinuity(state, sample) {
 }
 
 /** Reduce a real response; native opening evidence never grants presentation or canonical authority. */
-export function chatTimingReceipt(page, fixture) {
+export function chatTimingReceipt(page, fixture, { reportBridgeAdmission = false } = {}) {
   if (!(page?.session_id === fixture.sessionId && Array.isArray(page.events) && page.events.length <= 640)) {
     throw new Error("foreign_or_unbounded_page");
   }
@@ -768,6 +768,7 @@ export function chatTimingReceipt(page, fixture) {
   }
   return { scope: { session: page.session_id, conversation: page.conversation_id, generation: page.generation,
     epoch: page.source_epoch, revision: page.revision, admission: page.recent_admission ?? null }, progress: page.progress, nativeOpening, aliases,
+    ...(reportBridgeAdmission ? { bridge_admission: id(value?.preview_bridge?.admission_id) ? value.preview_bridge.admission_id : null } : {}),
     retains_exact_scope: retention,
     presentation: { version: page.presentation?.version ?? null, turns: turns.length, items: items.length,
       target_turns: turns.filter((turn) => items.some((item) => item.turn_key === turn.turn_key

@@ -419,7 +419,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
               const dto = await response.json();
               const details = diagnostic ? chatTimingCandidateDetails(dto, fixture) : null;
               let receipt; let receiptFailure;
-              try { receipt = chatTimingReceipt(dto, fixture); }
+              try { receipt = chatTimingReceipt(dto, fixture, { reportBridgeAdmission: remoteRepeatedOpen }); }
               catch (error) {
                 receiptFailure = error;
                 recordRejectedChatScope(detail, error, { at: performance.now(), clock_basis: "node:performance.now",

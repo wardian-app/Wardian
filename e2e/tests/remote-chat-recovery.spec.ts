@@ -153,6 +153,41 @@ async function installBoundedChat(page: Page, retryableFirst = false, status: "O
   return { chat: traffic, status_stream: statusTraffic };
 }
 
+test("Remote Chat stays readable without an alert while retrying backpressure", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installBoundedChat(page);
+  const answer = page.getByText("Declared header 78", { exact: true });
+  await expect(answer).toBeVisible();
+
+  let reads = 0;
+  let releaseRetry!: () => void;
+  const pendingRetry = new Promise<void>((resolve) => { releaseRetry = resolve; });
+  await page.route((url) => url.pathname === "/remote/api/agents/bounded-chat/chat", async (route) => {
+    reads += 1;
+    if (reads === 1) {
+      await route.fulfill({ status: 503, json: { code: "agent_chat_read_retryable" } });
+      return;
+    }
+    await pendingRetry;
+    await route.fallback();
+  });
+
+  try {
+    await page.getByRole("button", { name: "Refresh chat", exact: true }).click();
+    await expect.poll(() => reads).toBe(2);
+    await expect(answer).toBeVisible();
+    await expect(page.getByTestId("remote-agent-detail").getByRole("alert")).toHaveCount(0);
+    const screenshotDir = process.env.WARDIAN_CHAT_RECOVERY_SCREENSHOT_DIR;
+    if (screenshotDir) {
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, "mobile-chat-silent-retry.png"), animations: "disabled" });
+    }
+  } finally {
+    releaseRetry();
+  }
+  await expect(answer).toBeVisible();
+});
+
 test("Chat explains a replaced provider source while keeping saved messages readable", async ({ page }) => {
   await installBoundedChat(page, false, "Off", "capture_source_replaced");
   await expect(page.getByText("Declared header 78", { exact: true })).toBeVisible();

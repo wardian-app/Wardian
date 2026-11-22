@@ -25,7 +25,7 @@ use wardian_core::control::{WatchEvent, WatchOutput, WatchTranscript, WatchTrans
 use wardian_core::conversations::{AgentConversationLoggingSetting, ConversationLoggingSetting};
 use wardian_core::identity::normalize_status;
 use wardian_core::models::chat::{
-    AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
+    AgentChatEvent, AgentChatEventKind, AgentChatPage, AgentChatRole, AgentChatStatus,
 };
 
 #[path = "chat_archive_identity.rs"]
@@ -118,12 +118,15 @@ pub async fn load_agent_chat_page(
         },
     )
     .await?;
-    // Retirement resets and already readable pages remain useful even when
-    // the two producer slots are busy. A cold empty miss is retryable.
-    if page.events.is_empty() && !page.reset && queue_error.is_some() {
+    if queue_error.is_some() && chat_page_needs_recent_capture(&page) {
         return Err("chat snapshot temporarily busy".into());
     }
     Ok(page)
+}
+
+/// A failed enqueue only blocks a page that still needs recent capture.
+pub(crate) fn chat_page_needs_recent_capture(page: &AgentChatPage) -> bool {
+    page.events.is_empty() && !page.reset && !page.unchanged
 }
 
 /// Coalesce a bounded selection prelude without doing source IO on the request
@@ -4055,6 +4058,37 @@ fn event_id(session_id: &str, sequence: u64, source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enqueue_failure_keeps_an_unchanged_chat_page_but_retries_a_cold_miss() {
+        let mut page = AgentChatPage {
+            session_id: "synthetic-agent".into(),
+            conversation_id: Some("conversation".into()),
+            generation: Some("generation".into()),
+            source_epoch: Some("epoch".into()),
+            recent_admission: None,
+            archive_read_ready: false,
+            revision: "published-revision".into(),
+            presentation: None,
+            events: Vec::new(),
+            next_before: None,
+            unchanged: true,
+            reset: false,
+            older_page: false,
+            progress: "indexing".into(),
+            aliases: Vec::new(),
+            removed_ids: Vec::new(),
+            detail: None,
+            revalidated_ids: None,
+            bytes_read: 0,
+            records_decoded: 0,
+        };
+        assert!(!chat_page_needs_recent_capture(&page));
+        page.unchanged = false;
+        assert!(chat_page_needs_recent_capture(&page));
+        page.reset = true;
+        assert!(!chat_page_needs_recent_capture(&page));
+    }
 
     #[test]
     fn native_chat_page_request_decodes_existing_top_level_camel_case_fields() {
