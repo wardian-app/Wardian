@@ -265,6 +265,7 @@ pub(super) async fn send(
         &id,
         &deadline,
         authority,
+        Some(&ctx.app),
     )
     .await;
     let outcome = match result {

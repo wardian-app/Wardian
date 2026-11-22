@@ -63,7 +63,12 @@ evidence or queue the interaction.
 Desktop Chat passes `chatComposer: true` to keep submission feedback in the
 composer and let the transcript wait for the provider projection. The Remote
 Chat action passes `chat_composer: true` for the same behavior. These optional
-flags skip the generated archive receipt and use the ordinary delivery route.
+flags skip the generated archive receipt. Eligible Claude Chat prompts go
+through the ready Claude delivery mod. Desktop also passes
+`terminalAttachments: true` when it has staged images in the terminal.
+Those sends, permission responses, and TUI controls use terminal delivery.
+The Claude mod records `as_user=true` in the observed delivery state for
+composer submissions.
 
 `read_agent_pty` drains buffered terminal output after `agent-pty-output-ready`. It is display data and compatibility evidence only. Structured ask/reply completion, Inbox evidence, and provider status transitions must not depend on replaying this text.
 

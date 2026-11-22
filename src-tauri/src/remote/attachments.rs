@@ -2408,6 +2408,11 @@ mod tests {
                 .count(),
             2
         );
+        assert!(p
+            .prompt
+            .lines()
+            .filter_map(|line| line.strip_prefix("- "))
+            .all(|reference| Path::new(reference).is_absolute()));
         assert!(p.prompt.ends_with(&format!("{b}.png")));
         #[cfg(windows)]
         {

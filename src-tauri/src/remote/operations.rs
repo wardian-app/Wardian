@@ -1780,6 +1780,7 @@ async fn send_remote_prompt_with_idempotency(
                 input_mode,
                 queue_policy: wardian_core::control::QueuePolicy::LiveOnly,
                 approval_action: None,
+                chat_composer: false,
                 origin: None,
                 write_fence: None,
                 runtime_state: "live_pty_available",
@@ -1822,6 +1823,7 @@ async fn send_remote_prompt_with_idempotency(
         prompt,
         input_mode,
         chat_composer,
+        false,
     )
     .await
     .map(|detail| detail.chat_receipt)

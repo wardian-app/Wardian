@@ -1,4 +1,5 @@
 //! Prompt delivery entry points and optional display receipts.
+use super::message_delivery::DeliveryContext;
 use super::*;
 
 /// Preserve the delivery result when optional display persistence fails. The
@@ -10,6 +11,7 @@ pub(crate) async fn deliver_prompt_to_agent_with_chat_receipt(
     prompt: &str,
     input_mode: MessageInputMode,
     chat_composer: bool,
+    terminal_attachments: bool,
 ) -> Result<wardian_core::models::chat::ChatPromptDeliveryDetail, ControlError> {
     // Chat's transcript waits for an owned provider row. A generated archive
     // receipt only proves Wardian stored the submitted text.
@@ -24,7 +26,7 @@ pub(crate) async fn deliver_prompt_to_agent_with_chat_receipt(
         .ok()
         .flatten()
     });
-    let delivery = deliver_message_to_target_with_headless_timeout(
+    let delivery = deliver_message_to_target_with_delivery_options(
         app,
         state,
         target,
@@ -36,6 +38,13 @@ pub(crate) async fn deliver_prompt_to_agent_with_chat_receipt(
         None,
         false,
         crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
+        None,
+        None,
+        None,
+        DeliveryContext {
+            chat_composer: chat_composer && !terminal_attachments,
+            ..Default::default()
+        },
     )
     .await?;
     let detail = delivery.into_iter().next().ok_or_else(|| {
@@ -106,7 +115,8 @@ pub(crate) async fn deliver_prompt_to_agent_with_chat_receipt(
 
 /// Deliver a remote-client message through the queued control path.
 ///
-/// Its interaction ID, deadline, and send authority use the shared delivery path.
+/// Chat attachments supply the app handle to identify the composer and to
+/// keep its mod observer alive after the HTTP request ends.
 pub(crate) async fn deliver_remote_client_message(
     state: &AppState,
     target: &str,
@@ -114,6 +124,7 @@ pub(crate) async fn deliver_remote_client_message(
     interaction_id: &str,
     deadline_at: &str,
     authority: crate::remote::client_messages::ClientSendAuthority,
+    chat_app: Option<&AppHandle>,
 ) -> Result<Vec<DeliveryDetail>, ControlError> {
     let orchestration = wardian_core::control::OrchestrationDeliveryOptions {
         idempotency_key: Some(interaction_id.to_string()),
@@ -121,7 +132,7 @@ pub(crate) async fn deliver_remote_client_message(
         ..Default::default()
     };
     deliver_message_to_target_with_delivery_options(
-        None,
+        chat_app,
         state,
         target,
         message,
@@ -135,7 +146,10 @@ pub(crate) async fn deliver_remote_client_message(
         Some(&orchestration),
         None,
         Some(interaction_id),
-        Some(authority),
+        DeliveryContext {
+            client_send_authority: Some(authority),
+            chat_composer: chat_app.is_some(),
+        },
     )
     .await
 }

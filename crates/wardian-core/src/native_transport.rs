@@ -24,6 +24,27 @@ pub struct NativeMessageEnvelope {
     pub body: String,
 }
 
+impl NativeMessageEnvelope {
+    /// The provider transcript can recover this identity even when the
+    /// provider does not preserve the protocol's request metadata.
+    pub fn transcript_header(&self) -> String {
+        let mut header = format!(
+            "[Wardian message_id={} interaction_id={} generation={} target={}]",
+            self.message_id, self.interaction_id, self.generation, self.target_agent_id
+        );
+        if let Some(sender) = self.sender_agent_id.as_deref() {
+            header.push_str(&format!(" sender={sender}"));
+        }
+        if let Some(parent) = self.parent_interaction_id.as_deref() {
+            header.push_str(&format!(" reply_to={parent}"));
+        }
+        if let Some(deadline) = self.deadline_at.as_deref() {
+            header.push_str(&format!(" deadline={deadline}"));
+        }
+        header
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeMessageOperation {
@@ -223,6 +244,9 @@ pub struct NativeDeliveryRecord {
     pub canonical_hash: String,
     pub provider: String,
     pub transport: String,
+    /// Persist the Claude composer receipt format across observer restart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_mod_as_user: bool,
     pub phase: NativeDeliveryPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,

@@ -308,6 +308,7 @@ pub async fn submit_prompt_to_agent(
     prompt: String,
     input_mode: Option<wardian_core::control::MessageInputMode>,
     chat_composer: Option<bool>,
+    terminal_attachments: Option<bool>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<wardian_core::models::chat::ChatPromptDeliveryDetail, String> {
@@ -318,6 +319,7 @@ pub async fn submit_prompt_to_agent(
         &prompt,
         input_mode.unwrap_or(wardian_core::control::MessageInputMode::Message),
         chat_composer.unwrap_or_default(),
+        terminal_attachments.unwrap_or_default(),
     )
     .await
     .map_err(|error| error.to_string())?;

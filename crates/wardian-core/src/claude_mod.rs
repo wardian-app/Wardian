@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::atomic_file;
-use crate::native_transport::NativeDeliveryPhase;
+use crate::native_transport::{NativeDeliveryPhase, NativeMessageEnvelope};
 
 const MAX_JS_INTEGER: u64 = 9_007_199_254_740_991;
 const PLUGIN_PREFIX: &str = "The wardian plugin sent a message:";
@@ -195,6 +195,8 @@ pub struct ReadyRecord {
     pub generation: u64,
     pub session_id: String,
     pub mod_version: String,
+    #[serde(default)]
+    pub supports_as_user: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,6 +256,8 @@ pub struct PendingDelivery {
     pub interaction_id: String,
     pub runtime_generation: u64,
     pub text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub as_user: bool,
 }
 
 /// A projection, not a durable transition. Proof-bearing recovery is separate.
@@ -374,6 +378,7 @@ impl ClaudeModResolver {
         &mut self,
         now: DateTime<Utc>,
         tracked_session_ids: &BTreeSet<String>,
+        as_user: bool,
     ) -> io::Result<Result<(), FallbackReason>> {
         let Some(ready) = read_record::<ReadyRecord>(&self.config.inbox.join("ready.json"))? else {
             return Ok(Err(FallbackReason::ModNotLoaded));
@@ -384,7 +389,7 @@ impl ClaudeModResolver {
         if ready.session_id != self.config.expected_claude_session_id {
             return Ok(Err(FallbackReason::SessionMismatch));
         }
-        if ready.mod_version.trim().is_empty() {
+        if ready.mod_version.trim().is_empty() || (as_user && !ready.supports_as_user) {
             return Ok(Err(FallbackReason::ModNotLoaded));
         }
         if let Some(heartbeat) =
@@ -413,7 +418,7 @@ impl ClaudeModResolver {
     /// Publish complete JSON atomically. The application serializes publication
     /// per generation and supplies monotonically increasing sequence numbers.
     /// A repeated identical publication is idempotent; changed payloads refuse.
-    pub fn publish(&self, seq: u64, id: &str, text: &str) -> io::Result<PathBuf> {
+    pub fn publish(&self, seq: u64, id: &str, text: &str, as_user: bool) -> io::Result<PathBuf> {
         validate_id(id)?;
         if seq > MAX_JS_INTEGER {
             return Err(invalid("sequence exceeds JavaScript-safe range"));
@@ -423,6 +428,7 @@ impl ClaudeModResolver {
             interaction_id: id.to_owned(),
             runtime_generation: self.config.runtime_generation,
             text: text.to_owned(),
+            as_user,
         };
         let path = self
             .config
@@ -472,6 +478,13 @@ impl ClaudeModResolver {
     fn reason(&self, kind: &str, id: &str) -> io::Result<Option<ReasonRecord>> {
         Ok(read_record::<ReasonRecord>(&self.record_path(kind, id))?
             .filter(|r| self.bound(&r.outcome, id) && !r.reason.trim().is_empty()))
+    }
+
+    /// A complete claim proves this interaction was picked up by this mod
+    /// generation. A torn claim still prevents replay without proving pickup.
+    pub fn has_bound_claim(&self, id: &str) -> io::Result<bool> {
+        validate_id(id)?;
+        Ok(self.outcome("claimed", id)?.is_some())
     }
 
     /// Conflicting outcomes fail closed. A lone claim or rejection remains
@@ -584,28 +597,11 @@ pub fn transcript_row_matches(
     session_history: &BTreeSet<String>,
     interaction_id: &str,
 ) -> bool {
-    if validate_id(interaction_id).is_err()
-        || !session_history.contains(session_id)
-        || row.get("type").and_then(Value::as_str) != Some("user")
-        || row
-            .get("sessionId")
-            .is_some_and(|v| v.as_str() != Some(session_id))
-        || row.pointer("/message/role").and_then(Value::as_str) != Some("user")
-    {
+    if validate_id(interaction_id).is_err() {
         return false;
     }
-    let Some(content) = row.pointer("/message/content") else {
+    let Some(text) = transcript_user_text(row, session_id, session_history) else {
         return false;
-    };
-    let text = match content {
-        Value::String(text) => text.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => return false,
     };
     let Some(payload) = text.strip_prefix(PLUGIN_PREFIX) else {
         return false;
@@ -613,6 +609,64 @@ pub fn transcript_row_matches(
     payload
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
         .any(|token| token == interaction_id)
+}
+
+/// Check the complete composer envelope in a user row from an attributed
+/// Claude transcript. The caller supplies the mod's claimed delivery.
+pub fn composer_transcript_row_matches(
+    row: &Value,
+    session_id: &str,
+    session_history: &BTreeSet<String>,
+    envelope: &NativeMessageEnvelope,
+) -> bool {
+    let other_plugin = row
+        .pointer("/origin/name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| name != "wardian");
+    if validate_id(&envelope.interaction_id).is_err()
+        || row.get("isMeta").and_then(Value::as_bool) == Some(true)
+        || row.get("isSidechain").and_then(Value::as_bool) == Some(true)
+        || other_plugin
+    {
+        return false;
+    }
+    let Some(text) = transcript_user_text(row, session_id, session_history) else {
+        return false;
+    };
+    // Some rows still carry the plugin frame. The bound claim and first-line
+    // envelope supply the same identity in either representation.
+    let payload = text
+        .strip_prefix(PLUGIN_PREFIX)
+        .map_or(text.as_str(), str::trim_start);
+    payload.lines().next() == Some(envelope.transcript_header().as_str())
+}
+
+fn transcript_user_text(
+    row: &Value,
+    session_id: &str,
+    session_history: &BTreeSet<String>,
+) -> Option<String> {
+    if !session_history.contains(session_id)
+        || row.get("type").and_then(Value::as_str) != Some("user")
+        || row
+            .get("sessionId")
+            .is_some_and(|v| v.as_str() != Some(session_id))
+        || row.pointer("/message/role").and_then(Value::as_str) != Some("user")
+    {
+        return None;
+    }
+    match row.pointer("/message/content")? {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => Some(
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -708,8 +762,10 @@ mod tests {
                 }])
                 .is_err());
         }
-        assert!(resolver.publish(1, "../escape", "x").is_err());
-        assert!(resolver.publish(MAX_JS_INTEGER + 1, "ask", "x").is_err());
+        assert!(resolver.publish(1, "../escape", "x", false).is_err());
+        assert!(resolver
+            .publish(MAX_JS_INTEGER + 1, "ask", "x", false)
+            .is_err());
     }
 
     #[test]
@@ -732,15 +788,18 @@ mod tests {
     #[test]
     fn atomic_publication_orders_and_never_rewrites_an_interaction() {
         let (_temp, _plan, resolver) = setup();
-        let path = resolver.publish(9, "ask-1", "exact\ntext").unwrap();
-        resolver.publish(10, "ask-2", "second").unwrap();
+        let path = resolver.publish(9, "ask-1", "exact\ntext", false).unwrap();
+        resolver.publish(10, "ask-2", "second", false).unwrap();
         let bytes = fs::read(&path).unwrap();
         let value: PendingDelivery = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.runtime_generation, 7);
         assert_eq!(value.text, "exact\ntext");
-        assert_eq!(resolver.publish(9, "ask-1", "exact\ntext").unwrap(), path);
-        assert!(resolver.publish(10, "ask-1", "exact\ntext").is_err());
-        assert!(resolver.publish(9, "ask-1", "changed").is_err());
+        assert_eq!(
+            resolver.publish(9, "ask-1", "exact\ntext", false).unwrap(),
+            path
+        );
+        assert!(resolver.publish(10, "ask-1", "exact\ntext", false).is_err());
+        assert!(resolver.publish(9, "ask-1", "changed", false).is_err());
         assert_eq!(fs::read(&path).unwrap(), bytes);
         let mut names = fs::read_dir(resolver.config.inbox.join("pending"))
             .unwrap()
@@ -750,8 +809,12 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names[0].to_string_lossy().ends_with("-ask-1.json"));
         assert!(names[1].to_string_lossy().ends_with("-ask-2.json"));
-        resolver.publish(11, "prefix-ask-3", "distinct").unwrap();
-        resolver.publish(12, "ask-3", "also distinct").unwrap();
+        resolver
+            .publish(11, "prefix-ask-3", "distinct", false)
+            .unwrap();
+        resolver
+            .publish(12, "ask-3", "also distinct", false)
+            .unwrap();
     }
 
     fn ready(resolver: &ClaudeModResolver, now: DateTime<Utc>) {
@@ -765,6 +828,134 @@ mod tests {
             "heartbeat.json",
             json!({"generation":7,"session_id":"session-a","at":now.timestamp_millis()}),
         );
+    }
+
+    #[test]
+    fn composer_requires_a_capable_ready_record_and_the_existing_heartbeat() {
+        let (_temp, _plan, mut resolver) = setup();
+        let now = DateTime::from_timestamp_millis(1794484800123).unwrap();
+        let tracked = BTreeSet::new();
+        ready(&resolver, now);
+        assert_eq!(resolver.readiness(now, &tracked, false).unwrap(), Ok(()));
+        assert_eq!(
+            resolver.readiness(now, &tracked, true).unwrap(),
+            Err(FallbackReason::ModNotLoaded)
+        );
+        write(
+            &resolver,
+            "ready.json",
+            json!({"generation":7,"session_id":"session-a","mod_version":"0.2.0","supports_as_user":true}),
+        );
+        assert_eq!(resolver.readiness(now, &tracked, true).unwrap(), Ok(()));
+        assert_eq!(
+            resolver
+                .readiness(now + chrono::Duration::seconds(6), &tracked, true)
+                .unwrap(),
+            Err(FallbackReason::HeartbeatStale)
+        );
+
+        let path = resolver
+            .publish(1, "composer-1", "tagged text", true)
+            .unwrap();
+        let value: PendingDelivery = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(value.as_user);
+        assert!(resolver
+            .publish(1, "composer-1", "tagged text", false)
+            .is_err());
+        assert!(!resolver.has_bound_claim("composer-1").unwrap());
+        write(
+            &resolver,
+            "claimed/composer-1.json",
+            json!({"generation":8,"interaction_id":"composer-1","session_id":"session-a"}),
+        );
+        assert!(!resolver.has_bound_claim("composer-1").unwrap());
+        write(
+            &resolver,
+            "claimed/composer-1.json",
+            json!({"generation":7,"interaction_id":"composer-1","session_id":"session-a"}),
+        );
+        assert!(resolver.has_bound_claim("composer-1").unwrap());
+    }
+
+    #[test]
+    fn composer_receipt_requires_exact_envelope_in_an_attributed_user_row() {
+        let envelope = NativeMessageEnvelope {
+            interaction_id: "composer-1".into(),
+            message_id: "composer-1".into(),
+            target_agent_id: "agent-1".into(),
+            sender_agent_id: None,
+            parent_interaction_id: None,
+            caller_idempotency_key: None,
+            generation: 7,
+            operation: crate::native_transport::NativeMessageOperation::StartTurn,
+            deadline_at: None,
+            body: "same visible text".into(),
+        };
+        let history = BTreeSet::from(["session-a".to_string()]);
+        let content = format!("{}\nsame visible text", envelope.transcript_header());
+        let mut row = json!({
+            "type":"user","sessionId":"session-a",
+            "origin":{"kind":"plugin","name":"wardian","asUser":true},
+            "message":{"role":"user","content":content},
+        });
+        assert!(composer_transcript_row_matches(
+            &row,
+            "session-a",
+            &history,
+            &envelope
+        ));
+        assert!(!composer_transcript_row_matches(
+            &row,
+            "session-b",
+            &history,
+            &envelope
+        ));
+        row["origin"]["name"] = json!("other");
+        assert!(!composer_transcript_row_matches(
+            &row,
+            "session-a",
+            &history,
+            &envelope
+        ));
+        row["message"]["content"] = json!(format!("{PLUGIN_PREFIX}\n{content}"));
+        assert!(!composer_transcript_row_matches(
+            &row,
+            "session-a",
+            &history,
+            &envelope
+        ));
+        row.as_object_mut().unwrap().remove("origin");
+        assert!(composer_transcript_row_matches(
+            &row,
+            "session-a",
+            &history,
+            &envelope
+        ));
+        row["message"]["content"] = json!(content);
+        assert!(composer_transcript_row_matches(
+            &row,
+            "session-a",
+            &history,
+            &envelope
+        ));
+        row["message"]["content"] = json!(format!(
+            "{PLUGIN_PREFIX}\n{}",
+            content.replace("generation=7", "generation=8")
+        ));
+        assert!(!composer_transcript_row_matches(
+            &row,
+            "session-a",
+            &history,
+            &envelope
+        ));
+        row["message"]["content"] =
+            json!(format!("{PLUGIN_PREFIX}\ncomposer-1\nsame visible text"));
+        assert!(!composer_transcript_row_matches(
+            &row,
+            "session-a",
+            &history,
+            &envelope
+        ));
     }
 
     #[test]
@@ -783,10 +974,10 @@ mod tests {
             json!(1794484800123_i64)
         );
         let tracked = BTreeSet::new();
-        assert_eq!(resolver.readiness(now, &tracked).unwrap(), Ok(()));
+        assert_eq!(resolver.readiness(now, &tracked, false).unwrap(), Ok(()));
         assert_eq!(
             resolver
-                .readiness(now + chrono::Duration::milliseconds(5000), &tracked)
+                .readiness(now + chrono::Duration::milliseconds(5000), &tracked, false)
                 .unwrap(),
             Ok(())
         );
@@ -797,20 +988,20 @@ mod tests {
         .unwrap();
         assert_eq!(
             resolver
-                .readiness(now + chrono::Duration::milliseconds(5000), &tracked)
+                .readiness(now + chrono::Duration::milliseconds(5000), &tracked, false)
                 .unwrap(),
             Ok(())
         );
         assert_eq!(
             resolver
-                .readiness(now + chrono::Duration::milliseconds(5001), &tracked)
+                .readiness(now + chrono::Duration::milliseconds(5001), &tracked, false)
                 .unwrap(),
             Err(FallbackReason::HeartbeatStale)
         );
         // A fresh reader cannot use a torn record without an earlier complete sample.
         let mut reopened = ClaudeModResolver::open(&resolver.config.inbox).unwrap();
         assert_eq!(
-            reopened.readiness(now, &tracked).unwrap(),
+            reopened.readiness(now, &tracked, false).unwrap(),
             Err(FallbackReason::HeartbeatStale)
         );
     }
@@ -838,26 +1029,26 @@ mod tests {
             .with_timezone(&Utc);
         let mut tracked = BTreeSet::new();
         assert_eq!(
-            resolver.readiness(now, &tracked).unwrap(),
+            resolver.readiness(now, &tracked, false).unwrap(),
             Err(FallbackReason::ModNotLoaded)
         );
         ready(&resolver, now);
-        assert_eq!(resolver.readiness(now, &tracked).unwrap(), Ok(()));
+        assert_eq!(resolver.readiness(now, &tracked, false).unwrap(), Ok(()));
         assert_eq!(
             resolver
-                .readiness(now + chrono::Duration::seconds(5), &tracked)
+                .readiness(now + chrono::Duration::seconds(5), &tracked, false)
                 .unwrap(),
             Ok(())
         );
         assert_eq!(
             resolver
-                .readiness(now + chrono::Duration::milliseconds(5001), &tracked)
+                .readiness(now + chrono::Duration::milliseconds(5001), &tracked, false)
                 .unwrap(),
             Err(FallbackReason::HeartbeatStale)
         );
         assert_eq!(
             resolver
-                .readiness(now - chrono::Duration::seconds(1), &tracked)
+                .readiness(now - chrono::Duration::seconds(1), &tracked, false)
                 .unwrap(),
             Err(FallbackReason::HeartbeatStale)
         );
@@ -867,7 +1058,7 @@ mod tests {
             json!({"generation":8,"session_id":"session-a","at":now.timestamp_millis()}),
         );
         assert_eq!(
-            resolver.readiness(now, &tracked).unwrap(),
+            resolver.readiness(now, &tracked, false).unwrap(),
             Err(FallbackReason::GenerationMismatch)
         );
         write(
@@ -876,18 +1067,18 @@ mod tests {
             json!({"generation":7,"session_id":"session-b","at":now.timestamp_millis()}),
         );
         assert_eq!(
-            resolver.readiness(now, &tracked).unwrap(),
+            resolver.readiness(now, &tracked, false).unwrap(),
             Err(FallbackReason::SessionMismatch)
         );
         tracked.insert("session-b".into());
-        assert_eq!(resolver.readiness(now, &tracked).unwrap(), Ok(()));
+        assert_eq!(resolver.readiness(now, &tracked, false).unwrap(), Ok(()));
         write(
             &resolver,
             "ready.json",
             json!({"generation":7,"session_id":"session-b","mod_version":"1"}),
         );
         assert_eq!(
-            resolver.readiness(now, &tracked).unwrap(),
+            resolver.readiness(now, &tracked, false).unwrap(),
             Err(FallbackReason::SessionMismatch)
         );
         write(
@@ -896,7 +1087,7 @@ mod tests {
             json!({"generation":8,"session_id":"session-a","mod_version":"1"}),
         );
         assert_eq!(
-            resolver.readiness(now, &tracked).unwrap(),
+            resolver.readiness(now, &tracked, false).unwrap(),
             Err(FallbackReason::GenerationMismatch)
         );
         for (reason, code) in [
@@ -914,7 +1105,10 @@ mod tests {
         let (_temp, _plan, mut resolver) = setup();
         let now = Utc::now();
         ready(&resolver, now);
-        assert_eq!(resolver.readiness(now, &BTreeSet::new()).unwrap(), Ok(()));
+        assert_eq!(
+            resolver.readiness(now, &BTreeSet::new(), false).unwrap(),
+            Ok(())
+        );
         fs::write(
             resolver.config.inbox.join("heartbeat.json"),
             b"{\"generation\":",
@@ -922,13 +1116,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             resolver
-                .readiness(now + chrono::Duration::seconds(4), &BTreeSet::new())
+                .readiness(now + chrono::Duration::seconds(4), &BTreeSet::new(), false)
                 .unwrap(),
             Ok(())
         );
         assert_eq!(
             resolver
-                .readiness(now + chrono::Duration::seconds(6), &BTreeSet::new())
+                .readiness(now + chrono::Duration::seconds(6), &BTreeSet::new(), false)
                 .unwrap(),
             Err(FallbackReason::HeartbeatStale)
         );

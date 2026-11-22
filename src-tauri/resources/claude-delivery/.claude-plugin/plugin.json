@@ -1,5 +1,5 @@
 {
   "name": "wardian",
-  "version": "0.1.0",
-  "description": "Delivers Wardian peer messages and task replies as queued prompts instead of terminal keystrokes."
+  "version": "0.2.0",
+  "description": "Delivers Wardian peer messages, task replies, and eligible Chat prompts through the Claude queue."
 }
