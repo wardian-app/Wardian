@@ -8,6 +8,7 @@ import { applyChatPage } from "../chat/chatReadState";
 import { committedChatFixture } from "../../test/committedChatFixture";
 import { canonicalOlderIdentityFixture, coldSourcePreviewIdentityFixture, previewGenerationRolloverFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
 import { chatEventDisplayKey } from "../chat/chatEventIdentity";
+import { chatPresentationV1 } from "../chat/committedChatPresentation";
 
 type StatusStreamHandlers = Parameters<typeof remoteClient.openStatusStream>[0];
 
@@ -419,6 +420,76 @@ describe("useRemoteStore watchlists", () => {
     expect(useRemoteStore.getState().chatEvents).toEqual([]);
     expect(useRemoteStore.getState().chatPage).toEqual(next);
     expect(useRemoteStore.getState().chatError).toBe("");
+  });
+
+  it("holds the provisional renderer when an ordinary read can only prove the same bridge lifetime", async () => {
+    const { provisional, canonical } = previewIdentityFixture("agent-1");
+    const bridge = chatPresentationV1(provisional)!.preview_bridge!;
+    const waiting: RemoteAgentChatPage = {
+      ...provisional,
+      recent_admission: null,
+      revision: "same-source-indexing",
+      progress: "indexing",
+      events: [],
+      aliases: [],
+      removed_ids: [],
+      reset: false,
+      unchanged: false,
+      presentation: { version: 1, payload: {
+        turns: [], items: [], state_event_refs: [], legacy_turns: [], detail: null, preview_bridge: bridge,
+      } },
+    };
+    const loadPage = vi.mocked(remoteClient.loadAgentChatPage);
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: provisional.events, chatPage: provisional, chatPresentationPage: provisional });
+
+    loadPage.mockResolvedValueOnce(waiting);
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    const held = useRemoteStore.getState();
+    expect(held.chatPage).toBe(provisional);
+    expect(held.chatPresentationPage).toBe(provisional);
+    expect(held.chatEvents).toBe(provisional.events);
+    expect(held.chatError).toBe("");
+
+    loadPage.mockResolvedValueOnce(canonical);
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(loadPage.mock.calls[1]?.[2]).toBe(provisional.revision);
+    expect(useRemoteStore.getState().chatPresentationPage).toBe(canonical);
+  });
+
+  it("retries a read-backpressure response without an alert or a change to the visible Chat", async () => {
+    vi.useFakeTimers();
+    const { provisional, canonical } = previewIdentityFixture("agent-1");
+    const agent = { session_id: "agent-1", session_name: "Coder", agent_class: "Coder", provider: "codex",
+      workspace: "<absolute-workspace-path>", status: "Idle", latest_text: null };
+    vi.mocked(remoteClient.listAgents).mockResolvedValue([agent]);
+    const loadPage = vi.mocked(remoteClient.loadAgentChatPage)
+      .mockResolvedValueOnce(provisional)
+      .mockRejectedValueOnce(new RemoteRequestError("temporary", 503, "agent_chat_read_retryable"))
+      .mockResolvedValue(canonical);
+    useRemoteStore.setState({ activeAgentViewModesById: { "agent-1": "chat" } });
+    await useRemoteStore.getState().load();
+    await useRemoteStore.getState().openAgent("agent-1");
+    const opened = useRemoteStore.getState();
+    const alerts: string[] = [];
+    const unsubscribe = useRemoteStore.subscribe((state) => { if (state.chatError) alerts.push(state.chatError); });
+    try {
+      await vi.advanceTimersByTimeAsync(100);
+      const waiting = useRemoteStore.getState();
+      expect(loadPage).toHaveBeenCalledTimes(2);
+      expect(waiting.chatEvents).toBe(opened.chatEvents);
+      expect(waiting.chatPage).toBe(opened.chatPage);
+      expect(waiting.chatPresentationPage).toBe(opened.chatPresentationPage);
+      expect(waiting.chatError).toBe("");
+      expect(waiting.status).toBe("ready");
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(loadPage).toHaveBeenCalledTimes(3);
+      expect(useRemoteStore.getState().chatPresentationPage).toBe(canonical);
+      expect(alerts).toEqual([]);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("automatically recovers a selected Off agent after a retryable snapshot failure", async () => {

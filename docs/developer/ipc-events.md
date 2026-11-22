@@ -433,8 +433,10 @@ on Older and detail requests to retain that admission's representation.
 They omit `preview_backing_ids` on those requests. The cursor or detail
 reference remains the read authority; the revision alone grants none.
 An empty continuity envelope on a passive latest read preserves the validated
-admission while carrying no rows, cursor, detail or ACK. Readers keep their
-loaded window and apply the existing revalidation rules when its Head changes.
+admission while carrying no rows, cursor, detail or ACK. A reader with a bound
+provisional window keeps its displayed revision, rows, and renderer when that
+envelope names the same admission and source scope. Loaded canonical history
+continues to apply the existing revalidation rules when its Head changes.
 
 Archive replay retains canonical IDs and can enrich provenance from a current,
 source-bound native observation. Capture-enabled repair persists verified

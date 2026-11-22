@@ -70,12 +70,22 @@ function sameNativeScope(previous: AgentChatPage, next: AgentChatPage): boolean 
 export function holdsBoundChatWindow(
   previous: AgentChatPage | null, next: AgentChatPage, loaded: readonly AgentChatEvent[],
 ): boolean {
-  if (!previous || !qualifiedChatPreviewBridge(previous) || !sameNativeScope(previous, next)
+  const prior = qualifiedChatPreviewBridge(previous);
+  if (!previous || !prior || !sameNativeScope(previous, next)
     || next.revision.includes(":retired-view-v1:") || next.revision.endsWith(":retired")) return false;
   const bridge = qualifiedChatPreviewBridge(next);
   if (bridge?.replaces && previous.generation !== next.generation) return !previewBridgeRollover(previous, next, loaded);
-  return next.recent_admission == null && chatPresentationPayload(next) === null
-    && (next.progress === "indexing" || next.progress === "pending");
+  if (next.recent_admission != null) return false;
+  const presentation = chatPresentationPayload(next);
+  if (!presentation) return next.progress === "indexing" || next.progress === "pending";
+  // An authority-free continuation certifies the existing lifetime but brings
+  // no replacement rows. Keep the admitted revision and its renderer together.
+  return previous.recent_admission != null && bridge?.admission_id === prior.admission_id
+    && previous.generation === next.generation && !next.reset && !next.older_page && !next.archive_read_ready
+    && next.next_before === null && next.detail === null && next.revalidated_ids == null
+    && next.events.length === 0 && next.removed_ids.length === 0 && next.aliases.length === 0
+    && presentation.turns.length === 0 && presentation.items.length === 0 && presentation.state_event_refs.length === 0
+    && presentation.legacy_turns.length === 0 && presentation.detail == null;
 }
 
 /** A producer-marked successor must cover the prior returned window with literal IDs or aliases. */

@@ -11,6 +11,7 @@ import type {
   RemoteAutomationSummary,
 } from "../../types";
 import { chatPresentationV1 } from "../chat/committedChatPresentation";
+import { shouldShowChatEvent } from "../chat/chatPresentation";
 import { isUnscopedSourceLegacy, previewBackingIdsForWindow } from "../chat/chatPreviewBacking";
 import { holdsBoundChatWindow, qualifiedChatPreviewBridge } from "../chat/chatPreviewIdentity";
 import {
@@ -203,11 +204,14 @@ const statusFromError = (error: unknown): RemoteStatus => {
   return "unreachable";
 };
 
+const isChatReadBackpressure = (error: unknown) => error instanceof RemoteRequestError
+  && error.status === 503 && error.code === "agent_chat_read_retryable";
+
 const chatConnectionStatusFromError = (error: unknown): RemoteStatus | null => {
   // Connectivity is established at the request boundary, never by local page application.
   if (error instanceof RemoteTransportError) return "unreachable";
   if (!(error instanceof RemoteRequestError)) return null;
-  if (error instanceof RemoteRequestError && error.code === "agent_chat_read_retryable" && error.status === 503) return null;
+  if (isChatReadBackpressure(error)) return null;
   const status = statusFromError(error);
   // Ordinary chat failures and HTTP 500 do not establish status-stream loss; gateway failures still do.
   return error instanceof RemoteRequestError
@@ -1349,7 +1353,15 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       });
     } catch (error) {
       if (requestSerial !== chatRefreshRequestSerial || requestedWindow !== chatWindowRequestSerial) return;
-      if (get().activeAgentId !== activeAgentId) return;
+      const current = get();
+      if (current.activeAgentId !== activeAgentId) return;
+      if (isChatReadBackpressure(error) && current.chatPage?.session_id === activeAgentId
+        && current.chatEvents.some((event) => event.kind !== "status"
+          && (event.kind !== "message" || Boolean(event.text?.trim())) && shouldShowChatEvent(event))) {
+        // The existing selected-page scheduler retries after this read settles.
+        set({ chatLoading: false });
+        return;
+      }
       if (error instanceof ChatRevalidationError && error.scopeChanged) {
         olderDemand?.settle();
         chatWindowRequestSerial += 1;
