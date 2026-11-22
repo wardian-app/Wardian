@@ -23,6 +23,11 @@ pub(crate) async fn admit_background_capture(
     mut request: CaptureRequest,
     force: bool,
 ) -> Option<CaptureClaim> {
+    // A durable sequence failure needs operator repair, not another capture
+    // attempt merely because telemetry observes a new mtime or forces a tick.
+    if super::chat::background_capture_is_archive_blocked(state, &request) {
+        return None;
+    }
     if let Some(path) = request.source_path.as_deref() {
         match super::provider_log_acquisition::observe_provider_log_source(path) {
             Ok(actual) => {

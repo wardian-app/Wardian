@@ -4,6 +4,189 @@ use crate::commands::provider_log_acquisition::{
 };
 use wardian_core::control::ArchiveAdoptionNativeIdentity;
 
+#[test]
+fn adoption_sequence_gap_retires_without_changing_archive_or_retrying_after_restart() {
+    assert_adoption_sequence_gap_retires(false);
+}
+
+#[test]
+fn adoption_event_only_sequence_gap_retires_without_changing_archive_or_retrying_after_restart() {
+    assert_adoption_sequence_gap_retires(true);
+}
+
+#[test]
+fn adoption_reordered_or_ambiguous_evidence_is_not_retired_as_an_empty_sequence() {
+    for evidence in ["reordered", "unassigned-native", "malformed-payload"] {
+        let (_guard, temp) = super::super::tests::isolated_home();
+        let fixture = fixture(temp.path());
+        let context = &fixture.admission.context;
+        for text in ["second prompt", "third prompt"] {
+            fixture
+                .archive
+                .append_delivered_input_with_context(context.clone(), text, None)
+                .unwrap();
+        }
+        let narrative = fixture.archive_dir.join("conversation.jsonl");
+        let mut records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+            wardian_core::conversations::read_jsonl_records(&narrative).unwrap();
+        records.retain(|record| record.seq == 1);
+        wardian_core::conversations::write_jsonl_atomic(&narrative, &records).unwrap();
+        let path = fixture.archive_dir.join("events.jsonl");
+        let mut events: Vec<wardian_core::models::chat::AgentChatEvent> =
+            wardian_core::conversations::read_jsonl_records(&path).unwrap();
+        let mut second = events.remove(1);
+        match evidence {
+            "reordered" => {}
+            "unassigned-native" => {
+                second.id = "unassigned-native".into();
+                second.source = Some("event_msg".into());
+                second.metadata = serde_json::json!({"provider_log": true});
+                assert!(super::super::narrative_from_chat_event(&second, 2).is_some());
+            }
+            "malformed-payload" => second.metadata["archive_record"] = serde_json::json!("invalid"),
+            _ => unreachable!(),
+        }
+        events.push(second);
+        wardian_core::conversations::write_jsonl_atomic(&path, &events).unwrap();
+        fixture
+            .archive
+            .authorize_adoption(
+                &fixture.admission,
+                fixture.request.clone(),
+                None,
+                "test-os-user".into(),
+            )
+            .unwrap();
+        let before = [path, narrative].map(|path| {
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        });
+        assert!(
+            fixture
+                .archive
+                .advance_adoption(&fixture.admission)
+                .is_err(),
+            "{evidence}"
+        );
+        assert!(
+            fixture
+                .archive
+                .archive_sequence_gap(context)
+                .unwrap()
+                .is_none(),
+            "{evidence}"
+        );
+        assert!(fixture
+            .archive
+            .has_pending_adoption(&context.agent_id)
+            .unwrap());
+        let restarted = ConversationArchiveState::default();
+        assert!(restarted.advance_adoption(&fixture.admission).is_err());
+        assert!(restarted.archive_sequence_gap(context).unwrap().is_none());
+        for (path, bytes) in before {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+    }
+}
+
+fn assert_adoption_sequence_gap_retires(event_only: bool) {
+    let (_guard, temp) = super::super::tests::isolated_home();
+    let fixture = fixture(temp.path());
+    let context = &fixture.admission.context;
+    // Recreate a reservation lost by an older writer: row 1 is durable,
+    // slot 2 was never written, and the next legitimate prompt owns row 3.
+    fixture
+        .archive
+        .active
+        .lock()
+        .unwrap()
+        .get_mut(&context.agent_id)
+        .unwrap()
+        .next_seq = 3;
+    fixture
+        .archive
+        .append_delivered_input_with_context(context.clone(), "after lost reservation", None)
+        .unwrap();
+    if event_only {
+        let path = fixture.archive_dir.join("conversation.jsonl");
+        let mut records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+            wardian_core::conversations::read_jsonl_records(&path).unwrap();
+        records.retain(|record| record.seq != 3);
+        wardian_core::conversations::write_jsonl_atomic(&path, &records).unwrap();
+    }
+    fixture
+        .archive
+        .authorize_adoption(
+            &fixture.admission,
+            fixture.request.clone(),
+            None,
+            "test-os-user".into(),
+        )
+        .unwrap();
+    fn files(directory: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut result = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                result.extend(files(&path));
+            } else {
+                result.insert(path.clone(), std::fs::read(path).unwrap());
+            }
+        }
+        result
+    }
+    let before = files(&fixture.archive_dir);
+    assert!(!fixture
+        .archive
+        .advance_adoption(&fixture.admission)
+        .unwrap());
+    let gap = fixture
+        .archive
+        .archive_sequence_gap(context)
+        .unwrap()
+        .unwrap();
+    assert_eq!(gap.sequence, 2);
+    assert_eq!(gap.conversation_id, fixture.request.conversation_id);
+    assert!(gap.reason().contains("approved repair"));
+    let job = job_path(&context.agent_id, &fixture.request.authorization_id).unwrap();
+    let work: AdoptionWork = bounded_json(&job, JOB_BYTES).unwrap();
+    assert_eq!(work.status, "retired");
+    assert_eq!(work.reason, Some(gap.reason()));
+    assert_eq!(work.cursor, fixture.request.start_offset);
+    assert!(!fixture
+        .archive
+        .has_pending_adoption(&context.agent_id)
+        .unwrap());
+    assert_eq!(files(&fixture.archive_dir), before);
+    let capture_path = wardian_core::paths::agent_conversations_dir(&context.agent_id)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("conversation-capture.json");
+    assert_eq!(std::fs::read(capture_path).unwrap(), fixture.capture_bytes);
+    let job_bytes = std::fs::read(job).unwrap();
+    let restarted = ConversationArchiveState::default();
+    assert_eq!(restarted.archive_sequence_gap(context).unwrap(), Some(gap));
+    assert!(!restarted.advance_adoption(&fixture.admission).unwrap());
+    assert!(restarted
+        .append_delivered_input_with_context(context.clone(), "must stay unarchived", None)
+        .unwrap_err()
+        .to_string()
+        .contains("approved repair"));
+    assert_eq!(
+        std::fs::read(job_path(&context.agent_id, &fixture.request.authorization_id).unwrap())
+            .unwrap(),
+        job_bytes
+    );
+    assert_eq!(files(&fixture.archive_dir), before);
+    let mut other_source = context.clone();
+    other_source.provider_source_key = Some("new-source".into());
+    assert!(restarted
+        .archive_sequence_gap(&other_source)
+        .unwrap()
+        .is_none());
+}
+
 impl ConversationArchiveState {
     pub(crate) fn replace_adoption_source_for_test(&self, source: &str) -> io::Result<()> {
         use std::sync::atomic::Ordering;

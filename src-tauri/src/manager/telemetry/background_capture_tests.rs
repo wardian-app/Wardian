@@ -535,6 +535,64 @@ async fn quiet_replaced_source_finishes_owned_projection_work_without_another_ap
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_archive_gap_blocks_forced_and_changed_source_capture_and_reaches_chat() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let (state, session, path) = registered_off_source(&home).await;
+    *state.agents.lock().await[&session].log_path.lock().unwrap() = Some(path.clone());
+    let gap = wardian_core::conversations::ArchiveSequenceGap {
+        conversation_id: "damaged-conversation".into(),
+        provider_source_key: Some("codex:session:off-provider-conversation".into()),
+        sequence: 2,
+    };
+    let status_path = home
+        .path()
+        .join("agents")
+        .join(&session)
+        .join("archive-capture-stop.json");
+    let bytes = serde_json::to_vec(&gap).unwrap();
+    std::fs::write(&status_path, &bytes).unwrap();
+    for force in [false, true] {
+        append_records(&path, 1);
+        let request = crate::commands::chat::background_capture_request(&state, &session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::commands::background_capture::admit_background_capture(
+                &state,
+                request.clone(),
+                force
+            )
+            .await
+            .is_none()
+        );
+        assert_eq!(
+            crate::commands::chat::archive_background_capture_pass(&state, &request)
+                .await
+                .unwrap(),
+            crate::state::background_capture::CaptureStop::Retired
+        );
+    }
+    let error = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
+        &state,
+        session,
+        None,
+        None,
+        None,
+        None,
+        crate::commands::chat::RecentChatRead::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, gap.reason());
+    assert_eq!(std::fs::read(status_path).unwrap(), bytes);
+    assert!(!home
+        .path()
+        .join("agents/ordinary-off-capture/conversations")
+        .exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_replacement() {
     use wardian_core::control::{ArchiveAdoptionNativeIdentity, ArchiveAdoptionRequest};
 

@@ -577,6 +577,9 @@ impl ConversationArchiveState {
         }
         #[cfg(all(test, feature = "adoption-throughput"))]
         profile::mark(&grant.agent_id, "adoption_loaded", work.cursor);
+        if let Some(gap) = self.archive_sequence_gap(&admission.context)? {
+            return retire_work(&path, &mut work, io::Error::other(gap.reason()));
+        }
         let check = || -> io::Result<()> {
             let capture = storage::read_capture_state(&grant.agent_id)?;
             if current_fingerprint(&capture, admission, &grant.request)?
@@ -625,14 +628,23 @@ impl ConversationArchiveState {
             conversation_id: grant.request.conversation_id.clone(),
             rows: batch.events.clone(),
         };
-        let (_, candidate) = self.append_chat_events_prepared_locked(
+        let prepared = self.append_chat_events_prepared_locked(
             admission.context.clone(),
             &batch.events,
             None,
             None,
             None,
             Some(&authority),
-        )?;
+        );
+        let (_, candidate) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) if super::repair::narrative_sequence_gap(&error).is_some() => {
+                // Recovery saved the terminal source diagnostic and retired
+                // this grant under our existing per-agent archive lock.
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
         #[cfg(all(test, feature = "adoption-throughput"))]
         profile::mark(
             &grant.agent_id,

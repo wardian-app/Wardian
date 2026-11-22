@@ -1,7 +1,225 @@
 use super::*;
 use crate::state::conversation_archive::{tests::isolated_home, ConversationArchiveState};
-use wardian_core::conversations::AgentConversationLoggingSetting;
+use wardian_core::conversations::{read_jsonl_records, AgentConversationLoggingSetting};
 use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
+
+#[test]
+fn declined_receipts_preserve_narrative_prefix() {
+    for decline in ["busy", "missing", "handoff", "stale-fence"] {
+        assert_declined_receipt_preserves_narrative_prefix(decline);
+    }
+}
+
+#[test]
+fn terminal_archive_stop_declines_receipt_without_writing_or_allocating() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let ctx = context();
+    archive
+        .append_delivered_input_with_context(ctx.clone(), "warm", None)
+        .unwrap();
+    let fence = input_fence(&ctx, None).unwrap().unwrap();
+    let directory =
+        super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
+    let before =
+        ["events.jsonl", "conversation.jsonl"].map(|name| fs::read(directory.join(name)).unwrap());
+    let next_sequence = archive.active.lock().unwrap()[&ctx.agent_id].next_seq;
+    let gap = wardian_core::conversations::ArchiveSequenceGap {
+        conversation_id: fence.conversation_id.clone(),
+        provider_source_key: ctx.provider_source_key.clone(),
+        sequence: 2,
+    };
+    wardian_core::conversations::write_json_atomic(
+        &wardian_core::conversations::archive_capture_status_path(&ctx.agent_id).unwrap(),
+        &gap,
+    )
+    .unwrap();
+    assert!(archive
+        .append_delivered_input_receipt(ctx.clone(), "accepted but unreceipted", &fence)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        archive.active.lock().unwrap()[&ctx.agent_id].next_seq,
+        next_sequence
+    );
+    for (name, bytes) in ["events.jsonl", "conversation.jsonl"]
+        .into_iter()
+        .zip(before)
+    {
+        assert_eq!(fs::read(directory.join(name)).unwrap(), bytes);
+    }
+}
+
+fn assert_declined_receipt_preserves_narrative_prefix(decline: &str) {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let ctx = context();
+    archive
+        .append_delivered_input_with_context(ctx.clone(), "warm", None)
+        .unwrap();
+    let mut fence = input_fence(&ctx, None).unwrap().unwrap();
+    let directory =
+        super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
+    let before = ["events.jsonl", "conversation.jsonl"].map(|name| {
+        let path = directory.join(name);
+        let bytes = fs::read(&path).unwrap();
+        (path, bytes)
+    });
+
+    match decline {
+        "missing" => {
+            archive
+                .chat_projection
+                .work
+                .lock()
+                .unwrap()
+                .remove(&ctx.agent_id);
+        }
+        "handoff" => {
+            archive
+                .chat_projection
+                .work
+                .lock()
+                .unwrap()
+                .get_mut(&ctx.agent_id)
+                .unwrap()
+                .archive_display_handoff = true;
+        }
+        "stale-fence" => fence.source_epoch = Some("stale".into()),
+        "busy" => {}
+        _ => panic!("unknown admission decline"),
+    }
+    // Model another capture pass holding the shared projection work map.
+    let projection_busy = (decline == "busy").then(|| archive.chat_projection.work.lock().unwrap());
+    assert!(archive
+        .append_delivered_input_receipt(ctx.clone(), "accepted but unreceipted", &fence)
+        .unwrap()
+        .is_none());
+    drop(projection_busy);
+    for (path, bytes) in &before {
+        assert_eq!(fs::read(path).unwrap().as_slice(), bytes.as_slice());
+    }
+
+    assert_eq!(
+        archive
+            .append_chat_events_with_context(
+                ctx.clone(),
+                &[event("after-decline", "first normal observation")],
+            )
+            .unwrap(),
+        1
+    );
+    let next = archive.append_chat_events_with_context(
+        ctx,
+        &[event("after-recovery", "second normal observation")],
+    );
+    assert!(
+        next.is_ok(),
+        "a {decline} optional receipt must not prevent later recovery: {next:?}"
+    );
+    let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).unwrap();
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+}
+
+#[test]
+fn admitted_receipt_error_preserves_durable_identity_for_recovery() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let ctx = context();
+    archive
+        .append_delivered_input_with_context(ctx.clone(), "warm", None)
+        .unwrap();
+    let fence = input_fence(&ctx, None).unwrap().unwrap();
+    let directory =
+        super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
+    // Fail derived publication after the admitted callback has synced the
+    // canonical event and narrative. Retrying the same text is a new input.
+    archive
+        .chat_projection
+        .fail_checkpoint_stage
+        .store(3, std::sync::atomic::Ordering::SeqCst);
+    assert!(archive
+        .append_delivered_input_receipt(ctx.clone(), "same", &fence)
+        .is_err());
+    let after_failure: Vec<AgentChatEvent> =
+        read_jsonl_records(&directory.join("events.jsonl")).unwrap();
+    let failed_id = after_failure.last().unwrap().id.clone();
+    let accepted = archive
+        .append_delivered_input_receipt(ctx.clone(), "same", &fence)
+        .unwrap()
+        .unwrap();
+    assert_ne!(accepted.chat_event_id, failed_id);
+    archive
+        .append_chat_events_with_context(ctx.clone(), &[event("after-error", "normal observation")])
+        .unwrap();
+    archive
+        .append_chat_events_with_context(ctx, &[event("after-recovery", "recovery observation")])
+        .unwrap();
+    let events: Vec<AgentChatEvent> = read_jsonl_records(&directory.join("events.jsonl")).unwrap();
+    for id in [&failed_id, &accepted.chat_event_id] {
+        assert_eq!(events.iter().filter(|event| &event.id == id).count(), 1);
+    }
+    let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).unwrap();
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5]
+    );
+}
+
+#[test]
+fn partial_receipt_write_recovers_original_event_without_reusing_sequence() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let ctx = context();
+    archive
+        .append_delivered_input_with_context(ctx.clone(), "warm", None)
+        .unwrap();
+    let fence = input_fence(&ctx, None).unwrap().unwrap();
+    let directory =
+        super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
+    let narrative = directory.join("conversation.jsonl");
+    let retained = directory.join("retained-narrative.jsonl");
+    fs::rename(&narrative, &retained).unwrap();
+    fs::create_dir(&narrative).unwrap();
+    // The canonical event is written before the narrative append fails.
+    assert!(archive
+        .append_delivered_input_receipt(ctx.clone(), "same", &fence)
+        .is_err());
+    let events: Vec<AgentChatEvent> = read_jsonl_records(&directory.join("events.jsonl")).unwrap();
+    assert_eq!(events.len(), 2);
+    let original_id = events[1].id.clone();
+    fs::remove_dir(&narrative).unwrap();
+    fs::rename(&retained, &narrative).unwrap();
+    archive
+        .append_chat_events_with_context(ctx.clone(), &[event("repair", "normal recovery")])
+        .unwrap();
+    let accepted = archive
+        .append_delivered_input_receipt(ctx.clone(), "same", &fence)
+        .unwrap()
+        .unwrap();
+    assert_ne!(accepted.chat_event_id, original_id);
+    archive
+        .append_chat_events_with_context(
+            ctx.clone(),
+            &[event("after-recovery", "later observation")],
+        )
+        .unwrap();
+    let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+        read_jsonl_records(&narrative).unwrap();
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5]
+    );
+    assert!(records[1].event_refs.contains(&original_id));
+    assert_eq!(records[1].text.as_deref(), Some("same"));
+    assert!(records[3].event_refs.contains(&accepted.chat_event_id));
+    assert!(archive.archive_sequence_gap(&ctx).unwrap().is_none());
+}
 
 /// Exercise the fixture owner normally in CI. An explicit owned-home request
 /// runs the same preparation in the separate native harness process.
