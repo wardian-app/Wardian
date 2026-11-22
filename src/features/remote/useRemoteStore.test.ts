@@ -196,7 +196,8 @@ describe("useRemoteStore watchlists", () => {
         expect(held.chatPresentationPage).toBe(admitted.chatPresentationPage);
         expect(held.chatEvents).toBe(admitted.chatEvents);
         expect(held.chatError).toBe("");
-        expect(loadPage.mock.calls.at(-1)?.slice(0, 3)).toEqual(["agent-1", undefined, provisional.revision]);
+        const calls = loadPage.mock.calls;
+        expect(calls[calls.length - 1]?.slice(0, 3)).toEqual(["agent-1", undefined, provisional.revision]);
         expect(publications).toHaveLength(0);
       }
 

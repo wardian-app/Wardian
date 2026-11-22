@@ -12,6 +12,7 @@ import { JSDOM } from "jsdom";
 import { randomUUID, createHash } from "node:crypto";
 import { acquireHomeLock } from "../lib/sessionHome.mjs";
 import { createWindowsSupervisorPlan } from "../../scripts/native-e2e-runner.mjs";
+import { compactMinimalChatTiming, minimalChatTimingLabel } from "../lib/chatPreviewMinimalTiming.mjs";
 import {
   CHAT_PREVIEW_BUDGET_MS, CHAT_PREVIEW_SEED_TIMEOUT_MS, CHAT_PREVIEW_RULER_VERSION, chatPreviewWatchdogMs,
   CHAT_PREVIEW_METHOD_REVISION, chatPreviewSurfaceCases, retainChatTimingReport,
@@ -258,7 +259,8 @@ test("v8 source-legacy admission cannot conceal a partial scope or claimed prese
   }
 });
 
-function browser({ surface = "remote", disclosure = false, modeNeedsToggle = false, body = fixture.body, captureDetails = false, rulerVersion = 7 } = {}) {
+function browser({ surface = "remote", disclosure = false, modeNeedsToggle = false, body = fixture.body, captureDetails = false, rulerVersion = 7,
+  minimalTiming = false } = {}) {
   const observedFixture = { ...fixture, body };
   let time = 10; let ordinal = 0;
   const frames = new Map(); const listeners = new Map();
@@ -304,7 +306,7 @@ function browser({ surface = "remote", disclosure = false, modeNeedsToggle = fal
     getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
     requestAnimationFrame: (callback) => { frames.set(++ordinal, callback); return ordinal; },
     cancelAnimationFrame: (id) => frames.delete(id), setTimeout, clearTimeout, TextEncoder });
-  vm.runInContext(chatPreviewObserverScript({ ...observedFixture, surface, probe: rulerVersion === 8 ? v8Probe : "probe", captureDetails, rulerVersion }), context);
+  vm.runInContext(chatPreviewObserverScript({ ...observedFixture, surface, probe: rulerVersion === 8 ? v8Probe : "probe", captureDetails, rulerVersion, minimalTiming }), context);
   const api = window.__chatPreviewTiming;
   const adopt = (dto, marker = true, rendered = dto) => {
     const receipt = chatTimingReceipt(dto, observedFixture);
@@ -354,6 +356,64 @@ function v8Opening(b, dto = nativeLegacyPage(), marker = false, delay = 0) {
   b.inputEvent(); b.advance(3);
   return b.api.snapshot();
 }
+
+test("minimal timing captures the actual first usable frame/anchor once, independently of later handoff geometry", () => {
+  const normal = browser({ rulerVersion: 8 });
+  assert.equal(v8Opening(normal).phase.minimal_first_usable, undefined); normal.api.dispose();
+  const b = browser({ rulerVersion: 8, minimalTiming: true });
+  const rect = b.content.getBoundingClientRect(); let top = 12.25;
+  b.content.getBoundingClientRect = () => ({ ...rect, top });
+  const opening = v8Opening(b).phase;
+  assert.equal(opening.minimal_first_usable.at, opening.usableAt);
+  assert.equal(opening.minimal_first_usable.click_at, opening.clickAt);
+  assert.deepEqual(opening.minimal_first_usable.frames, opening.frames.usableAt);
+  assert.equal(opening.minimal_first_usable.anchor_top, 12.25);
+  assert.ok(opening.minimal_first_usable.receipt_sequence > 0);
+  top = 15.75; b.advance(4);
+  const later = b.api.snapshot().phase;
+  assert.deepEqual(later.minimal_first_usable, opening.minimal_first_usable);
+  assert.equal(later.continuity.last.anchor_top, 15.75);
+  assert.equal(later.minimal_anchor.delta_px, 3.5); assert.equal(later.minimal_anchor.verified, true);
+  b.api.dispose();
+});
+
+test("minimal anchor retains the worst verified temporary legacy return and independent M1 even when strict M2 rejects a successor", () => {
+  const b = browser({ rulerVersion: 8, minimalTiming: true });
+  const rect = b.content.getBoundingClientRect(); let top = 401;
+  b.content.getBoundingClientRect = () => ({ ...rect, top });
+  const initial = presentedPreview(); const opening = v8Opening(b, initial, true).phase;
+  const legacy = nativeLegacyPage({ id: initial.events[0].id, sourceRef: "source-record" });
+  top = 157; b.adopt(legacy, false); b.advance(2);
+  const successor = presentedPreview(); successor.recent_admission = "successor-admission"; successor.generation = "successor-generation";
+  successor.presentation.payload.preview_bridge = { ...successor.presentation.payload.preview_bridge,
+    admission_id: successor.recent_admission, replaces: { admission_id: initial.recent_admission, generation: initial.generation } };
+  successor.presentation.payload.items[0].admission_id = successor.recent_admission;
+  top = 401; b.adopt(successor, true); b.advance(4);
+  const final = b.api.snapshot();
+  assert.equal(final.phase.continuity.last.anchor_top, 401);
+  assert.equal(final.phase.minimal_anchor.verified, true); assert.equal(final.phase.minimal_anchor.delta_px, -244);
+  assert.equal(final.phase.usableAt, opening.usableAt);
+  assert.throws(() => assertChatOpeningSample(final), /missing_qualified_handoff|unproven_handoff_continuity/);
+  const report = compactMinimalChatTiming({ cases: [{ label: minimalChatTimingLabel("desktop", 1, "cold-process-first-chat"),
+    status: "FAILED", observation: final }], surfaces: [] });
+  assert.equal(report.cases[0].first_usable_ms, opening.usableAt - opening.clickAt);
+  assert.equal(report.cases[0].anchor_delta_px, -244); assert.equal(report.cases[0].source_switch_count, 1);
+  b.api.dispose();
+});
+
+test("a missing or foreign anchor frame cannot be repaired by a later return of the original anchor", () => {
+  for (const missing of [true, false]) {
+    const b = browser({ rulerVersion: 8, minimalTiming: true }); v8Opening(b);
+    if (missing) b.content.textContent = "not the target";
+    else b.row.attributes["data-chat-row-identity"] = JSON.stringify({ id: "unrelated-row" });
+    b.advance(1);
+    b.content.textContent = fixture.body; b.row.attributes["data-chat-row-identity"] = JSON.stringify({ id: "producer literal / ? λ" });
+    b.advance(3);
+    const final = b.api.snapshot(); assert.equal(final.phase.minimal_anchor.verified, false);
+    assert.ok(final.phase.minimal_first_usable.at);
+    b.api.dispose();
+  }
+});
 
 async function ordinaryOutcomeCase({ budget = false, success = false, fullWindow = true, missingM2 = false, passiveError, label = "owned-case" } = {}) {
   const b = browser({ rulerVersion: 8 });

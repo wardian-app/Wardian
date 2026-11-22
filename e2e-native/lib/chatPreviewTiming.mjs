@@ -1121,6 +1121,35 @@ export function installChatPreviewTiming(config) {
       });
     return choices.at(-1) ?? null;
   };
+  const minimalAnchorProof = (view, body, qualified) => {
+    if (!view) return null;
+    const item = qualified?.admitted ? qualified.presentedAnswer ?? qualified.target?.qualifiedAnswer : null;
+    if (view.committed) {
+      if (!item || qualified.node !== view.node || qualified.anchorKey !== qualified.target.key) return null;
+      return { epoch: item.evidence.source_epoch, records: [...new Set([item.evidence.record_key, ...(qualified.target.members ?? [])])] };
+    }
+    const native = body?.nativeOpening;
+    // Literal row membership, never text/provider-ID/key reconstruction. Multiple candidate
+    // physical records cannot identify this particular legacy anchor without further proof.
+    if (!native?.verified || native.backing_ids.length !== 1 || native.source_refs.length !== 1
+      || !(view.identity?.id === native.backing_ids[0] || view.identity?.members?.includes(native.backing_ids[0]))) return null;
+    return { epoch: native.source_epoch, records: native.source_refs };
+  };
+  const sampleMinimalAnchor = (view, body, qualified) => {
+    const first = phase?.minimal_first_usable;
+    const metric = phase?.minimal_anchor;
+    if (!config.minimalTiming || !first || !metric) return;
+    const proof = minimalAnchorProof(view, body, qualified);
+    const top = view ? +view.node.getBoundingClientRect().top.toFixed(3) : null;
+    metric.frames++;
+    if (!proof || !first.anchor_proof || proof.epoch !== first.anchor_proof.epoch
+      || !proof.records.some((record) => first.anchor_proof.records.includes(record)) || !Number.isFinite(top)) {
+      // A later return cannot repair an unproved intervening anchor frame.
+      metric.verified = false; return;
+    }
+    const delta = top - first.anchor_top;
+    if (Math.abs(delta) > Math.abs(metric.delta_px)) { metric.delta_px = delta; metric.at = now(); metric.top = top; }
+  };
   const continuitySample = (body, qualified) => {
     const c = phase?.continuity;
     if (!openingV8 || !c || c.closed || !Number.isFinite(phase.clickAt)) return;
@@ -1128,7 +1157,11 @@ export function installChatPreviewTiming(config) {
     if (!c.started && !body && !qualified?.admitted) return;
     c.started = true;
     const view = body ?? contentView();
-    if (!view) { config.continuity(c, { at: now(), content_count: 0, renderer: "missing", mixed_source_rows: 0 }); return; }
+    if (!view) {
+      sampleMinimalAnchor(null, body, qualified);
+      config.continuity(c, { at: now(), content_count: 0, renderer: "missing", mixed_source_rows: 0 }); return;
+    }
+    sampleMinimalAnchor(view, body, qualified);
     const rect = view.node.getBoundingClientRect();
     const ids = [...new Set([...(openingReceipt?.nativeOpening?.window_ids ?? []),
       ...(body?.receipt?.nativeOpening?.window_ids ?? [])])];
@@ -1303,6 +1336,14 @@ export function installChatPreviewTiming(config) {
         if (field === "usableAt") current.usable_subject = { row_key: body.key, response_scope: body.receipt?.scope ?? null,
           consumer_scope_admitted: body.admitted, committed_turn: body.turnKey,
           presented_answer: body.presentedAnswer, canonical_qualified: body.qualified };
+        // Capture geometry in the actual first usable frame, before subsequent handoff/layout work.
+        if (config.minimalTiming && field === "usableAt" && firstObservation) {
+          const top = +finalBody.node.getBoundingClientRect().top.toFixed(3);
+          const proof = minimalAnchorProof(finalBody, finalBody, presentedCandidate());
+          current.minimal_first_usable = { click_at: current.clickAt, at, frames: [first, at], anchor_top: top,
+            anchor_proof: proof, receipt_sequence: finalBody.receipt?.last_sequence ?? null };
+          current.minimal_anchor = { verified: Boolean(proof), frames: 1, delta_px: 0, at, top };
+        }
         if (field === "previewAt") current.preview_scope = body.receipt.scope;
         if (field === "healthAt") recoverBusy(body, [first, at]);
         if (field === "projectionAt") {

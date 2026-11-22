@@ -2,6 +2,8 @@
 // WARDIAN_E2E_CHAT_PREVIEW_TIMING=1 WARDIAN_CHAT_PREVIEW_SEED_EXE=<compiled-libtest-exe> \
 // WARDIAN_NATIVE_APP=<frozen-app> WARDIAN_NATIVE_CLI=<matching-frozen-cli> \
 // npm run test:e2e:native:fast -- e2e-native/tests/chat-preview-identity-native.test.mjs
+// Opt-in compact pending-only 3x Desktop/Remote cold+warm: WARDIAN_E2E_CHAT_PREVIEW_MINIMAL_TIMING=1.
+// Same frozen inputs/real observer/cleanup; one input attempt per opening, no opening resampling.
 // Optional module override: export async function seedStoppedChatPreviewSource({ harness, fixture, mode }).
 // It must use the backend acquisition owner, NOT write invented capture/projection DTOs.
 // An optional beforeColdOpen({ harness, fixture, session }) can release a backend-owned fixture barrier.
@@ -34,13 +36,16 @@ import {
   recordChatPreviewSurfaceError, recordChatPreviewCleanupOutcome, chatPreviewRunOutcome, CHAT_PREVIEW_OUTCOME_PREFIX,
   recordRejectedChatScope, driveChatPreviewProbe, assertChatOpeningSample, assertChatFixtureShape, CHAT_PREVIEW_RULER_VERSION, observeChatOpening,
 } from "../lib/chatPreviewTiming.mjs";
+import { minimalChatTimingSchedule, minimalChatTimingLabel, driveMinimalChatProbe, observeMinimalChatOpening,
+  writeMinimalChatTimingReport } from "../lib/chatPreviewMinimalTiming.mjs";
 
-const enabled = process.env.WARDIAN_E2E_CHAT_PREVIEW_TIMING === "1";
-const diagnostic = process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC === "1";
-const desktopPendingDiagnostic = process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC_DESKTOP_PENDING === "1";
-const requestedFixtureModes = (process.env.WARDIAN_CHAT_PREVIEW_FIXTURES ?? "pending,qualified").split(",");
+const minimalTiming = process.env.WARDIAN_E2E_CHAT_PREVIEW_MINIMAL_TIMING === "1";
+const enabled = minimalTiming || process.env.WARDIAN_E2E_CHAT_PREVIEW_TIMING === "1";
+const diagnostic = !minimalTiming && process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC === "1";
+const desktopPendingDiagnostic = !minimalTiming && process.env.WARDIAN_CHAT_PREVIEW_DIAGNOSTIC_DESKTOP_PENDING === "1";
+const requestedFixtureModes = minimalTiming ? ["pending"] : (process.env.WARDIAN_CHAT_PREVIEW_FIXTURES ?? "pending,qualified").split(",");
 // Invalid selectors retain the maximum watchdog until the existing preflight reports them.
-const watchdogMs = chatPreviewWatchdogMs(requestedFixtureModes.length === 1 ? 1 : 2);
+const watchdogMs = chatPreviewWatchdogMs(requestedFixtureModes.length === 1 ? 1 : 2) * (minimalTiming ? 3 : 1);
 const probe = "synthetic-unsent-timing-probe";
 
 function endpointResult(snapshot, options) {
@@ -110,14 +115,14 @@ async function measureDesktop(driver, fixture, label, report, save, options, aft
     const pending = report.cases.at(-1).capture = {};
     await trustedClickWithPendingCapture(options.pendingFixture, () => roster.click(), pending);
     process.stdout.write(`[chat-preview-timing] trusted click active: ${label}\n`);
-    const final = await observeChatOpening({ record: report.cases.at(-1), options,
+    const final = await (options.minimalTiming ? observeMinimalChatOpening : observeChatOpening)({ record: report.cases.at(-1), options,
       snapshot: () => driver.executeScript(() => window.__chatPreviewTiming.snapshot()), measureM1: async () => {
         const mode = await driver.wait(() => driver.executeScript(() => window.__chatPreviewTiming.modeControl()), 5_000);
         report.cases.at(-1).activation = { normal_chat_toggle_required: mode.needsToggle, clock_origin: "trusted_roster_click" };
         if (mode.needsToggle) await mode.node.click();
         // Normal mode activation remains inside the original trusted Roster clock.
         await desktopEndpoint(driver, "readableAt", 5_000);
-        await driveChatPreviewProbe({
+        await (options.minimalTiming ? driveMinimalChatProbe : driveChatPreviewProbe)({
           next: async (remaining) => {
             try { return await driver.wait(() => driver.executeScript(() => window.__chatPreviewTiming.prepareInteraction()),
               remaining, "No safe owned control appeared before the original interaction deadline", 25); }
@@ -172,12 +177,12 @@ async function measureRemote(page, fixture, label, report, save, options, afterU
     await trustedClickWithPendingCapture(options.pendingFixture,
       () => page.getByRole("button", { name: `Open ${fixture.name} details`, exact: true }).click(), pending);
     process.stdout.write(`[chat-preview-timing] trusted click active: ${label}\n`);
-    const final = await observeChatOpening({ record: report.cases.at(-1), options,
+    const final = await (options.minimalTiming ? observeMinimalChatOpening : observeChatOpening)({ record: report.cases.at(-1), options,
       snapshot: () => page.evaluate(() => window.__chatPreviewTiming.snapshot()), measureM1: async () => {
         const readable = await page.evaluate(() => window.__chatPreviewTiming.wait("readableAt", 5_000).then(() => null, (error) => String(error.message)));
         if (readable) throw Object.assign(new Error(readable), { code: readable === "timing endpoint readableAt timed out"
           ? "chat_readable_timeout" : "chat_observer_error" });
-        await driveChatPreviewProbe({
+        await (options.minimalTiming ? driveMinimalChatProbe : driveChatPreviewProbe)({
           next: async (remaining) => {
             let handle;
             try { handle = await page.waitForFunction(() => window.__chatPreviewTiming.prepareInteraction(), null, { timeout: remaining, polling: "raf" }); }
@@ -222,16 +227,17 @@ async function measureRemote(page, fixture, label, report, save, options, afterU
 test("real desktop and native-gateway PWA preview-to-qualified opening timing", { skip: !enabled, timeout: watchdogMs }, async () => {
   assert.equal(process.env.WARDIAN_NATIVE_SKIP_BUILD, "1", "Use the prebuilt fast runner; this benchmark never builds");
   assert.ok(process.env.WARDIAN_NATIVE_APP && process.env.WARDIAN_NATIVE_CLI, "Explicit frozen app and paired CLI are required");
-  const selectedSurfaceCases = chatPreviewSurfaceCases(requestedFixtureModes, diagnostic, desktopPendingDiagnostic, process.env.WARDIAN_CHAT_PREVIEW_SOURCE_ROLE);
   // Fixed-width fresh IDs and case suffixes preserve byte equality without exceeding the in-home socket limit.
   const suppliedRunId = process.env.WARDIAN_E2E_RUN_ID;
   const runId = suppliedRunId ?? randomBytes(8).toString("hex");
   const defaultHome = defaultNativeE2EHome(runId);
   assertChatPreviewHomeBinding(process.env.WARDIAN_E2E_NATIVE_HOME, suppliedRunId, defaultHome);
   const homes = chatPreviewHomePaths({ runId, baseHome: defaultHome });
+  const selectedSurfaceCases = minimalTiming ? minimalChatTimingSchedule(homes)
+    : chatPreviewSurfaceCases(requestedFixtureModes, diagnostic, desktopPendingDiagnostic, process.env.WARDIAN_CHAT_PREVIEW_SOURCE_ROLE);
   if (suppliedRunId === undefined) assertFreshChatPreviewHome(homes.baseHome);
   else assertPreclaimedChatPreviewBase(homes.baseHome, runId);
-  for (const item of homes.cases) assertFreshChatPreviewHome(item.home);
+  for (const item of minimalTiming ? selectedSurfaceCases : homes.cases) assertFreshChatPreviewHome(item.home);
   const priorRunId = process.env.WARDIAN_E2E_RUN_ID;
   process.env.WARDIAN_E2E_RUN_ID = runId;
   let base;
@@ -239,7 +245,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
   finally { if (priorRunId === undefined) delete process.env.WARDIAN_E2E_RUN_ID; else process.env.WARDIAN_E2E_RUN_ID = priorRunId; }
   assert.equal(base.isolatedHome, homes.baseHome, "Harness must retain the ordinary default home resolver");
   prepareIsolatedHome(base);
-  const file = path.join(base.isolatedHome, "artifacts", "chat-preview-identity", "result.json");
+  const file = path.join(base.isolatedHome, "artifacts", minimalTiming ? "chat-preview-minimal-timing" : "chat-preview-identity", "result.json");
   process.stdout.write(`[chat-preview-timing] evidence: ${file}\n`);
   const report = { schema_version: 2, ruler_version: CHAT_PREVIEW_RULER_VERSION, outcome_protocol_version: 1,
     method_revision: CHAT_PREVIEW_METHOD_REVISION, status: "RUNNING", cases: [], surfaces: [],
@@ -257,7 +263,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
       "M2 requires actual page scope, turn/item/source identities; missing main Remote markers never gain inferred identity",
       "Synthetic peer startup does not establish real Codex behavior; native owner readiness requires separate lifecycle validation"],
   };
-  const save = () => writeChatTimingReport(file, report);
+  const save = () => minimalTiming ? writeMinimalChatTimingReport(file, report) : writeChatTimingReport(file, report);
   const failures = [];
   let taskFailure;
   try {
@@ -284,7 +290,8 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
     report.artifact.profile = manifest.profile;
     assert.equal(manifest.profile, "release", "V8 comparison uses normal release pairs only");
     report.harness_source_sha256 = createHash("sha256").update(fs.readFileSync(new URL(import.meta.url)))
-      .update(fs.readFileSync(new URL("../lib/chatPreviewTiming.mjs", import.meta.url))).digest("hex");
+      .update(fs.readFileSync(new URL("../lib/chatPreviewTiming.mjs", import.meta.url)))
+      .update(minimalTiming ? fs.readFileSync(new URL("../lib/chatPreviewMinimalTiming.mjs", import.meta.url)) : "").digest("hex");
     const adapterPath = process.env.WARDIAN_CHAT_PREVIEW_SEED_MODULE;
     const seedExe = process.env.WARDIAN_CHAT_PREVIEW_SEED_EXE;
     let adapter;
@@ -304,11 +311,11 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
     const pendingPadding = Number(process.env.WARDIAN_CHAT_PREVIEW_PENDING_PADDING ?? 1_024);
     assert.ok(Number.isSafeInteger(pendingTurns) && pendingTurns >= 12_000 && pendingTurns <= 20_000, "Pending history must contain 12000..20000 turns");
     report.fixture_modes = modes;
-    for (const { surface, mode } of selectedSurfaceCases) {
-      const harness = { ...base, isolatedHome: homes.cases.find((item) => item.surface === surface && item.mode === mode).home, homeLock: undefined,
+    for (const { surface, mode, repetition, home: scheduledHome } of selectedSurfaceCases) {
+      const harness = { ...base, isolatedHome: scheduledHome ?? homes.cases.find((item) => item.surface === surface && item.mode === mode).home, homeLock: undefined,
         appPath: base.frozenArtifacts.app.path, sharedCliPath: base.frozenArtifacts.cli.path, ownsGeneratedHome: false };
       assertFreshChatPreviewHome(harness.isolatedHome);
-      const detail = { surface, fixture_mode: mode, status: "RUNNING", cleanup: {}, websocket: { status_frames_received: 0 }, errors: [] };
+      const detail = { surface, fixture_mode: mode, ...(minimalTiming ? { repetition } : {}), status: "RUNNING", cleanup: {}, websocket: { status_frames_received: 0 }, errors: [] };
       const surfaceCaseStart = report.cases.length;
       report.surfaces.push(detail);
       let session; let browser; let page; let tls; let startupAttempted = false; let fixture;
@@ -357,7 +364,8 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         detail.source_projection_after_startup = verifySyntheticSourceProjection(harness, fixture, detail.source);
         const observerConfig = { surface, sessionId: fixture.sessionId, provider: fixture.provider, name: fixture.name, body: fixture.body, probe,
           synthetic: fixture.synthetic, sourceKey: fixture.sourceKey, sourceEpoch: fixture.sourceEpoch, targetTurn: fixture.targetTurn,
-          targetMessageId: fixture.targetMessageId, captureDetails: diagnostic, rulerVersion: CHAT_PREVIEW_RULER_VERSION };
+          targetMessageId: fixture.targetMessageId, captureDetails: diagnostic, rulerVersion: CHAT_PREVIEW_RULER_VERSION,
+          ...(minimalTiming ? { minimalTiming: true } : {}) };
         if (surface === "desktop") {
           await session.driver.executeScript(chatPreviewObserverScript(observerConfig));
         } else {
@@ -430,7 +438,8 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         const measure = (label) => {
           const options = { sourceRole, requireProjection: sourceRole === "candidate", requireCanonical: sourceRole === "candidate" && mode === "qualified",
             pendingFixture: mode === "pending" ? fixture : null,
-            ...(diagnostic ? { budgetMs: Number.MAX_SAFE_INTEGER } : {}) };
+            ...(diagnostic || minimalTiming ? { budgetMs: Number.MAX_SAFE_INTEGER } : {}),
+            ...(minimalTiming ? { minimalTiming: true } : {}) };
           const afterUsable = () => adapter.afterUsable?.({ harness, fixture, session, mode, surface, label });
           return surface === "desktop" ? measureDesktop(session.driver, fixture, label, report, save, options, afterUsable)
             : measureRemote(page, fixture, label, report, save, options, afterUsable);
@@ -442,7 +451,7 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
             if (surface === "desktop") await closeDesktopChat(session.driver, fixture);
             else await page.getByRole("button", { name: "Back to remote agents", exact: true }).click();
           }
-          const label = `${surface}-${mode}-${temperature}`;
+          const label = minimalTiming ? minimalChatTimingLabel(surface, repetition, temperature) : `${surface}-${mode}-${temperature}`;
           try { await measure(label); }
           catch (error) {
             failures.push(error);
@@ -478,7 +487,10 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
         if (Object.values(detail.cleanup).some((value) => value === "UNPROVEN")) detail.status = "FAILED_CLEANUP";
         if (Object.values(detail.cleanup).every((value) => value !== "UNPROVEN")) releaseHomeLock({ home: harness.isolatedHome, runId: harness.runId });
         recordChatPreviewCleanupOutcome(detail);
-        await save();
+        if (minimalTiming) {
+          try { await save(); }
+          catch (error) { failures.push(error); }
+        } else await save();
       }
     }
     report.status = failures.length ? "FAILED" : modes.includes("qualified")
@@ -499,8 +511,9 @@ test("real desktop and native-gateway PWA preview-to-qualified opening timing", 
     await save();
     // A final report-write/read failure must not masquerade as an ordinary-only exit1.
     const reportSha256 = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-    process.stdout.write(CHAT_PREVIEW_OUTCOME_PREFIX + JSON.stringify({ version: 1, report_sha256: reportSha256,
-      diagnostic_only: diagnostic, ...report.root_outcome }) + "\n");
+    process.stdout.write((minimalTiming ? "[chat-preview-minimal-timing] " : CHAT_PREVIEW_OUTCOME_PREFIX)
+      + JSON.stringify(minimalTiming ? { status: report.status, report_sha256: reportSha256 }
+        : { version: 1, report_sha256: reportSha256, diagnostic_only: diagnostic, ...report.root_outcome }) + "\n");
   }
   catch (error) { retainedFailures.push(error); }
   if (retainedFailures.length === 1) throw retainedFailures[0];

@@ -1031,6 +1031,14 @@ Those behaviors need their separate regression evidence.
 
 ### V8 native Chat opening and qualified handoff
 
+For a candidate-only check of archive-generation rollover, the existing test also
+accepts `WARDIAN_E2E_CHAT_PREVIEW_MINIMAL_TIMING=1`. It runs three saved-active
+pending cold/warm pairs per surface using a prebuilt release app and CLI. Its
+separate report retains first usable in milliseconds, source switch count and
+the largest signed anchor displacement in CSS pixels, with the outcome for each
+opening. A failed opening stays in its scheduled slot. The complete V8 report
+continues to use its existing writer and evidence policy.
+
 The current harness revision is `v9-retention-selector-diagnostics`. It uses the
 unchanged V8 endpoint predicates, numeric ruler version, workload, probe, clocks,
 budgets and authority checks. Historical V8 artifacts remain immutable and receive
