@@ -110,9 +110,12 @@ fn padded_pair(temp: &Path) -> Vec<AgentChatEvent> {
     for index in 0..60 {
         let mut padding = events[0].clone();
         padding.id = format!("padding-{index}");
-        padding.kind = AgentChatEventKind::Status;
-        padding.role = None;
+        // Owned bodies keep the recount partial when short jobs share a pass;
+        // unowned status rows alone do not create any pending body work.
+        padding.kind = AgentChatEventKind::Message;
+        padding.role = Some(AgentChatRole::User);
         padding.text = Some(format!("Saved activity {index}"));
+        padding.metadata["raw_type"] = json!("user_message");
         events.push(padding);
     }
     events

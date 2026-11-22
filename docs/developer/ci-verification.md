@@ -46,6 +46,37 @@ remain in Vitest. No separate manual guard command is required.
 Earlier timeouts remain historical failures. Moving the required suite out of
 the DOM worker pool does not identify their original active case or cause.
 
+## Archive adoption throughput
+
+The `adoption-throughput` feature enables a manual synthetic release test.
+It creates an isolated Wardian home and a 25,574,400-byte Codex selection with
+3,072 numbered user messages. It does not launch a provider or use a live import.
+The deterministic scheduling and body-budget regressions remain in default CI.
+
+From the repository root, run:
+
+```sh
+node scripts/rust-build-cache.mjs cargo test -p Wardian --release --lib --features adoption-throughput adoption_throughput_synthetic_fixed_range -- --nocapture --test-threads=1
+```
+
+PowerShell:
+
+```powershell
+node scripts/rust-build-cache.mjs cargo test -p Wardian --release --lib --features adoption-throughput adoption_throughput_synthetic_fixed_range -- --nocapture --test-threads=1
+```
+
+Require exit status 0 and a `SYNTHETIC_ADOPTION_RESULT` with `status: "complete"`,
+`archive_read_ready: true`, and `detail_complete: true`. The test checks every
+canonical body, the pinned end and append exclusions, the unchanged native
+receipt, and an ordinary Chat detail response. `WORKER_DONE` alone is insufficient.
+The reported time covers the admitted worker through quiescence; fixture setup,
+correctness assertions, and cleanup are outside that interval.
+
+Set `WARDIAN_ADOPTION_PROFILE=1` in the test process's environment to emit step,
+gap, and phase diagnostics. Keep instrumented runs separate from uninstrumented
+throughput comparisons. Record the source revision, build, and host load with
+each comparison; message size and provenance affect the work per byte.
+
 ## Protected compiler inputs
 
 Schedulers can supply `WARDIAN_PROTECTED_INPUT_MANIFESTS` as a JSON array of

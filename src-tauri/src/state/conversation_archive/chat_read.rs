@@ -2073,6 +2073,44 @@ fn output_body_source(
 }
 
 impl ProjectionOwner {
+    /// Adoption without native source proof needs the gated physical recount.
+    /// Its capture owner continues through that replay after the bounded import
+    /// drains, so materializing a second warm projection only duplicates work.
+    /// The caller retains scheduling demand through its final adoption step.
+    pub(super) fn defer_archive_adoption(
+        &self,
+        context: &ConversationArchiveContext,
+        conversation_id: &str,
+    ) -> io::Result<bool> {
+        if context.provider != "codex" {
+            return Ok(false);
+        }
+        // An unreadable derived head is ineligible for deferral. Ordinary
+        // publication retains its existing repair path from canonical rows.
+        let Ok(Some(reference)) = head(&context.agent_id) else {
+            return Ok(false);
+        };
+        let mut store = Store::new(&locations(&context.agent_id)?.1);
+        let Ok(published) = store.read::<Head>(&reference) else {
+            return Ok(false);
+        };
+        if published.agent_id != context.agent_id
+            || published.conversation_id != conversation_id
+            || published.source_key != context.provider_source_key
+            || !cold_bootstrap::can_upgrade_saved_head(context, &published)?
+        {
+            return Ok(false);
+        }
+        let previous = self
+            .work
+            .lock()
+            .map_err(|_| io::Error::other("chat projection owner poisoned"))?
+            .remove(&context.agent_id);
+        // Body jobs can own file handles. Release them outside the shared map.
+        drop(previous);
+        Ok(true)
+    }
+
     /// Restore saved history in fixed checkpoints without hydrating the archive
     /// writer. The caller holds the policy and per-agent archive gates.
     pub(super) fn bootstrap_saved(&self, context: &ConversationArchiveContext) -> io::Result<bool> {

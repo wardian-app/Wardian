@@ -600,6 +600,74 @@ pub(super) fn is_bound_native_delivery(
             .any(|event_ref| event_ref.starts_with("generated:"))
 }
 
+const MAX_RECOVERY_OWNER_REFERENCES: usize = 64 * 1024;
+
+/// Retain original record positions only for this immutable recovery scan.
+/// Ordinary provenance keeps its scanner; oversized adoption indexes fall back
+/// without truncating owners or introducing errors for unrelated ambiguity.
+struct RecoveryRecordOwners<'a> {
+    records: &'a [ConversationNarrativeRecord],
+    // Outer None is lazy; inner None remembers the complete scanner fallback.
+    adoption: Option<Option<HashMap<&'a str, Vec<usize>>>>,
+}
+
+impl<'a> RecoveryRecordOwners<'a> {
+    fn new(records: &'a [ConversationNarrativeRecord]) -> Self {
+        Self {
+            records,
+            adoption: None,
+        }
+    }
+
+    fn build_adoption(
+        records: &'a [ConversationNarrativeRecord],
+    ) -> Option<HashMap<&'a str, Vec<usize>>> {
+        let references = records.iter().try_fold(0usize, |count, record| {
+            count.checked_add(record.event_refs.len())
+        })?;
+        if references > MAX_RECOVERY_OWNER_REFERENCES {
+            return None;
+        }
+        let mut owners = HashMap::<&str, Vec<usize>>::new();
+        for (index, record) in records.iter().enumerate() {
+            for event_ref in &record.event_refs {
+                let positions = owners.entry(event_ref.as_str()).or_default();
+                // A slice scan yields a record once even if it repeats a ref.
+                // Records are visited in order, so its last owner is enough.
+                if positions.last() != Some(&index) {
+                    positions.push(index);
+                }
+            }
+        }
+        Some(owners)
+    }
+
+    fn matching_record_index(
+        &mut self,
+        current: &AgentChatEvent,
+        archived_events: &[AgentChatEvent],
+    ) -> io::Result<Option<usize>> {
+        if current.metadata["archive_adoption"].is_null() {
+            return matching_record_index(self.records, current, archived_events);
+        }
+        let records = self.records;
+        match self
+            .adoption
+            .get_or_insert_with(|| Self::build_adoption(records))
+        {
+            Some(owners) => unique_match(
+                owners
+                    .get(current.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+                "archive adoption narrative ownership",
+            ),
+            None => matching_record_index(records, current, archived_events),
+        }
+    }
+}
+
 pub(super) fn recover_unlinked_observations(
     conversation_id: &str,
     directory: &Path,
@@ -636,6 +704,7 @@ pub(super) fn recover_unlinked_observations(
     let mut known_sources: Option<Vec<ConversationSourceRecord>> = None;
     let mut recovered_event_ids = HashSet::new();
     let mut recovered = Vec::new();
+    let mut record_owners = RecoveryRecordOwners::new(records);
 
     for event in events {
         if !event.id.trim().is_empty()
@@ -657,7 +726,10 @@ pub(super) fn recover_unlinked_observations(
             }
             continue;
         }
-        if matching_record_index(records, event, events)?.is_some() {
+        if record_owners
+            .matching_record_index(event, events)?
+            .is_some()
+        {
             continue;
         }
         let paired_codex_mirror_index = unique_match(
@@ -799,6 +871,9 @@ pub(super) fn recover_unlinked_observations(
         *next_seq = (*next_seq).max(record.seq.saturating_add(1));
         recovered.push(RecoveredObservation { record, sources });
     }
+    // Publication may sort/replace records. Never retain positions beyond this
+    // scan or let staged recovery observations become existing owners early.
+    drop(record_owners);
 
     let has_generated_history = records.iter().any(|record| {
         record
@@ -1095,4 +1170,293 @@ fn source_row_is_published(
         ));
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod recovery_record_owners_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn event(id: &str, adoption: bool, aliases: Value) -> AgentChatEvent {
+        serde_json::from_value(json!({
+            "id": id,
+            "session_id": "agent",
+            "provider": "codex",
+            "kind": "message",
+            "role": "user",
+            "text": "original observation",
+            "metadata": {
+                "provider_log": true,
+                "archive_adoption": if adoption { json!({}) } else { Value::Null },
+                "legacy_event_ids": aliases
+            }
+        }))
+        .unwrap()
+    }
+
+    fn record(seq: u64, refs: &[&str]) -> ConversationNarrativeRecord {
+        let mut record = narrative_from_chat_event(&event("seed", false, json!([])), seq).unwrap();
+        record.event_refs = refs.iter().map(|id| (*id).to_owned()).collect();
+        record.source_refs = vec![format!("src_{seq}")];
+        record
+    }
+
+    fn outcome(
+        result: io::Result<Option<usize>>,
+    ) -> Result<Option<usize>, (io::ErrorKind, String)> {
+        result.map_err(|error| (error.kind(), error.to_string()))
+    }
+
+    #[test]
+    fn adoption_owner_index_matches_scanner_and_preserves_original_records() {
+        let ambiguous = Err((
+            io::ErrorKind::InvalidData,
+            "ambiguous archive adoption narrative ownership: multiple durable owners".to_owned(),
+        ));
+        let cases = vec![
+            (
+                "missing",
+                vec![record(91, &["other"])],
+                event("wanted", true, json!([])),
+                Ok(None),
+            ),
+            (
+                "original position, nonordinal seq",
+                vec![record(91, &["other"]), record(7, &["wanted"])],
+                event("wanted", true, json!([])),
+                Ok(Some(1)),
+            ),
+            (
+                "reordered records",
+                vec![record(7, &["wanted"]), record(91, &["other"])],
+                event("wanted", true, json!([])),
+                Ok(Some(0)),
+            ),
+            (
+                "repeated ref in one record",
+                vec![record(7, &["wanted", "other", "wanted"])],
+                event("wanted", true, json!([])),
+                Ok(Some(0)),
+            ),
+            (
+                "duplicate owners",
+                vec![record(91, &["wanted"]), record(7, &["wanted"])],
+                event("wanted", true, json!([])),
+                ambiguous,
+            ),
+            (
+                "unrelated ambiguity",
+                vec![
+                    record(91, &["shared"]),
+                    record(7, &["shared"]),
+                    record(20, &["wanted"]),
+                ],
+                event("wanted", true, json!([])),
+                Ok(Some(2)),
+            ),
+            (
+                "opaque numeric string",
+                vec![
+                    record(91, &["01"]),
+                    record(7, &["1"]),
+                    record(20, &["src_1"]),
+                ],
+                event("1", true, json!([])),
+                Ok(Some(1)),
+            ),
+            (
+                "opaque leading zero",
+                vec![record(91, &["1"]), record(7, &["01"])],
+                event("01", true, json!([])),
+                Ok(Some(1)),
+            ),
+            (
+                "opaque source ref",
+                vec![record(91, &["1"]), record(7, &["src_1"])],
+                event("src_1", true, json!([])),
+                Ok(Some(1)),
+            ),
+            (
+                "string alias is not adoption ownership",
+                vec![record(7, &["alias"])],
+                event("wanted", true, json!(["alias"])),
+                Ok(None),
+            ),
+            (
+                "exact ownership wins over string alias",
+                vec![record(91, &["alias"]), record(7, &["wanted"])],
+                event("wanted", true, json!(["alias"])),
+                Ok(Some(1)),
+            ),
+            (
+                "numeric JSON alias is ignored",
+                vec![record(7, &["1"])],
+                event("wanted", true, json!([1])),
+                Ok(None),
+            ),
+            (
+                "numeric-looking string alias is ignored",
+                vec![record(7, &["1"])],
+                event("wanted", true, json!(["1"])),
+                Ok(None),
+            ),
+        ];
+        for (name, records, current, expected) in cases {
+            let before = serde_json::to_value(&records).unwrap();
+            assert_eq!(
+                outcome(matching_record_index(&records, &current, &[])),
+                expected,
+                "{name}"
+            );
+            let mut owners = RecoveryRecordOwners::new(&records);
+            for _ in 0..2 {
+                assert_eq!(
+                    outcome(owners.matching_record_index(&current, &[])),
+                    expected,
+                    "{name}"
+                );
+            }
+            assert_eq!(serde_json::to_value(&records).unwrap(), before, "{name}");
+        }
+    }
+
+    #[test]
+    fn adoption_owner_index_is_lazy_and_leaves_ordinary_alias_matching_on_the_scanner() {
+        let records = vec![record(91, &["alias"]), record(7, &["1"])];
+        let mut owners = RecoveryRecordOwners::new(&records);
+        let ordinary = event("ordinary", false, json!(["alias", 1]));
+        assert_eq!(
+            owners.matching_record_index(&ordinary, &[]).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            outcome(owners.matching_record_index(&ordinary, &[])),
+            outcome(matching_record_index(&records, &ordinary, &[]))
+        );
+        assert!(owners.adoption.is_none());
+        let numeric = event("ordinary", false, json!([1]));
+        assert_eq!(owners.matching_record_index(&numeric, &[]).unwrap(), None);
+        assert!(owners.adoption.is_none());
+        let adoption = event("alias", true, json!([]));
+        assert_eq!(
+            owners.matching_record_index(&adoption, &[]).unwrap(),
+            Some(0)
+        );
+        assert!(owners.adoption.as_ref().unwrap().is_some());
+        assert_eq!(
+            owners.matching_record_index(&ordinary, &[]).unwrap(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn adoption_owner_index_cap_falls_back_without_truncating_ambiguous_owners() {
+        let mut records = vec![record(91, &["wanted"]), record(7, &["wanted"])];
+        records[0].event_refs = vec!["wanted".to_owned(); MAX_RECOVERY_OWNER_REFERENCES];
+        let current = event("wanted", true, json!([]));
+        let expected = outcome(matching_record_index(&records, &current, &[]));
+        assert!(expected.is_err());
+        let mut owners = RecoveryRecordOwners::new(&records);
+        for _ in 0..2 {
+            assert_eq!(
+                outcome(owners.matching_record_index(&current, &[])),
+                expected
+            );
+            assert!(matches!(&owners.adoption, Some(None)));
+        }
+    }
+
+    #[test]
+    fn adoption_owner_index_recovery_keeps_linked_records_and_numeric_source_refs() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = ConversationArchiveContext::for_agent_id("agent", "codex");
+        let events = vec![
+            event("first", true, json!([])),
+            event("second", true, json!([])),
+        ];
+        let mut records = vec![record(91, &["second"]), record(7, &["first", "first"])];
+        let before = serde_json::to_value(&records).unwrap();
+        let durable = HashSet::from(["first".to_owned(), "second".to_owned()]);
+        let mut next_seq = 1;
+        for _ in 0..2 {
+            let recovered = recover_unlinked_observations(
+                "conversation",
+                directory.path(),
+                &context,
+                &mut records,
+                &events,
+                Some(&durable),
+                &mut next_seq,
+            )
+            .unwrap();
+            assert!(recovered.is_empty());
+            assert_eq!(next_seq, 92);
+            assert_eq!(serde_json::to_value(&records).unwrap(), before);
+        }
+    }
+
+    #[cfg(feature = "adoption-throughput")]
+    #[test]
+    fn adoption_owner_index_component_measurement() {
+        use std::{hint::black_box, time::Instant};
+
+        for rows in [512usize, 4096] {
+            let events = (0..rows)
+                .map(|index| event(&format!("adoption-{index}"), true, json!([])))
+                .collect::<Vec<_>>();
+            let records = events
+                .iter()
+                .rev()
+                .enumerate()
+                .map(|(index, event)| record((index as u64 + 1) * 7, &[event.id.as_str()]))
+                .collect::<Vec<_>>();
+            let references = records
+                .iter()
+                .map(|record| record.event_refs.len())
+                .sum::<usize>();
+            let scanner_started = Instant::now();
+            let mut scanner_checksum = 0usize;
+            for (index, current) in events.iter().enumerate() {
+                let found = black_box(
+                    matching_record_index(
+                        black_box(records.as_slice()),
+                        black_box(current),
+                        black_box(events.as_slice()),
+                    )
+                    .unwrap(),
+                );
+                assert_eq!(found, Some(rows - index - 1));
+                scanner_checksum = scanner_checksum.wrapping_add(found.unwrap());
+            }
+            black_box(scanner_checksum);
+            let scanner_duration = scanner_started.elapsed();
+
+            let indexed_started = Instant::now();
+            let mut owners = RecoveryRecordOwners::new(black_box(records.as_slice()));
+            let mut indexed_checksum = 0usize;
+            for (index, current) in events.iter().enumerate() {
+                let found = black_box(
+                    owners
+                        .matching_record_index(black_box(current), black_box(events.as_slice()))
+                        .unwrap(),
+                );
+                assert_eq!(found, Some(rows - index - 1));
+                indexed_checksum = indexed_checksum.wrapping_add(found.unwrap());
+            }
+            black_box(indexed_checksum);
+            let indexed_duration = indexed_started.elapsed();
+            assert!(owners.adoption.as_ref().unwrap().is_some());
+            assert_eq!(indexed_checksum, scanner_checksum);
+            eprintln!(
+                "ADOPTION_OWNER_INDEX_COMPONENT {}",
+                json!({
+                    "records": records.len(), "E": events.len(), "Q": references,
+                    "Q_per_E": references as f64 / events.len() as f64,
+                    "scanner_ns": scanner_duration.as_nanos(),
+                    "index_build_and_queries_ns": indexed_duration.as_nanos(),
+                    "scanner_checksum": scanner_checksum, "indexed_checksum": indexed_checksum
+                })
+            );
+        }
+    }
 }

@@ -1869,6 +1869,12 @@ pub(crate) async fn archive_background_capture_pass(
     state: &AppState,
     request: &CaptureRequest,
 ) -> Result<CaptureStop, String> {
+    #[cfg(all(test, feature = "adoption-throughput"))]
+    crate::state::conversation_archive::adoption::profile::mark(
+        &request.session_id,
+        "pass_begin",
+        0,
+    );
     match archive_agent_chat_events_bound(
         state,
         &request.session_id,
@@ -1878,6 +1884,12 @@ pub(crate) async fn archive_background_capture_pass(
     .await
     {
         Ok(result) => {
+            #[cfg(all(test, feature = "adoption-throughput"))]
+            crate::state::conversation_archive::adoption::profile::mark(
+                &request.session_id,
+                "pass_archive_done",
+                0,
+            );
             if result.background_stop != CaptureStop::Disabled
                 && result.background_stop != CaptureStop::Retired
             {
@@ -1886,11 +1898,23 @@ pub(crate) async fn archive_background_capture_pass(
                     .flush_deferred_chat_summaries(&result.context)
                     .map_err(|_| "chat summary maintenance failed".to_string())?;
             }
+            #[cfg(all(test, feature = "adoption-throughput"))]
+            crate::state::conversation_archive::adoption::profile::mark(
+                &request.session_id,
+                "pass_summaries_done",
+                0,
+            );
             let pending = state
                 .conversation_archive
                 .chat_projection
                 .advance_capture(&request.session_id)
                 .map_err(|_| "chat projection checkpoint failed".to_string())?;
+            #[cfg(all(test, feature = "adoption-throughput"))]
+            crate::state::conversation_archive::adoption::profile::mark(
+                &request.session_id,
+                "pass_projection_done",
+                0,
+            );
             if pending
                 && result.background_stop != CaptureStop::Disabled
                 && result.background_stop != CaptureStop::Retired

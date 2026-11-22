@@ -970,6 +970,10 @@ impl ConversationArchiveState {
             }
         }
         let before_compatibility_events = existing_events.clone();
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        if adoption.is_some() {
+            adoption::profile::mark(&context.agent_id, "archive_loaded", 0);
+        }
         let (batch_events, mut compatibility_overlay) = if let Some(capture) = capture.as_mut() {
             #[cfg(test)]
             if self
@@ -1137,6 +1141,10 @@ impl ConversationArchiveState {
                 .unwrap_or(0)
                 .saturating_add(1),
         );
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        if adoption.is_some() {
+            adoption::profile::mark(&context.agent_id, "archive_recovery_begin", 0);
+        }
         let recovered_observations = recover_unlinked_observations(
             &handle.conversation_id,
             &conversation_dir,
@@ -1146,6 +1154,10 @@ impl ConversationArchiveState {
             Some(&durable_event_ids),
             &mut next_seq,
         )?;
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        if adoption.is_some() {
+            adoption::profile::mark(&context.agent_id, "archive_recovered", 0);
+        }
         records_refreshed |= before_refresh_records != existing_records;
         refreshed |= records_refreshed;
         if let Some(authority) = native_messages {
@@ -1475,6 +1487,10 @@ impl ConversationArchiveState {
             appended.push(record);
         }
 
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        if adoption.is_some() {
+            adoption::profile::mark(&context.agent_id, "archive_batch_prepared", 0);
+        }
         if appended.is_empty()
             && merged_existing_count == 0
             && recovered_count == 0
@@ -1555,6 +1571,10 @@ impl ConversationArchiveState {
             .last()
             .or_else(|| existing_records.last())
             .expect("conversation has at least one record");
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        if adoption.is_some() {
+            adoption::profile::mark(&context.agent_id, "archive_rows_published", 0);
+        }
         let all_records = existing_records
             .iter()
             .chain(appended.iter())
@@ -1597,6 +1617,10 @@ impl ConversationArchiveState {
             ),
         )?;
 
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        if adoption.is_some() {
+            adoption::profile::mark(&context.agent_id, "archive_summarized", 0);
+        }
         handle.next_seq = next_seq;
         let candidate = chat_read::Candidate {
             context: effective_context,

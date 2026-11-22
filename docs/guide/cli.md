@@ -634,6 +634,11 @@ belong to the saved archive and support ordinary history/detail reads. Native
 capture retains its replacement reason, original cursor and privacy boundaries.
 Other sources and future native history require their own authority.
 
+Importing uses bounded checkpoints and yields between them. After the selected
+interval is durable, Wardian continues indexing the saved archive for Chat.
+Newly imported rows can wait for that indexing even when the import job is
+complete.
+
 `agent restart` restarts the provider while preserving the Wardian agent, its
 habitat, and saved session history. Use it after `agent update` when the update
 reports `restart_required`, including class changes. `agent delete` is

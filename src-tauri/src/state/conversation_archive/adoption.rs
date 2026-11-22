@@ -18,6 +18,8 @@ use super::{
 use crate::commands::provider_log_acquisition::ProviderLogCaptureState;
 use crate::providers::chat_transcript::TranscriptNormalizationState;
 
+#[cfg(all(test, feature = "adoption-throughput"))]
+pub(crate) mod profile;
 #[cfg(test)]
 mod replay_tests;
 mod source;
@@ -538,9 +540,13 @@ impl ConversationArchiveState {
     /// One bounded step under policy -> per-agent archive -> projection order.
     /// An old native replacement stop never blocks this independent work kind.
     pub(crate) fn advance_adoption(&self, admission: &Admission) -> io::Result<bool> {
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        profile::mark(&admission.context.agent_id, "adoption_begin", 0);
         let lock = storage::agent_lock_for(&self.agent_locks, &admission.context.agent_id)?;
         let _guard = storage::lock_agent_archive(&lock)?;
         let Some(grant) = pending_grant(&admission.context.agent_id)? else {
+            #[cfg(all(test, feature = "adoption-throughput"))]
+            profile::mark(&admission.context.agent_id, "adoption_idle", 0);
             return Ok(false);
         };
         sync_authorization(&grant)?;
@@ -569,6 +575,8 @@ impl ConversationArchiveState {
             schedule(&grant, false)?;
             return Ok(false);
         }
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        profile::mark(&grant.agent_id, "adoption_loaded", work.cursor);
         let check = || -> io::Result<()> {
             let capture = storage::read_capture_state(&grant.agent_id)?;
             if current_fingerprint(&capture, admission, &grant.request)?
@@ -585,6 +593,8 @@ impl ConversationArchiveState {
         if let Err(error) = check() {
             return retire_work(&path, &mut work, error);
         }
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        profile::mark(&grant.agent_id, "adoption_precheck", work.cursor);
         let mut batch = match source::advance(
             &grant.selection,
             &grant.agent_id,
@@ -598,11 +608,15 @@ impl ConversationArchiveState {
             }
             Err(error) => return Err(error),
         };
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        profile::mark(&grant.agent_id, "adoption_normalized", batch.next_cursor);
         #[cfg(test)]
         self.replace_adoption_source_for_test(&grant.selection.path)?;
         if let Err(error) = check() {
             return retire_work(&path, &mut work, error);
         }
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        profile::mark(&grant.agent_id, "adoption_postcheck", batch.next_cursor);
         for event in &mut batch.events {
             event.metadata["archive_adoption"]["authorization_id"] =
                 serde_json::json!(grant.request.authorization_id);
@@ -619,12 +633,27 @@ impl ConversationArchiveState {
             None,
             Some(&authority),
         )?;
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        profile::mark(
+            &grant.agent_id,
+            "adoption_archive_written",
+            batch.next_cursor,
+        );
         if let Some(candidate) = candidate {
-            self.publish_chat_candidate(candidate)?;
+            if !self
+                .chat_projection
+                .defer_archive_adoption(&candidate.context, &candidate.conversation_id)?
+            {
+                self.publish_chat_candidate(candidate)?;
+            }
         }
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        profile::mark(&grant.agent_id, "adoption_appended", batch.next_cursor);
         // append_chat_events_prepared_locked owns artifacts and repairs a torn
         // event/narrative pair before this independent cursor can advance.
         sync_archive(&grant)?;
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        profile::mark(&grant.agent_id, "adoption_synced", batch.next_cursor);
         #[cfg(test)]
         self.adoption_fault(4)?;
         work.cursor = batch.next_cursor;
@@ -635,6 +664,8 @@ impl ConversationArchiveState {
         }
         write_json_atomic(&path, &work)?;
         schedule(&grant, work.status == "pending")?;
+        #[cfg(all(test, feature = "adoption-throughput"))]
+        profile::mark(&grant.agent_id, "adoption_checkpoint", work.cursor);
         // Completion still schedules the existing derived archive handoff.
         Ok(true)
     }
