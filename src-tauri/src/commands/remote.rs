@@ -24,6 +24,7 @@ pub async fn submit_inbox_provider_choice(
             inbox_item_id: Some(inbox_item_id),
             attachment_ids: Vec::new(),
             submission_id: None,
+            chat_composer: false,
         },
     )
     .await

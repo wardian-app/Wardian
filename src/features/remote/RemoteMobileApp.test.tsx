@@ -1424,6 +1424,7 @@ describe("RemoteMobileApp", () => {
       action: "send_prompt",
       target: "agent-1",
       prompt: "what changed?",
+      chat_composer: true,
     });
   });
 
@@ -1498,6 +1499,7 @@ describe("RemoteMobileApp", () => {
       action: "send_prompt",
       target: "agent-1",
       prompt: "continue while running",
+      chat_composer: true,
     });
   });
 
@@ -1521,6 +1523,7 @@ describe("RemoteMobileApp", () => {
         target: "agent-1",
         prompt: "/status",
         input_mode: "command",
+        chat_composer: true,
       });
     });
   });
@@ -1720,6 +1723,7 @@ describe("RemoteMobileApp", () => {
         action: "send_prompt",
         target: "agent-1",
         prompt: "1",
+        chat_composer: true,
       });
     });
   });

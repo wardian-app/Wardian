@@ -15,11 +15,9 @@ import { shouldShowChatEvent } from "../chat/chatPresentation";
 import { isUnscopedSourceLegacy, previewBackingIdsForWindow } from "../chat/chatPreviewBacking";
 import { holdsBoundChatWindow, qualifiedChatPreviewBridge } from "../chat/chatPreviewIdentity";
 import {
-  addChatSubmission,
   applyChatPage,
   canAdmitOlderChatPage,
   chatRecentRefreshDelay,
-  submittedChatEvent,
   type ChatWindowDirection,
 } from "../chat/chatReadState";
 import {
@@ -1670,19 +1668,10 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         || submissionPage.source_epoch === state.chatPage.source_epoch);
     set({ sending: true });
     try {
-      const acknowledgement = await remoteClient.sendPrompt(activeAgentId, trimmed, inputMode);
+      const fromChat = get().activeAgentViewMode === "chat";
+      await remoteClient.sendPrompt(activeAgentId, trimmed, inputMode, undefined, fromChat ? { chat_composer: true } : undefined);
       if (!isCurrentSubmission(get())) return;
       if (get().activeAgentViewMode === "chat") {
-        if (inputMode === "message") {
-          set((state) => {
-            if (!isCurrentSubmission(state)) return {};
-            const activeAgent = state.agents.find((agent) => agent.session_id === activeAgentId);
-            return {
-              chatEvents: addChatSubmission(state.chatEvents, state.chatPage,
-                submittedChatEvent(activeAgentId, activeAgent?.provider ?? "unknown", trimmed, acknowledgement)),
-            };
-          });
-        }
         await get().refreshActiveAgentChat();
       } else {
         await get().refreshActiveAgentTerminal();

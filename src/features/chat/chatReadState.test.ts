@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { AgentChatEvent, AgentChatPage } from "../../types";
-import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, chatInputReceipt, chatReadProgress, chatRecentRefreshDelay, MAX_LOADED_CHAT_BYTES, MAX_LOADED_CHAT_HEADERS, submittedChatEvent, utf8Window } from "./chatReadState";
+import { applyChatPage, canAdmitOlderChatPage, chatReadProgress, chatRecentRefreshDelay, MAX_LOADED_CHAT_BYTES, MAX_LOADED_CHAT_HEADERS, utf8Window } from "./chatReadState";
 
 const event = (id: string, metadata: Record<string, unknown> = {}): AgentChatEvent => ({
   id, session_id: "agent", provider: "codex", kind: "message", role: "user", text: "identical prompt",
   title: null, status: null, turn_id: null, source: null, command: null, exit_code: null,
   path: null, language: null, created_at: null, sequence: null, metadata,
 });
-const receipt = { chat_event_id: "generated:conversation:1", chat_agent_id: "agent", chat_conversation_id: "conversation", chat_source_epoch: "epoch" };
 const page = (events: AgentChatEvent[], overrides: Partial<AgentChatPage> = {}): AgentChatPage => ({
   session_id: "agent", conversation_id: "conversation", generation: "generation", source_epoch: "epoch",
   revision: "revision", events, next_before: null, unchanged: false, reset: false, progress: "ready",
@@ -15,24 +14,6 @@ const page = (events: AgentChatEvent[], overrides: Partial<AgentChatPage> = {}):
 });
 
 describe("bounded Chat state", () => {
-  it("renders an accepted prompt only from the projection when delivery has no row receipt", () => {
-    const prompt = "Check the sections against last year.";
-    const acknowledgement = { delivery_state: "provider_accepted", provider: "claude" };
-    const submitted = submittedChatEvent("agent", "claude", prompt, acknowledgement);
-    const current = addChatSubmission([], page([]), submitted);
-    const native = { ...event("source:claude:prompt"), provider: "claude", text: prompt };
-    expect(current).toEqual([]);
-    expect(applyChatPage(current, page([native]), "recent")).toEqual([expect.objectContaining({ id: native.id })]);
-  });
-
-  it("does not append unreceipted local prompts before the first page or from another agent", () => {
-    const existing = [event("source:previous")];
-    for (const acknowledgement of [undefined, { delivery_state: "queued" }, { ...receipt, chat_agent_id: "other" }]) {
-      const submitted = submittedChatEvent("agent", "claude", "Repeated prompt", acknowledgement);
-      expect(addChatSubmission(existing, null, submitted)).toEqual(existing);
-    }
-  });
-
   it("shares the original empty-window spacing and opening budget with admitted previews only", () => {
     for (const elapsed of [-1, 0, 99, 999, 1_000, 4_000]) {
       for (const interval of [50, 3_000]) {
@@ -58,38 +39,13 @@ describe("bounded Chat state", () => {
     expect(chatReadProgress("capture_source_replaced", true)).toContain("paused");
   });
 
-  it("leaves unchanged polls and unresolved equal-text identities alone", () => {
-    const pending = submittedChatEvent("agent", "codex", "identical prompt", undefined);
-    const current = [event("source:1", { chat_provisional: true }), pending];
+  it("preserves distinct producer identities with equal text across polls", () => {
+    const current = [event("source:1", { chat_provisional: true })];
     expect(applyChatPage(current, page([], { unchanged: true }), "recent")).toBe(current);
-    const next = applyChatPage(current, page([event(receipt.chat_event_id, { generated: true }), event("source:2")]), "recent");
-    expect(next.map((row) => row.id)).toEqual(["source:1", receipt.chat_event_id, "source:2", pending.id]);
-  });
-
-  it("consumes only the exact committed receipt and retains its displayed key", () => {
-    const pending = submittedChatEvent("agent", "codex", "identical prompt", receipt);
-    const second = submittedChatEvent("agent", "codex", "identical prompt", { ...receipt, chat_event_id: "generated:conversation:2" });
-    const next = applyChatPage([pending, second], page([event(receipt.chat_event_id, { generated: true })]), "recent");
-    expect(next.map((row) => row.id)).toEqual([receipt.chat_event_id, second.id]);
-    expect(next[0].metadata.chat_display_key).toBe(pending.id);
-  });
-
-  it.each([
-    { session_id: "other-agent" }, { conversation_id: "other-conversation" }, { source_epoch: "other-epoch" },
-  ])("rejects receipts from another scope: %j", (scope) => {
-    const pending = submittedChatEvent("agent", "codex", "identical prompt", receipt);
-    const next = applyChatPage([pending], page([event(receipt.chat_event_id, { generated: true })], scope), "recent");
-    expect(next.some((row) => row.id === pending.id)).toBe(true);
-  });
-
-  it("handles an acknowledgement arriving after its canonical row", () => {
-    const canonical = event(receipt.chat_event_id, { generated: true });
-    const pending = submittedChatEvent("agent", "codex", "identical prompt", receipt);
-    const next = addChatSubmission([canonical], page([canonical]), pending);
-    expect(next).toHaveLength(1);
-    expect(next[0].metadata.chat_display_key).toBe(pending.id);
-    expect(chatInputReceipt({ ...receipt, chat_event_id: "source:1" })).toBeNull();
-    expect(chatInputReceipt({ chat_event_id: receipt.chat_event_id })).toBeNull();
+    const nextPage = page([event("source:2")]);
+    const next = applyChatPage(current, nextPage, "recent");
+    expect(next.map((row) => row.id)).toEqual(["source:1", "source:2"]);
+    expect(applyChatPage(next, nextPage, "recent")).toEqual(next);
   });
 
   it("uses only verified aliases to replace an observation in its existing slot", () => {
@@ -109,13 +65,6 @@ describe("bounded Chat state", () => {
     }), "recent");
     expect(next.map((row) => row.id)).toEqual(["middle", canonical.id]);
     expect(next[1].metadata.chat_display_key).toBe("source:visible");
-  });
-
-  it("keeps pending rows through reset and empty indexing responses", () => {
-    const pending = submittedChatEvent("agent", "codex", "sent", undefined);
-    const current = [event("existing"), pending];
-    expect(applyChatPage(current, page([], { reset: true, progress: "indexing" }), "recent").map((row) => row.id)).toEqual(["existing", pending.id]);
-    expect(applyChatPage(current, page([event("new")], { reset: true }), "recent").map((row) => row.id)).toEqual(["new", pending.id]);
   });
 
   it("retains an unresolved observation outside the canonical recent window under the same admission", () => {

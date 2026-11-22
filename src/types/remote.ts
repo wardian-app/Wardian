@@ -294,6 +294,7 @@ export interface RemoteAgentActionRequest {
   inbox_item_id?: string;
   attachment_ids?: string[];
   submission_id?: string;
+  chat_composer?: boolean;
 }
 
 export interface RemoteAttachment {

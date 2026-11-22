@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { AgentChatEvent, AgentChatPage } from "../../types";
-import { MAX_LOADED_CHAT_BYTES, submittedChatEvent } from "./chatReadState";
+import { MAX_LOADED_CHAT_BYTES } from "./chatReadState";
 import { actualEmptyOwnedCapture } from "../../test/chatRevalidationTestFixture";
 import { chatEventsWithinBounds } from "../../test/chatRevalidationTestHelpers";
 import {
@@ -571,20 +571,13 @@ describe("bounded Chat source revalidation", () => {
     expect(chatPageScopeRelation(pending, firstOwned, [stagedNative], false)).toBe("unknown");
   });
 
-  it("accepts generated input receipts beside strictly scoped native rows during empty bootstrap", async () => {
+  it("accepts generated archive rows beside strictly scoped native rows during empty bootstrap", async () => {
     const pending: AgentChatPage = {
       ...scope, conversation_id: null, generation: null, source_epoch: null,
       revision: "pending", events: [], next_before: null, progress: "projection_pending",
     };
-    const receipt = {
-      chat_event_id: "generated:conversation:901",
-      chat_agent_id: scope.session_id,
-      chat_conversation_id: "conversation",
-      chat_source_epoch: scope.source_epoch,
-    };
-    const submitted = submittedChatEvent(scope.session_id, "codex", "accepted input", receipt);
     const generated: AgentChatEvent = {
-      ...sourceEvent(901), id: receipt.chat_event_id, sequence: 901, metadata: { generated: true },
+      ...sourceEvent(901), id: "generated:conversation:901", sequence: 901, metadata: { generated: true },
     };
     const native = sourceEvent(902);
     native.metadata.chat_source_epoch = scope.source_epoch;
@@ -592,8 +585,7 @@ describe("bounded Chat source revalidation", () => {
       ...scope, revision: "native-ready", events: [generated, native],
     };
 
-    expect(submitted.metadata.chat_receipt).toEqual(receipt);
-    expect(chatPageScopeRelation(pending, mixed, [submitted], false)).toBe("bootstrap");
+    expect(chatPageScopeRelation(pending, mixed, [], false)).toBe("bootstrap");
     expect(chatRevalidationIds(mixed.events)).toEqual([native.id]);
 
     const renewLoader = vi.fn(async ({ revalidateIds }: {
@@ -613,7 +605,7 @@ describe("bounded Chat source revalidation", () => {
     };
     expect(chatPageScopeRelation(pending, {
       ...mixed, events: [generated, missingNativeAdmission],
-    }, [submitted], false)).toBe("bootstrap");
+    }, [], false)).toBe("bootstrap");
   });
 
   it("retains scoped generated rows without source IDs and rejects other unproven rows", async () => {

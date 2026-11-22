@@ -5,7 +5,7 @@ import type { AgentChatPage } from "../../types";
 import { canonicalOlderIdentityFixture, coldSourcePreviewIdentityFixture, partitionedPreviewIdentityFixture, previewGenerationRolloverFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
 import { chatPresentationScope, holdsBoundChatWindow, previewBridgeRollover, qualifiedChatPreviewBridge, sourceLegacyBridgeCoversWindow, useChatPresentationScope } from "./chatPreviewIdentity";
 import { chatPageScopeRelation } from "./chatRevalidation";
-import { addChatSubmission, applyChatPage, submittedChatEvent } from "./chatReadState";
+import { applyChatPage } from "./chatReadState";
 import { chatEventDisplayKey } from "./chatEventIdentity";
 import { chatPresentationV1, deriveCommittedChatRows, mergeCommittedChatPresentation, useCommittedChatPresentation } from "./committedChatPresentation";
 import { ChatTranscriptRow } from "./ChatTranscriptRows";
@@ -557,25 +557,6 @@ describe("exact producer preview identity", () => {
     expect(mergeCommittedChatPresentation(chatPresentationV1(provisional), chatPresentationV1(canonical), rows))
       .toBe(canonical.presentation?.payload);
     expect(deriveCommittedChatRows(rows, chatPresentationV1(provisional))).toHaveLength(1);
-  });
-
-  it("does not use a delivery receipt to admit or identify a provisional prefix row", () => {
-    const { provisional } = previewIdentityFixture();
-    const id = `generated:${provisional.conversation_id}:receipt`;
-    const echo = submittedChatEvent(provisional.session_id, "codex", "Delivered prompt", {
-      chat_event_id: id, chat_agent_id: provisional.session_id, chat_conversation_id: provisional.conversation_id,
-      chat_source_epoch: provisional.source_epoch,
-    });
-    expect(addChatSubmission([], provisional, echo)).toEqual([]);
-    const generated = { ...provisional.events[0], id, metadata: { generated: true } };
-    const payload = chatPresentationV1(provisional)!;
-    const page = { ...provisional, events: [generated], aliases: [], presentation: { version: 1, payload: {
-      ...payload, items: [{ ...payload.items[0], event_refs: [id] }],
-    } } };
-    expect(qualifiedChatPreviewBridge(page)).not.toBeNull();
-    const rows = applyChatPage([echo], page, "recent");
-    expect(rows).toHaveLength(1);
-    expect(chatEventDisplayKey(rows.find((event) => event.id === id)!)).toBe(id);
   });
 
   it.each(["running", "action_required", "incomplete"] as const)("admits only an attributed, count-incomplete %s prefix", (status) => {

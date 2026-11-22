@@ -2359,6 +2359,34 @@ describe("useRemoteStore watchlists", () => {
     expect(useRemoteStore.getState().chatHasOlder).toBe(false);
   });
 
+  it("keeps an unbridged submission out of Remote Chat until the producer publishes it", async () => {
+    const delivery = deferred<Awaited<ReturnType<typeof remoteClient.sendPrompt>>>();
+    const capture = deferred<RemoteAgentChatPage>();
+    const initial = { ...chatPageFields, events: [], next_before: null };
+    vi.mocked(remoteClient.sendPrompt).mockReturnValue(delivery.promise);
+    vi.mocked(remoteClient.loadAgentChatPage).mockReturnValue(capture.promise);
+    useRemoteStore.setState({ activeAgentId: "agent-1", activeAgentViewMode: "chat", chatPage: initial, chatEvents: [] });
+    const sending = useRemoteStore.getState().sendPromptToActiveAgent("Inspect the sample");
+    expect(remoteClient.sendPrompt).toHaveBeenCalledWith("agent-1", "Inspect the sample", "message", undefined, { chat_composer: true });
+    expect(useRemoteStore.getState().sending).toBe(true);
+    expect(useRemoteStore.getState().chatEvents).toEqual([]);
+
+    delivery.resolve({
+      ok: true, chat_event_id: `generated:${initial.conversation_id}:1`,
+      chat_agent_id: "agent-1", chat_conversation_id: initial.conversation_id, chat_source_epoch: initial.source_epoch,
+    });
+    await Promise.resolve();
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+    expect(useRemoteStore.getState().chatEvents).toEqual([]);
+
+    const prompt = { ...chatMessage("captured-prompt", "Inspect the sample", 2), role: "user" as const };
+    capture.resolve({ ...initial, events: [prompt], revision: "captured" });
+    await sending;
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual([prompt.id]);
+    expect(useRemoteStore.getState().sending).toBe(false);
+  });
+
   it.each(["conversation_id", "source_epoch"] as const)("rejects a late submission acknowledgement after %s changes", async (field) => {
     const delivery = deferred<Awaited<ReturnType<typeof remoteClient.sendPrompt>>>();
     vi.mocked(remoteClient.sendPrompt).mockReturnValue(delivery.promise);
