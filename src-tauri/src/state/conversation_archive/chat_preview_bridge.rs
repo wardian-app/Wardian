@@ -851,18 +851,20 @@ pub(super) fn read(
         return Ok(None);
     };
     if binding.generation != published.generation {
-        if mode != Mode::Bound
-            || binding.rows.is_empty()
-            || !reads_generation(
-                &mut store,
-                &published.agent_id,
-                &binding,
-                revision,
-                &binding.generation,
-            )
+        if mode == Mode::Bound
+            && (binding.rows.is_empty()
+                || !reads_generation(
+                    &mut store,
+                    &published.agent_id,
+                    &binding,
+                    revision,
+                    &binding.generation,
+                ))
         {
             return Ok(None);
         }
+        // A fresh reader can publish its own current window. Keep the prior
+        // source witness for readers that still hold the previous generation.
         binding.rollover = Some(Rollover {
             generation: std::mem::replace(&mut binding.generation, published.generation.clone()),
             source_revision: std::mem::take(&mut binding.source_revision),
@@ -1015,7 +1017,10 @@ pub(super) fn read(
             canonical_id: event.id.clone(),
         });
     }
-    let replaces = if let Some(rollover) = binding.rollover.as_ref().filter(|_| mode == Mode::Bound)
+    let replaces = if let Some(rollover) = binding
+        .rollover
+        .as_ref()
+        .filter(|rollover| mode == Mode::Bound && !rollover.rows.is_empty())
     {
         reads_generation(
             &mut store,

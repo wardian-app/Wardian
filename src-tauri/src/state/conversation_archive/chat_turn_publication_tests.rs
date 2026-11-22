@@ -1790,6 +1790,22 @@ fn passive_bound_recent_refresh_keeps_empty_continuity_for_unchanged_and_unquali
             let (pointer, _) = locations("agent-1").unwrap();
             write_json_atomic(&pointer, &next_head).unwrap();
 
+            // The old reader may close. A fresh reader must be able to
+            // qualify the same slot before any predecessor poll advances it.
+            let fresh = owner.recent_reader_with_hints(
+                source.clone(),
+                runtime.clone(),
+                None,
+                8,
+                Some(Vec::new()),
+            )()
+            .unwrap()
+            .unwrap();
+            let fresh_bridge = value(&fresh).preview_bridge.unwrap();
+            assert_eq!(fresh_bridge.admission_id, receipt.0);
+            assert!(fresh_bridge.replaces.is_none());
+            assert_eq!(fresh.generation.as_deref(), Some("successor-generation"));
+
             for _ in 0..2 {
                 let hold = owner
                     .canonical_bridge_reader(
