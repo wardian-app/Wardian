@@ -51,15 +51,32 @@ test("Remote repeat diagnostics schedule seven openings for one home and disting
     { renderer: "shared", representation: { kind: "unknown" } },
     { renderer: "shared", representation: { kind: "provisional" } },
   ] };
+  const scope = { conversation: "hidden-c", generation: "hidden-g", epoch: "hidden-e", admission: "hidden-a", revision: "hidden-r" };
+  record.observation.phases = [phase];
+  record.observation.receipts = [
+    { scope, bridge_admission: "hidden-a", progress: "provisional", presentation: { version: 1, turns: 1 }, last_request: { phase_index: 0 } },
+    { scope: { ...scope, admission: null, revision: "hidden-r:retired-view-v1:hidden-a~source" },
+      bridge_admission: "hidden-a", progress: "indexing", presentation: { version: 1, turns: 0 }, last_request: { phase_index: 0 } },
+  ];
   const compact = compactMinimalChatTiming(report);
   assert.equal(compact.cases.length, 7);
   assert.equal(new Set(compact.cases.map((entry) => entry.label)).size, 7);
   assert.equal(compact.cases[0].source_switch_count, 0);
   assert.equal(compact.cases[0].first_usable_ms, null);
   assert.deepEqual(compact.cases[0].evidence.renderer_path, ["legacy/legacy", "shared/unknown", "shared/provisional"]);
+  assert.equal(compact.cases[0].evidence.legacy_after_shared, false);
+  assert.deepEqual(compact.cases[0].evidence.receipt_path[1], {
+    progress: "indexing", presentation_version: 1, presented: false, unchanged: false,
+    admission: false, generation: true, same_conversation: true, same_generation: true, same_source_epoch: true,
+    same_bridge_admission: true, retired: true,
+  });
+  assert.equal(JSON.stringify(compact).includes("hidden-"), false);
   assert.ok(compact.cases.slice(1).every((entry) => entry.status === "NOT_ATTEMPTED"));
   record.m1_observed = { usable_ms: 1_235.125 };
-  assert.equal(compactMinimalChatTiming(report).cases[0].first_usable_ms, 1_235.125);
+  phase.continuity.last = { renderer: "legacy", representation: { kind: "unknown" } };
+  const latest = compactMinimalChatTiming(report).cases[0];
+  assert.equal(latest.first_usable_ms, 1_235.125);
+  assert.equal(latest.evidence.legacy_after_shared, true);
 });
 
 test("compact writer retains an over-budget first usable and real anchor delta despite handoff failure and oversized raw details", () => {

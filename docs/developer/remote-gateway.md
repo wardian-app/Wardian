@@ -189,9 +189,14 @@ saves, configuration replacement, disable, shutdown, and foreign-port refusal.
 `GET /remote/api/agents/{session_id}/chat` returns HTTP 503 with the sanitized
 code `agent_chat_read_retryable` when its bounded reader is temporarily busy,
 its runtime changes, or its projection cannot currently be read. The selected
-Chat retries without treating a healthy desktop as disconnected. Invalid
-query values retain HTTP 400; authentication and authorization retain their
-existing statuses. Capture-stage diagnostics use these sanitized codes:
+Chat retries on its normal polling schedule. Once the selected transcript has
+visible content, a retryable read preserves its current rows and presentation
+and leaves the transcript alert clear. A valid unchanged response still
+succeeds when the recent capture request cannot be queued. The retryable code
+covers several internal paths and provides no more specific cause to the
+client. Invalid query values retain HTTP 400. Authentication and authorization
+retain their existing statuses. Capture-stage diagnostics use the following
+sanitized codes.
 
 | Code | Stage |
 | --- | --- |
