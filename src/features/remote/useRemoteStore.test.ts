@@ -6,6 +6,8 @@ import { useRemoteStore } from "./useRemoteStore";
 import { actualEmptyOwnedCapture, actualProducerBatch, actualProducerPage } from "../../test/chatRevalidationTestFixture";
 import { applyChatPage } from "../chat/chatReadState";
 import { committedChatFixture } from "../../test/committedChatFixture";
+import { canonicalOlderIdentityFixture, coldSourcePreviewIdentityFixture, previewGenerationRolloverFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
+import { chatEventDisplayKey } from "../chat/chatEventIdentity";
 
 type StatusStreamHandlers = Parameters<typeof remoteClient.openStatusStream>[0];
 
@@ -87,6 +89,151 @@ function emptyCaptureStop(): RemoteAgentChatPage {
 }
 
 describe("useRemoteStore watchlists", () => {
+  it("sends aware empty backing, then literal cold native IDs and the unchanged opaque revision before the bridge handoff", async () => {
+    const { cold, bridge } = coldSourcePreviewIdentityFixture("agent-1");
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat", chatEvents: [],
+      chatPage: null, chatPresentationPage: null, chatNextBefore: null, chatHasOlder: false });
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(cold).mockResolvedValueOnce(bridge);
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[0][7]).toEqual([]);
+    const ids = useRemoteStore.getState().chatEvents.map((event) => event.id);
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[1][2]).toBe(cold.revision);
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[1][7]).toEqual(ids);
+    expect(useRemoteStore.getState().chatError).toBe("");
+    expect(useRemoteStore.getState().chatEvents.map(chatEventDisplayKey)).toEqual(ids);
+    expect(useRemoteStore.getState().chatPage?.recent_admission).toBe("preview-admission");
+  });
+
+  it("prepends canonical bridged Older history with legacy groups without resetting the current window", async () => {
+    const { initial, older } = canonicalOlderIdentityFixture("agent-1");
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat", chatEvents: initial.events,
+      chatPage: initial, chatPresentationPage: initial, chatNextBefore: initial.next_before, chatHasOlder: true });
+    vi.mocked(remoteClient.loadAgentChatPage).mockImplementation(async (_session, cursor, revision) => cursor
+      ? revision === initial.revision ? older : { ...older, revision: "ordinary-older", presentation: undefined }
+      : initial);
+    await useRemoteStore.getState().loadOlderActiveAgentChat();
+    const request = vi.mocked(remoteClient.loadAgentChatPage).mock.calls.find((call) => call[1] === initial.next_before)!;
+    expect(request[2]).toBe(initial.revision);
+    expect(request[5]).toBeUndefined();
+    expect(request[7]).toBeUndefined();
+    expect(useRemoteStore.getState().chatError).toBe("");
+    expect(useRemoteStore.getState().chatBrowsingOlder).toBe(true);
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual([...older.events, ...initial.events].map((event) => event.id));
+    expect(useRemoteStore.getState().chatPresentationPage?.presentation).toEqual(older.presentation);
+  });
+
+  it.each(["recent", "older"] as const)("loads bridged step detail with the current %s page revision and no hints", async (window) => {
+    const { initial, older } = canonicalOlderIdentityFixture("agent-1");
+    const current = window === "recent" ? initial : older;
+    const detail = { ...committedChatFixture().detail, revision: current.revision };
+    const payload = { ...(current.presentation!.payload as ReturnType<typeof committedChatFixture>["presentation"]),
+      turns: [], items: [], state_event_refs: [], legacy_turns: [], detail };
+    const response = { ...current, events: [], next_before: null, presentation: { version: 1, payload } };
+    const ordinary = { ...response, revision: "ordinary-detail", presentation: { version: 1,
+      payload: { ...payload, preview_bridge: undefined, detail: { ...detail, revision: "ordinary-detail" } } } };
+    useRemoteStore.setState({ activeAgentId: current.session_id, chatPage: current, chatPresentationPage: current,
+      chatEvents: [...older.events, ...initial.events] });
+    vi.mocked(remoteClient.loadAgentChatPage).mockImplementation(async (_session, _cursor, revision) =>
+      revision === current.revision ? response : ordinary);
+    await expect(useRemoteStore.getState().loadActiveAgentChatStepDetail("step:read")).resolves.toEqual(detail);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith(current.session_id, undefined, current.revision, "step:read");
+    const calls = vi.mocked(remoteClient.loadAgentChatPage).mock.calls;
+    const request = calls[calls.length - 1];
+    expect(request[5]).toBeUndefined();
+    expect(request[7]).toBeUndefined();
+    expect(useRemoteStore.getState().chatPage).toBe(current);
+  });
+
+  it("admits the bridge atomically through the remote transport and rejects preview detail authority", async () => {
+    const { legacy, provisional, canonical, closed } = previewIdentityFixture("agent-1");
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: legacy.events, chatPage: legacy, chatPresentationPage: legacy, chatNextBefore: null, chatHasOlder: false });
+    for (const page of [provisional, canonical, closed]) {
+      vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(page);
+      await useRemoteStore.getState().refreshActiveAgentChat();
+      expect(useRemoteStore.getState().chatError).toBe("");
+      expect(useRemoteStore.getState().chatPage?.revision).toBe(page.revision);
+      expect(useRemoteStore.getState().chatEvents.slice(0, legacy.events.length).map(chatEventDisplayKey)).toEqual(legacy.events.map((event) => event.id));
+      if (page === provisional) {
+        const calls = vi.mocked(remoteClient.loadAgentChatPage).mock.calls.length;
+        await expect(useRemoteStore.getState().loadActiveAgentChatDetail("invalid")).rejects.toThrow(/no detail authority/);
+        await expect(useRemoteStore.getState().loadActiveAgentChatStepDetail("invalid")).rejects.toThrow(/no detail authority/);
+        await useRemoteStore.getState().loadOlderActiveAgentChat();
+        expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(calls);
+      }
+    }
+    expect(useRemoteStore.getState().chatEvents).toHaveLength(closed.events.length);
+  });
+
+  it("holds the bound remote window through both indexing replies, then atomically replaces or retracts it", async () => {
+    vi.useFakeTimers();
+    const { legacy, provisional, pending, replacement, loss } = previewGenerationRolloverFixture("agent-1");
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: legacy.events, chatPage: legacy, chatPresentationPage: legacy, chatNextBefore: null, chatHasOlder: false });
+    const loadPage = vi.mocked(remoteClient.loadAgentChatPage);
+    loadPage.mockResolvedValueOnce(provisional);
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    const admitted = useRemoteStore.getState();
+    const displayKeys = admitted.chatEvents.map(chatEventDisplayKey);
+    expect(admitted.chatPage).toEqual(provisional);
+    expect(admitted.chatPresentationPage).toBe(provisional);
+    expect(displayKeys).toEqual(legacy.events.map((event) => event.id));
+
+    const publications: Array<ReturnType<typeof useRemoteStore.getState>> = [];
+    let previous = admitted;
+    const unsubscribe = useRemoteStore.subscribe((state) => {
+      if (state.chatPage !== previous.chatPage || state.chatPresentationPage !== previous.chatPresentationPage
+        || state.chatEvents !== previous.chatEvents) publications.push(state);
+      previous = state;
+    });
+    try {
+      for (const page of pending) {
+        loadPage.mockResolvedValueOnce(page);
+        await useRemoteStore.getState().refreshActiveAgentChat();
+        const held = useRemoteStore.getState();
+        expect(held.chatPage).toBe(admitted.chatPage);
+        expect(held.chatPresentationPage).toBe(admitted.chatPresentationPage);
+        expect(held.chatEvents).toBe(admitted.chatEvents);
+        expect(held.chatError).toBe("");
+        const calls = loadPage.mock.calls;
+        expect(calls[calls.length - 1]?.slice(0, 3)).toEqual(["agent-1", undefined, provisional.revision]);
+        expect(publications).toHaveLength(0);
+      }
+
+      loadPage.mockResolvedValueOnce(replacement);
+      await useRemoteStore.getState().refreshActiveAgentChat();
+      const replaced = useRemoteStore.getState();
+      expect(replaced.chatPage).toEqual(replacement);
+      expect(replaced.chatPresentationPage).toBe(replacement);
+      expect(replaced.chatEvents.map((event) => event.id)).toEqual(replacement.events.map((event) => event.id));
+      expect(replaced.chatEvents.map(chatEventDisplayKey)).toEqual(displayKeys);
+      expect(replaced.chatError).toBe("");
+      expect(publications).toHaveLength(1);
+      expect(publications[0].chatPage).toBe(replaced.chatPage);
+      expect(publications[0].chatPresentationPage).toBe(replaced.chatPresentationPage);
+      expect(publications[0].chatEvents).toBe(replaced.chatEvents);
+
+      loadPage.mockResolvedValueOnce(loss);
+      await useRemoteStore.getState().refreshActiveAgentChat();
+      const retracted = useRemoteStore.getState();
+      expect(retracted.chatPage).toEqual(loss);
+      expect(retracted.chatPresentationPage).toBe(loss);
+      expect(retracted.chatPresentationPage?.presentation).toBeUndefined();
+      expect(retracted.chatPage?.recent_admission).toBeNull();
+      expect(retracted.chatEvents.map((event) => event.id)).toEqual(loss.events.map((event) => event.id));
+      expect(retracted.chatEvents.map(chatEventDisplayKey)).not.toEqual(displayKeys);
+      expect(retracted.chatError).toBe("");
+      expect(publications).toHaveLength(2);
+      expect(publications[1].chatPage).toBe(retracted.chatPage);
+      expect(publications[1].chatPresentationPage).toBe(retracted.chatPresentationPage);
+      expect(publications[1].chatEvents).toBe(retracted.chatEvents);
+      expect(loadPage).toHaveBeenCalledTimes(5);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("keeps the desktop connected when a successful older page cannot establish source scope", async () => {
     const recent = chatMessage("recent", "Recent reply stays visible", 33);
     const initial = { ...chatPageFields, events: [recent], next_before: "older-cursor" };
@@ -1756,7 +1903,7 @@ describe("useRemoteStore watchlists", () => {
 
     await useRemoteStore.getState().openAgent("agent-1");
 
-    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal), undefined, true);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal), undefined, true, []);
     expect(useRemoteStore.getState().activeAgentViewMode).toBe("chat");
     expect(useRemoteStore.getState().chatEvents).toHaveLength(1);
   });
@@ -2071,7 +2218,7 @@ describe("useRemoteStore watchlists", () => {
       expect(useRemoteStore.getState().chatEvents.some((event) => event.id === "1001")).toBe(false);
       useRemoteStore.getState().jumpToLatestActiveAgentChat();
       await useRemoteStore.getState().refreshActiveAgentChat();
-      expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal), undefined, true);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal), undefined, true, []);
       expect(useRemoteStore.getState().chatBrowsingOlder).toBe(false);
       expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual(rows(1001 - size).map((event) => event.id));
     },
@@ -2126,7 +2273,7 @@ describe("useRemoteStore watchlists", () => {
 
     expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Newest transcript"]);
     expect(useRemoteStore.getState().chatHasOlder).toBe(true);
-    expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal), undefined, true);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal), undefined, true, []);
 
     await useRemoteStore.getState().loadOlderActiveAgentChat();
 

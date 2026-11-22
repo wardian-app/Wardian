@@ -98,8 +98,19 @@ ordered steps and muted narration, then **Show output** on a step to inspect
 its input and retained output. JSON is formatted only inside that detail.
 Long output stays in a bounded scrolling area; **Earlier output not shown**
 marks a clipped tail. Counts marked **at least** are incomplete. Older history,
-unproven turn membership, other providers, and native previews retain the
-existing Work log presentation.
+unproven turn membership, other providers, and previews without a proven saved
+conversation retain the existing Work log presentation.
+
+Chat opens with the available recent messages while turn qualification runs
+later. Running agents keep the composer available before the turn view appears.
+
+Qualified running turns show **Working**. Their counts are in progress, and
+assistant narration stays inside the work summary until completion proves a
+final answer. Content awaiting saved capture is marked **Provisional** and has
+no saved-output controls. When a preview becomes qualified, Chat keeps the
+reading position and open work summary as it switches to the turn view. A turn
+interrupted without completion evidence shows **Incomplete** and retains its
+partial output. Replaced sources and privacy changes retract the old view.
 
 Codex custom `exec` calls appear as work steps even when their input is code
 rather than a shell command. Open **Show output** (or **Show full details** in

@@ -4,6 +4,7 @@ import { isWorkEvent, type ChatPresentationBoundary } from "../grid/workLogPrese
 import { chatEventDisplayKey } from "./chatEventIdentity";
 import { MAX_LOADED_CHAT_HEADERS } from "./chatReadState";
 import { chatTranscriptRowKey, type ChatTranscriptRowModel } from "./chatTurns";
+import { useChatWorkExpansion } from "./chatWorkExpansion";
 
 const emptyBoundaries: ReadonlyMap<string, ChatPresentationBoundary> = new Map();
 
@@ -43,6 +44,7 @@ export function visibleChatPresentationBoundaries(
 
 /** Presentation pins follow the conversation generation and bounded header window. */
 export function useChatReadingPresentation(scopeKey: string, events: readonly AgentChatEvent[], scopeReady = true) {
+  const workExpansion = useChatWorkExpansion(scopeKey, events);
   const [saved, setSaved] = useState({ scopeKey, scopeReady, rowEpoch: 0, boundaries: emptyBoundaries });
   const rowEpoch = saved.rowEpoch + (saved.scopeKey !== scopeKey && saved.scopeReady ? 1 : 0);
   if (saved.scopeKey !== scopeKey || saved.scopeReady !== scopeReady) {
@@ -68,5 +70,5 @@ export function useChatReadingPresentation(scopeKey: string, events: readonly Ag
   const clear = () => {
     if (saved.scopeKey !== scopeKey || saved.boundaries.size) setSaved({ scopeKey, scopeReady, rowEpoch, boundaries: emptyBoundaries });
   };
-  return { rowEpoch, boundaries, active: boundaries.size > 0, retainVisible, clear };
+  return { rowEpoch, boundaries, workExpansion, active: boundaries.size > 0, retainVisible, clear };
 }

@@ -31,6 +31,7 @@ import {
 } from "../chat/chatPresentation";
 import { chatTranscriptRowKey, type ChatTranscriptRowModel } from "../chat/chatTurns";
 import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
+import { useChatPresentationScope } from "../chat/chatPreviewIdentity";
 import { useAppShellWorkbenchNavigation } from "../../layout/AppShell";
 import { openFileWithSettings } from "../files/fileOpenRouting";
 import { type ChatMarkdownLinkHandling } from "./markdown/ChatMarkdown";
@@ -118,7 +119,7 @@ export function AgentChatView({
   const jumpToLatestRef = useRef(true);
   const prependScrollSnapshotRef = useRef<ChatScrollAnchor | null>(null);
   const [settledPrependSnapshot, setSettledPrependSnapshot] = useState<ChatScrollAnchor | null>(null);
-  const scrollScopeRef = useRef(sessionId);
+  const scrollScopeRef = useRef<{ source: string; presentation: string } | null>(null);
   const activeDraft = draft ?? internalDraft;
   const setActiveDraft = onDraftChange ?? setInternalDraft;
 
@@ -177,7 +178,7 @@ export function AgentChatView({
       ),
     [agent?.provider, mergedEvents, provider, sessionId, showThinking],
   );
-  const presentationScope = JSON.stringify([sessionId, provider ?? agent?.provider, page?.conversation_id, page?.generation, page?.source_epoch]);
+  const presentationScope = useChatPresentationScope(page, sessionId, provider ?? agent?.provider, events);
   const readingPresentation = useChatReadingPresentation(presentationScope, displayEvents, page !== null);
   const committedPresentation = useCommittedChatPresentation(page, events);
   const chatRows = useMemo<ChatTranscriptRowModel[]>(
@@ -186,7 +187,10 @@ export function AgentChatView({
   );
   const visibleChatRows = chatRows;
   const progressText = page ? chatReadProgress(page.progress, visibleChatRows.length > 0) : null;
-  const scrollScope = JSON.stringify([sessionId, provider ?? agent?.provider, page?.conversation_id, page?.source_epoch]);
+  const scrollScope = {
+    source: JSON.stringify([sessionId, provider ?? agent?.provider, page?.conversation_id, page?.source_epoch]),
+    presentation: presentationScope,
+  };
   const eventKeys = useMemo(() => events.filter(shouldShowChatEvent).map(chatEventDisplayKey), [events]);
   const hasActionRequired = mergedEvents.some((event) => event.status === "action_required");
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(mergedEvents)), [mergedEvents]);
@@ -245,8 +249,10 @@ export function AgentChatView({
   }, [sessionId]);
 
   const restoreTranscriptScroll = (snapshot: TranscriptScrollSnapshot | null) => {
-    if (scrollScopeRef.current !== scrollScope) {
-      scrollScopeRef.current = scrollScope;
+    const previous = scrollScopeRef.current;
+    scrollScopeRef.current = scrollScope;
+    // A verified handoff can add conversation identity without retiring the visible window.
+    if (previous?.source !== scrollScope.source && previous?.presentation !== scrollScope.presentation) {
       prependScrollSnapshotRef.current = null;
       jumpToLatestRef.current = true;
     }
@@ -388,6 +394,7 @@ export function AgentChatView({
         scrollRef={transcriptScrollRef}
         rows={visibleChatRows}
         eventKeys={eventKeys}
+        bridgeGeneration={committedPresentation?.preview_bridge ? page?.generation ?? null : null}
         layout={JSON.stringify([loadState, progressText, error, chat.waiting, chat.browsingOlder, loadingOlder, page?.next_before])}
         onCommit={restoreTranscriptScroll}
         pageScope={page ? JSON.stringify({ session: page.session_id,
@@ -441,6 +448,8 @@ export function AgentChatView({
                   onOpenFile={openChangedFile}
                   onLoadDetail={loadDetail}
                   onLoadStepDetail={loadStepDetail}
+                  workExpansion={readingPresentation.workExpansion}
+                  detailsDisabled={page?.recent_admission != null}
                   row={row}
                 />
               </li>
@@ -478,6 +487,7 @@ type TranscriptScrollBoundaryProps = {
   scrollRef: RefObject<HTMLDivElement | null>;
   rows: ChatTranscriptRowModel[];
   eventKeys: string[];
+  bridgeGeneration: string | null;
   layout: string;
   pageScope: string | undefined;
   onCommit: (snapshot: TranscriptScrollSnapshot | null) => void;
@@ -488,14 +498,14 @@ type TranscriptScrollBoundaryProps = {
 /** Read the old viewport before React mutates its rows and restore it before paint. */
 class TranscriptScrollBoundary extends Component<TranscriptScrollBoundaryProps, object, TranscriptScrollSnapshot | null> {
   getSnapshotBeforeUpdate(previous: TranscriptScrollBoundaryProps): TranscriptScrollSnapshot | null {
-    const { scrollRef, rows, eventKeys, layout } = this.props;
+    const { scrollRef, rows, eventKeys, bridgeGeneration, layout } = this.props;
     const scroll = scrollRef.current;
     if (!scroll || !previous.rows.length || (previous.rows === rows && previous.layout === layout)) return null;
     const priorTail = previous.eventKeys[previous.eventKeys.length - 1];
     const tailIndex = priorTail === undefined ? -1 : eventKeys.indexOf(priorTail);
     const tail = eventKeys[eventKeys.length - 1];
     const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 1;
-    const followTail = atBottom && tailIndex >= 0 && tailIndex < eventKeys.length - 1
+    const followTail = previous.bridgeGeneration === bridgeGeneration && atBottom && tailIndex >= 0 && tailIndex < eventKeys.length - 1
       && tail !== undefined && !previous.eventKeys.includes(tail);
     return { anchor: captureChatScrollAnchor(scroll), followTail };
   }

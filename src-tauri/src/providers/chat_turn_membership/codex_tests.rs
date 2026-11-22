@@ -94,6 +94,28 @@ fn assert_unrooted(event: &AgentChatEvent) {
     assert_eq!(event.metadata["chat_turn_membership_complete"], false);
 }
 
+fn assert_no_contradiction(event: &AgentChatEvent) {
+    for field in [
+        "chat_turn_membership_contradiction",
+        "chat_turn_membership_contradicted_root",
+        "chat_turn_membership_expected_provider_turn",
+    ] {
+        assert!(event.metadata.get(field).is_none(), "unexpected {field}");
+    }
+}
+
+fn assert_contradiction(event: &AgentChatEvent, kind: &str) {
+    assert_eq!(event.metadata["chat_turn_membership_contradiction"], kind);
+    assert_eq!(
+        event.metadata["chat_turn_membership_contradicted_root"],
+        "request-a"
+    );
+    assert_eq!(
+        event.metadata["chat_turn_membership_expected_provider_turn"],
+        "turn-a"
+    );
+}
+
 #[test]
 fn withholding_adapter_proof_preserves_legacy_identity_fields() {
     let mut state = CodexState::default();
@@ -127,6 +149,7 @@ fn real_rollout_shapes_require_typed_request_and_close_exact_bracket() {
     let mut request = request_row("real-request-root");
     state.observe(&raw[2], Some(&mut request));
     assert_member(&request, turn, "real-request-root");
+    assert_no_contradiction(&request);
     assert_eq!(request.metadata["chat_turn_membership_complete"], false);
 
     let mut mirror = request_row("real-request-root");
@@ -134,6 +157,7 @@ fn real_rollout_shapes_require_typed_request_and_close_exact_bracket() {
     mirror.metadata["provider_turn_id"] = json!(turn);
     state.observe(&raw[3], Some(&mut mirror));
     assert_member(&mirror, turn, "real-request-root");
+    assert_no_contradiction(&mirror);
 
     for record in &raw[4..] {
         let mut answer = row(
@@ -143,10 +167,12 @@ fn real_rollout_shapes_require_typed_request_and_close_exact_bracket() {
         answer.role = Some(AgentChatRole::Assistant);
         state.observe(record, Some(&mut answer));
         assert_member(&answer, turn, "real-request-root");
+        assert_no_contradiction(&answer);
         assert_eq!(answer.metadata["chat_turn_membership_complete"], false);
     }
     let terminal = finish(&mut state, turn);
     assert_member(&terminal, turn, "real-request-root");
+    assert_no_contradiction(&terminal);
     assert_eq!(terminal.metadata["chat_turn_membership_complete"], true);
     assert_eq!(terminal.metadata["chat_turn_membership_partial"], false);
     assert!(state.active.is_none());
@@ -174,6 +200,7 @@ fn actual_prompt_before_start_is_tagged_without_granting_work_or_full_counts() {
     mirror.metadata["provider_turn_id"] = json!(turn);
     state.observe(&raw[2], Some(&mut mirror));
     assert_unrooted(&mirror);
+    assert_no_contradiction(&mirror);
 
     let mut premature = row(AgentChatEventKind::ToolCall, "response_item");
     state.observe(&call("before-start"), Some(&mut premature));
@@ -183,6 +210,7 @@ fn actual_prompt_before_start_is_tagged_without_granting_work_or_full_counts() {
     let mut start = row(AgentChatEventKind::ToolCall, "event_msg");
     state.observe(&started(turn), Some(&mut start));
     assert_member(&start, turn, "request-a");
+    assert_no_contradiction(&start);
     assert_eq!(start.metadata["chat_turn_membership_complete"], false);
     for (raw, kind) in [
         (call("call-a"), AgentChatEventKind::ToolCall),
@@ -692,4 +720,296 @@ fn work_before_context_and_untyped_completion_cannot_be_repaired_into_full_proof
         finish(&mut state, "turn-a").metadata["chat_turn_membership_complete"],
         false
     );
+}
+
+#[test]
+fn native_opening_identifies_itself_without_inheriting_an_unproven_root() {
+    let mut state = CodexState::default();
+    let mut opening = row(AgentChatEventKind::ToolCall, "event_msg");
+    opening.metadata =
+        json!({"request_root_id": "older-request", "provider_turn_id": "older-turn"});
+    state.observe(&started("turn-a"), Some(&mut opening));
+    assert_eq!(opening.metadata["chat_turn_adapter"], ADAPTER);
+    assert_eq!(opening.metadata["provider_turn_id"], "turn-a");
+    assert!(opening.metadata.get("request_root_id").is_none());
+    assert_eq!(opening.metadata["chat_turn_membership_complete"], false);
+    assert_eq!(opening.metadata["chat_turn_membership_partial"], false);
+    assert_no_contradiction(&opening);
+
+    state.observe(&context("turn-a"), None);
+    let mut request = request_row("request-a");
+    state.observe(&prompt("turn-a"), Some(&mut request));
+    assert_member(&request, "turn-a", "request-a");
+    assert_eq!(
+        finish(&mut state, "turn-a").metadata["chat_turn_membership_complete"],
+        true
+    );
+}
+
+#[test]
+fn normalizer_exposes_own_opening_identity_before_context_or_prompt() {
+    let events = crate::providers::chat_transcript::normalize_chat_lines(
+        "wardian-agent",
+        "codex",
+        [started("turn-a").to_string()],
+    );
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event.metadata["chat_turn_adapter"], ADAPTER);
+    assert_eq!(event.metadata["provider_turn_id"], "turn-a");
+    assert!(event.metadata.get("request_root_id").is_none());
+    assert_no_contradiction(event);
+}
+
+#[test]
+fn explicit_provider_conflict_names_only_the_previous_certified_identity() {
+    for raw in [
+        json!({"type":"response_item","payload":{"type":"function_call","turn_id":"turn-b","call_id":"one","arguments":"private-payload"}}),
+        json!({"type":"response_item","turn_id":"turn-a","payload":{"type":"function_call","turn_id":"turn-b","call_id":"one","arguments":"private-payload"}}),
+    ] {
+        let mut state = opened();
+        let mut event = row(AgentChatEventKind::ToolCall, "response_item");
+        state.observe(&raw, Some(&mut event));
+        assert_unrooted(&event);
+        assert_contradiction(&event, "codex_provider_turn_conflict");
+        let reason = event.metadata["chat_turn_membership_contradiction"]
+            .as_str()
+            .unwrap();
+        assert!(!reason.contains("private-payload"));
+        assert!(!reason.contains("turn-b"));
+        assert_eq!(
+            finish(&mut state, "turn-a").metadata["chat_turn_membership_complete"],
+            false
+        );
+    }
+}
+
+#[test]
+fn conflicting_request_and_work_roots_keep_the_old_root_as_diagnostic_evidence() {
+    for prompt_conflict in [true, false] {
+        let mut state = opened();
+        let mut event = if prompt_conflict {
+            request_row("private-new-root")
+        } else {
+            row(AgentChatEventKind::ToolCall, "response_item")
+        };
+        event.metadata["request_root_id"] = json!("private-new-root");
+        state.observe(
+            &if prompt_conflict {
+                prompt("turn-a")
+            } else {
+                call("one")
+            },
+            Some(&mut event),
+        );
+        assert_unrooted(&event);
+        assert_contradiction(&event, "codex_request_root_conflict");
+        assert!(!serde_json::to_string(&state)
+            .unwrap()
+            .contains("private-new-root"));
+
+        let mut restored: CodexState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        let terminal = finish(&mut restored, "turn-a");
+        assert_contradiction(&terminal, "codex_request_root_conflict");
+        assert_eq!(terminal.metadata["chat_turn_membership_complete"], false);
+        let later = finish(&mut restored, "turn-b");
+        assert_no_contradiction(&later);
+    }
+}
+
+#[test]
+fn malformed_ids_and_unproven_next_turns_are_uncertainty_not_contradiction() {
+    for value in [
+        json!(null),
+        json!(17),
+        json!(""),
+        json!("x".repeat(MAX_ID_BYTES + 1)),
+    ] {
+        let mut state = opened();
+        let mut raw = call("one");
+        raw["payload"]["turn_id"] = value;
+        let mut event = row(AgentChatEventKind::ToolCall, "response_item");
+        state.observe(&raw, Some(&mut event));
+        assert_eq!(event.metadata["chat_turn_membership_partial"], true);
+        assert_no_contradiction(&event);
+    }
+    let mut state = CodexState::default();
+    state.observe(&started("turn-a"), None);
+    let mut raw = call("one");
+    raw["payload"]["turn_id"] = json!("turn-b");
+    let mut event = row(AgentChatEventKind::ToolCall, "response_item");
+    state.observe(&raw, Some(&mut event));
+    assert_no_contradiction(&event);
+
+    let mut state = opened();
+    state.observe(&context("turn-b"), None);
+    state.observe(&raw, Some(&mut event));
+    assert_no_contradiction(&event);
+    state.observe(
+        &started("turn-b"),
+        Some(&mut row(AgentChatEventKind::ToolCall, "event_msg")),
+    );
+    assert_no_contradiction(&finish(&mut state, "turn-b"));
+}
+
+#[test]
+fn early_unpaired_parallel_and_replayed_results_are_ordinary_members() {
+    let mut state = opened();
+    for (raw, kind) in [
+        (result("early"), AgentChatEventKind::ToolResult),
+        (result("unpaired"), AgentChatEventKind::ToolResult),
+        (call("first"), AgentChatEventKind::ToolCall),
+        (call("parallel"), AgentChatEventKind::ToolCall),
+        (result("parallel"), AgentChatEventKind::ToolResult),
+        (call("early"), AgentChatEventKind::ToolCall),
+        (result("first"), AgentChatEventKind::ToolResult),
+        (result("parallel"), AgentChatEventKind::ToolResult),
+        (call("first"), AgentChatEventKind::ToolCall),
+    ] {
+        let mut event = row(kind, "response_item");
+        state.observe(&raw, Some(&mut event));
+        assert_member(&event, "turn-a", "request-a");
+        assert_no_contradiction(&event);
+        assert_eq!(event.metadata["chat_turn_membership_partial"], false);
+    }
+    let terminal = finish(&mut state, "turn-a");
+    assert_eq!(terminal.metadata["chat_turn_membership_complete"], true);
+    assert_no_contradiction(&terminal);
+    let mut later = row(AgentChatEventKind::ToolResult, "response_item");
+    state.observe(&result("first"), Some(&mut later));
+    assert_unrooted(&later);
+    assert_no_contradiction(&later);
+    assert_eq!(terminal.metadata["chat_turn_membership_complete"], true);
+}
+
+#[test]
+fn unrepresented_conflict_is_carried_by_the_next_event_without_retaining_content() {
+    let mut state = opened();
+    let mut raw = result("unrepresented");
+    raw["payload"]["turn_id"] = json!("turn-b");
+    state.observe(&raw, None);
+    let serialized = serde_json::to_string(&state).unwrap();
+    assert!(!serialized.contains("must-not-retain"));
+    let mut state: CodexState = serde_json::from_str(&serialized).unwrap();
+    let terminal = finish(&mut state, "turn-a");
+    assert_contradiction(&terminal, "codex_provider_turn_conflict");
+    assert_eq!(terminal.metadata["chat_turn_membership_complete"], false);
+}
+
+#[test]
+fn missing_context_or_request_cannot_certify_a_root_for_retraction() {
+    let mut state = CodexState::default();
+    state.observe(&started("turn-a"), None);
+    state.observe(&prompt("turn-a"), Some(&mut request_row("request-a")));
+    let mut conflicting = request_row("request-b");
+    state.observe(&prompt("turn-a"), Some(&mut conflicting));
+    assert_no_contradiction(&conflicting);
+    assert_no_contradiction(&finish(&mut state, "turn-a"));
+
+    let mut state = opened();
+    let mut next = request_row("request-b");
+    state.observe(&prompt("turn-b"), Some(&mut next));
+    assert_no_contradiction(&next);
+    let mut other_pending_root = request_row("another-request-b");
+    state.observe(&prompt("turn-b"), Some(&mut other_pending_root));
+    assert_no_contradiction(&other_pending_root);
+    assert_no_contradiction(&finish(&mut state, "turn-a"));
+}
+
+#[test]
+fn post_complete_wrapper_and_unpaired_result_are_later_activity_without_retraction() {
+    let mut state = opened();
+    let closed = finish(&mut state, "turn-a");
+    assert_eq!(closed.metadata["chat_turn_membership_complete"], true);
+    assert!(closed.metadata.get("chat_turn_after_closed").is_none());
+    let saved = serde_json::to_string(&state).unwrap();
+    assert!(!saved.contains("must-not-retain"));
+    let mut state: CodexState = serde_json::from_str(&saved).unwrap();
+    let wrapper = json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","internal_chat_message_metadata_passthrough":{"turn_id":"turn-a"},"content":[{"type":"output_text","text":"same final answer"}]}});
+    let mut final_wrapper = row(AgentChatEventKind::Message, "response_item");
+    final_wrapper.role = Some(AgentChatRole::Assistant);
+    state.observe(&wrapper, Some(&mut final_wrapper));
+    assert_eq!(final_wrapper.metadata["chat_turn_after_closed"], true);
+    assert_unrooted(&final_wrapper);
+    assert_no_contradiction(&final_wrapper);
+    assert_eq!(
+        final_wrapper.metadata["chat_turn_membership_partial"],
+        false
+    );
+
+    let mut opening = row(AgentChatEventKind::ToolCall, "event_msg");
+    opening.metadata = json!({"request_root_id":"request-a","provider_turn_id":"turn-a"});
+    state.observe(&context("turn-b"), None);
+    state.observe(&started("turn-b"), Some(&mut opening));
+    assert!(opening.metadata.get("chat_turn_after_closed").is_none());
+    state.observe(&prompt("turn-b"), Some(&mut request_row("request-b")));
+    let mut unpaired = row(AgentChatEventKind::ToolResult, "response_item");
+    unpaired.metadata["request_root_id"] = json!("request-a");
+    state.observe(&result("unpaired-after-close"), Some(&mut unpaired));
+    assert_eq!(unpaired.metadata["chat_turn_after_closed"], true);
+    assert_unrooted(&unpaired);
+    assert_no_contradiction(&unpaired);
+    assert_eq!(unpaired.metadata["chat_turn_membership_partial"], false);
+    assert_eq!(
+        finish(&mut state, "turn-b").metadata["chat_turn_membership_complete"],
+        true
+    );
+    assert_eq!(closed.metadata["chat_turn_membership_complete"], true);
+    assert!(state.valid());
+}
+
+#[test]
+fn openness_or_missing_context_never_supplies_after_closed_evidence() {
+    for closes_without_context in [false, true] {
+        let mut state = if closes_without_context {
+            CodexState::default()
+        } else {
+            opened()
+        };
+        if closes_without_context {
+            state.observe(&started("turn-a"), None);
+            state.observe(&prompt("turn-a"), Some(&mut request_row("request-a")));
+            finish(&mut state, "turn-a");
+        }
+        let mut event = row(AgentChatEventKind::ToolResult, "response_item");
+        event.metadata = json!({"request_root_id":"request-a","provider_turn_id":"turn-a","chat_turn_after_closed":true});
+        state.observe(&result("unpaired"), Some(&mut event));
+        assert!(event.metadata.get("chat_turn_after_closed").is_none());
+        assert_no_contradiction(&event);
+    }
+}
+
+#[test]
+fn normalizer_marks_post_complete_final_wrapper_before_logical_coalescing() {
+    let answer = json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","internal_chat_message_metadata_passthrough":{"turn_id":"turn-a"},"content":[{"type":"output_text","text":"same final answer"}]}});
+    let events = crate::providers::chat_transcript::normalize_chat_lines(
+        "wardian-agent",
+        "codex",
+        [
+            context("turn-a"),
+            started("turn-a"),
+            prompt("turn-a"),
+            answer.clone(),
+            complete("turn-a"),
+            answer,
+        ]
+        .into_iter()
+        .map(|raw| raw.to_string()),
+    );
+    let answers: Vec<_> = events
+        .iter()
+        .filter(|event| event.role == Some(AgentChatRole::Assistant))
+        .collect();
+    assert_eq!(answers.len(), 2);
+    assert!(answers[0].metadata.get("chat_turn_after_closed").is_none());
+    assert_eq!(answers[0].metadata["chat_turn_adapter"], ADAPTER);
+    assert_eq!(answers[1].metadata["chat_turn_after_closed"], true);
+    assert_no_contradiction(answers[1]);
+    let closed = events
+        .iter()
+        .find(|event| event.source.as_deref() == Some("task_complete"))
+        .unwrap();
+    assert_eq!(closed.metadata["chat_turn_membership_complete"], true);
+    assert!(closed.metadata.get("chat_turn_after_closed").is_none());
 }

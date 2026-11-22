@@ -984,10 +984,287 @@ Durable scope requires real conversation and generation IDs. A validated recent
 preview instead uses its producer-issued recent admission and retains every actual
 nullable canonical hint. The original preview receipt and current consumer DOM must
 match owner, admission, revision and the complete nullable tuple. Missing admission
-does not make null durable IDs valid. Preview paint proves recent-capability scope;
-it does not grant canonical-ready, Older, detail or renewal authority. A matching
+does not make null durable IDs valid for a target receipt. Preview paint proves
+recent-capability scope; it does not grant canonical-ready, Older, detail or
+renewal authority. A matching
 empty unchanged response can retain the original current target receipt while its
 actual admitted scope stays the same.
+
+An empty unscoped reset is retained only as control evidence: matching owner,
+valid revision, explicit null conversation/generation/epoch, and no admission,
+rows or authority. It fences earlier receipts and pending frame proofs. It grants
+no endpoint or qualification; a fresh scoped producer reply must pass two stable
+frames before a new endpoint can be stamped. Malformed claimed scopes remain
+errors. Bounded rejection records retain field shapes and available request
+context without transcript or identifier values.
+
+The timing observer classifies only the exact desktop rejection `chat source
+temporarily busy` with a known original page-request sequence, dispatch time,
+operation and phase as a pending retry. The SDK promise and normal product retry
+remain unchanged. Every rejection still increments the raw error count; at most
+eight structural records and 8 KiB are retained. Other errors and unknown request
+association remain fatal. Recovery requires a normal request dispatched after the
+rejection, a validated target matching the current admitted DOM, and two fresh
+frames without a visible direct-child transcript alert. Old replies and empty
+reset controls cannot recover it. Pending retry or a current transcript alert
+blocks usability, qualification, endpoint waits and final acceptance, even when
+earlier endpoint timestamps exist.
+The reported latency remains the first healthy usable witness. A busy error
+before it delays that witness under the original opening budget. An error after
+it preserves the historical timestamps and metrics, but final acceptance still
+requires fresh post-rejection target health and, for qualified cases, fresh
+canonical frame proof. Recovery qualification is recorded separately; old
+qualification cannot satisfy that gate. No late recovery input or renewed probe
+deadline is required to preserve an already healthy first usability witness.
+
+The historical V7 `chat-preview-identity-native` opening ruler also recognized a source-backed
+answer in the provisional shared renderer. It requires one unambiguous producer
+item/event-reference binding, the literal answer anchor and turn key in the DOM,
+and matching consumer session, conversation, generation, epoch, admission and
+revision across both frame witnesses. Bridge and item admissions must equal the
+page admission. Both desktop and Remote require the consumer scope marker.
+This proves provisional readability and usability; canonical qualification still
+requires the existing non-provisional, completed canonical answer. A
+preview-to-qualified interval can describe capture promotion in place and does
+not by itself prove a source-representation switch or anchor preservation.
+Those behaviors need their separate regression evidence.
+
+### V8 native Chat opening and qualified handoff
+
+For a candidate-only check of archive-generation rollover, the existing test also
+accepts `WARDIAN_E2E_CHAT_PREVIEW_MINIMAL_TIMING=1`. It runs three saved-active
+pending cold/warm pairs per surface using a prebuilt release app and CLI. Its
+separate report retains first usable in milliseconds, source switch count and
+the largest signed anchor displacement in CSS pixels, with the outcome for each
+opening. A failed opening stays in its scheduled slot. The complete V8 report
+continues to use its existing writer and evidence policy.
+
+The current harness revision is `v9-retention-selector-diagnostics`. It uses the
+unchanged V8 endpoint predicates, numeric ruler version, workload, probe, clocks,
+budgets and authority checks. Historical V8 artifacts remain immutable and receive
+no new credit from this revision.
+
+V8 separates the first usable opening (M1) from producer-qualified handoff (M2).
+Historical V7 freezes, failed cohorts and null accepted metrics remain unchanged.
+The same V8 ruler runs against normal release main and candidate artifacts. Each
+artifact uses its own compiled producer fixture seeder and persisted schema. Raw
+source generation, counts, padding and successful body are common; producer IDs
+and source record ordinals remain opaque across versions.
+
+M1 starts at the trusted normal Roster click and includes an ordinary Switch to
+Chat action when needed. It requires a current-phase owned native page response,
+literal native backing IDs and source/body evidence, separately visible recent
+narrative in the selected agent view, and trusted unsent composer input followed
+by two stable animation frames. The exact probe is
+`synthetic-unsent-timing-probe` (29 characters); Enter is never sent. M1 is strictly
+under 1,000 ms. API-only responses, spinners, empty resets, hidden/foreign views,
+stale requests and synthetic input receive no credit. Wire evidence and visible
+content are separate observations. Body text never assigns a DOM ID or alias.
+Main Remote lacks consumer scope/row DOM markers; V8 neither adds nor infers them.
+Existing markers, when present, must agree with the actual current response.
+
+Both sources use the versioned `saved-active-auto-restore-v1` fixture lifecycle
+with the quiet synthetic Codex PATH peer. Staging opts into
+`savedActiveRestore: true` and writes desired `is_off: false` before app startup;
+default staging remains saved-Off. The ordinary backend restores the existing
+literal native session through its resume policy. It must earn the real owner,
+ordinary TUI attachment, exclusive Idle thread and direct-input readiness.
+The composer must really be enabled. Saved config or roster online state alone
+does not prove native-owner readiness; the
+separate fixture-readiness diagnostic must establish it before measurement. No
+DOM/status/config enablement, Mock substitution or wheel probe can satisfy V8 M1.
+The peer tests synthetic startup and unsent input only, not real Codex inference
+or delivery. Pin its corrected JS/transport, interpreter and dependency hashes.
+
+V8 opts into `upstreamStorage: true` when staging the raw fixture. Its physical
+source starts under
+`<wardian-home>/agents/<session-id>/synthetic-provider-home/.codex/sessions`,
+and that owned plain `.codex` directory is the application's explicit upstream
+`CODEX_HOME`. Default staging retains the historical local-session layout.
+Staging locally and then projecting into a different upstream can copy the
+file, invalidating its certified physical identity even when its bytes match.
+
+Saved-active mode invokes neither `build_agent_cli_command` nor `resume_agent`:
+normal owner startup prepares the projection. After actual backend Idle readiness,
+verify that managed `sessions` resolves to the staged upstream directory and that
+source bytes, body hash and device/file identity match the pre-app witness.
+Retain those checks through cleanup and ordinary compaction. Reuse an existing provider directory
+only for this opt-in owned plain upstream; reject linked or foreign ancestors.
+Keep source/capture/peer guards intact and retain failed diagnostic roots. These
+filesystem checks do not establish native-owner readiness or measurement credit.
+
+Strict cleanup must retain one successful native `pause_agent` request and its
+actual null reply for the exact fixture agent, followed by one read-only roster
+check confirming that same agent is Off. Empty selection, another agent's reply,
+driver exit or a zero-process Job receipt cannot substitute for the pause reply.
+Pause failure still requires driver cleanup and remains a failed cleanup.
+
+This lifecycle applies identically to baseline and candidate: qualified
+128-turn/padding-128 and pending 12,000-turn/padding-1,024 workloads, source/body
+proofs, cold first-Chat and warm reopen definitions, trusted input/frames, budgets
+and M1/M2 gates stay fixed. No retry, resampling, retroactive credit or alternate
+fixture is permitted after a saved-active validation failure; that failure blocks
+PR3. The saved-Off/manual-resume path remains uncovered under
+[issue #1778](https://github.com/wardian-app/Wardian/issues/1778), with R07 retained
+as failed evidence. A later Off-path follow-up is separate from PR3's merge gate.
+
+M2 retains the stronger consumer scope, producer-issued admission, turn/item,
+event-reference and source-evidence checks across two fresh frames. Provisional
+items require matching page, bridge and item admissions and an exact answer anchor.
+Both provisional and canonical items must match the owned fixture source key and
+the independently captured native-identity epoch. Page, event metadata and item
+epoch agreement alone cannot establish ownership. The epoch is the digest of the
+serialized native identity, not the source-content hash. A record key must be the
+literal physical source reference or explicit producer physical-owner identity.
+A merged display representative may keep another physical owner only through
+its exact bounded producer member certificate. Without that physical witness or
+certificate, the returned event ID grants no owner evidence: it may be a logical
+display ID. Text and derived canonical keys never establish that relation.
+Canonical completion is reported separately; provisional paint never becomes
+canonical credit. The runner observes for 30 seconds from the original click on
+both sources. M2 has no one-second SLO. Candidate handoff is required; absent main
+support is reported `N/A_LEGACY_UNSUPPORTED`, never manufactured qualification.
+The Legacy-to-bound producer source switch is counted separately from a same-item
+provisional-to-canonical in-place replacement. At most one of each is allowed;
+promotion inside the shared renderer is not a second source switch. The ruler
+tracks literal item, turn and source identities and provenance, complete returned
+aliases/window order, bounded frame geometry and real disclosure expansion state.
+It can request the real disclosure for an already shared provisional opening.
+Eight awareness hints are not an 80-row membership proof. Missing anchor/expansion
+witnesses, changed bound identity, regression, repeat promotion, blank or mixed
+frames, extra reflows or exhausted bounds leave continuity unproven. A genuinely
+canonical first frame is labeled `CANONICAL_FIRST_FRAME`, with no handoff or
+expansion-preservation claim. Zero observed changes in a provisional shared view
+do not automatically prove continuity.
+
+An ordinary M1 readable timeout, input timeout or exhausted fixed probe window
+retains its failure and null accepted metric. Passive M2 observation continues
+until the original click plus 30 seconds, without new input, another opening or a
+new deadline. Its separate component result remains available even when M1 fails.
+No M2 frame or transition after that absolute cutoff receives credit. Authority,
+setup and fatal observer failures still trigger immediate owned cleanup.
+
+Before the first V8 cohort, the typed outcome protocol distinguishes an ordinary
+M1 miss from a fatal cycle failure. Only the actual opening flow can mark its
+original exception after the full passive M2 window and every handoff guard has
+passed. The case remains `FAILED`, with null accepted metrics and the same error
+and cause. Codes, messages and caller-supplied fields cannot supply this origin.
+The surface records post-source-verification `PASS` only after its real source
+assertion. Its existing final errors-length assertion emits an ordinary-only
+summary only when every recorded error is exactly one marked opening miss;
+source assertions, passive errors, unknown origins and count mismatches do not
+qualify. Cleanup operation results remain separate from supervisor closure.
+
+After the final report is persisted, one bounded stdout outcome record binds the
+root classification to that report's SHA-256. Typed classification still requires
+exact ordinary case/surface/error accounting, source and observer checks,
+completed cleanup and the matching joined, active-zero, closed Job receipt. It
+does not authorize another native run. Missing or mixed evidence remains a stop.
+
+The remaining operational authorization is one reviewed diagnostic followed by
+one last reviewed fixed 48-opening cohort, each requiring a separate parent GO.
+There are no extra trials, retries, resampling or retroactive credit. After the
+last cohort, failure to obtain an accepted series stops runtime for any reason
+and returns the merge decision to the user. This is an operator policy, not a new
+persisted counter, inferred permission or authority supplied by an outcome label.
+
+The one diagnostic uses the existing test with all of these selectors:
+
+| Environment selector | Value |
+| --- | --- |
+| `WARDIAN_CHAT_PREVIEW_DIAGNOSTIC` | `1` |
+| `WARDIAN_CHAT_PREVIEW_DIAGNOSTIC_DESKTOP_PENDING` | `1` |
+| `WARDIAN_CHAT_PREVIEW_FIXTURES` | `pending` |
+| `WARDIAN_CHAT_PREVIEW_SOURCE_ROLE` | `baseline` |
+
+That selector rejects other roles/modes, runs Desktop cold then warm only, and
+keeps accepted metrics, M1 and M2 null even if the endpoint operation succeeds.
+It changes no source/body/capture proof, trusted interaction, frame or cleanup
+gate. The selector itself is not a GO. No native execution is authorized merely
+by setting these variables.
+
+Selector diagnostics record bounded scalar counts, stage reasons and first/last
+failures from the actual owned-host, single-visible-scroll, exact-visible-body
+and text-range-intersection predicates. Counts describe selector calls, not
+animation-frame counts. They retain no body text, DOM fragments or mutations and
+never supply a healthy endpoint. Diagnostic DOM capture uses the same single
+visible scroll rather than the first matching scroll.
+
+Report retention is minified and remains capped at 512 KiB. Passing observations
+keep the original raw SHA-256/byte count, phase identity/frame/probe/continuity
+facts and the negative fields consumed by outcome predicates. Failed observations
+and each immediate predecessor retain raw evidence, including the full receipt
+ledger once per case. The duplicated `phases` history is removed; each case keeps
+its current `phase`. This storage view does not mutate in-memory verdicts or typed
+error provenance, and existing outcome readers consume the same negative fields.
+It introduces no interning, table/codec layer or relaxed proof.
+
+If required raw evidence still exceeds 512 KiB, the writer reports exact
+`measured_bytes` and `limit_bytes`, refuses the write and leaves the previous
+partial intact. It never raises the cap, truncates failures or invents a complete
+report. Such an overflow remains a failed run with an explicit retention gap.
+
+Controls fence old receipts and in-flight frames. A later exact current response
+needs fresh health frames. Busy recovery preserves a properly healthy first M1
+timestamp but cannot bypass current health or fresh M2 proof. Subject replacement
+requires fresh trusted input and frames, with at most three attempts in the same
+absolute five-second probe window. No deadline or initial clock is reset.
+
+Before App startup, the runner checks a predeclared fixture-generation fingerprint
+and literal byte count for each surface/mode. Fresh fixed-width 16-hex run IDs use
+the ordinary default home resolver. Case homes are siblings with the fixed
+three-byte suffixes `d-p`, `r-p`, `d-q`, `r-q`, retaining each home's required
+`wardian-e2e-native-*` prefix and all ownership fences. Native agent/session IDs
+remain UUID36. A cohort parent supplies the same existing WARDIAN_E2E_RUN_ID after
+claiming the absent default base with acquireHomeLock before Node spawn. The child
+accepts that base only with a matching live readable lock on an otherwise empty
+plain root; sibling cases remain absent. The earlier literal no-HOME assumption
+was incompatible with the maintained supervisor's receipt scope. Its existing
+WARDIAN_E2E_NATIVE_HOME is accepted only with the supplied valid 16-hex run ID
+and a literal value exactly equal to defaultNativeE2EHome for that run, followed
+by the live lock-only/plain-base check before preparation. Foreign, missing-run,
+malformed, dirty, dead or mismatched explicit homes still fail. There is no
+preload, new environment namespace or supervisor-guard change. The
+parent retains its lease through the matching joined/active-zero Job receipt and
+then releases it with releaseHomeLock. Standalone absence of a supplied run ID
+keeps the existing fresh-base path. Pin one new owned short TEMP/TMP container for both sources; with
+a seven-byte ASCII Windows root, all four compact sockets are 103 bytes, below
+the strict 108-byte capacity. Reject a longer socket or any existing base/case
+home before preparation; never reset a collision or resample its run ID. This
+preflight creates no home or reservation. Equal workspace path encoding lengths
+prevent per-turn `cwd` size bias. Literal source
+hashes and identities remain unmodified. A mismatch fails before the click, with
+no post-run exclusion or source normalization. Preparation remains bounded to
+180 seconds per home. Independent process/home/profile cold and same-process warm
+reopen definitions remain; fixture write/hash/read warms the OS filesystem cache.
+
+The comparison protocol predeclares three complete cycles per source in order
+Main1, PR3-1, PR3-2, Main2, Main3, PR3-3. Each has eight pending/qualified ×
+desktop/authenticated Remote × cold/warm openings (48 M1 observations). Freeze
+both normal release pairs, source-specific seeders and the common V8 ruler before
+the first opening. Preserve every setup failure, null accepted metric and outlier;
+never union subsets from old cohorts or adapt the counts, order or gates.
+For each label, use only all three main observations to calculate its usable-time
+range and the median of their six observed readable/usable RAF-pair intervals.
+The empirical noise band is the larger of those two values. After all six cycles,
+report candidate-minus-main median, both raw ranges and every individual miss.
+Candidate must satisfy the absolute M1 target and not exceed main beyond that
+band. Main misses remain separate preexisting observations. This low-N empirical
+guard supplies neither a confidence interval nor a speedup claim. A failed
+fixture, authority, observer or cleanup gate stops later cycles under the frozen
+plan; ordinary measured M1 misses remain in the fixed comparison, never retried.
+
+Runner configuration adds `WARDIAN_CHAT_PREVIEW_SOURCE_ROLE=baseline|candidate`,
+`WARDIAN_CHAT_PREVIEW_FIXTURE_SHAPES=<absolute-json-file>`,
+`WARDIAN_CHAT_PREVIEW_PEER_PYTHON=<pinned-python-executable>` and an explicit
+`WARDIAN_CHAT_PREVIEW_PEER_TRANSPORT`. The shapes JSON maps `desktop-pending`,
+`remote-pending`, `desktop-qualified` and `remote-qualified` to
+`{generation_sha256, source_bytes}`. Existing explicit frozen app/CLI, artifact
+manifest, source-specific seeder and skip-build settings remain required. This
+configuration is not permission to launch a measurement. DOM software-frame
+witnesses do not prove physical scanout; maintained cleanup retains the existing
+limited supervisor-closure statement. CPU/job/disk snapshots are context only.
+
 Readable timing retains the independent full raw assistant body/hash in the RPC
 proof. Before App startup, the existing Markdown parser prepares a bounded
 rendered-text witness; plain Mock text retains whole-text matching. The actual
@@ -1007,7 +1284,15 @@ model discovery or wake. If no safe composer exists, an overflowing owned viewpo
 uses a trusted wheel. Its baseline comes from the existing DOM metadata read before
 the action, so compositor scrolling before the event handler cannot erase it.
 Both an actual trusted event inside that region and an offset change are required.
-There is no retry or fallback after a failed probe; no safe control fails honestly.
+An ordinary subject replacement cancels the old probe and pending frame proof.
+The replacement must pass fresh admitted paint frames and receive its own trusted
+input or wheel; old input never credits a new scope or DOM subject. Each opening
+permits at most three probe attempts within one absolute five-second probe window.
+The original Roster, readable and usable clocks never reset. An unchanged subject
+with no scroll movement is not retried. No safe control, an exhausted attempt cap,
+or an expired deadline fails honestly. Content-free attempt evidence retains the
+selected wheel delta and baseline, actual trusted event delta, current scroll and
+subject predicates, and frame/invalidation times, capped at three records/4 KiB.
 The fixture never toggles Off Chat away or loads history to manufacture activation
 or overflow. Both paint and trusted interaction retain the same admitted body and
 scope through two animation frames. Live cold/warm and small Mock Saved-Off cold/warm

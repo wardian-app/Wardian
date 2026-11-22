@@ -14,6 +14,31 @@ const disposers: Array<() => void> = [];
 afterEach(() => { disposers.splice(0).forEach((dispose) => dispose()); vi.unstubAllGlobals(); });
 
 describe("passive Chat page observation", () => {
+  it("forwards bounded literal backing IDs to the SDK and observation only on ordinary recent reads", async () => {
+    const invoke = vi.fn().mockResolvedValue(page);
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+    const observer = vi.fn();
+    const subscription = chatPageObservation.facade.subscribe({ version: 1, owner: "owner", onRequest: observer });
+    if (!subscription.active) throw new Error("activation failed");
+    disposers.push(subscription.unsubscribe);
+    const ids = ["literal source row ? λ", "source:cold:two"];
+    const revision = "opaque.presentationNone/unchanged?reader=old";
+    await loadChatPage({ sessionId: "owner", revision, previewBackingIds: ids });
+    expect(invoke.mock.calls[0][1]).toMatchObject({ revision, recentPreview: true, previewBackingIds: ids });
+    expect(invoke.mock.calls[0][1].previewBackingIds).toBe(ids);
+    expect(observer.mock.calls[0][0]).toBe(invoke.mock.calls[0][1]);
+    await loadChatPage({ sessionId: "owner", previewBackingIds: [] });
+    expect(invoke.mock.calls[1][1].previewBackingIds).toEqual([]);
+    await loadChatPage({ sessionId: "owner" });
+    expect(invoke.mock.calls[2][1]).not.toHaveProperty("previewBackingIds");
+    for (const request of [{ cursor: "older" }, { detailRef: "detail" }, { revalidateIds: ["source:one"] },
+      { revalidateIds: [] }, { recentPreview: false }, { previewBackingIds: Array(9).fill("literal") },
+      { previewBackingIds: ["😀".repeat(129)] }]) {
+      await loadChatPage({ sessionId: "owner", previewBackingIds: ids, ...request });
+      expect(invoke.mock.calls[invoke.mock.calls.length - 1][1]).not.toHaveProperty("previewBackingIds");
+    }
+  });
+
   it("does not touch a Promise without a matching subscriber or retain a backlog", () => {
     const bridge = createChatPageObservation();
     const result = Promise.resolve(page);

@@ -31,7 +31,8 @@ this coverage and exercise invalid arguments and workflow declarations.
 
 The normal `npm run test` entry first runs the existing cache and turn-ended
 Node contracts, the bounded-runner contracts, and the app-free Chat Saved-fixture
-and harness-observer contracts. It then runs the complete
+and harness-observer contracts, including preview timing fixture and ruler
+checks that require no native app. It then runs the complete
 `scripts/compiler-input-guard.test.mjs` suite in a dedicated Node child before
 starting Vitest and its jsdom workers. The child retains its existing Node
 executable, unfiltered arguments, cwd, inherited environment, UTF-8 capture,

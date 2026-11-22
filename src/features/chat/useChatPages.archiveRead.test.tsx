@@ -302,7 +302,7 @@ describe("owned archive reads in the desktop Chat hook", () => {
         expect(hook.result.current.browsingOlder).toBe(false);
         expect(hook.result.current.loadingOlder).toBe(false);
         expect(hook.result.current.page).toBeNull();
-        expect(loader.mock.calls[3][0]).toEqual({ sessionId: SESSION, revision: undefined });
+        expect(loader.mock.calls[3][0]).toEqual({ sessionId: SESSION, revision: undefined, previewBackingIds: [] });
         const requests = loader.mock.calls.length;
         await act(async () => { await hook.result.current.loadOlder(); });
         expect(loader).toHaveBeenCalledTimes(requests);
