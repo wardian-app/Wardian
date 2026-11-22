@@ -26,6 +26,8 @@ import {
 } from "../chat/chatPresentation";
 import { chatTranscriptRowKey } from "../chat/chatTurns";
 import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
+import { qualifiedChatPreviewBridge, useChatPresentationScope } from "../chat/chatPreviewIdentity";
+import { useChatHandoffAnchor } from "../chat/chatScrollAnchor";
 import { RemoteAttachmentComposer } from "./RemoteAttachmentComposer";
 import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
@@ -460,8 +462,8 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const jumpToLatestChat = useRemoteStore((state) => state.jumpToLatestActiveAgentChat);
   const chatError = useRemoteStore((state) => state.chatError);
   const chatProgress = useRemoteStore((state) => state.chatPage?.progress ?? "indexing");
-  const chatPresentationScope = useRemoteStore((state) => JSON.stringify([agent.session_id, agent.provider,
-    state.chatPage?.conversation_id, state.chatPage?.generation, state.chatPage?.source_epoch]));
+  const scopePage = useRemoteStore((state) => state.chatPage);
+  const presentationScope = useChatPresentationScope(scopePage, agent.session_id, agent.provider, chatEvents);
   const chatScopeReady = useRemoteStore((state) => state.chatPage !== null);
   const loadChatDetail = useRemoteStore((state) => state.loadActiveAgentChatDetail);
   const loadChatStepDetail = useRemoteStore((state) => state.loadActiveAgentChatStepDetail);
@@ -474,6 +476,8 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const sendPromptToActiveAgent = useRemoteStore((state) => state.sendPromptToActiveAgent);
   const contentEndRef = useRef<HTMLDivElement | null>(null);
   const lastVisibleChatEventIdRef = useRef<string | undefined>(undefined);
+  const chatGeneration = scopePage?.generation;
+  const lastChatScope = useRef<{ presentation: string; generation: typeof chatGeneration } | null>(null);
 
   const visibleEvents = useMemo(
     () =>
@@ -489,10 +493,14 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
     const lastVisibleChatEventId = lastEvent?.metadata.chat_display_key as string | undefined ?? lastEvent?.id;
     const shouldScroll = activeAgentViewMode === "terminal" || lastVisibleChatEventId !== lastVisibleChatEventIdRef.current;
     lastVisibleChatEventIdRef.current = lastVisibleChatEventId;
+    const previous = lastChatScope.current;
+    lastChatScope.current = { presentation: presentationScope, generation: chatGeneration };
+    if (activeAgentViewMode === "chat" && previous?.presentation === presentationScope
+      && previous.generation != null && chatGeneration != null && previous.generation !== chatGeneration) return;
     const scroll = contentEndRef.current?.closest("section");
     const nearBottom = scroll ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 48 : true;
     if (shouldScroll && (activeAgentViewMode === "terminal" || nearBottom)) contentEndRef.current?.scrollIntoView({ block: "end" });
-  }, [activeAgentViewMode, visibleEvents]);
+  }, [activeAgentViewMode, visibleEvents, chatGeneration, presentationScope]);
 
   const refresh = () => {
     if (activeAgentViewMode === "chat") {
@@ -563,7 +571,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
 
       {activeAgentViewMode === "chat" ? (
         <ChatPane
-          presentationScope={chatPresentationScope}
+          presentationScope={presentationScope}
           scopeReady={chatScopeReady}
           key={agent.session_id}
           agent={agent}
@@ -1064,9 +1072,17 @@ function ChatPane({
         readingPresentation.boundaries, hasOlder),
     [hasOlder, visibleEvents, committedPresentation, readingPresentation.boundaries],
   );
+  useChatHandoffAnchor(scrollRef, presentationScope, JSON.stringify(rows.map((row) => [row.kind, chatTranscriptRowKey(row)])),
+    qualifiedChatPreviewBridge(presentationPage) ? presentationPage?.generation : undefined);
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
   return (
-    <section className="chat-transcript-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`} ref={scrollRef} onScroll={() => {
+    <section className="chat-transcript-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}
+      data-chat-page-scope={scopeReady && presentationPage?.session_id === agent.session_id
+        ? JSON.stringify({ session: presentationPage.session_id,
+          conversation: presentationPage.conversation_id, generation: presentationPage.generation,
+          epoch: presentationPage.source_epoch, revision: presentationPage.revision,
+          admission: presentationPage.recent_admission ?? null }) : undefined}
+      ref={scrollRef} onScroll={() => {
       const scroll = scrollRef.current;
       if (!scroll || prepend.current) return;
       if (scroll.scrollTop <= 160 && hasOlder && !loadingOlder) { void loadOlder(); return; }
@@ -1121,6 +1137,8 @@ function ChatPane({
               onApprovalSubmit={onApprovalSubmit}
               onLoadDetail={onLoadDetail}
               onLoadStepDetail={onLoadStepDetail}
+              workExpansion={readingPresentation.workExpansion}
+              detailsDisabled={presentationPage?.recent_admission != null}
               row={row}
             />
           </div>

@@ -1,4 +1,5 @@
 import type { AgentChatEvent, AgentChatPage, ChatInputReceipt } from "../../types";
+import { chatPresentationPayload, qualifiedChatPreviewBridge } from "./chatPreviewIdentity";
 
 export const MAX_LOADED_CHAT_HEADERS = 640;
 export const MAX_LOADED_CHAT_BYTES = 2 * 1024 * 1024;
@@ -50,7 +51,7 @@ export function addChatSubmission(current: AgentChatEvent[], page: AgentChatPage
   // Acceptance proves delivery, not a transcript identity. Without the archive's
   // exact row receipt a local echo can never be reconciled with the provider row.
   const receipt = chatInputReceipt(event.metadata.chat_receipt);
-  if (!receipt || receipt.chat_agent_id !== event.session_id) return current;
+  if (!receipt || receipt.chat_agent_id !== event.session_id || page?.recent_admission != null) return current;
   const next = [...current, event];
   return page ? applyChatPage(next, { ...page, unchanged: false, reset: false,
     events: current.filter((row) => row.metadata.optimistic !== true), aliases: [], removed_ids: [] }, "recent") : boundedChatEvents(next);
@@ -75,14 +76,24 @@ export function applyChatPage(
   const pending = submitted.filter((event) => {
     const receipt = chatInputReceipt(event.metadata.chat_receipt);
     const canonical = receipt && incoming.get(receipt.chat_event_id);
-    if (!receipt || !canonical || canonical.metadata.generated !== true
+    if (page.recent_admission != null || !receipt || !canonical || canonical.metadata.generated !== true
       || canonical.session_id !== page.session_id || event.session_id !== page.session_id
       || receipt.chat_agent_id !== page.session_id || receipt.chat_conversation_id !== page.conversation_id
       || receipt.chat_source_epoch !== page.source_epoch) return true;
     confirmed.set(canonical.id, event.id);
     return false;
   });
-  const retain = page.recent_admission == null && (!page.reset || (page.events.length === 0 && page.progress !== "ready"));
+  const bridge = qualifiedChatPreviewBridge(page);
+  const payload = bridge ? chatPresentationPayload(page) : null;
+  // A qualified empty continuation updates lifetime, without replacing admitted headers.
+  const lifetimeOnly = bridge !== null && payload !== null && page.recent_admission == null
+    && !page.reset && !page.older_page && page.events.length === 0 && page.aliases.length === 0
+    && page.removed_ids.length === 0 && page.next_before === null && page.detail === null
+    && page.revalidated_ids == null && page.archive_read_ready !== true && payload.detail === null
+    && payload.turns.length === 0 && payload.items.length === 0
+    && payload.state_event_refs.length === 0 && payload.legacy_turns.length === 0;
+  const retain = (!bridge || mode === "older" || lifetimeOnly) && page.recent_admission == null
+    && (!page.reset || (page.events.length === 0 && page.progress !== "ready"));
   const admittedProvisional = new Set(page.events.filter((event) => event.metadata.chat_provisional === true
     && event.metadata.chat_source_epoch === page.source_epoch)
     .map((event) => event.metadata.chat_source_admission).filter((admission): admission is string => typeof admission === "string"));
@@ -94,7 +105,7 @@ export function applyChatPage(
     const canonical = aliases.get(old.id);
     const id = canonical && (incoming.has(canonical) || (!page.reset && loaded.has(canonical))) ? canonical : old.id;
     const replacement = incoming.get(id) ?? (canonical && !page.reset ? loaded.get(id) : undefined);
-    const retainedObservation = old.metadata.chat_provisional === true && old.metadata.chat_source_epoch === page.source_epoch
+    const retainedObservation = !bridge && old.metadata.chat_provisional === true && old.metadata.chat_source_epoch === page.source_epoch
       && typeof old.metadata.chat_source_admission === "string" && admittedProvisional.has(old.metadata.chat_source_admission);
     if ((!retain && !replacement && !retainedObservation) || seen.has(id)) continue;
     const next = replacement ?? old;
@@ -106,9 +117,42 @@ export function applyChatPage(
     && (mode === "older" || windowDirection === "recent" || page.reset || confirmed.has(event.id))).map((event) => ({
     ...event, metadata: { ...event.metadata, chat_display_key: confirmed.get(event.id) ?? event.id },
   }));
-  const merged = mode === "older" && !page.reset ? [...additions, ...result] : [...result, ...additions];
-  merged.push(...pending);
+  const merged = mode === "older" && !page.reset ? [...additions, ...result]
+    : mode === "recent" && windowDirection === "recent" ? orderRecentChatRows(result, additions, page.events)
+    : [...result, ...additions];
+  // A provisional bridge owns only its returned prefix.
+  if (!bridge || page.recent_admission == null) merged.push(...pending);
   return boundedChatEvents(merged, page.reset ? "recent" : windowDirection);
+}
+
+/** Stitch one producer window through its loaded slots without moving unmentioned history. */
+function orderRecentChatRows(
+  retained: AgentChatEvent[], additions: AgentChatEvent[], incoming: AgentChatEvent[],
+): AgentChatEvent[] {
+  const loadedIds = new Set(retained.map((event) => event.id));
+  const available = new Map([...retained, ...additions].map((event) => [event.id, event]));
+  const ordered = incoming.flatMap(({ id }) => {
+    const event = available.get(id);
+    if (!event) return [];
+    available.delete(id);
+    return [event];
+  });
+  const merged: AgentChatEvent[] = [];
+  let index = 0;
+  for (const event of retained) {
+    if (available.has(event.id)) {
+      merged.push(event);
+      continue;
+    }
+    // Each shared slot consumes the producer prefix through its next shared row.
+    // Rows newly captured before that row land before it, even on a later poll.
+    while (index < ordered.length) {
+      const next = ordered[index++];
+      merged.push(next);
+      if (loadedIds.has(next.id)) break;
+    }
+  }
+  return merged.concat(ordered.slice(index));
 }
 
 /** A requested page must fit completely before either client advances its cursor. */

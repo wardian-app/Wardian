@@ -7,6 +7,8 @@ export interface ChatPageArguments {
   detailRef?: string;
   revalidateIds?: string[];
   recentPreview: boolean;
+  /** Exactly the SDK's optional literal backing IDs, including an explicit initial []. */
+  previewBackingIds?: string[];
 }
 
 export interface ChatPageSubscription {

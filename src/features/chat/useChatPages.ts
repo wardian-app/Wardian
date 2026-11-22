@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import type { AgentChatEvent, AgentChatPage } from "../../types";
 import { chatPresentationV1 } from "./committedChatPresentation";
+import { previewBackingIdsForWindow } from "./chatPreviewBacking";
+import { holdsBoundChatWindow, qualifiedChatPreviewBridge } from "./chatPreviewIdentity";
 import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, chatRecentRefreshDelay, type ChatWindowDirection } from "./chatReadState";
 import {
   ChatRevalidationError,
@@ -12,14 +14,18 @@ import {
   revalidateChatWindow,
 } from "./chatRevalidation";
 
-export type ChatPageLoader = (request: {
+export interface ChatPageLoaderRequest {
   sessionId: string;
   cursor?: string;
   revision?: string;
   detailRef?: string;
   revalidateIds?: string[];
   recentPreview?: boolean;
-}) => Promise<AgentChatPage>;
+  /** Literal admitted IDs for ordinary recent reads; [] declares initial awareness, omission grants no backing. */
+  previewBackingIds?: string[];
+}
+
+export type ChatPageLoader = (request: ChatPageLoaderRequest) => Promise<AgentChatPage>;
 
 const CHAT_FIRST_READ_WAIT_MS = 30_000;
 // One retained call may coexist with the newly selected conversation. Further
@@ -236,12 +242,21 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
           }
         };
         try {
-          const next = await loader(readingOlder ? { sessionId, cursor: demand!.cursor }
+          const previewBackingIds = readingOlder || windowDirection.current === "older" ? undefined
+            : previewBackingIdsForWindow(latest.current, eventWindow.current);
+          const next = await loader(readingOlder ? { sessionId, cursor: demand!.cursor,
+              ...(qualifiedChatPreviewBridge(latest.current) ? { revision: latest.current!.revision } : {}) }
             : { sessionId, revision: forceRecentRead.current ? undefined : latest.current?.revision,
-              ...(windowDirection.current === "older" ? { recentPreview: false } : {}) });
+              ...(windowDirection.current === "older" ? { recentPreview: false }
+                : previewBackingIds === undefined ? {} : { previewBackingIds }) });
           if (readingOlder && next.session_id !== sessionId) throw new Error("Conversation changed during older read");
           if (epoch !== scope.current || requestedWindow !== windowVersion.current || next.session_id !== sessionId) return;
           const previous = latest.current;
+          if (!readingOlder && holdsBoundChatWindow(previous, next, eventWindow.current)) {
+            setError(null);
+            schedule(pollInterval.current);
+            return;
+          }
           const browsingOlder = readingOlder || windowDirection.current === "older";
           const scopeRelation = chatPageScopeRelation(previous, next, eventWindow.current,
             demand !== null || olderCursor.current !== null || browsingOlder
@@ -249,10 +264,11 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
           if (next.archive_read_ready === true && !isArchiveReadPage(next)) {
             throw new ChatRevalidationError("Invalid archive read qualification.", scopeRelation === "changed");
           }
-          if (next.recent_admission != null && chatPageScopeRelation(next, next, [], false) !== "preview") {
+          if (next.recent_admission != null && !["preview", "bridge"].includes(chatPageScopeRelation(next, next, [], false))) {
             throw new ChatRevalidationError("Invalid recent preview capability.", scopeRelation === "changed");
           }
-          const compatible = scopeRelation === "same";
+          const compatible = scopeRelation === "same" || (scopeRelation === "bridge"
+            && previous?.generation === next.generation && previous?.recent_admission == null && next.recent_admission == null);
           const ordinaryCompatible = chatPageScopeAllowsOrdinaryRead(scopeRelation);
           if (previous && scopeRelation === "unknown") {
             throw new ChatRevalidationError("Chat source scope is incomplete. The current window and history position were kept; retry Chat.");
@@ -293,6 +309,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
             forceRecentRead.current = false;
             setEvents(patched);
             const updated = { ...latest.current!, revision: next.revision, progress: next.progress, presentation: next.presentation,
+              events: next.events, aliases: next.aliases, removed_ids: next.removed_ids,
               archive_read_ready: isArchiveReadPage(next) ? true : undefined,
               next_before: olderCursor.current?.before ?? latest.current!.next_before };
             latest.current = updated; setPage(updated); setError(null);
@@ -328,6 +345,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
                 windowDirection.current = "older"; setBrowsingOlder(true);
                 setEvents(candidate);
                 const updated = { ...latest.current!, revision: next.revision, progress: next.progress, presentation: next.presentation,
+                  events: next.events, aliases: next.aliases, removed_ids: next.removed_ids,
                   archive_read_ready: isArchiveReadPage(next) ? true : undefined,
                   next_before: olderCursor.current?.before ?? latest.current!.next_before };
                 latest.current = updated; setPage(updated); setError(null);
@@ -465,7 +483,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
     failedRevalidation.current = null;
     if (olderDemand.current) return olderDemand.current.promise;
     const current = latest.current;
-    if (!current?.next_before) return Promise.resolve();
+    if (!current?.next_before || current.recent_admission != null) return Promise.resolve();
     let resolve = () => {};
     const promise = new Promise<void>((complete) => { resolve = complete; });
     olderDemand.current = { scope: scope.current, window: windowVersion.current, cursor: current.next_before,
@@ -487,16 +505,19 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
   }, [loadOlder]);
 
   const loadDetailPage = useCallback(async (detailRef: string, step = false) => {
+    if (latest.current?.recent_admission != null) throw new Error("Recent preview has no detail authority");
     const epoch = scope.current;
     const generation = latest.current?.generation;
     const conversation = latest.current?.conversation_id;
     const source = latest.current?.source_epoch;
+    const admission = latest.current?.recent_admission;
     const revision = latest.current?.revision;
     const archiveRead = latest.current !== null && isArchiveReadPage(latest.current);
     const requestedWindow = windowVersion.current;
     const currentScope = () => epoch === scope.current && requestedWindow === windowVersion.current
       && latest.current?.generation === generation && latest.current?.conversation_id === conversation
       && latest.current?.source_epoch === source
+      && latest.current?.recent_admission === admission
       && (!step || latest.current?.revision === revision)
       && (latest.current !== null && isArchiveReadPage(latest.current)) === archiveRead;
     // Every invocation of the shared loader owns the same physical slot.
@@ -512,9 +533,10 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
     physicalReadDone.current = new Promise<void>((resolve) => { releaseRead = resolve; });
     readPool.reads.set(sessionId, { request, done: physicalReadDone.current });
     try {
-      const next = await loader({ sessionId, detailRef });
+      const next = await loader({ sessionId, detailRef,
+        ...(qualifiedChatPreviewBridge(latest.current) ? { revision: latest.current!.revision } : {}) });
       if (!currentScope() || next.generation !== generation || next.conversation_id !== conversation
-        || next.source_epoch !== source || next.session_id !== sessionId
+        || next.source_epoch !== source || next.recent_admission !== admission || next.session_id !== sessionId
         || isArchiveReadPage(next) !== archiveRead || (step ? next.revision !== revision || chatPresentationV1(next)?.detail?.revision !== revision : !next.detail)) {
         throw new Error("Conversation changed during detail read");
       }

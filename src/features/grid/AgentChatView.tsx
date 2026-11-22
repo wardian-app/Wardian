@@ -3,8 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readImage } from "@tauri-apps/plugin-clipboard-manager";
 import { FileText, Hand, Image as ImageIcon, Loader2, Plus, SendHorizontal, Square, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { DragEvent, KeyboardEvent } from "react";
+import { Component, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { DragEvent, KeyboardEvent, ReactNode, RefObject } from "react";
 import type { AgentChatEvent, AgentConfig, AgentModelSelectionUpdateResult, AgentTelemetry } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import { reasoningEffortForConfig } from "../agents/configUtils";
@@ -19,16 +19,19 @@ import { ChatTranscriptRow } from "../chat/ChatTranscriptRows";
 import { useChatPages } from "../chat/useChatPages";
 import { loadChatPage } from "../chat/chatPageLoader";
 import { chatReadProgress, submittedChatEvent } from "../chat/chatReadState";
+import { chatEventDisplayKey } from "../chat/chatEventIdentity";
 import { captureChatScrollAnchor, restoreChatScrollAnchor, type ChatScrollAnchor } from "../chat/chatScrollAnchor";
 import { useChatReadingPresentation } from "../chat/useChatReadingPresentation";
 import { matchingSlashCommands } from "../chat/slashCommands";
 import {
   isProcessingAgentStatus,
   liveApprovalEventId,
+  shouldShowChatEvent,
   sortTranscriptEvents,
 } from "../chat/chatPresentation";
 import { chatTranscriptRowKey, type ChatTranscriptRowModel } from "../chat/chatTurns";
 import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
+import { useChatPresentationScope } from "../chat/chatPreviewIdentity";
 import { useAppShellWorkbenchNavigation } from "../../layout/AppShell";
 import { openFileWithSettings } from "../files/fileOpenRouting";
 import { type ChatMarkdownLinkHandling } from "./markdown/ChatMarkdown";
@@ -113,10 +116,10 @@ export function AgentChatView({
   const externalEditorCustomExecutable = useSettingsStore((state) => state.externalEditorCustomExecutable);
   const fileOpenActions = useSettingsStore((state) => state.fileOpenActions);
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
-  const stickToLatestRef = useRef(true);
+  const jumpToLatestRef = useRef(true);
   const prependScrollSnapshotRef = useRef<ChatScrollAnchor | null>(null);
   const [settledPrependSnapshot, setSettledPrependSnapshot] = useState<ChatScrollAnchor | null>(null);
-  const scrollSessionRef = useRef(sessionId);
+  const scrollScopeRef = useRef<{ source: string; presentation: string } | null>(null);
   const activeDraft = draft ?? internalDraft;
   const setActiveDraft = onDraftChange ?? setInternalDraft;
 
@@ -126,7 +129,7 @@ export function AgentChatView({
 
     listen<{ session_id?: string }>("agent-terminal-cleared", (event) => {
       if (disposed || event.payload?.session_id !== sessionId) return;
-      stickToLatestRef.current = true;
+      jumpToLatestRef.current = true;
       prependScrollSnapshotRef.current = null;
       resetChat();
       submissionSerial.current += 1; pendingSubmissionScope.current = null; setIsSubmitting(false);
@@ -175,7 +178,7 @@ export function AgentChatView({
       ),
     [agent?.provider, mergedEvents, provider, sessionId, showThinking],
   );
-  const presentationScope = JSON.stringify([sessionId, provider ?? agent?.provider, page?.conversation_id, page?.generation, page?.source_epoch]);
+  const presentationScope = useChatPresentationScope(page, sessionId, provider ?? agent?.provider, events);
   const readingPresentation = useChatReadingPresentation(presentationScope, displayEvents, page !== null);
   const committedPresentation = useCommittedChatPresentation(page, events);
   const chatRows = useMemo<ChatTranscriptRowModel[]>(
@@ -184,7 +187,11 @@ export function AgentChatView({
   );
   const visibleChatRows = chatRows;
   const progressText = page ? chatReadProgress(page.progress, visibleChatRows.length > 0) : null;
-  const latestVisibleRowKey = visibleChatRows.length > 0 ? chatTranscriptRowKey(visibleChatRows[visibleChatRows.length - 1]) : "";
+  const scrollScope = {
+    source: JSON.stringify([sessionId, provider ?? agent?.provider, page?.conversation_id, page?.source_epoch]),
+    presentation: presentationScope,
+  };
+  const eventKeys = useMemo(() => events.filter(shouldShowChatEvent).map(chatEventDisplayKey), [events]);
   const hasActionRequired = mergedEvents.some((event) => event.status === "action_required");
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(mergedEvents)), [mergedEvents]);
   const disabledReason = readOnly ? "Read only" : inputDisabledReason(isSubmitting);
@@ -231,7 +238,7 @@ export function AgentChatView({
   }), [externalEditor, externalEditorCustomExecutable, fileOpenActions, workbenchNavigation, workspacePath]);
 
   useEffect(() => {
-    stickToLatestRef.current = true;
+    jumpToLatestRef.current = true;
     submissionSerial.current += 1; pendingSubmissionScope.current = null;
     prependScrollSnapshotRef.current = null;
     setAwaitingResponse(null);
@@ -241,11 +248,13 @@ export function AgentChatView({
     setAttachments([]);
   }, [sessionId]);
 
-  useLayoutEffect(() => {
-    if (scrollSessionRef.current !== presentationScope) {
-      scrollSessionRef.current = presentationScope;
+  const restoreTranscriptScroll = (snapshot: TranscriptScrollSnapshot | null) => {
+    const previous = scrollScopeRef.current;
+    scrollScopeRef.current = scrollScope;
+    // A verified handoff can add conversation identity without retiring the visible window.
+    if (previous?.source !== scrollScope.source && previous?.presentation !== scrollScope.presentation) {
       prependScrollSnapshotRef.current = null;
-      stickToLatestRef.current = true;
+      jumpToLatestRef.current = true;
     }
     const scrollRegion = transcriptScrollRef.current;
     if (!scrollRegion || loadState !== "ready") return;
@@ -255,15 +264,16 @@ export function AgentChatView({
       if (settledPrependSnapshot !== prependSnapshot) return;
       restoreChatScrollAnchor(scrollRegion, prependSnapshot);
       prependScrollSnapshotRef.current = null;
-      stickToLatestRef.current = isNearTranscriptBottom(scrollRegion);
       return;
     }
 
-    if (stickToLatestRef.current) {
+    if (visibleChatRows.length && (jumpToLatestRef.current || (snapshot?.followTail && !chat.browsingOlder))) {
       scrollRegion.scrollTop = scrollRegion.scrollHeight;
-      stickToLatestRef.current = true;
+      jumpToLatestRef.current = false;
+    } else if (snapshot) {
+      restoreChatScrollAnchor(scrollRegion, snapshot.anchor, "position");
     }
-  }, [latestVisibleRowKey, loadState, visibleChatRows.length, presentationScope, settledPrependSnapshot]);
+  };
 
   const submitPrompt = async (
     promptValue: string,
@@ -276,7 +286,8 @@ export function AgentChatView({
     const providerName = agent?.provider ?? provider ?? providerFromEvents(events);
     const submittedPrompt = promptWithChatAttachments(prompt, selectedAttachments);
 
-    stickToLatestRef.current = true;
+    // Sending a prompt explicitly returns to the latest conversation.
+    jumpToLatestRef.current = true;
     readingPresentation.clear();
     if (chat.browsingOlder) chat.jumpToLatest();
     setInterruptRequested(false);
@@ -333,12 +344,11 @@ export function AgentChatView({
   const handleTranscriptScroll = () => {
     const scrollRegion = transcriptScrollRef.current;
     if (!scrollRegion || prependScrollSnapshotRef.current) return;
-    stickToLatestRef.current = isNearTranscriptBottom(scrollRegion);
     if (scrollRegion.scrollTop <= 160 && page?.next_before && !loadingOlder) {
       void handleLoadOlderRows();
       return;
     }
-    if (stickToLatestRef.current) readingPresentation.clear();
+    if (isNearTranscriptBottom(scrollRegion)) readingPresentation.clear();
     else if (readingPresentation.active) {
       const snapshot = captureChatScrollAnchor(scrollRegion);
       if (readingPresentation.retainVisible(visibleChatRows, scrollRegion)) {
@@ -355,7 +365,6 @@ export function AgentChatView({
     if (snapshot) {
       readingPresentation.retainVisible(visibleChatRows, scrollRegion!);
       prependScrollSnapshotRef.current = snapshot;
-      stickToLatestRef.current = false;
     }
     try {
       await loadOlder();
@@ -381,14 +390,17 @@ export function AgentChatView({
           {fileOpenError}
         </div>
       ) : null}
-      <div
-        className="chat-transcript-scroll min-h-0 flex-1 overflow-auto px-2.5 py-2.5"
-        data-testid="agent-chat-scroll-region"
-        data-chat-page-scope={page ? JSON.stringify({ session: page.session_id,
+      <TranscriptScrollBoundary
+        scrollRef={transcriptScrollRef}
+        rows={visibleChatRows}
+        eventKeys={eventKeys}
+        bridgeGeneration={committedPresentation?.preview_bridge ? page?.generation ?? null : null}
+        layout={JSON.stringify([loadState, progressText, error, chat.waiting, chat.browsingOlder, loadingOlder, page?.next_before])}
+        onCommit={restoreTranscriptScroll}
+        pageScope={page ? JSON.stringify({ session: page.session_id,
           conversation: page.conversation_id, generation: page.generation,
           epoch: page.source_epoch, revision: page.revision, admission: page.recent_admission ?? null }) : undefined}
         onScroll={handleTranscriptScroll}
-        ref={transcriptScrollRef}
       >
         {loadState === "loading" ? <LoadingState /> : null}
         {chat.waiting ? <WaitingState compact={events.length > 0} /> : null}
@@ -404,7 +416,7 @@ export function AgentChatView({
                   className="w-full rounded border border-wardian-light bg-[var(--color-wardian-card-bg-muted)] px-2.5 py-1.5 text-[11px] font-semibold leading-5 text-muted-neutral hover:text-primary"
                   onClick={() => {
                     prependScrollSnapshotRef.current = null;
-                    stickToLatestRef.current = true;
+                    jumpToLatestRef.current = true;
                     readingPresentation.clear();
                     chat.jumpToLatest();
                   }}
@@ -436,13 +448,15 @@ export function AgentChatView({
                   onOpenFile={openChangedFile}
                   onLoadDetail={loadDetail}
                   onLoadStepDetail={loadStepDetail}
+                  workExpansion={readingPresentation.workExpansion}
+                  detailsDisabled={page?.recent_admission != null}
                   row={row}
                 />
               </li>
             ))}
           </ol>
         ) : null}
-      </div>
+      </TranscriptScrollBoundary>
       <ChatComposer
         agent={agent}
         autoFocus={autoFocusComposer}
@@ -466,6 +480,54 @@ export function AgentChatView({
       />
     </section>
   );
+}
+
+type TranscriptScrollSnapshot = { anchor: ChatScrollAnchor; followTail: boolean };
+type TranscriptScrollBoundaryProps = {
+  scrollRef: RefObject<HTMLDivElement | null>;
+  rows: ChatTranscriptRowModel[];
+  eventKeys: string[];
+  bridgeGeneration: string | null;
+  layout: string;
+  pageScope: string | undefined;
+  onCommit: (snapshot: TranscriptScrollSnapshot | null) => void;
+  onScroll: () => void;
+  children: ReactNode;
+};
+
+/** Read the old viewport before React mutates its rows and restore it before paint. */
+class TranscriptScrollBoundary extends Component<TranscriptScrollBoundaryProps, object, TranscriptScrollSnapshot | null> {
+  getSnapshotBeforeUpdate(previous: TranscriptScrollBoundaryProps): TranscriptScrollSnapshot | null {
+    const { scrollRef, rows, eventKeys, bridgeGeneration, layout } = this.props;
+    const scroll = scrollRef.current;
+    if (!scroll || !previous.rows.length || (previous.rows === rows && previous.layout === layout)) return null;
+    const priorTail = previous.eventKeys[previous.eventKeys.length - 1];
+    const tailIndex = priorTail === undefined ? -1 : eventKeys.indexOf(priorTail);
+    const tail = eventKeys[eventKeys.length - 1];
+    const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 1;
+    const followTail = previous.bridgeGeneration === bridgeGeneration && atBottom && tailIndex >= 0 && tailIndex < eventKeys.length - 1
+      && tail !== undefined && !previous.eventKeys.includes(tail);
+    return { anchor: captureChatScrollAnchor(scroll), followTail };
+  }
+
+  componentDidMount() { this.props.onCommit(null); }
+  componentDidUpdate(_previous: TranscriptScrollBoundaryProps, _state: object, snapshot: TranscriptScrollSnapshot | null) {
+    this.props.onCommit(snapshot);
+  }
+  render() {
+    const { scrollRef, pageScope, onScroll, children } = this.props;
+    return (
+      <div
+        className="chat-transcript-scroll min-h-0 flex-1 overflow-auto px-2.5 py-2.5"
+        data-testid="agent-chat-scroll-region"
+        data-chat-page-scope={pageScope}
+        onScroll={onScroll}
+        ref={scrollRef}
+      >
+        {children}
+      </div>
+    );
+  }
 }
 
 function isNearTranscriptBottom(scrollRegion: HTMLElement): boolean {

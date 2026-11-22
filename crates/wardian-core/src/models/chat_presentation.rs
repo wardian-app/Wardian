@@ -33,6 +33,25 @@ pub struct ChatPresentationV1 {
     #[serde(default)]
     pub legacy_turns: Vec<ChatLegacyTurn>,
     pub detail: Option<ChatStepDetail>,
+    /// Exact recent-owner continuity; grants no canonical detail, Older or ACK authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_bridge: Option<ChatPreviewBridge>,
+}
+
+/// The producer checked this immutable Head against the same current admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatPreviewBridge {
+    pub admission_id: String,
+    pub canonical_head: String,
+    /// The prior generation this same-source snapshot can replace atomically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<ChatPreviewBridgeReplacement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatPreviewBridgeReplacement {
+    pub admission_id: String,
+    pub generation: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +98,9 @@ pub struct ChatPresentedTurn {
     pub turn_key: String,
     pub order_key: String,
     pub membership_complete: bool,
+    /// Every admitted live-prefix item has proven membership; termination remains unknown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prefix_attributed: bool,
     pub status: ChatTurnStatus,
     pub prompt_item_keys: Vec<String>,
     pub answer_item_keys: Vec<String>,

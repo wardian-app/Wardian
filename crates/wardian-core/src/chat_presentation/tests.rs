@@ -41,6 +41,35 @@ fn unknown_versions_stay_opaque_while_malformed_v1_fails_closed() {
 }
 
 #[test]
+fn preview_bridge_and_running_prefix_cannot_grant_final_authority() {
+    let mut value = wire().decode_v1().unwrap().unwrap();
+    value.preview_bridge = Some(ChatPreviewBridge {
+        admission_id: "recent-owner".into(),
+        canonical_head: "a".repeat(64),
+        replaces: None,
+    });
+    value.turns[0].prefix_attributed = true;
+    value.turns[0].membership_complete = false;
+    value.turns[0].status = ChatTurnStatus::Running;
+    value.turns[0].counts_complete = false;
+    value.turns[0].references_complete = false;
+    value.turns[0].answer_recorded = false;
+    value.turns[0].answer_item_keys.clear();
+    assert!(value.validate().is_ok());
+    for field in ["counts", "references", "completed", "answer", "head"] {
+        let mut invalid = value.clone();
+        match field {
+            "counts" => invalid.turns[0].counts_complete = true,
+            "references" => invalid.turns[0].references_complete = true,
+            "completed" => invalid.turns[0].status = ChatTurnStatus::Completed,
+            "answer" => invalid.turns[0].answer_recorded = true,
+            _ => invalid.preview_bridge.as_mut().unwrap().canonical_head = "invented".into(),
+        }
+        assert!(invalid.validate().is_err(), "{field}");
+    }
+}
+
+#[test]
 fn legacy_page_omits_capability_and_future_capability_does_not_break_events() {
     let mut value = json!({
         "session_id": "fixture-agent", "conversation_id": "fixture-conversation",

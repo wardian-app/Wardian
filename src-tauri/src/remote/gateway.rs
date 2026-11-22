@@ -1239,6 +1239,8 @@ async fn load_client_agent_chat<R: Runtime>(
     // read. Later revocation blocks new requests but does not cancel this one.
     let query = parse_remote_chat_query(raw_query.as_deref())
         .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
+    let preview_backing_ids = decode_remote_chat_preview_backing_ids(&query)
+        .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
     let requested_ids = decode_remote_chat_revalidation_ids(query.revalidate_ids.as_deref())
         .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
     let revalidate_ids =
@@ -1272,16 +1274,19 @@ async fn load_client_agent_chat<R: Runtime>(
     } else {
         None
     };
-    let page = crate::remote::operations::remote_agent_chat_page_with_recent(
+    let page = crate::remote::operations::remote_agent_chat_page_with_preview(
         &state,
         &session_id,
         query.before,
         query.revision,
         query.detail,
         revalidate_ids,
-        crate::commands::chat::RecentChatRead {
-            limit: query.limit,
-            preview: query.recent_preview.unwrap_or(false),
+        crate::commands::chat::PreviewChatRead {
+            recent: crate::commands::chat::RecentChatRead {
+                limit: query.limit,
+                preview: query.recent_preview.unwrap_or(false),
+            },
+            backing_ids: preview_backing_ids,
         },
     )
     .await
@@ -2094,6 +2099,8 @@ struct RemoteChatQuery {
     before: Option<String>,
     limit: Option<usize>,
     recent_preview: Option<bool>,
+    // A single JSON-list value, decoded and validated before producer work.
+    preview_backing_ids: Option<String>,
     revision: Option<String>,
     detail: Option<String>,
     // Keep this a single canonical JSON-list value; Axum's `Query<Vec<_>>`
@@ -2108,7 +2115,10 @@ const REMOTE_CHAT_REVALIDATION_JSON_MAX_BYTES: usize =
         + crate::state::conversation_archive::chat_read::MAX_REVALIDATED_SOURCE_IDS
         - 1
         + 2;
+// JSON may escape each UTF-8 byte as six ASCII bytes (for example, "\u0001").
+const REMOTE_CHAT_PREVIEW_BACKING_JSON_MAX_BYTES: usize = 8 * (512 * 6 + 3) + 1;
 const REMOTE_CHAT_QUERY_MAX_BYTES: usize = REMOTE_CHAT_REVALIDATION_JSON_MAX_BYTES * 3
+    + REMOTE_CHAT_PREVIEW_BACKING_JSON_MAX_BYTES * 3
     + crate::state::conversation_archive::chat_read::MAX_REVALIDATED_SOURCE_ID_BYTES * 3 * 3
     + 128;
 
@@ -2183,6 +2193,31 @@ fn parse_remote_chat_query(raw_query: Option<&str>) -> Result<RemoteChatQuery, (
     Ok(query)
 }
 
+fn decode_remote_chat_preview_backing_ids(
+    query: &RemoteChatQuery,
+) -> Result<Option<Vec<String>>, &'static str> {
+    let ids = query
+        .preview_backing_ids
+        .as_deref()
+        .map(|value| {
+            if value.len() > REMOTE_CHAT_PREVIEW_BACKING_JSON_MAX_BYTES {
+                return Err("invalid chat preview backing query");
+            }
+            serde_json::from_str::<Vec<String>>(value)
+                .map_err(|_| "invalid chat preview backing query")
+        })
+        .transpose()?;
+    crate::commands::chat::validate_preview_backing_ids(
+        ids.as_deref(),
+        query.recent_preview.unwrap_or(false),
+        query.before.as_deref(),
+        query.detail.as_deref(),
+        query.revalidate_ids.is_some(),
+    )
+    .map_err(|_| "invalid chat preview backing query")?;
+    Ok(ids)
+}
+
 async fn load_remote_agent_chat<R: Runtime>(
     State(ctx): State<RemoteGatewayContext<R>>,
     headers: HeaderMap,
@@ -2190,6 +2225,8 @@ async fn load_remote_agent_chat<R: Runtime>(
     RawQuery(raw_query): RawQuery,
 ) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
     let query = parse_remote_chat_query(raw_query.as_deref())
+        .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
+    let preview_backing_ids = decode_remote_chat_preview_backing_ids(&query)
         .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
     let requested_ids = decode_remote_chat_revalidation_ids(query.revalidate_ids.as_deref())
         .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
@@ -2228,16 +2265,19 @@ async fn load_remote_agent_chat<R: Runtime>(
     } else {
         None
     };
-    let page = crate::remote::operations::remote_agent_chat_page_with_recent(
+    let page = crate::remote::operations::remote_agent_chat_page_with_preview(
         &state,
         &session_id,
         query.before,
         query.revision,
         query.detail,
         revalidate_ids,
-        crate::commands::chat::RecentChatRead {
-            limit: query.limit,
-            preview: query.recent_preview.unwrap_or(false),
+        crate::commands::chat::PreviewChatRead {
+            recent: crate::commands::chat::RecentChatRead {
+                limit: query.limit,
+                preview: query.recent_preview.unwrap_or(false),
+            },
+            backing_ids: preview_backing_ids,
         },
     )
     .await
@@ -3291,6 +3331,117 @@ mod tests {
 
     fn encode_query_component(value: &str) -> String {
         super::encode_remote_chat_query_component(value)
+    }
+
+    fn parse_preview_backing_ids_query(raw_query: &str) -> Result<Option<Vec<String>>, ()> {
+        let query = parse_remote_chat_query(Some(raw_query))?;
+        decode_remote_chat_preview_backing_ids(&query).map_err(|_| ())
+    }
+
+    #[test]
+    fn remote_chat_preview_backing_ids_are_optional_and_allow_an_initial_empty_list() {
+        for raw_query in ["", "recent_preview=false", "recent_preview=true"] {
+            assert_eq!(parse_preview_backing_ids_query(raw_query), Ok(None));
+        }
+        assert_eq!(
+            parse_preview_backing_ids_query("recent_preview=true&preview_backing_ids=%5B%5D"),
+            Ok(Some(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn remote_chat_preview_backing_ids_preserve_opaque_hints_and_utf8_byte_boundary() {
+        let boundary_id = "é".repeat(256);
+        assert_eq!(boundary_id.len(), 512);
+        let ids = vec![boundary_id; 8];
+        let wire_value = encode_query_component(&serde_json::to_string(&ids).unwrap());
+        assert_eq!(
+            parse_preview_backing_ids_query(&format!(
+                "recent_preview=true&preview_backing_ids={wire_value}&revision=current"
+            )),
+            Ok(Some(ids))
+        );
+
+        // No gateway lookup or ownership inference: the producer resolves these.
+        let ids = vec!["unknown", "other-scope", "stale", "opaque:&/+", "unknown"];
+        let wire_value = encode_query_component(&serde_json::to_string(&ids).unwrap());
+        assert_eq!(
+            parse_preview_backing_ids_query(&format!(
+                "recent_preview=true&preview_backing_ids={wire_value}"
+            )),
+            Ok(Some(ids.into_iter().map(str::to_string).collect()))
+        );
+        let escaped_json = encode_query_component(r#" [ "\u0061" ] "#);
+        assert_eq!(
+            parse_preview_backing_ids_query(&format!(
+                "recent_preview=true&preview_backing_ids={escaped_json}"
+            )),
+            Ok(Some(vec!["a".to_string()]))
+        );
+    }
+
+    #[test]
+    fn remote_chat_preview_backing_ids_reject_the_whole_malformed_or_oversized_list() {
+        let mut invalid = vec![
+            String::new(),
+            "not-json".to_string(),
+            "null".to_string(),
+            "{}".to_string(),
+            r#""id""#.to_string(),
+            r#"["valid",null]"#.to_string(),
+            r#"["valid",1]"#.to_string(),
+            r#"["valid",""]"#.to_string(),
+            r#"["valid"," "]"#.to_string(),
+            r#"["valid","id",]"#.to_string(),
+        ];
+        invalid.extend([
+            serde_json::to_string(&vec!["id"; 9]).unwrap(),
+            serde_json::to_string(&["x".repeat(513)]).unwrap(),
+            serde_json::to_string(&["é".repeat(257)]).unwrap(),
+            " ".repeat(REMOTE_CHAT_PREVIEW_BACKING_JSON_MAX_BYTES + 1),
+        ]);
+        for value in invalid {
+            let raw_query = format!(
+                "recent_preview=true&preview_backing_ids={}",
+                encode_query_component(&value)
+            );
+            assert!(parse_preview_backing_ids_query(&raw_query).is_err());
+        }
+    }
+
+    #[test]
+    fn remote_chat_preview_backing_ids_require_an_ordinary_recent_preview_read() {
+        for mode in [
+            "",
+            "recent_preview=false",
+            "recent_preview=true&before=",
+            "recent_preview=true&before=older",
+            "recent_preview=true&detail=",
+            "recent_preview=true&detail=body",
+            "recent_preview=true&revalidate_ids=%5B%5D",
+        ] {
+            for ids in ["%5B%5D", "%5B%22id%22%5D"] {
+                assert!(parse_preview_backing_ids_query(&format!(
+                    "{mode}&preview_backing_ids={ids}"
+                ))
+                .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn remote_chat_preview_backing_ids_reject_repeated_keys_and_oversized_queries() {
+        for raw_query in [
+            "recent_preview=true&preview_backing_ids=%5B%5D&preview_backing_ids=%5B%5D",
+            "recent_preview=true&preview_backing_ids=%5B%5D&%70review_backing_ids=%5B%5D",
+        ] {
+            assert!(parse_preview_backing_ids_query(raw_query).is_err());
+        }
+        assert!(parse_preview_backing_ids_query(&format!(
+            "recent_preview=true&preview_backing_ids={}",
+            "x".repeat(REMOTE_CHAT_QUERY_MAX_BYTES + 1)
+        ))
+        .is_err());
     }
 
     #[test]

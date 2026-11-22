@@ -24,12 +24,21 @@ pub(super) fn valid_ref(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// An operation-local cache of already hash-validated immutable seek nodes.
+/// An operation-local cache of already hash-validated immutable index data.
+/// Nodes and values share the existing retained byte and object limits.
 /// Each Store retains its existing hard byte and object limits.
 #[derive(Default)]
 pub(super) struct SeekCache {
     nodes: HashMap<String, Node>,
+    values: HashMap<String, Box<[u8]>>,
     bytes: usize,
+}
+
+impl SeekCache {
+    fn can_retain(&self, bytes: usize) -> bool {
+        self.nodes.len() + self.values.len() < READ_OBJECTS
+            && bytes <= READ_BYTES.saturating_sub(self.bytes)
+    }
 }
 
 /// Only schema-defined links participate in checkpoint reachability. Object
@@ -205,6 +214,28 @@ impl Store {
 
     pub(super) fn read<T: DeserializeOwned>(&mut self, reference: &str) -> io::Result<T> {
         serde_json::from_slice(&self.read_bytes(reference, OBJECT_BYTES)?).map_err(io::Error::other)
+    }
+
+    /// Reuse an immutable value already validated in this read operation.
+    /// Raw bytes preserve every field when the same object has different typed
+    /// views. Failed reads and decodes are not inserted or negatively cached.
+    pub(super) fn read_reusing_values<T: DeserializeOwned>(
+        &mut self,
+        reference: &str,
+        cache: &mut SeekCache,
+    ) -> io::Result<T> {
+        if let Some(bytes) = cache.values.get(reference) {
+            return serde_json::from_slice(bytes).map_err(io::Error::other);
+        }
+        let bytes = self.read_bytes(reference, OBJECT_BYTES)?;
+        let value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        if cache.can_retain(bytes.len()) {
+            cache.bytes += bytes.len();
+            cache
+                .values
+                .insert(reference.into(), bytes.into_boxed_slice());
+        }
+        Ok(value)
     }
 
     fn account_write(&self, bytes: &[u8]) -> io::Result<()> {
@@ -625,9 +656,7 @@ impl Store {
                 let bytes_before = self.bytes;
                 let node: Node = self.read(&reference)?;
                 let bytes = self.bytes - bytes_before;
-                if cache.nodes.len() < READ_OBJECTS
-                    && bytes <= READ_BYTES.saturating_sub(cache.bytes)
-                {
+                if cache.can_retain(bytes) {
                     cache.bytes += bytes;
                     cache.nodes.insert(reference, node.clone());
                 }

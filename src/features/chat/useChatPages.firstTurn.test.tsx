@@ -8,6 +8,13 @@ import { useChatPages, type ChatPageLoader } from "./useChatPages";
 // Sanitized from the #1760 native page observations: 16 Claude rows (including
 // one stored observation without source metadata) and 14 Codex display rows.
 const pages = captures as Record<"claude" | "codex", { pending: AgentChatPage; completed: AgentChatPage }>;
+// Literal suffixes in the captured producer order, including Codex's display ID.
+const latestBackingIds = {
+  claude: ["source:claude-8", "source:claude-9", "source:claude-10", "source:claude-11",
+    "source:claude-12", "source:claude-13", "source:claude-14", "source:claude-15"],
+  codex: ["source:codex-10", "source:codex-11", "source:codex-12", "source:codex-14",
+    "source:codex-15", "source:codex-16", "display:codex-19", "source:codex-20"],
+};
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -58,9 +65,13 @@ describe.each(["claude", "codex"] as const)("first %s turn in an already-open Ch
       expect(hook.result.current.page?.revision).toBe(completed.revision);
       expect(hook.result.current.events.map((row) => row.id)).toEqual(completed.events.map((row) => row.id));
       expect(hook.result.current.events.some((row) => row.text === `First turn completed for ${provider}.`)).toBe(true);
-      expect(loader).toHaveBeenNthCalledWith(2, { sessionId: pending.session_id, revision: pending.revision });
+      expect(loader).toHaveBeenNthCalledWith(2, { sessionId: pending.session_id, revision: pending.revision, previewBackingIds: [] });
       await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
-      expect(loader).toHaveBeenLastCalledWith({ sessionId: pending.session_id, revision: completed.revision });
+      // Known C/G does not make these legacy rows canonical; only the latest eight literal IDs are hints.
+      expect(completed.presentation == null).toBe(true);
+      expect(completed.events.length).toBeGreaterThan(8);
+      expect(loader).toHaveBeenLastCalledWith({ sessionId: pending.session_id, revision: completed.revision,
+        previewBackingIds: latestBackingIds[provider] });
       expect(hook.result.current.error).toBeNull();
     } finally { hook.unmount(); }
   });

@@ -14,6 +14,7 @@ import type { WorkbenchNavigationService } from "../workbench/navigationService"
 import { AgentChatView } from "./AgentChatView";
 import { chatPageInvokeFixture } from "../../test/chatPageTestFixture";
 import { actualProducerBatch, actualProducerPage } from "../../test/chatRevalidationTestFixture";
+import { coldSourcePreviewIdentityFixture, previewGenerationRolloverFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
 
 const markdownWork = vi.hoisted(() => vi.fn());
 vi.mock("react-markdown", async (importOriginal) => {
@@ -130,6 +131,112 @@ function olderReadPage(overrides: Partial<AgentChatPage> = {}): AgentChatPage {
 }
 
 describe("AgentChatView", () => {
+  it.each(["watch", "cold-native"])("switches a %s legacy preview once, preserving shared expansion through canonical closure", async (source) => {
+    vi.useFakeTimers();
+    const fixture = previewIdentityFixture("agent-1");
+    const native = coldSourcePreviewIdentityFixture("agent-1");
+    const { closed } = fixture;
+    const { legacy, provisional, canonical } = source === "watch" ? fixture
+      : { legacy: native.cold, provisional: native.bridge, canonical: native.canonical };
+    let current = legacy;
+    invokeMock.mockImplementation((command) => Promise.resolve(command === "load_agent_chat_page" ? current : []));
+    const view = render(<AgentChatView sessionId="agent-1" provider="codex" refreshIntervalMs={100} readOnly deferModelDiscovery />);
+    const anchorKey = legacy.events[0].id;
+    const geometry = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+    try {
+      await act(async () => {});
+      expect(screen.queryByTestId("chat-committed-turn")).toBeNull();
+      fireEvent.click(screen.getByTitle("Show all work"));
+
+      const scroll = screen.getByTestId("agent-chat-scroll-region");
+      Object.defineProperty(scroll, "scrollHeight", { configurable: true,
+        get: () => scroll.querySelector('[data-testid="chat-committed-turn"]') ? 1_200 : 1_000 });
+      Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 200 });
+      geometry.mockImplementation(function (this: HTMLElement) {
+        if (this === scroll) return new DOMRect(0, 0, 300, 200);
+        if (this.dataset.chatRowKey === anchorKey || this.dataset.chatAnchorKey === anchorKey) {
+          const documentTop = this.closest('[data-testid="chat-committed-turn"]') ? 940 : 870;
+          return new DOMRect(0, documentTop - scroll.scrollTop, 300, 40);
+        }
+        return new DOMRect();
+      });
+      scroll.scrollTop = 800;
+      fireEvent.scroll(scroll);
+
+      current = provisional;
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      const section = screen.getByTestId("chat-committed-turn");
+      expect(screen.queryByTestId("chat-work-group")).toBeNull();
+      expect(screen.getByRole("button", { name: /Working.*In progress/ })).toHaveAttribute("aria-expanded", "true");
+      const anchor = section.querySelector("[data-chat-anchor-key]");
+      expect(anchor).toHaveAttribute("data-chat-anchor-key", anchorKey);
+      expect(anchor?.getBoundingClientRect().top).toBe(70);
+      expect(screen.queryByText(/All 42 tests passed/)).toBeNull();
+      for (const next of [canonical, closed]) {
+        current = next;
+        await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+        expect(screen.getByTestId("chat-committed-turn")).toBe(section);
+        expect(screen.queryByTestId("chat-work-group")).toBeNull();
+      }
+      expect(screen.getByRole("button", { name: /Worked.*4 steps/ })).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByText("All 42 tests passed.")).toBeVisible();
+    } finally {
+      geometry.mockRestore();
+      view.unmount();
+    }
+  });
+
+  it("holds the bound transcript and anchor through two indexing reads and a successor admission", async () => {
+    vi.useFakeTimers();
+    const { legacy, provisional, pending, replacement, loss } = previewGenerationRolloverFixture("agent-1");
+    let current = legacy;
+    invokeMock.mockImplementation((command) => Promise.resolve(command === "load_agent_chat_page" ? current : []));
+    const view = render(<AgentChatView sessionId="agent-1" provider="codex" refreshIntervalMs={100} readOnly deferModelDiscovery />);
+    const geometry = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+    const poll = async (page: AgentChatPage) => {
+      current = page;
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    };
+    try {
+      await act(async () => {});
+      expect(screen.queryByTestId("chat-committed-turn")).toBeNull();
+      expect(screen.getByTestId("chat-work-group")).toBeVisible();
+
+      await poll(provisional);
+      const section = screen.getByTestId("chat-committed-turn");
+      const anchorKey = legacy.events[0].id;
+      const scroll = screen.getByTestId("agent-chat-scroll-region");
+      Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1_200 });
+      Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 200 });
+      geometry.mockImplementation(function (this: HTMLElement) {
+        if (this === scroll) return new DOMRect(0, 0, 300, 200);
+        if (this.dataset.chatAnchorKey === anchorKey) {
+          const documentTop = scroll.dataset.chatPageScope?.includes("successor-bridge") ? 410 : 370;
+          return new DOMRect(0, documentTop - scroll.scrollTop, 300, 40);
+        }
+        return new DOMRect();
+      });
+      scroll.scrollTop = 300;
+      fireEvent.scroll(scroll);
+
+      for (const page of [...pending, replacement]) {
+        await poll(page);
+        expect(screen.getAllByTestId("chat-committed-turn")).toEqual([section]);
+        expect(screen.queryByTestId("chat-work-group")).toBeNull();
+        const anchor = section.querySelector("[data-chat-anchor-key]");
+        expect(anchor).toHaveAttribute("data-chat-anchor-key", anchorKey);
+        expect(anchor?.getBoundingClientRect().top).toBe(70);
+        expect(scroll.scrollTop).toBe(page === replacement ? 340 : 300);
+      }
+      expect(scroll.getAttribute("data-chat-page-scope")).toContain("successor-bridge");
+      await poll(loss);
+      expect(screen.queryByTestId("chat-committed-turn")).toBeNull();
+    } finally {
+      geometry.mockRestore();
+      view.unmount();
+    }
+  });
+
   beforeEach(() => {
     invokeMock.mockReset();
     listenMock.mockReset();
@@ -301,7 +408,7 @@ describe("AgentChatView", () => {
     expect(screen.getByText("Read test output")).toBeInTheDocument();
     expect(screen.getByText("npm run test")).toBeInTheDocument();
     expect(container.querySelector('code[data-language="shell"]')?.textContent).toContain("tests failed in AgentChatView");
-    expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_page", { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true });
+    expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_page", { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true, previewBackingIds: [] });
     expect(screen.queryByText("codex")).not.toBeInTheDocument();
     expect(screen.queryByText("Processing")).not.toBeInTheDocument();
     expect(screen.queryByText("Read-only")).not.toBeInTheDocument();
@@ -1359,6 +1466,43 @@ describe("AgentChatView", () => {
     expect(screen.queryByTestId("chat-work-group")).not.toBeInTheDocument();
   });
 
+  it.each([true, false])("preserves the answer through backfill and follows new tail only at bottom (%s)", async (atBottom) => {
+    vi.useFakeTimers();
+    const answer = event({ id: "answer", text: "Recent answer" });
+    const history = event({ id: "history", text: "Earlier captured message" });
+    const tail = event({ id: "tail", text: "New tail message" });
+    const pages = [[answer], [history, answer], [history, answer, tail]];
+    let read = 0;
+    invokeMock.mockImplementation((command) => Promise.resolve(command === "load_agent_chat_page"
+      ? olderReadPage({ events: pages[read] ?? pages[pages.length - 1], revision: String(++read), next_before: null })
+      : undefined));
+    await act(async () => { render(<AgentChatView sessionId="agent-1" refreshIntervalMs={3_000} />); });
+    const scroll = screen.getByTestId("agent-chat-scroll-region");
+    const row = screen.getByText("Recent answer").closest<HTMLElement>("[data-chat-row-key]")!;
+    scroll.getBoundingClientRect = () => new DOMRect(0, 0, 300, 200);
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true,
+      get: () => 300 + scroll.querySelectorAll("[data-chat-row-key]").length * 100 });
+    // Match browser clamping and derive row geometry from actual DOM order.
+    let top = 0;
+    Object.defineProperty(scroll, "scrollTop", { configurable: true, get: () => top,
+      set: (value: number) => { top = Math.max(0, Math.min(value, scroll.scrollHeight - scroll.clientHeight)); } });
+    const rows = () => Array.from(scroll.querySelectorAll<HTMLElement>("[data-chat-row-key]"));
+    row.getBoundingClientRect = () => new DOMRect(0, 300 + rows().indexOf(row) * 100 - top, 300, 100);
+    scroll.scrollTop = atBottom ? 200 : 180;
+    fireEvent.scroll(scroll);
+    const answerOffset = row.getBoundingClientRect().top;
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(rows().map((node) => node.dataset.chatRowKey)).toEqual(["history", "answer"]);
+    expect(rows()[1]).toBe(row);
+    expect(row.getBoundingClientRect().top).toBe(answerOffset);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(screen.getByText("New tail message")).toBeInTheDocument();
+    expect(scroll.scrollTop).toBe(atBottom ? 400 : 280);
+  });
+
   it("allows another older scroll after a failed read and preserves the prepended viewport", async () => {
     const firstOlder = deferred<AgentChatPage>();
     const secondOlder = deferred<AgentChatPage>();
@@ -1502,9 +1646,9 @@ describe("AgentChatView", () => {
       expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
       expect(loadOlder).toHaveBeenCalledOnce();
       expect(invokeMock.mock.calls.filter(([command]) => command === "load_agent_chat_page").map(([, request]) => request)).toEqual([
-        { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
+        { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true, previewBackingIds: [] },
         { sessionId: "agent-1", cursor: "saved-before", revision: undefined, detailRef: undefined, recentPreview: false },
-        { sessionId: "agent-2", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
+        { sessionId: "agent-2", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true, previewBackingIds: [] },
       ]);
       await act(async () => firstOlder.resolve(olderReadPage({
         events: [event({ id: "retired-older", text: "Retired older row", sequence: 1 })],
@@ -2235,8 +2379,8 @@ describe("AgentChatView", () => {
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
       expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
       expect(invokeMock.mock.calls.filter(([command]) => command === "load_agent_chat_page").map(([, request]) => request)).toEqual([
-        { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
-        { sessionId: "agent-2", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
+        { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true, previewBackingIds: [] },
+        { sessionId: "agent-2", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true, previewBackingIds: [] },
       ]);
       await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();

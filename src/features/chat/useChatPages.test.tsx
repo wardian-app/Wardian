@@ -341,7 +341,7 @@ describe("normal Chat page polling", () => {
     expect(loader).toHaveBeenCalledTimes(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(loader).toHaveBeenCalledTimes(2);
-    expect(loader.mock.calls[1][0]).toEqual({ sessionId: "agent", revision: "opening-revision" });
+    expect(loader.mock.calls[1][0]).toEqual({ sessionId: "agent", revision: "opening-revision", previewBackingIds: earlier.map((event) => event.id) });
     const events = hook.result.current.events;
     expect(events[events.length - 1]?.text).toBe(latestBody);
     expect(hook.result.current.page?.recent_admission).toBe("enriched-preview");
@@ -582,6 +582,7 @@ describe("normal Chat page polling", () => {
     expect(loader.mock.calls[1]?.[0]).toEqual({
       sessionId: emptyCapture.dto.session_id,
       revision: firstCapture.request.revision,
+      previewBackingIds: [],
     });
     expect(hook.result.current.error).toBeNull();
     expect(hook.result.current.page).toMatchObject({
@@ -692,7 +693,7 @@ describe("normal Chat page polling", () => {
     expect(hook.result.current.events.map((event) => event.id)).toEqual(["first"]);
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(loader).toHaveBeenCalledTimes(2);
-    expect(loader.mock.calls[1][0]).toEqual({ sessionId: "agent", revision: "revision" });
+    expect(loader.mock.calls[1][0]).toEqual({ sessionId: "agent", revision: "revision", previewBackingIds: [retained.id] });
     await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
     expect(hook.result.current.waiting).toBe(false);
     expect(loader).toHaveBeenCalledTimes(2);
@@ -874,7 +875,7 @@ describe("normal Chat page polling", () => {
     expect(hook.result.current.loadingOlder).toBe(true);
     visibility.mockReturnValue("visible");
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
-    expect(loader.mock.calls[2][0]).toEqual({ sessionId: "agent", revision: "revision" });
+    expect(loader.mock.calls[2][0]).toEqual({ sessionId: "agent", revision: "revision", previewBackingIds: ["recent"] });
     expect(hook.result.current.loadingOlder).toBe(true);
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); await pending; });
     expect(hook.result.current.loadingOlder).toBe(false);
@@ -904,7 +905,7 @@ describe("normal Chat page polling", () => {
     expect(loader).toHaveBeenCalledTimes(2);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(loader).toHaveBeenCalledTimes(3);
-    expect(loader.mock.calls[2][0]).toEqual({ sessionId: "agent", revision: "revision" });
+    expect(loader.mock.calls[2][0]).toEqual({ sessionId: "agent", revision: "revision", previewBackingIds: ["recent"] });
     expect(hook.result.current.loadingOlder).toBe(true);
     await act(async () => { await vi.advanceTimersByTimeAsync(999); });
     expect(loader).toHaveBeenCalledTimes(3);
@@ -973,7 +974,7 @@ describe("normal Chat page polling", () => {
       expect(hook.result.current.error).toBeNull();
       expect(loader).toHaveBeenCalledTimes(3);
       expect(loader.mock.calls[1]?.[0]).toEqual({ sessionId: "agent", cursor: "cursor" });
-      expect(loader.mock.calls[2]?.[0]).toEqual({ sessionId: "agent", revision: undefined });
+      expect(loader.mock.calls[2]?.[0]).toEqual({ sessionId: "agent", revision: undefined, previewBackingIds: [] });
       hook.unmount();
     },
   );
@@ -1000,7 +1001,7 @@ describe("normal Chat page polling", () => {
     await act(async () => { coalesced = hook.result.current.loadOlder(); });
     expect(loader).toHaveBeenCalledTimes(2);
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
-    expect(loader.mock.calls[2][0]).toEqual({ sessionId: "agent", revision: "revision" });
+    expect(loader.mock.calls[2][0]).toEqual({ sessionId: "agent", revision: "revision", previewBackingIds: ["recent"] });
     expect(settled).toBe(false);
     expect(hook.result.current.page?.next_before).toBe("original-cursor");
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
@@ -1124,20 +1125,31 @@ describe("normal Chat page polling", () => {
   });
 
   it("rejects a response from an earlier A to B to A scope", async () => {
+    vi.useFakeTimers();
     const old = deferred();
     const loader = vi.fn<ChatPageLoader>().mockReturnValueOnce(old.promise)
       .mockResolvedValueOnce(page("b"))
-      .mockResolvedValueOnce(page("a", { revision: "new-a" }));
+      .mockResolvedValue(page("a", { revision: "new-a" }));
     const hook = renderHook(({ id }) => useChatPages(id, loader, 60_000, 0), { initialProps: { id: "a" } });
-    hook.rerender({ id: "b" });
-    hook.rerender({ id: "a" });
-    expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["a", "b"]);
-    expect(hook.result.current.page).toBeNull();
-    await act(async () => { old.resolve(page("a", { revision: "stale-a", events: [row("stale-a")] })); });
-    await waitFor(() => expect(hook.result.current.page?.revision).toBe("new-a"));
-    expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["a", "b", "a"]);
-    expect(hook.result.current.events.some((event) => event.id === "stale-a")).toBe(false);
-    hook.unmount();
+    try {
+      hook.rerender({ id: "b" });
+      hook.rerender({ id: "a" });
+      expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["a", "b"]);
+      expect(hook.result.current.page).toBeNull();
+      await act(async () => { old.resolve(page("a", { revision: "stale-a", events: [row("stale-a")] })); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(hook.result.current.page?.revision).toBe("new-a");
+      expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["a", "b", "a"]);
+      expect(hook.result.current.events.some((event) => event.id === "stale-a")).toBe(false);
+
+      // Empty windows poll again at 100ms during opening, independently of the stale response.
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["a", "b", "a", "a"]);
+      expect(loader.mock.calls[3][0]).toEqual({ sessionId: "a", revision: "new-a", previewBackingIds: [] });
+      expect(hook.result.current.page?.revision).toBe("new-a");
+      expect(hook.result.current.events.some((event) => event.id === "stale-a")).toBe(false);
+      expect(hook.result.current.error).toBeNull();
+    } finally { hook.unmount(); }
   });
 
   it("preserves the requested older continuation across compatible refreshes", async () => {

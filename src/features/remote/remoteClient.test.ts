@@ -2,6 +2,28 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RemoteChatTimeoutError, RemoteRequestError, RemoteTransportError, remoteClient } from "./remoteClient";
 
 describe("remoteClient error propagation", () => {
+  it("sends literal backing IDs as JSON only for ordinary recent preview reads and keeps revision opaque", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    const ids = ["literal source row ? λ", "source:cold:two"];
+    const revision = "opaque.presentationNone/unchanged?reader=old";
+    await remoteClient.loadAgentChatPage("agent-1", undefined, revision, undefined, undefined, undefined, true, ids);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, undefined, undefined, undefined, undefined, true, []);
+    await remoteClient.loadAgentChatPage("agent-1", "older", revision, undefined, undefined, undefined, true, ids);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, revision, "detail", undefined, undefined, true, ids);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, revision, undefined, undefined, ["source:one"], true, ids);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, revision, undefined, undefined, [], true, ids);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, revision, undefined, undefined, undefined, false, ids);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, revision, undefined, undefined, undefined, true, Array(9).fill("literal"));
+    await remoteClient.loadAgentChatPage("agent-1", undefined, revision, undefined, undefined, undefined, true, ["😀".repeat(129)]);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, revision, undefined, undefined, undefined, true);
+    const queries = fetcher.mock.calls.map(([url]) => new URL(String(url), "https://fixture.test").searchParams);
+    expect(queries[0].get("preview_backing_ids")).toBe(JSON.stringify(ids));
+    expect(queries[0].get("revision")).toBe(revision);
+    expect(queries[1].get("preview_backing_ids")).toBe("[]");
+    expect(queries.slice(2).every((query) => !query.has("preview_backing_ids"))).toBe(true);
+  });
+
   it("classifies fetch rejection at the transport boundary", async () => {
     const cause = new TypeError("Failed to fetch");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(cause));

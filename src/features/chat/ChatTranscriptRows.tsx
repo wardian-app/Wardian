@@ -47,6 +47,8 @@ import {
 } from "./chatPresentation";
 import { structuredEditDiffText, structuredEditFromEvent, type StructuredEdit } from "./structuredEdit";
 import type { ChatTranscriptRowModel } from "./chatTurns";
+import type { ChatWorkExpansion } from "./chatWorkExpansion";
+import { chatEventDisplayKey } from "./chatEventIdentity";
 import { TurnChangeCard } from "./TurnChangeCard";
 
 const ROLE_CLASSES: Record<AgentChatRole, string> = {
@@ -77,6 +79,9 @@ export interface ChatTranscriptRowProps {
   liveApprovalId?: string | null;
   onLoadDetail?: (reference: string) => Promise<AgentChatDetail>;
   onLoadStepDetail?: (reference: string) => Promise<ChatStepDetail>;
+  workExpansion?: ChatWorkExpansion;
+  /** A provisional snapshot grants no body or step-detail authority, including legacy groups. */
+  detailsDisabled?: boolean;
 }
 
 type ChatDetailLoader = NonNullable<ChatTranscriptRowProps["onLoadDetail"]>;
@@ -100,14 +105,18 @@ export function ChatTranscriptRow({
   onApprovalSubmit,
   onOpenFile,
   liveApprovalId = null,
-  onLoadDetail,
-  onLoadStepDetail,
+  onLoadDetail: requestedDetail,
+  onLoadStepDetail: requestedStepDetail,
+  workExpansion,
+  detailsDisabled = false,
 }: ChatTranscriptRowProps) {
+  const onLoadDetail = detailsDisabled ? undefined : requestedDetail;
+  const onLoadStepDetail = detailsDisabled ? undefined : requestedStepDetail;
   if (row.kind === "committed_turn") return <CommittedTurn row={row} agentIsWorking={agentIsWorking} isSubmitting={isSubmitting}
     linkHandling={linkHandling} onApprovalSubmit={onApprovalSubmit} onOpenFile={onOpenFile} liveApprovalId={liveApprovalId}
-    onLoadDetail={onLoadDetail} onLoadStepDetail={onLoadStepDetail} />;
+    onLoadDetail={onLoadDetail} onLoadStepDetail={onLoadStepDetail} workExpansion={workExpansion} detailsDisabled={detailsDisabled} />;
   if (row.kind === "turn_change_summary") return <TurnChangeCard onOpenFile={onOpenFile} row={row} />;
-  return row.kind === "work_group" ? <WorkGroupRow agentIsWorking={agentIsWorking} onLoadDetail={onLoadDetail} row={row} />
+  return row.kind === "work_group" ? <WorkGroupRow agentIsWorking={agentIsWorking} onLoadDetail={onLoadDetail} row={row} workExpansion={workExpansion} />
     : row.event.kind === "memory" ? <MemoryRow event={row.event} linkHandling={linkHandling} onLoadDetail={onLoadDetail} />
     : row.event.kind === "message" ? (
     <MessageRow event={row.event} linkHandling={linkHandling} onLoadDetail={onLoadDetail} />
@@ -781,14 +790,17 @@ export function WorkGroupRow({
   row,
   agentIsWorking,
   onLoadDetail,
+  workExpansion,
 }: {
   row: Extract<PresentedChatRow, { kind: "work_group" }>;
   agentIsWorking: boolean;
   onLoadDetail?: ChatDetailLoader;
+  workExpansion?: ChatWorkExpansion;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const anchorKeys = row.entries.flatMap((entry) => [entry.primary_event, ...entry.merged_result_events]).map(chatEventDisplayKey);
+  const [expanded, setExpanded] = useState(() => workExpansion?.isOpen(anchorKeys) ?? false);
   const [hasOpened, setHasOpened] = useState(false);
-  const toggle = () => { setHasOpened(true); setExpanded((value) => !value); };
+  const toggle = () => { setHasOpened(true); workExpansion?.setOpen(anchorKeys, !expanded); setExpanded(!expanded); };
   const title = workGroupTitleFromEntries(row.entries);
   const duration = workGroupDurationLabel(row.entries);
   const latestEntry = row.entries[row.entries.length - 1];
@@ -800,7 +812,7 @@ export function WorkGroupRow({
       data-testid="chat-work-group"
       data-expanded={expanded ? "true" : "false"}
     >
-      <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 items-center gap-2" data-chat-anchor-keys={JSON.stringify(anchorKeys)}>
         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-wardian-processing)]" aria-hidden="true" />
         <button
           type="button"
