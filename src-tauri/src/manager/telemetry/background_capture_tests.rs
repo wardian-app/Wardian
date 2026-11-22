@@ -4,6 +4,10 @@ use std::io::Write;
 use std::task::Poll;
 use std::time::Duration;
 
+#[cfg(feature = "adoption-throughput")]
+#[path = "adoption_throughput_tests.rs"]
+mod adoption_throughput_tests;
+
 fn stopped_sample(
     _: Arc<tokio::sync::Mutex<sysinfo::System>>,
     _: Vec<String>,
@@ -531,6 +535,64 @@ async fn quiet_replaced_source_finishes_owned_projection_work_without_another_ap
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_archive_gap_blocks_forced_and_changed_source_capture_and_reaches_chat() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let (state, session, path) = registered_off_source(&home).await;
+    *state.agents.lock().await[&session].log_path.lock().unwrap() = Some(path.clone());
+    let gap = wardian_core::conversations::ArchiveSequenceGap {
+        conversation_id: "damaged-conversation".into(),
+        provider_source_key: Some("codex:session:off-provider-conversation".into()),
+        sequence: 2,
+    };
+    let status_path = home
+        .path()
+        .join("agents")
+        .join(&session)
+        .join("archive-capture-stop.json");
+    let bytes = serde_json::to_vec(&gap).unwrap();
+    std::fs::write(&status_path, &bytes).unwrap();
+    for force in [false, true] {
+        append_records(&path, 1);
+        let request = crate::commands::chat::background_capture_request(&state, &session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::commands::background_capture::admit_background_capture(
+                &state,
+                request.clone(),
+                force
+            )
+            .await
+            .is_none()
+        );
+        assert_eq!(
+            crate::commands::chat::archive_background_capture_pass(&state, &request)
+                .await
+                .unwrap(),
+            crate::state::background_capture::CaptureStop::Retired
+        );
+    }
+    let error = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
+        &state,
+        session,
+        None,
+        None,
+        None,
+        None,
+        crate::commands::chat::RecentChatRead::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, gap.reason());
+    assert_eq!(std::fs::read(status_path).unwrap(), bytes);
+    assert!(!home
+        .path()
+        .join("agents/ordinary-off-capture/conversations")
+        .exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_replacement() {
     use wardian_core::control::{ArchiveAdoptionNativeIdentity, ArchiveAdoptionRequest};
 
@@ -799,6 +861,28 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
         }
     })
     .await;
+    assert!(
+        !state
+            .conversation_archive
+            .chat_projection
+            .has_pending_capture_work(&session),
+        "an adoption chunk must defer warm body hydration to gated saved-archive replay"
+    );
+    drop(worker);
+    let (_, retry) = collect_agent_metrics_with_sampler(&state, stopped_sample).await;
+    status::dispatch_capture_follow_up(&state, retry.background_captures, |claim| {
+        claims.push(claim)
+    })
+    .await;
+    assert_eq!(
+        claims.len(),
+        1,
+        "a cancelled partial import retries normally"
+    );
+    let mut worker = Box::pin(crate::commands::background_capture::run_background_capture(
+        &state,
+        claims.pop().unwrap(),
+    ));
     state
         .conversation_archive
         .append_delivered_input_with_context(
@@ -807,7 +891,48 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
             None,
         )
         .unwrap();
-    worker.await;
+    poll_fn(|cx| {
+        assert!(worker.as_mut().poll(cx).is_pending());
+        let work: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&work_path).unwrap()).unwrap();
+        if work["status"] == "complete" {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    assert!(!state
+        .conversation_archive
+        .has_pending_adoption(&session)
+        .unwrap());
+    assert!(!state
+        .conversation_archive
+        .chat_projection
+        .has_pending_capture_work(&session));
+    // Completion still owes its final More: retry the cancelled claim through
+    // ordinary telemetry while both adoption and warm projection demand are empty.
+    drop(worker);
+    let (_, retry) = collect_agent_metrics_with_sampler(&state, stopped_sample).await;
+    status::dispatch_capture_follow_up(&state, retry.background_captures, |claim| {
+        claims.push(claim)
+    })
+    .await;
+    assert_eq!(
+        claims.len(),
+        1,
+        "final replay retries without a forced command"
+    );
+    state
+        .conversation_archive
+        .append_delivered_input_with_context(
+            context.clone(),
+            "Normal delivered prompt after the final adoption chunk",
+            None,
+        )
+        .unwrap();
+    crate::commands::background_capture::run_background_capture(&state, claims.pop().unwrap())
+        .await;
     let work: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&work_path).unwrap()).unwrap();
     assert_eq!(work["status"], "complete");
@@ -997,6 +1122,7 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
         "Previously captured owned anchor",
         "Existing delivered prompt before adoption",
         "Normal delivered prompt during archive adoption",
+        "Normal delivered prompt after the final adoption chunk",
     ] {
         assert_eq!(
             rows.iter()
@@ -2804,6 +2930,7 @@ async fn missing_body_fixture(
     state: &AppState,
     home: &crate::control::test_support::TestWardianHome,
     body_index: usize,
+    body_repetitions: usize,
 ) -> (
     wardian_core::models::AgentConfig,
     String,
@@ -2832,7 +2959,7 @@ async fn missing_body_fixture(
         "saved fixture must not bind a vendor source"
     );
     let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
-    let body = "saved artifact body\n".repeat(7000);
+    let body = "saved artifact body\n".repeat(body_repetitions);
     let events = (0..161)
         .map(|index| {
             serde_json::from_value(serde_json::json!({
@@ -3017,7 +3144,7 @@ async fn missing_body_details(
 async fn cold_missing_body_complete_control() {
     let home = crate::control::test_support::TestWardianHome::new_async().await;
     let state = Arc::new(AppState::new());
-    let (config, original, _, body, saved) = missing_body_fixture(&state, &home, 133).await;
+    let (config, original, _, body, saved) = missing_body_fixture(&state, &home, 133, 7000).await;
     missing_body_one_pass(&state, &config.session_id).await;
     let seed = missing_body_page(&state, &config.session_id, None).await;
     assert_eq!(seed.conversation_id.as_deref(), Some(original.as_str()));
@@ -3043,7 +3170,7 @@ async fn cold_missing_body_complete_control() {
 async fn cold_missing_body_other_io_remains_failure() {
     let home = crate::control::test_support::TestWardianHome::new_async().await;
     let state = Arc::new(AppState::new());
-    let (config, _, artifact, _, _) = missing_body_fixture(&state, &home, 133).await;
+    let (config, _, artifact, _, _) = missing_body_fixture(&state, &home, 133, 7000).await;
     assert!(artifact
         .canonicalize()
         .unwrap()
@@ -3080,7 +3207,8 @@ async fn cold_missing_body_other_io_remains_failure() {
 async fn cold_missing_body_before_admission_preserves_older_headers() {
     let home = crate::control::test_support::TestWardianHome::new_async().await;
     let state = Arc::new(AppState::new());
-    let (config, original, artifact, _, saved) = missing_body_fixture(&state, &home, 133).await;
+    let (config, original, artifact, _, saved) =
+        missing_body_fixture(&state, &home, 133, 7000).await;
     assert!(artifact
         .canonicalize()
         .unwrap()
@@ -3115,7 +3243,9 @@ async fn cold_missing_body_before_admission_preserves_older_headers() {
 async fn cold_missing_body_after_prefix_preserves_committed_chunks() {
     let home = crate::control::test_support::TestWardianHome::new_async().await;
     let state = Arc::new(AppState::new());
-    let (config, original, artifact, body, saved) = missing_body_fixture(&state, &home, 160).await;
+    // Keep a genuine uncommitted suffix beyond the bounded body window.
+    let (config, original, artifact, body, saved) =
+        missing_body_fixture(&state, &home, 160, 32000).await;
     missing_body_one_pass(&state, &config.session_id).await;
     let seed = missing_body_page(&state, &config.session_id, None).await;
     let row = seed
@@ -3128,6 +3258,25 @@ async fn cold_missing_body_after_prefix_preserves_committed_chunks() {
         row.metadata["chat_detail_ref"].is_string(),
         "first body prefix was committed"
     );
+    // A pending detail cursor deliberately points beyond its committed extent.
+    // Pin that extent from the published row before removing the source body.
+    let reference = row.metadata["chat_detail_ref"]
+        .as_str()
+        .unwrap()
+        .split(':')
+        .nth(1)
+        .unwrap();
+    let conversations = wardian_core::paths::agent_conversations_dir(&config.session_id).unwrap();
+    let object = conversations
+        .parent()
+        .unwrap()
+        .join("chat-read-objects")
+        .join(reference);
+    let published: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(object).unwrap()).unwrap();
+    let committed_bytes = usize::try_from(published["body"]["bytes"].as_u64().unwrap()).unwrap();
+    assert!(committed_bytes > 0 && committed_bytes < body.len());
+    let committed_prefix = &body[..committed_bytes];
     assert!(artifact
         .canonicalize()
         .unwrap()
@@ -3147,7 +3296,7 @@ async fn cold_missing_body_after_prefix_preserves_committed_chunks() {
     assert_ne!(row.metadata["chat_body_pending"], true);
     assert_eq!(
         missing_body_details(&state, &config.session_id, row, false).await,
-        body[..64 * 1024]
+        committed_prefix
     );
     let older = missing_body_page(&state, &config.session_id, seed.next_before).await;
     assert!(!older.events.is_empty());

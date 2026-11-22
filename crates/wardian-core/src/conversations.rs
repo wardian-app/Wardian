@@ -6,7 +6,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub const CONVERSATION_SCHEMA: u8 = 1;
@@ -14,6 +14,58 @@ pub const CONVERSATION_TURNS_SCHEMA: u8 = 3;
 pub const CONVERSATION_INLINE_TEXT_LIMIT_BYTES: usize = 8 * 1024;
 
 const JSONL_WRITE_BUFFER_BYTES: usize = 8 * 1024;
+
+/// A terminal capture diagnostic, scoped to the archive and provider source
+/// that failed validation. This grants no authority to skip a missing record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveSequenceGap {
+    pub conversation_id: String,
+    pub provider_source_key: Option<String>,
+    pub sequence: u64,
+}
+
+impl ArchiveSequenceGap {
+    /// Keep operator guidance identical in Chat and CLI diagnostics.
+    pub fn reason(&self) -> String {
+        format!(
+            "Archive capture stopped: narrative sequence gap before {} in conversation {}. \
+             The archive is preserved. Request operator review and an approved repair, then \
+             re-grant archive adoption if needed. Do not delete or renumber archive records.",
+            self.sequence, self.conversation_id
+        )
+    }
+}
+
+/// Read only bounded capture metadata; never inspect narrative or provider
+/// files to render an operator status command.
+pub fn read_archive_sequence_gap(agent_id: &str) -> io::Result<Option<ArchiveSequenceGap>> {
+    use std::io::Read;
+    let file = match fs::File::open(archive_capture_status_path(agent_id)?) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    const LIMIT: u64 = 64 * 1024;
+    file.take(LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(io::Error::other("capture status exceeds byte limit"));
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(io::Error::other)
+}
+
+/// Separate terminal diagnostics from growing policy metadata and canonical
+/// conversation contents. Writers hold the per-agent archive lock.
+pub fn archive_capture_status_path(agent_id: &str) -> io::Result<PathBuf> {
+    crate::paths::agent_conversations_dir(agent_id)
+        .and_then(|path| {
+            path.parent()
+                .map(|parent| parent.join("archive-capture-stop.json"))
+        })
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe capture status agent"))
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

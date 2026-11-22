@@ -59,13 +59,49 @@ pub fn validate_options(opts: &RenderOptions) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Enrich default agent-show output from bounded persistent diagnostics while
+/// keeping explicit identity projections independent of archive metadata.
+pub fn render_show_status(agent: &AgentIdentity, opts: &RenderOptions) -> Result<String, CliError> {
+    if opts.field.is_some() || opts.fields.is_some() {
+        return render_show(agent, opts);
+    }
+    let gap =
+        wardian_core::conversations::read_archive_sequence_gap(&agent.uuid).map_err(|error| {
+            CliError::generic(format!("archive capture status unavailable: {error}"))
+        })?;
+    render_show_with_capture_status(agent, opts, gap.as_ref())
+}
+
 pub fn render_show(agent: &AgentIdentity, opts: &RenderOptions) -> Result<String, CliError> {
+    render_show_with_capture_status(agent, opts, None)
+}
+
+/// Default show output includes an actionable terminal capture diagnostic.
+/// Explicit identity projections retain their existing field contract.
+pub fn render_show_with_capture_status(
+    agent: &AgentIdentity,
+    opts: &RenderOptions,
+    gap: Option<&wardian_core::conversations::ArchiveSequenceGap>,
+) -> Result<String, CliError> {
     validate_options(opts)?;
     if let Some(field) = opts.field.as_deref() {
         return render_single_field(agent, field);
     }
 
-    let projected = project_agent(agent, opts)?;
+    let mut projected = project_agent(agent, opts)?;
+    if opts.fields.is_none() {
+        if let Some(gap) = gap {
+            projected.insert(
+                "archive_capture".into(),
+                serde_json::json!({
+                    "status": "blocked",
+                    "conversation_id": gap.conversation_id,
+                    "sequence": gap.sequence,
+                    "reason": gap.reason(),
+                }),
+            );
+        }
+    }
     if opts.pretty {
         return Ok(render_pretty(&projected));
     }

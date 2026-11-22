@@ -1,7 +1,225 @@
 use super::*;
 use crate::state::conversation_archive::{tests::isolated_home, ConversationArchiveState};
-use wardian_core::conversations::AgentConversationLoggingSetting;
+use wardian_core::conversations::{read_jsonl_records, AgentConversationLoggingSetting};
 use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
+
+#[test]
+fn declined_receipts_preserve_narrative_prefix() {
+    for decline in ["busy", "missing", "handoff", "stale-fence"] {
+        assert_declined_receipt_preserves_narrative_prefix(decline);
+    }
+}
+
+#[test]
+fn terminal_archive_stop_declines_receipt_without_writing_or_allocating() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let ctx = context();
+    archive
+        .append_delivered_input_with_context(ctx.clone(), "warm", None)
+        .unwrap();
+    let fence = input_fence(&ctx, None).unwrap().unwrap();
+    let directory =
+        super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
+    let before =
+        ["events.jsonl", "conversation.jsonl"].map(|name| fs::read(directory.join(name)).unwrap());
+    let next_sequence = archive.active.lock().unwrap()[&ctx.agent_id].next_seq;
+    let gap = wardian_core::conversations::ArchiveSequenceGap {
+        conversation_id: fence.conversation_id.clone(),
+        provider_source_key: ctx.provider_source_key.clone(),
+        sequence: 2,
+    };
+    wardian_core::conversations::write_json_atomic(
+        &wardian_core::conversations::archive_capture_status_path(&ctx.agent_id).unwrap(),
+        &gap,
+    )
+    .unwrap();
+    assert!(archive
+        .append_delivered_input_receipt(ctx.clone(), "accepted but unreceipted", &fence)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        archive.active.lock().unwrap()[&ctx.agent_id].next_seq,
+        next_sequence
+    );
+    for (name, bytes) in ["events.jsonl", "conversation.jsonl"]
+        .into_iter()
+        .zip(before)
+    {
+        assert_eq!(fs::read(directory.join(name)).unwrap(), bytes);
+    }
+}
+
+fn assert_declined_receipt_preserves_narrative_prefix(decline: &str) {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let ctx = context();
+    archive
+        .append_delivered_input_with_context(ctx.clone(), "warm", None)
+        .unwrap();
+    let mut fence = input_fence(&ctx, None).unwrap().unwrap();
+    let directory =
+        super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
+    let before = ["events.jsonl", "conversation.jsonl"].map(|name| {
+        let path = directory.join(name);
+        let bytes = fs::read(&path).unwrap();
+        (path, bytes)
+    });
+
+    match decline {
+        "missing" => {
+            archive
+                .chat_projection
+                .work
+                .lock()
+                .unwrap()
+                .remove(&ctx.agent_id);
+        }
+        "handoff" => {
+            archive
+                .chat_projection
+                .work
+                .lock()
+                .unwrap()
+                .get_mut(&ctx.agent_id)
+                .unwrap()
+                .archive_display_handoff = true;
+        }
+        "stale-fence" => fence.source_epoch = Some("stale".into()),
+        "busy" => {}
+        _ => panic!("unknown admission decline"),
+    }
+    // Model another capture pass holding the shared projection work map.
+    let projection_busy = (decline == "busy").then(|| archive.chat_projection.work.lock().unwrap());
+    assert!(archive
+        .append_delivered_input_receipt(ctx.clone(), "accepted but unreceipted", &fence)
+        .unwrap()
+        .is_none());
+    drop(projection_busy);
+    for (path, bytes) in &before {
+        assert_eq!(fs::read(path).unwrap().as_slice(), bytes.as_slice());
+    }
+
+    assert_eq!(
+        archive
+            .append_chat_events_with_context(
+                ctx.clone(),
+                &[event("after-decline", "first normal observation")],
+            )
+            .unwrap(),
+        1
+    );
+    let next = archive.append_chat_events_with_context(
+        ctx,
+        &[event("after-recovery", "second normal observation")],
+    );
+    assert!(
+        next.is_ok(),
+        "a {decline} optional receipt must not prevent later recovery: {next:?}"
+    );
+    let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).unwrap();
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+}
+
+#[test]
+fn admitted_receipt_error_preserves_durable_identity_for_recovery() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let ctx = context();
+    archive
+        .append_delivered_input_with_context(ctx.clone(), "warm", None)
+        .unwrap();
+    let fence = input_fence(&ctx, None).unwrap().unwrap();
+    let directory =
+        super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
+    // Fail derived publication after the admitted callback has synced the
+    // canonical event and narrative. Retrying the same text is a new input.
+    archive
+        .chat_projection
+        .fail_checkpoint_stage
+        .store(3, std::sync::atomic::Ordering::SeqCst);
+    assert!(archive
+        .append_delivered_input_receipt(ctx.clone(), "same", &fence)
+        .is_err());
+    let after_failure: Vec<AgentChatEvent> =
+        read_jsonl_records(&directory.join("events.jsonl")).unwrap();
+    let failed_id = after_failure.last().unwrap().id.clone();
+    let accepted = archive
+        .append_delivered_input_receipt(ctx.clone(), "same", &fence)
+        .unwrap()
+        .unwrap();
+    assert_ne!(accepted.chat_event_id, failed_id);
+    archive
+        .append_chat_events_with_context(ctx.clone(), &[event("after-error", "normal observation")])
+        .unwrap();
+    archive
+        .append_chat_events_with_context(ctx, &[event("after-recovery", "recovery observation")])
+        .unwrap();
+    let events: Vec<AgentChatEvent> = read_jsonl_records(&directory.join("events.jsonl")).unwrap();
+    for id in [&failed_id, &accepted.chat_event_id] {
+        assert_eq!(events.iter().filter(|event| &event.id == id).count(), 1);
+    }
+    let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).unwrap();
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5]
+    );
+}
+
+#[test]
+fn partial_receipt_write_recovers_original_event_without_reusing_sequence() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let ctx = context();
+    archive
+        .append_delivered_input_with_context(ctx.clone(), "warm", None)
+        .unwrap();
+    let fence = input_fence(&ctx, None).unwrap().unwrap();
+    let directory =
+        super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
+    let narrative = directory.join("conversation.jsonl");
+    let retained = directory.join("retained-narrative.jsonl");
+    fs::rename(&narrative, &retained).unwrap();
+    fs::create_dir(&narrative).unwrap();
+    // The canonical event is written before the narrative append fails.
+    assert!(archive
+        .append_delivered_input_receipt(ctx.clone(), "same", &fence)
+        .is_err());
+    let events: Vec<AgentChatEvent> = read_jsonl_records(&directory.join("events.jsonl")).unwrap();
+    assert_eq!(events.len(), 2);
+    let original_id = events[1].id.clone();
+    fs::remove_dir(&narrative).unwrap();
+    fs::rename(&retained, &narrative).unwrap();
+    archive
+        .append_chat_events_with_context(ctx.clone(), &[event("repair", "normal recovery")])
+        .unwrap();
+    let accepted = archive
+        .append_delivered_input_receipt(ctx.clone(), "same", &fence)
+        .unwrap()
+        .unwrap();
+    assert_ne!(accepted.chat_event_id, original_id);
+    archive
+        .append_chat_events_with_context(
+            ctx.clone(),
+            &[event("after-recovery", "later observation")],
+        )
+        .unwrap();
+    let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+        read_jsonl_records(&narrative).unwrap();
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5]
+    );
+    assert!(records[1].event_refs.contains(&original_id));
+    assert_eq!(records[1].text.as_deref(), Some("same"));
+    assert!(records[3].event_refs.contains(&accepted.chat_event_id));
+    assert!(archive.archive_sequence_gap(&ctx).unwrap().is_none());
+}
 
 /// Exercise the fixture owner normally in CI. An explicit owned-home request
 /// runs the same preparation in the separate native harness process.
@@ -1458,6 +1676,239 @@ fn unchanged_settled_capture_keeps_the_published_canonical_head() {
         first,
         "an unchanged settled capture must not invalidate an in-flight renewal revision"
     );
+}
+
+fn saved_archive_for_adoption_defer(
+    text: &str,
+) -> (ConversationArchiveState, ConversationArchiveContext, String) {
+    let archive = ConversationArchiveState::default();
+    let mut ctx = context();
+    ctx.provider = "codex".into();
+    ctx.provider_source_key = Some("codex:one".into());
+    ctx.provider_session_ids = vec!["one".into()];
+    archive
+        .append_delivered_input_with_context(ctx.clone(), text, None)
+        .unwrap();
+    let conversation = archive
+        .active_conversation_id(&ctx.agent_id)
+        .unwrap()
+        .unwrap();
+    (archive, ctx, conversation)
+}
+
+#[test]
+fn archive_adoption_defer_matching_saved_head_is_repeatable_without_work() {
+    let (_guard, _temp) = isolated_home();
+    let (_archive, ctx, conversation) = saved_archive_for_adoption_defer("saved input");
+    let owner = ProjectionOwner::default();
+    let head_path = locations(&ctx.agent_id).unwrap().0;
+    let before = fs::read(&head_path).unwrap();
+    assert!(owner.test_work_snapshot(&ctx.agent_id).unwrap().is_none());
+    for _ in 0..2 {
+        assert!(owner.defer_archive_adoption(&ctx, &conversation).unwrap());
+        assert!(owner.test_work_snapshot(&ctx.agent_id).unwrap().is_none());
+        assert_eq!(fs::read(&head_path).unwrap(), before);
+    }
+}
+
+#[test]
+fn archive_adoption_defer_rejected_scope_preserves_head_and_work() {
+    use wardian_core::conversations::{ConversationManifest, ConversationStatus};
+
+    let (_guard, _temp) = isolated_home();
+    let (archive, ctx, conversation) = saved_archive_for_adoption_defer("saved input");
+    let owner = &archive.chat_projection;
+    let before_work = owner.test_work_snapshot(&ctx.agent_id).unwrap();
+    assert!(before_work.is_some());
+    let head_path = locations(&ctx.agent_id).unwrap().0;
+    let before_head = fs::read(&head_path).unwrap();
+    let mut non_codex = ctx.clone();
+    non_codex.provider = "mock".into();
+    let mut other_source = ctx.clone();
+    other_source.provider_source_key = Some("codex:other".into());
+    for (scope, selected) in [
+        (ctx.clone(), "different-conversation"),
+        (non_codex, conversation.as_str()),
+        (other_source, conversation.as_str()),
+    ] {
+        assert!(!owner.defer_archive_adoption(&scope, selected).unwrap());
+        assert_eq!(
+            owner.test_work_snapshot(&ctx.agent_id).unwrap(),
+            before_work
+        );
+        assert_eq!(fs::read(&head_path).unwrap(), before_head);
+    }
+
+    let reference = head(&ctx.agent_id).unwrap().unwrap();
+    fs::write(&head_path, b"not-json").unwrap();
+    assert!(!owner.defer_archive_adoption(&ctx, &conversation).unwrap());
+    assert_eq!(
+        owner.test_work_snapshot(&ctx.agent_id).unwrap(),
+        before_work
+    );
+    assert_eq!(fs::read(&head_path).unwrap(), b"not-json");
+    fs::write(&head_path, &before_head).unwrap();
+    let object = locations(&ctx.agent_id).unwrap().1.join(reference);
+    let original = fs::read(&object).unwrap();
+    fs::write(&object, b"not-json").unwrap();
+    assert!(!owner.defer_archive_adoption(&ctx, &conversation).unwrap());
+    assert_eq!(
+        owner.test_work_snapshot(&ctx.agent_id).unwrap(),
+        before_work
+    );
+    assert_eq!(fs::read(&head_path).unwrap(), before_head);
+    assert_eq!(fs::read(&object).unwrap(), b"not-json");
+    fs::write(&object, original).unwrap();
+
+    let manifest_path = super::super::storage::conversation_dir(&ctx.agent_id, &conversation)
+        .unwrap()
+        .join("manifest.json");
+    let mut manifest: ConversationManifest =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest.status = ConversationStatus::Closed;
+    write_json_atomic(&manifest_path, &manifest).unwrap();
+    assert!(!owner.defer_archive_adoption(&ctx, &conversation).unwrap());
+    assert_eq!(
+        owner.test_work_snapshot(&ctx.agent_id).unwrap(),
+        before_work
+    );
+    assert_eq!(fs::read(&head_path).unwrap(), before_head);
+
+    fs::remove_file(&head_path).unwrap();
+    assert!(!owner.defer_archive_adoption(&ctx, &conversation).unwrap());
+    assert_eq!(
+        owner.test_work_snapshot(&ctx.agent_id).unwrap(),
+        before_work
+    );
+    assert!(head(&ctx.agent_id).unwrap().is_none());
+}
+
+#[test]
+fn archive_adoption_defer_native_proof_preserves_head_work_and_input_fence() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("native-defer.jsonl");
+    let contents = format!(
+        "{}\n{}",
+        json!({"type":"session_meta","payload":{"id":"one"}}),
+        native_message("native input")
+    );
+    let (source, _) = owned_native_source(&path, &contents);
+    let ctx = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        &ctx.agent_id,
+        "codex",
+        &path,
+        ctx.provider_source_key.as_deref().unwrap(),
+        None,
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut batch.events, "codex", &path);
+    let archive = ConversationArchiveState::default();
+    archive
+        .append_verified_provider_log_batch_with_context(
+            ctx.clone(),
+            &batch.events,
+            batch.previous.as_ref(),
+            &batch.next,
+            batch.source_proof(),
+        )
+        .unwrap();
+    assert!(super::super::chat_logical_index::source_proof(&ctx)
+        .unwrap()
+        .is_some());
+    let conversation = archive
+        .active_conversation_id(&ctx.agent_id)
+        .unwrap()
+        .unwrap();
+    let owner = &archive.chat_projection;
+    let before_work = owner.test_work_snapshot(&ctx.agent_id).unwrap();
+    assert!(before_work.is_some());
+    let head_path = locations(&ctx.agent_id).unwrap().0;
+    let before_head = fs::read(&head_path).unwrap();
+    let before_fence = input_fence(&ctx, Some(&path)).unwrap();
+    assert!(before_fence.is_some());
+    assert!(!owner.defer_archive_adoption(&ctx, &conversation).unwrap());
+    assert_eq!(
+        owner.test_work_snapshot(&ctx.agent_id).unwrap(),
+        before_work
+    );
+    assert_eq!(fs::read(&head_path).unwrap(), before_head);
+    assert!(input_fence(&ctx, Some(&path)).unwrap() == before_fence);
+}
+
+#[test]
+fn archive_adoption_defer_clears_work_without_retiring_recent_or_writing_receipts() {
+    let (_guard, _temp) = isolated_home();
+    let (archive, ctx, conversation) =
+        saved_archive_for_adoption_defer(&"x".repeat(5 * BODY_BYTES));
+    let owner = &archive.chat_projection;
+    let before_work = owner.test_work_snapshot(&ctx.agent_id).unwrap().unwrap();
+    assert!(before_work.body_jobs > 0 && before_work.remaining_body_bytes > 0);
+    let head_path = locations(&ctx.agent_id).unwrap().0;
+    let before_head = fs::read(&head_path).unwrap();
+    let published: Head = store(&ctx.agent_id)
+        .unwrap()
+        .read(head(&ctx.agent_id).unwrap().as_ref().unwrap())
+        .unwrap();
+    let fence = InputFence {
+        conversation_id: conversation.clone(),
+        source_epoch: published.source_epoch,
+        policy_generation: None,
+    };
+    let directory = super::super::storage::conversation_dir(&ctx.agent_id, &conversation).unwrap();
+    let events_before = fs::read(directory.join("events.jsonl")).unwrap();
+    let narrative_before = fs::read(directory.join("conversation.jsonl")).unwrap();
+    let source = snapshot(&ctx);
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let admission = owner.begin_recent(&source, &runtime).unwrap();
+    let mut preview = event("recent-input", "recent input");
+    preview.provider = "codex".into();
+    assert!(owner
+        .publish_recent(&source, &runtime, &admission, vec![preview.clone()])
+        .unwrap());
+    let recent = owner.recent_reader_with_hints(source.clone(), runtime.clone(), None, 8, None)()
+        .unwrap()
+        .unwrap();
+
+    assert!(owner.defer_archive_adoption(&ctx, &conversation).unwrap());
+    assert!(owner.test_work_snapshot(&ctx.agent_id).unwrap().is_none());
+    assert_eq!(fs::read(&head_path).unwrap(), before_head);
+    let unchanged = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(recent.revision.clone()),
+        8,
+        None,
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(unchanged.unchanged && !unchanged.reset);
+    assert_eq!(unchanged.revision, recent.revision);
+    assert_eq!(unchanged.recent_admission, recent.recent_admission);
+    // The same admission token must remain usable: deferral is not a recent
+    // privacy boundary and must not retire an in-flight publication fence.
+    preview.text = Some("updated recent input".into());
+    assert!(owner
+        .publish_recent(&source, &runtime, &admission, vec![preview])
+        .unwrap());
+    for _ in 0..2 {
+        assert!(owner
+            .commit_input(&ctx, &conversation, &fence, || {
+                panic!("a deferred owner must not execute a duplicate receipt write")
+            })
+            .unwrap()
+            .is_none());
+    }
+    assert_eq!(
+        fs::read(directory.join("events.jsonl")).unwrap(),
+        events_before
+    );
+    assert_eq!(
+        fs::read(directory.join("conversation.jsonl")).unwrap(),
+        narrative_before
+    );
+    assert_eq!(fs::read(&head_path).unwrap(), before_head);
 }
 
 fn cold_saved_remove_projection(temp: &Path) {

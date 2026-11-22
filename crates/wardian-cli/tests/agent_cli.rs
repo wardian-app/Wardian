@@ -156,6 +156,71 @@ fn self_lookup_returns_agent_json() {
 }
 
 #[test]
+fn show_reports_persisted_terminal_archive_gap_without_writing() {
+    let home = seed_home();
+    let directory = home.path().join("agents/uuid-1");
+    std::fs::create_dir_all(&directory).unwrap();
+    let status = directory.join("archive-capture-stop.json");
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "conversation_id": "saved-conversation",
+        "provider_source_key": "codex:session:owned",
+        "sequence": 2
+    }))
+    .unwrap();
+    std::fs::write(&status, &bytes).unwrap();
+    let output = Command::new(bin())
+        .args(["agent", "show", "uuid-1"])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let capture = &value["agent"]["archive_capture"];
+    assert_eq!(capture["status"], "blocked");
+    assert_eq!(capture["conversation_id"], "saved-conversation");
+    assert_eq!(capture["sequence"], 2);
+    assert!(capture["reason"]
+        .as_str()
+        .unwrap()
+        .contains("approved repair"));
+    let field = Command::new(bin())
+        .args(["agent", "show", "uuid-1", "--field", "uuid"])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(field.status.success());
+    assert_eq!(String::from_utf8(field.stdout).unwrap().trim(), "uuid-1");
+    assert_eq!(std::fs::read(status).unwrap(), bytes);
+}
+
+#[test]
+fn show_rejects_oversized_archive_capture_status_without_writing() {
+    let home = seed_home();
+    let directory = home.path().join("agents/uuid-1");
+    std::fs::create_dir_all(&directory).unwrap();
+    let status = directory.join("archive-capture-stop.json");
+    let bytes = vec![b' '; 64 * 1024 + 1];
+    std::fs::write(&status, &bytes).unwrap();
+    let output = Command::new(bin())
+        .args(["agent", "show", "uuid-1"])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("capture status exceeds byte limit"));
+    assert_eq!(std::fs::read(status).unwrap(), bytes);
+}
+
+#[test]
 fn not_in_session_exits_three() {
     let home = seed_home();
     let output = Command::new(bin())
