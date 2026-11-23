@@ -226,6 +226,13 @@ Interactive Claude launches load the bundled `wardian` mod through
 assets and launch identity under
 `<wardian-home>/agents/<agent-id>/claude/delivery/<runtime-generation>/mod/`
 and atomically publishes peer prompts into the sibling `inbox/pending/`.
+Each launch allocates above the highest numeric generation directory already
+present for that agent, including after an app restart. Earlier generation
+directories and their write-once records are immutable audit evidence and are
+never reused, rewritten, or removed. If Wardian cannot inspect the existing
+generation directories, launch stops before runtime allocation so it cannot
+reuse an unknown namespace. If the generation is safely reserved but the mod
+cannot be materialized, Claude launches with terminal fallback.
 The mod queues prompts through Claude's prompt API, preserving terminal drafts.
 User composer submissions and approval keys retain their existing paths.
 
