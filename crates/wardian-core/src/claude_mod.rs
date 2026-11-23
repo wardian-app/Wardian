@@ -65,6 +65,36 @@ pub struct ClaudeModLaunchPlan {
 }
 
 impl ClaudeModLaunchPlan {
+    /// Return the highest numeric generation already present for this agent.
+    ///
+    /// Generation folders are immutable audit namespaces, so allocation must
+    /// advance past every one left by an earlier app process.
+    pub fn highest_existing_generation(wardian_home: &Path, agent_id: &str) -> io::Result<u64> {
+        validate_id(agent_id)?;
+        if !wardian_home.is_absolute() {
+            return Err(invalid("absolute home required"));
+        }
+        let delivery_root = wardian_home
+            .join("agents")
+            .join(agent_id)
+            .join("claude/delivery");
+        let mut entries = match fs::read_dir(delivery_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+        };
+
+        entries.try_fold(0, |highest, entry| {
+            let entry = entry?;
+            let generation = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u64>().ok())
+                .unwrap_or(0);
+            Ok(highest.max(generation))
+        })
+    }
+
     /// Compute a fresh namespace; this does not mutate disk.
     pub fn new(
         wardian_home: &Path,
@@ -742,6 +772,35 @@ mod tests {
         config.runtime_generation = 8;
         atomic_file::write_json_atomic(&launch, &config).unwrap();
         assert!(ClaudeModResolver::open(plan.inbox()).is_err());
+    }
+
+    #[test]
+    fn highest_existing_generation_ignores_non_numeric_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            ClaudeModLaunchPlan::highest_existing_generation(temp.path(), "agent-1").unwrap(),
+            0
+        );
+        let delivery = temp.path().join("agents/agent-1/claude/delivery");
+        fs::create_dir_all(delivery.join("1")).unwrap();
+        fs::create_dir_all(delivery.join("7")).unwrap();
+        fs::write(delivery.join("pending"), b"not a generation").unwrap();
+
+        assert_eq!(
+            ClaudeModLaunchPlan::highest_existing_generation(temp.path(), "agent-1").unwrap(),
+            7
+        );
+        assert!(ClaudeModLaunchPlan::highest_existing_generation(temp.path(), "../agent").is_err());
+    }
+
+    #[test]
+    fn highest_existing_generation_rejects_an_unreadable_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent_dir = temp.path().join("agents/agent-1/claude");
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(agent_dir.join("delivery"), b"not a directory").unwrap();
+
+        assert!(ClaudeModLaunchPlan::highest_existing_generation(temp.path(), "agent-1").is_err());
     }
 
     #[test]

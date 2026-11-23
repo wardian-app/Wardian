@@ -9,6 +9,61 @@ use std::sync::{
 use wardian_core::agent_messaging::{AgentMessagePage, TaskDeliveryOwner};
 use wardian_core::control::ReplyStatus;
 
+#[tokio::test]
+async fn restart_generation_does_not_reuse_existing_claude_delivery_namespace() {
+    use wardian_core::claude_mod::{ClaudeModLaunchPlan, ModAsset};
+
+    let home = TestWardianHome::new_async().await;
+    let previous = ClaudeModLaunchPlan::new(
+        home.path(),
+        "receiver",
+        1,
+        "2d1f06c5-b097-422f-a2b7-06ccdb362e40",
+    )
+    .unwrap();
+    previous
+        .materialize(&[ModAsset {
+            relative_path: "hooks/register.ts",
+            contents: b"previous build",
+        }])
+        .unwrap();
+    let old_record = previous.inbox().join("claimed/old-interaction.json");
+    std::fs::write(
+        &old_record,
+        br#"{"generation":1,"interaction_id":"old-interaction"}"#,
+    )
+    .unwrap();
+    let old_record_before = std::fs::read(&old_record).unwrap();
+    let highest_existing =
+        ClaudeModLaunchPlan::highest_existing_generation(home.path(), "receiver").unwrap();
+    assert_eq!(highest_existing, 1);
+
+    // A new broker models the app process after restart.
+    let broker = crate::state::terminal_session::TerminalSessionBroker::default();
+    let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+    assert_eq!(
+        broker
+            .next_runtime_generation_after("receiver", highest_existing)
+            .await
+            .unwrap(),
+        2,
+        "a new process must skip the prior generation directory"
+    );
+    assert_eq!(
+        broker
+            .start_or_replace_runtime(
+                "receiver",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+            )
+            .await
+            .unwrap(),
+        2,
+        "the registered runtime must match the generation predicted before spawn"
+    );
+    assert_eq!(std::fs::read(&old_record).unwrap(), old_record_before);
+}
+
 async fn agent(state: &AppState, id: &str, name: &str) {
     let agent = super::super::tests::test_agent(id, name, "Test");
     *agent.current_status.lock().unwrap() = "Off".into();
@@ -20,8 +75,11 @@ async fn agent(state: &AppState, id: &str, name: &str) {
 async fn claude_mod_surface_settlement(
     dropped: bool,
     before_settlement: Option<wardian_core::native_transport::NativeDeliveryPhase>,
+    simulate_restart: bool,
+    composer: bool,
 ) {
     use serde_json::json;
+    use wardian_core::claude_mod::{ClaudeModLaunchPlan, ModAsset};
     use wardian_core::native_transport::NativeDeliveryPhase;
 
     let home = TestWardianHome::new_async().await;
@@ -29,6 +87,60 @@ async fn claude_mod_surface_settlement(
     agent(&state, "sender", "Sender").await;
     agent(&state, "receiver", "Receiver").await;
     let claude_session = "2d1f06c5-b097-422f-a2b7-06ccdb362e40";
+    let old_generation_records = if simulate_restart {
+        let previous =
+            ClaudeModLaunchPlan::new(home.path(), "receiver", 1, claude_session).unwrap();
+        previous
+            .materialize(&[ModAsset {
+                relative_path: "hooks/register.ts",
+                contents: b"previous build",
+            }])
+            .unwrap();
+        let inbox = previous.inbox();
+        let old_at = 1;
+        for (path, record) in [
+            (
+                inbox.join("ready.json"),
+                json!({"schema": 1, "generation": 1, "session_id": claude_session, "at": old_at}),
+            ),
+            (
+                inbox.join("heartbeat.json"),
+                json!({"schema": 1, "generation": 1, "session_id": claude_session, "at": old_at}),
+            ),
+            (
+                inbox
+                    .join("sessions")
+                    .join(format!("{}.json", claude_session)),
+                json!({"schema": 1, "generation": 1, "session_id": claude_session, "at": old_at}),
+            ),
+            (
+                inbox.join("claimed/old-interaction.json"),
+                json!({"schema": 1, "generation": 1, "interaction_id": "old-interaction", "at": old_at}),
+            ),
+            (
+                inbox.join("queued/old-interaction.json"),
+                json!({"schema": 1, "generation": 1, "interaction_id": "old-interaction", "at": old_at}),
+            ),
+        ] {
+            std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+        }
+        [
+            previous.mod_dir().join("launch.json"),
+            previous.mod_dir().join("hooks/register.ts"),
+            inbox.join("ready.json"),
+            inbox.join("heartbeat.json"),
+            inbox
+                .join("sessions")
+                .join(format!("{}.json", claude_session)),
+            inbox.join("claimed/old-interaction.json"),
+            inbox.join("queued/old-interaction.json"),
+        ]
+        .into_iter()
+        .map(|path| (path.clone(), std::fs::read(path).unwrap()))
+        .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let config = {
         let agents = state.agents.lock().await;
         let receiver = agents.get("receiver").unwrap();
@@ -41,6 +153,15 @@ async fn claude_mod_surface_settlement(
         config.resume_session = Some(claude_session.into());
         config.clone()
     };
+    let highest_existing =
+        ClaudeModLaunchPlan::highest_existing_generation(home.path(), "receiver")
+            .expect("inspect only the isolated test home");
+    let predicted_generation = state
+        .terminal_sessions
+        .next_runtime_generation_after("receiver", highest_existing)
+        .await
+        .expect("predict launch generation after existing delivery folders");
+    assert_eq!(predicted_generation, if simulate_restart { 2 } else { 1 });
     let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(8);
     install_test_terminal_runtime(&state, "receiver", input_tx).await;
     let runtime_generation = state
@@ -49,8 +170,9 @@ async fn claude_mod_surface_settlement(
         .await
         .unwrap()
         .runtime_generation;
+    assert_eq!(runtime_generation, predicted_generation);
     // Deliberately diverge counters: the inbox belongs to the terminal runtime.
-    for _ in 0..2 {
+    for _ in 0..3 {
         state
             .interactions
             .start_provider_input_generation("receiver", ProviderInputReadiness::Ready, None)
@@ -72,13 +194,20 @@ async fn claude_mod_surface_settlement(
     write_record(
         inbox.join("ready.json"),
         json!({"schema": 1, "generation": runtime_generation,
-            "session_id": claude_session, "mod_version": "0.1.0", "at": at}),
+            "session_id": claude_session, "mod_version": "0.1.0",
+            "supports_as_user": true, "at": at}),
     );
     write_record(
         inbox.join("heartbeat.json"),
         json!({"schema": 1, "generation": runtime_generation,
             "session_id": claude_session, "at": at}),
     );
+    if simulate_restart {
+        let heartbeat: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(inbox.join("heartbeat.json")).unwrap()).unwrap();
+        assert_eq!(heartbeat["generation"], 2);
+        assert!(heartbeat["at"].as_i64().unwrap() > 1);
+    }
     let admitted = task(&state).await;
     let claim = state
         .interactions
@@ -91,9 +220,25 @@ async fn claude_mod_surface_settlement(
     let mut request = crate::delivery::LiveSurfacePromptRequest::message("receiver", &context);
     request.interaction_id = Some(claim.record.id.clone());
     request.delivery_message_id = Some(claim.record.id.clone());
-    request.origin = Some(origin("sender"));
-    request.runtime_state = "agent_messaging_task";
+    request.origin = (!composer).then(|| origin("sender"));
+    request.runtime_state = if composer {
+        "live_pty_available"
+    } else {
+        "agent_messaging_task"
+    };
+    request.chat_composer = composer;
     request.require_provider_turn_receipt = true;
+    let submitted_prompt = if composer {
+        "Inspect the notes.".to_string()
+    } else {
+        context.clone()
+    };
+    request.prompt = submitted_prompt.clone();
+    if composer {
+        assert!(crate::delivery::claude_mod::is_composer_delivery(
+            "claude", &request
+        ));
+    }
 
     let producer = async {
         // The real mod can only claim a delivery after the app publishes it.
@@ -119,7 +264,22 @@ async fn claude_mod_surface_settlement(
         assert_eq!(pending["schema"], 1);
         assert_eq!(pending["interaction_id"], claim.record.id);
         assert_eq!(pending["runtime_generation"], runtime_generation);
-        assert_eq!(pending["text"], context);
+        assert_eq!(pending["as_user"].as_bool().unwrap_or(false), composer);
+        if composer {
+            let record = wardian_core::db::native_delivery(&claim.record.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                pending["text"],
+                format!(
+                    "{}\n{}",
+                    record.envelope.transcript_header(),
+                    submitted_prompt
+                )
+            );
+        } else {
+            assert_eq!(pending["text"], context);
+        }
         assert_eq!(owner(&claim.record.id), "dispatching");
         let mut record = json!({"schema": 1, "generation": runtime_generation,
             "interaction_id": claim.record.id, "session_id": claude_session,
@@ -226,6 +386,9 @@ async fn claude_mod_surface_settlement(
             input_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
+        for (path, original) in &old_generation_records {
+            assert_eq!(std::fs::read(path).unwrap(), *original, "{path:?} changed");
+        }
         return;
     }
     native::settle(&state, &claim, settlement).await.unwrap();
@@ -242,6 +405,7 @@ async fn claude_mod_surface_settlement(
         .unwrap();
     assert_eq!(native_record.envelope.generation, runtime_generation);
     assert_eq!(native_record.transport, "claude_mod");
+    assert_eq!(native_record.claude_mod_as_user, composer);
     assert_eq!(
         native_record.phase,
         if dropped {
@@ -253,8 +417,17 @@ async fn claude_mod_surface_settlement(
     if !dropped {
         // Simulate the transcript observer's native receipt after validating the
         // exact plugin row. App transcript-file discovery is outside this test.
+        let row_text = if composer {
+            format!(
+                "The wardian plugin sent a message:\n{}\n{}",
+                native_record.envelope.transcript_header(),
+                submitted_prompt
+            )
+        } else {
+            format!("The wardian plugin sent a message:\n{context}")
+        };
         let row = json!({"type": "user", "sessionId": claude_session,
-            "message": {"role": "user", "content": format!("The wardian plugin sent a message:\n{context}")}});
+            "message": {"role": "user", "content": row_text}});
         assert!(wardian_core::claude_mod::transcript_row_matches(
             &row,
             claude_session,
@@ -270,16 +443,19 @@ async fn claude_mod_surface_settlement(
         input_rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
+    for (path, original) in &old_generation_records {
+        assert_eq!(std::fs::read(path).unwrap(), *original, "{path:?} changed");
+    }
 }
 
 #[tokio::test]
 async fn claude_mod_surface_queued_is_canonically_accepted_until_transcript_receipt() {
-    claude_mod_surface_settlement(false, None).await;
+    claude_mod_surface_settlement(false, None, false, false).await;
 }
 
 #[tokio::test]
 async fn claude_mod_surface_dropped_is_canonically_failed_without_pty_input() {
-    claude_mod_surface_settlement(true, None).await;
+    claude_mod_surface_settlement(true, None, false, false).await;
 }
 
 #[tokio::test]
@@ -287,6 +463,8 @@ async fn claude_mod_surface_transcript_before_accepted_settlement_remains_visibl
     claude_mod_surface_settlement(
         false,
         Some(wardian_core::native_transport::NativeDeliveryPhase::TurnStarted),
+        false,
+        false,
     )
     .await;
 }
@@ -296,8 +474,20 @@ async fn claude_mod_surface_late_drop_before_accepted_settlement_remains_failed(
     claude_mod_surface_settlement(
         false,
         Some(wardian_core::native_transport::NativeDeliveryPhase::Failed),
+        false,
+        false,
     )
     .await;
+}
+
+#[tokio::test]
+async fn claude_mod_delivery_after_restart_preserves_old_generation_records() {
+    claude_mod_surface_settlement(false, None, true, false).await;
+}
+
+#[tokio::test]
+async fn claude_composer_submit_after_restart_uses_fresh_mod_generation() {
+    claude_mod_surface_settlement(false, None, true, true).await;
 }
 
 #[tokio::test]

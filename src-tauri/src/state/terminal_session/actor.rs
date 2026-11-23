@@ -831,17 +831,25 @@ impl TerminalSessionBroker {
         &self,
         session_id: &str,
     ) -> Result<u64, TerminalBrokerError> {
+        self.next_runtime_generation_after(session_id, 0).await
+    }
+
+    /// Raise this process's generation floor before predicting the next runtime.
+    ///
+    /// The session lifecycle boundary must remain held until the runtime is
+    /// registered so the predicted value stays aligned with allocation.
+    pub async fn next_runtime_generation_after(
+        &self,
+        session_id: &str,
+        existing_generation: u64,
+    ) -> Result<u64, TerminalBrokerError> {
         validate_id(session_id, "session_id")?;
-        self.runtime_generation_tombstones
-            .read()
-            .await
-            .get(session_id)
-            .copied()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| {
-                TerminalBrokerError::RuntimeIo("terminal runtime generation exhausted".to_string())
-            })
+        let mut generations = self.runtime_generation_tombstones.write().await;
+        let last_generation = generations.entry(session_id.to_string()).or_default();
+        *last_generation = (*last_generation).max(existing_generation);
+        last_generation.checked_add(1).ok_or_else(|| {
+            TerminalBrokerError::RuntimeIo("terminal runtime generation exhausted".to_string())
+        })
     }
 
     pub async fn start_or_replace_runtime(

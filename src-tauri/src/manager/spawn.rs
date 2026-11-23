@@ -2978,9 +2978,17 @@ async fn spawn_agent_inner(
     // The lifecycle lease keeps this prediction stable until broker registration.
     // Provider-input generations are independent and must not name mod assets.
     let claude_mod_generation = if config.provider == "claude" {
+        let home = crate::utils::fs::get_wardian_home()
+            .ok_or_else(|| "Failed to determine Claude delivery generation home".to_string())?;
+        let existing_generation =
+            wardian_core::claude_mod::ClaudeModLaunchPlan::highest_existing_generation(
+                &home,
+                &config.session_id,
+            )
+            .map_err(|error| format!("Failed to inspect Claude delivery generations: {error}"))?;
         let runtime_generation = app_state
             .terminal_sessions
-            .next_runtime_generation(&config.session_id)
+            .next_runtime_generation_after(&config.session_id, existing_generation)
             .await
             .map_err(|error| format!("Failed to determine Claude runtime generation: {error}"))?;
         match crate::delivery::claude_mod::materialize_launch(&config, runtime_generation).and_then(
