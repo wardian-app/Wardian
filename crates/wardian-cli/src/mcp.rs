@@ -98,6 +98,7 @@ struct AdmittedCall {
     name: String,
     arguments: Value,
     idempotency_key: String,
+    provider_thread_id: Option<String>,
 }
 
 // Counts executing and queued calls; channel occupancy alone depends on scheduling.
@@ -140,7 +141,13 @@ struct ReservedCall {
 
 impl AdmittedCall {
     fn execute(self, backend: &mut impl messaging::Backend) -> Value {
-        let result = messaging::call(&self.name, self.arguments, &self.idempotency_key, backend);
+        let result = messaging::call(
+            &self.name,
+            self.arguments,
+            &self.idempotency_key,
+            self.provider_thread_id,
+            backend,
+        );
         json!({"jsonrpc":"2.0","id":self.id,"result":result})
     }
 
@@ -701,6 +708,12 @@ impl Session {
                         "Unknown tool or invalid tools/call params",
                     )));
                 }
+                let provider_thread_id = match provider_thread_id(&params) {
+                    Ok(thread_id) => thread_id,
+                    Err(message) => {
+                        return Admission::Immediate(Some(error(id, -32602, message)));
+                    }
+                };
                 let call_id = id.to_string(); // String and numeric IDs remain distinct.
                 if self.calls.contains(&call_id) {
                     return Admission::Immediate(Some(error(id, -32600, "Call ID reused; no operation was dispatched. Do not replay uncertain delivery")));
@@ -724,6 +737,7 @@ impl Session {
                         .cloned()
                         .unwrap_or_else(|| json!({})),
                     idempotency_key: format!("{}:{call_id}", self.admission_namespace),
+                    provider_thread_id,
                 });
             }
             _ => return Admission::Immediate(Some(error(id, -32601, "Method not found"))),
@@ -735,6 +749,43 @@ impl Session {
 enum Admission {
     Immediate(Option<Value>),
     Call(AdmittedCall),
+}
+
+/// Resolve per-call Codex provenance before any backend work, without ambient fallback.
+fn provider_thread_id(params: &Value) -> Result<Option<String>, &'static str> {
+    let Some(meta) = params.get("_meta") else {
+        return Ok(None);
+    };
+    let meta = meta.as_object().ok_or("Invalid tools/call metadata")?;
+    let direct = metadata_thread_id(meta.get("threadId"))?;
+    let nested = match meta.get("x-codex-turn-metadata") {
+        Some(turn) => metadata_thread_id(
+            turn.as_object()
+                .ok_or("Invalid Codex turn metadata")?
+                .get("thread_id"),
+        )?,
+        None => None,
+    };
+    if direct.zip(nested).is_some_and(|(a, b)| a != b) {
+        return Err("Inconsistent Codex thread metadata; no operation was dispatched");
+    }
+    Ok(direct.or(nested).map(str::to_owned))
+}
+
+fn metadata_thread_id(value: Option<&Value>) -> Result<Option<&str>, &'static str> {
+    match value {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 256
+                    && *id == id.trim()
+                    && !id.chars().any(char::is_control)
+            })
+            .map(Some)
+            .ok_or("Invalid Codex thread ID; no operation was dispatched"),
+    }
 }
 
 fn error(id: Value, code: i32, message: &str) -> Value {

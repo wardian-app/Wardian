@@ -9,6 +9,9 @@ use wardian_core::agent_messaging::{
     AgentMessagingError, AgentMessagingRequest as Request, AgentMessagingResponse as Response,
 };
 use wardian_core::db::agent_messaging as store;
+#[cfg(test)]
+mod caller_thread_tests;
+mod caller_threads;
 mod controller;
 mod native;
 pub(super) use controller::handle as handle_controller;
@@ -83,7 +86,10 @@ async fn handle_in_state(
     request: Request,
     origin: MessageOrigin,
 ) -> Result<Response, ControlError> {
-    let MessageOrigin::WardianAgent { session_id: sender } = origin;
+    let MessageOrigin::WardianAgent {
+        session_id: sender,
+        provider_thread_id,
+    } = origin;
     authenticate(state, &sender).await?;
     match request {
         Request::ListAgents => {
@@ -110,6 +116,11 @@ async fn handle_in_state(
             message,
             idempotency_key,
         } => {
+            if let Some(response) = caller_threads::route_child_progress(
+                app, state, &sender, provider_thread_id.as_deref(), &target, &message, idempotency_key.as_deref(),
+            ).await? {
+                return Ok(response);
+            }
             admit(
                 app,
                 state,
@@ -146,6 +157,11 @@ async fn handle_in_state(
             status,
             message,
         } => {
+            if let Some(response) = caller_threads::reply(
+                app, state, &sender, provider_thread_id.as_deref(), &request_id, status.clone(), &message,
+            ).await? {
+                return Ok(response);
+            }
             let replied = state
                 .interactions
                 .reply_agent_message(&sender, &request_id, status, &message)
@@ -623,11 +639,12 @@ pub(super) async fn dispatch_pending_wakeable_information(
                     queue_policy: QueuePolicy::LiveOnly,
                     approval_action: None,
                     chat_composer: false,
-                    origin: claim
-                        .record
-                        .sender_session_id
-                        .clone()
-                        .map(|session_id| MessageOrigin::WardianAgent { session_id }),
+                    origin: claim.record.sender_session_id.clone().map(|session_id| {
+                        MessageOrigin::WardianAgent {
+                            session_id,
+                            provider_thread_id: None,
+                        }
+                    }),
                     write_fence: Some(
                         crate::utils::delivery_transaction::AutomatedInputWriteFence {
                             provider: info.provider.clone(),
@@ -985,11 +1002,12 @@ pub(super) async fn dispatch_pending_reply_continuations(
                     queue_policy: QueuePolicy::LiveOnly,
                     approval_action: None,
                     chat_composer: false,
-                    origin: claim
-                        .record
-                        .sender_session_id
-                        .clone()
-                        .map(|session_id| MessageOrigin::WardianAgent { session_id }),
+                    origin: claim.record.sender_session_id.clone().map(|session_id| {
+                        MessageOrigin::WardianAgent {
+                            session_id,
+                            provider_thread_id: None,
+                        }
+                    }),
                     write_fence: Some(
                         crate::utils::delivery_transaction::AutomatedInputWriteFence {
                             provider: info.provider.clone(),
@@ -1123,28 +1141,7 @@ async fn admit(
         task,
     } = input;
     store::validate_message(message).map_err(control_error)?;
-    let resolved = if target.starts_with("controller:") {
-        if task {
-            return Err(ControlError::coded(
-                "invalid_target",
-                "Controllers are receive-only mailboxes, never task workers.",
-            ));
-        }
-        wardian_core::controllers::ControllerStore::current()
-            .and_then(|store| store.authorize_mailbox_sender(target, sender))
-            .map_err(|_| {
-                ControlError::coded(
-                    "forbidden",
-                    "Controller mailbox does not accept information from this sender.",
-                )
-            })?;
-        ResolvedRecipient {
-            id: target.into(),
-            provider: WorkerProviderClassification::Unknown,
-        }
-    } else {
-        resolve_exact(state, target).await?
-    };
+    let resolved = resolve_message_recipient(state, sender, target, task).await?;
     let recipient = resolved.id;
     // New Session/clear operations use this same per-agent lifecycle gate.
     // Hold it from the durable identity snapshot through canonical admission.
@@ -1224,6 +1221,38 @@ async fn admit(
             delivery_state: admitted.delivery_state,
             duplicate: admitted.duplicate,
         })
+    }
+}
+
+// Child progress changes the destination, while retaining ordinary exact-target
+// validation and controller authorization before any canonical admission.
+async fn resolve_message_recipient(
+    state: &AppState,
+    sender: &str,
+    target: &str,
+    task: bool,
+) -> Result<ResolvedRecipient, ControlError> {
+    if target.starts_with("controller:") {
+        if task {
+            return Err(ControlError::coded(
+                "invalid_target",
+                "Controllers are receive-only mailboxes, never task workers.",
+            ));
+        }
+        wardian_core::controllers::ControllerStore::current()
+            .and_then(|store| store.authorize_mailbox_sender(target, sender))
+            .map_err(|_| {
+                ControlError::coded(
+                    "forbidden",
+                    "Controller mailbox does not accept information from this sender.",
+                )
+            })?;
+        Ok(ResolvedRecipient {
+            id: target.into(),
+            provider: WorkerProviderClassification::Unknown,
+        })
+    } else {
+        resolve_exact(state, target).await
     }
 }
 
@@ -1749,11 +1778,12 @@ async fn dispatch_one_with_request(
             queue_policy: QueuePolicy::LiveOnly,
             approval_action: None,
             chat_composer: false,
-            origin: claim
-                .record
-                .sender_session_id
-                .clone()
-                .map(|session_id| MessageOrigin::WardianAgent { session_id }),
+            origin: claim.record.sender_session_id.clone().map(|session_id| {
+                MessageOrigin::WardianAgent {
+                    session_id,
+                    provider_thread_id: None,
+                }
+            }),
             write_fence: None,
             runtime_state: "agent_messaging_task",
             mark_prompt_started: true,
@@ -1951,11 +1981,15 @@ async fn dispatch_background_task(
     delivery.and(information)?;
     if let Ok(result) = result {
         record_headless_message_response(state, &current, &claim.record.id, &result.response).await;
-        let origin = claim
-            .record
-            .sender_session_id
-            .clone()
-            .map(|session_id| MessageOrigin::WardianAgent { session_id });
+        let origin =
+            claim
+                .record
+                .sender_session_id
+                .clone()
+                .map(|session_id| MessageOrigin::WardianAgent {
+                    session_id,
+                    provider_thread_id: None,
+                });
         record_headless_message_exchange(
             state,
             &current,
@@ -2133,6 +2167,8 @@ fn control_error(error: AgentMessagingError) -> ControlError {
         "idempotency_conflict" => "idempotency_conflict",
         "invalid_idempotency_key" => "invalid_idempotency_key",
         "conflicting_reply" => "conflicting_reply",
+        "invalid_thread_provenance" => "invalid_thread_provenance",
+        "task_thread_unavailable" => "task_thread_unavailable",
         "stale_claim" => "stale_claim",
         _ => "storage_error",
     };

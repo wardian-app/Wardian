@@ -11,12 +11,20 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 fn run_cli(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_wardian-cli"))
+    run_cli_with_thread(home, args, None)
+}
+
+fn run_cli_with_thread(home: &Path, args: &[&str], thread_id: Option<&str>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wardian-cli"));
+    command
         .args(args)
         .env("WARDIAN_HOME", home)
-        .env("WARDIAN_SESSION_ID", "managed-sender")
-        .output()
-        .unwrap()
+        .env("WARDIAN_SESSION_ID", "managed-sender");
+    match thread_id {
+        Some(thread_id) => command.env("CODEX_THREAD_ID", thread_id),
+        None => command.env_remove("CODEX_THREAD_ID"),
+    };
+    command.output().unwrap()
 }
 
 async fn serve_stream(
@@ -114,6 +122,49 @@ fn spawn_endpoint(home: &Path, response: Option<&'static str>) -> thread::JoinHa
         .recv_timeout(Duration::from_secs(5))
         .expect("synthetic endpoint must start");
     server
+}
+
+#[test]
+fn cli_shell_thread_provenance_reaches_control_without_changing_legacy_origin() {
+    for thread_id in [Some("root-thread"), Some("child-thread"), None] {
+        let home = TempDir::new().unwrap();
+        let server = spawn_endpoint(
+            home.path(),
+            Some(
+                r#"{"operation":"reply","request_id":"canonical-task","interaction_id":"canonical-reply","delivery_state":"pending","duplicate":false}"#,
+            ),
+        );
+        let output = run_cli_with_thread(
+            home.path(),
+            &[
+                "message",
+                "reply",
+                "canonical-task",
+                "result",
+                "--status",
+                "done",
+            ],
+            thread_id,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let wire = server.join().unwrap();
+        let expected_origin = wardian_core::control::MessageOrigin::WardianAgent {
+            session_id: "managed-sender".into(),
+            provider_thread_id: thread_id.map(str::to_owned),
+        };
+        assert_eq!(
+            wire["origin"],
+            serde_json::to_value(expected_origin).unwrap()
+        );
+        assert_eq!(wire["request"]["request_id"], "canonical-task");
+        if thread_id.is_none() {
+            assert!(wire["origin"].get("provider_thread_id").is_none());
+        }
+    }
 }
 
 #[test]

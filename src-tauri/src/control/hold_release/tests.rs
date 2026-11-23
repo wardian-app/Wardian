@@ -81,6 +81,7 @@ async fn attested_release_audits_exact_historical_hold_and_preserves_config_hist
     let before = serde_json::to_value(&*config.lock().unwrap()).unwrap();
     let actor = MessageOrigin::WardianAgent {
         session_id: "managed-actor".into(),
+        provider_thread_id: None,
     };
     let response = release_for_state(
         &state,

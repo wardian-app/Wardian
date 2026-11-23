@@ -26,6 +26,7 @@ use super::opencode_http::{
 use crate::providers::{CodexProvider, PiProvider, ProviderFactory};
 
 mod codex;
+pub(crate) use codex::shared_error as codex_shared_error;
 pub(crate) use codex::CapturedCodexStop;
 
 #[cfg(test)]

@@ -790,6 +790,7 @@ fn wakeable_information_recovers_same_conversation_and_fences_replaced_session()
 fn origin(id: &str) -> MessageOrigin {
     MessageOrigin::WardianAgent {
         session_id: id.into(),
+        provider_thread_id: None,
     }
 }
 

@@ -325,7 +325,7 @@ async fn submit_live_surface_prompt_inner(
         Some(id) => id,
         None => {
             let sender_session_id = request.origin.as_ref().map(|origin| match origin {
-                MessageOrigin::WardianAgent { session_id } => session_id.clone(),
+                MessageOrigin::WardianAgent { session_id, .. } => session_id.clone(),
             });
             state
                 .interactions

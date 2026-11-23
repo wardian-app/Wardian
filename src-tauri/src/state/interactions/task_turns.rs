@@ -37,6 +37,20 @@ impl InteractionState {
         Ok(binding)
     }
 
+    /// Preserve the exact claim's owned root before its input is submitted.
+    /// Turn acknowledgement and automatic receipt validation remain separate.
+    pub(crate) async fn prepare_agent_codex_task_root(
+        &self,
+        claim: &store::TaskClaim,
+        recipient: &str,
+        root: &str,
+    ) -> Result<(), AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        self.validate_task_turn_generation(recipient, claim.generation)
+            .await?;
+        store::with_db(|conn| store::prepare_codex_task_root(conn, claim, root))
+    }
+
     async fn validate_task_turn_generation(
         &self,
         recipient: &str,

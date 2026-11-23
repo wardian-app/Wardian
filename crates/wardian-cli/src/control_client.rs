@@ -69,20 +69,36 @@ pub fn build_runtime() -> io::Result<tokio::runtime::Runtime> {
 
 /// Require the authenticated sender identity from the managed session environment.
 pub fn require_current_message_origin() -> io::Result<MessageOrigin> {
-    current_message_origin().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "WARDIAN_SESSION_ID environment variable is not set",
-        )
-    })
+    require_message_origin(current_provider_thread_id())
 }
 
-fn current_message_origin() -> Option<MessageOrigin> {
+/// Build an origin with explicit caller provenance, including an intentional absence.
+/// MCP callers must not inherit the shared server process's provider thread.
+pub(crate) fn require_message_origin(
+    provider_thread_id: Option<String>,
+) -> io::Result<MessageOrigin> {
     std::env::var("WARDIAN_SESSION_ID")
         .ok()
         .map(|session_id| session_id.trim().to_string())
         .filter(|session_id| !session_id.is_empty())
-        .map(|session_id| MessageOrigin::WardianAgent { session_id })
+        .map(|session_id| MessageOrigin::WardianAgent {
+            session_id,
+            provider_thread_id,
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "WARDIAN_SESSION_ID environment variable is not set",
+            )
+        })
+}
+
+/// Read native thread provenance for an ordinary CLI invocation.
+pub(crate) fn current_provider_thread_id() -> Option<String> {
+    std::env::var("CODEX_THREAD_ID")
+        .ok()
+        .map(|thread_id| thread_id.trim().to_string())
+        .filter(|thread_id| !thread_id.is_empty())
 }
 
 /// Send one control request over the platform endpoint.

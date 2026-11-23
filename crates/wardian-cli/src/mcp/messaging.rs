@@ -9,7 +9,11 @@ pub(super) trait Backend: Send + 'static {
         false
     }
     fn require_sender(&self) -> io::Result<()>;
-    fn invoke(&mut self, request: AgentMessagingRequest) -> io::Result<Value>;
+    fn invoke(
+        &mut self,
+        request: AgentMessagingRequest,
+        provider_thread_id: Option<String>,
+    ) -> io::Result<Value>;
     fn identity_failure(&self) -> Value {
         failure(
             "missing_managed_sender",
@@ -22,11 +26,16 @@ pub(super) struct Live;
 
 impl Backend for Live {
     fn require_sender(&self) -> io::Result<()> {
-        control_client::require_current_message_origin().map(|_| ())
+        control_client::require_message_origin(None).map(|_| ())
     }
 
-    fn invoke(&mut self, request: AgentMessagingRequest) -> io::Result<Value> {
-        control_client::messaging::request(request)
+    fn invoke(
+        &mut self,
+        request: AgentMessagingRequest,
+        provider_thread_id: Option<String>,
+    ) -> io::Result<Value> {
+        let origin = control_client::require_message_origin(provider_thread_id)?;
+        control_client::messaging::request_with_origin(request, origin)
     }
 }
 
@@ -75,6 +84,7 @@ pub(super) fn call(
     name: &str,
     arguments: Value,
     idempotency_key: &str,
+    provider_thread_id: Option<String>,
     backend: &mut impl Backend,
 ) -> Value {
     let request = match parse(name, arguments, idempotency_key, backend.controller_mode()) {
@@ -88,7 +98,7 @@ pub(super) fn call(
         AgentMessagingRequest::Reply { request_id, .. } => Some(request_id.clone()),
         _ => None,
     };
-    match backend.invoke(request) {
+    match backend.invoke(request, provider_thread_id) {
         Ok(value) if value.is_object() => {
             let failed = value.get("error").is_some() || value.get("ok") == Some(&Value::Bool(false));
             if !failed && (value["operation"] != name
@@ -298,7 +308,11 @@ impl Backend for ControllerLive {
             .authenticate_token_for_resource(self.token.expose(), &self.resource)
             .map(|_| ())
     }
-    fn invoke(&mut self, mut request: AgentMessagingRequest) -> io::Result<Value> {
+    fn invoke(
+        &mut self,
+        mut request: AgentMessagingRequest,
+        _provider_thread_id: Option<String>,
+    ) -> io::Result<Value> {
         match &mut request {
             AgentMessagingRequest::SendMessage {
                 idempotency_key, ..

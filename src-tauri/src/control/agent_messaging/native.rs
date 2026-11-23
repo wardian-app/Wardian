@@ -10,6 +10,7 @@ use wardian_core::native_transport::{NativeDeliveryErrorCode, NativeDeliveryPhas
 mod completion;
 use completion::{
     bind_codex_task, observe_codex_task, publish_completion, spawn_codex_task_completion,
+    submit_codex_task,
 };
 
 pub(super) fn spawn_information(app: &AppHandle, recipient: &str) {
@@ -464,10 +465,9 @@ pub(super) async fn dispatch_attached_task_with_request(
         {
             Ok(client) => {
                 let attempted = client.observations().borrow().activity();
-                match state
-                    .native_delivery
-                    .codex_followup(&info.uuid, generation, &claim.record.id, &context)
+                match submit_codex_task(&state.interactions, &client, &claim, &context)
                     .await
+                    .map_err(crate::delivery::native_broker::codex_shared_error)
                 {
                     Ok(receipt) => {
                         let binding = bind_codex_task(state, &claim, &receipt).await?;
@@ -855,11 +855,8 @@ pub(super) async fn dispatch_background(
                 message: error.to_string(),
                 provider_boundary_crossed: false,
             })?;
-            let mut receipt = state
-                .native_delivery
-                .codex_followup(&info.uuid, task.generation, &task.record.id, &context)
-                .await
-                .map_err(background_native_error)?;
+            let mut receipt =
+                submit_codex_task(&state.interactions, &client, &task, &context).await?;
             turn_owned = true;
             let binding = bind_codex_task(state, &task, &receipt)
                 .await

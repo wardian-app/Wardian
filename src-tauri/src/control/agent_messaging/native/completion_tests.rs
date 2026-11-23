@@ -105,6 +105,9 @@ impl Fixture {
             let mut agent = crate::control::tests::test_agent(id, id, "Test");
             agent.process_id = None;
             agent.config.lock().unwrap().provider = "codex".into();
+            if id == RECIPIENT {
+                agent.config.lock().unwrap().resume_session = Some(THREAD.into());
+            }
             *agent.current_status.lock().unwrap() = "Off".into();
             state.agents.lock().await.insert(id.into(), agent);
         }
@@ -170,6 +173,16 @@ impl Fixture {
         early: bool,
         receipted: bool,
     ) -> store::TaskTurnBinding {
+        self.task_with_options(turn, early, receipted, false).await
+    }
+
+    async fn task_with_options(
+        &mut self,
+        turn: &str,
+        early: bool,
+        receipted: bool,
+        reply_before_ack: bool,
+    ) -> store::TaskTurnBinding {
         let response = handle_in_state(
             None,
             &self.state,
@@ -226,6 +239,41 @@ impl Fixture {
                     }}))
                     .await;
             }
+            if reply_before_ack {
+                assert!(store::with_db(store::pending_task_turn_bindings)
+                    .unwrap()
+                    .is_empty());
+                for (thread, body) in [
+                    ("fork-thread", "child result"),
+                    (THREAD, "root reply before acknowledgement"),
+                ] {
+                    let reply = handle_in_state(
+                        None,
+                        &self.state,
+                        Request::Reply {
+                            request_id: request_id.clone(),
+                            status: ReplyStatus::Done,
+                            message: body.into(),
+                        },
+                        MessageOrigin::WardianAgent {
+                            session_id: RECIPIENT.into(),
+                            provider_thread_id: Some(thread.into()),
+                        },
+                    )
+                    .await;
+                    if thread == THREAD {
+                        assert!(matches!(reply.unwrap(), Response::Reply { .. }));
+                    } else {
+                        assert_eq!(reply.err().unwrap().code, "foreign_provider_thread");
+                        assert!(self
+                            .state
+                            .interactions
+                            .structured_reply(&request_id)
+                            .await
+                            .is_none());
+                    }
+                }
+            }
             if early {
                 // Both events precede the RPC response in the reader's stream.
                 self.peer.complete(THREAD, turn, FINAL).await;
@@ -240,7 +288,10 @@ impl Fixture {
                 .send(json!({"id":request["id"],"result":{"turn":{"id":turn}}}))
                 .await;
         };
-        let (receipt, ()) = tokio::join!(self.client.followup(&request_id, &context), provider);
+        let (receipt, ()) = tokio::join!(
+            submit_codex_task(&self.state.interactions, &self.client, &claim, &context),
+            provider,
+        );
         let receipt = receipt.expect("exact task acknowledgement");
         assert_eq!(receipt.admission_mode.as_deref(), Some("start"));
         let binding = bind_codex_task(&self.state, &claim, &receipt)
@@ -421,6 +472,74 @@ fn assert_reply(page: &AgentMessagePage, request: &str, status: ReplyStatus, bod
         count, 1,
         "one durable result, not just one projected message"
     );
+}
+
+#[tokio::test]
+async fn root_reply_before_provider_ack_keeps_precedence_and_fork_has_no_authority() {
+    scenario(|fixture| {
+        Box::pin(async move {
+            let binding = fixture
+                .task_with_options("early-explicit", true, true, true)
+                .await;
+            let (reply, _) =
+                observe_codex_task(&fixture.state.interactions, &fixture.client, &binding, WAIT)
+                    .await
+                    .unwrap();
+            assert!(reply.is_none());
+            let page = receive(&fixture.state, REQUESTER, 0, None, None)
+                .await
+                .unwrap();
+            assert_reply(
+                &page,
+                &binding.request_id,
+                ReplyStatus::Done,
+                "root reply before acknowledgement",
+            );
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn forked_thread_cannot_reuse_parent_input_or_finish_parent_task() {
+    scenario(|fixture| {
+        Box::pin(async move {
+            let binding = fixture.task("parent-turn", false).await;
+            let observer = observe_codex_task(
+                &fixture.state.interactions,
+                &fixture.client,
+                &binding,
+                WAIT,
+            );
+            tokio::pin!(observer);
+            assert_pending(observer.as_mut()).await;
+
+            // Native forks share the Wardian agent and runtime generation, but
+            // their own thread cannot borrow even copied parent input/turn IDs.
+            fixture.peer.send(json!({"method":"item/completed","params":{
+                "threadId":"fork-thread","turnId":"parent-turn","item":{
+                    "type":"userMessage","id":format!("input-{}", binding.request_id),
+                    "clientId":binding.request_id,"content":[{"type":"text","text":"literal task λ\r\n"}]
+                }
+            }})).await;
+            fixture.peer.complete("fork-thread", "parent-turn", "helper finished").await;
+            fixture.peer.barrier(&fixture.client).await;
+            assert_pending(observer.as_mut()).await;
+            assert!(fixture.state.interactions.structured_reply(&binding.request_id).await.is_none());
+            assert_eq!(
+                store::with_db(|conn| store::load(conn, &binding.request_id)).unwrap().status,
+                InteractionStatus::AwaitingReply
+            );
+            assert!(receive(&fixture.state, REQUESTER, 0, None, None).await.unwrap().messages.is_empty());
+
+            fixture.peer.complete(THREAD, "parent-turn", FINAL).await;
+            let (reply, answer) = observer.await.unwrap();
+            assert_eq!(answer, FINAL);
+            assert!(reply.is_some());
+            let page = receive(&fixture.state, REQUESTER, 0, None, None).await.unwrap();
+            assert_reply(&page, &binding.request_id, ReplyStatus::Done, FINAL);
+        })
+    }).await;
 }
 
 #[tokio::test]

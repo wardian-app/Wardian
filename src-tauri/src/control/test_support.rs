@@ -45,7 +45,7 @@ pub(super) async fn record_conversation_delivery(
         .unwrap_or_default()
         .conversation_logging;
     let sender_agent_id =
-        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.as_str());
+        origin.map(|MessageOrigin::WardianAgent { session_id, .. }| session_id.as_str());
     let target_settings = {
         let agents = state.agents.lock().await;
         delivery

@@ -33,7 +33,7 @@ pub(super) async fn deliver_message_to_target_with_delivery_options(
     validate_send_message_options(target, thread, input_mode)?;
     let sender_session_id = origin
         .as_ref()
-        .map(|MessageOrigin::WardianAgent { session_id }| session_id.as_str());
+        .map(|MessageOrigin::WardianAgent { session_id, .. }| session_id.as_str());
     let session_ids =
         resolve_send_targets_scoped(state, target, sender_session_id, scope_all).await;
     if session_ids.is_empty() {
@@ -73,7 +73,7 @@ pub(super) async fn deliver_message_to_target_with_delivery_options(
         )
         .await;
         let sender_session_id =
-            origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
+            origin.map(|MessageOrigin::WardianAgent { session_id, .. }| session_id.clone());
         let live_surface_available = state
             .terminal_sessions
             .broker_state(&info.uuid)

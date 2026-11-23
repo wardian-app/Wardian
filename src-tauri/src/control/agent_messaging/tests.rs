@@ -436,6 +436,7 @@ async fn automation_bound_uuid_survives_real_catalog_name_reassignment() {
 pub(super) fn origin(id: &str) -> MessageOrigin {
     MessageOrigin::WardianAgent {
         session_id: id.into(),
+        provider_thread_id: None,
     }
 }
 

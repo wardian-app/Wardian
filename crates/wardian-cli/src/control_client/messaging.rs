@@ -3,12 +3,20 @@ use super::{build_runtime, require_current_message_origin, send_request, Control
 use std::{io, time::Duration};
 use wardian_core::{
     agent_messaging::{AgentMessagingRequest, AgentMessagingResponse},
-    control::ControlRequest,
+    control::{ControlRequest, MessageOrigin},
 };
 
 /// Send exactly one authenticated messaging request with a hard transport bound.
 pub fn request(request: AgentMessagingRequest) -> io::Result<serde_json::Value> {
     let origin = require_current_message_origin()?;
+    request_with_origin(request, origin)
+}
+
+/// Send one request with caller provenance already resolved by the adapter.
+pub(crate) fn request_with_origin(
+    request: AgentMessagingRequest,
+    origin: MessageOrigin,
+) -> io::Result<serde_json::Value> {
     let expected = request.clone();
     let runtime = build_runtime()?;
     let value = runtime.block_on(async {
