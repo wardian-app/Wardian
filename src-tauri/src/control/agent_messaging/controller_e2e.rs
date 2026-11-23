@@ -56,6 +56,7 @@ async fn exchange<T: AsyncRead + AsyncWrite + Unpin>(stream: T, state: Arc<AppSt
                 },
                 MessageOrigin::WardianAgent {
                     session_id: WORKER.into(),
+                    provider_thread_id: None,
                 },
             )
             .await

@@ -376,7 +376,23 @@ pub enum ControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageOrigin {
-    WardianAgent { session_id: String },
+    WardianAgent {
+        session_id: String,
+        /// Optional native caller thread. Legacy clients omit this; a provider
+        /// session ID can be shared by a root and its forks and is insufficient.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_thread_id: Option<String>,
+    },
+}
+
+impl MessageOrigin {
+    /// Construct an agent origin for operations without native caller provenance.
+    pub fn wardian_agent(session_id: impl Into<String>) -> Self {
+        Self::WardianAgent {
+            session_id: session_id.into(),
+            provider_thread_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1242,6 +1258,7 @@ mod tests {
             addressed_comment_ids: vec!["comment-1".to_string(), "comment-2".to_string()],
             origin: MessageOrigin::WardianAgent {
                 session_id: "session-1".to_string(),
+                provider_thread_id: None,
             },
         };
 
@@ -1269,6 +1286,7 @@ mod tests {
             },
             origin: MessageOrigin::WardianAgent {
                 session_id: "session-1".to_string(),
+                provider_thread_id: None,
             },
         };
 
@@ -1428,6 +1446,7 @@ mod tests {
             None,
             Some(MessageOrigin::WardianAgent {
                 session_id: "managed-actor".into(),
+                provider_thread_id: None,
             }),
         ] {
             let mut with_origin = value.clone();

@@ -573,7 +573,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             addressed_comment_ids,
             origin,
         } => {
-            let MessageOrigin::WardianAgent { session_id } = origin;
+            let MessageOrigin::WardianAgent { session_id, .. } = origin;
             let state = app.state::<AppState>();
             let config = {
                 let agents = state.agents.lock().await;
@@ -714,7 +714,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             notification,
             origin,
         } => {
-            let MessageOrigin::WardianAgent { session_id } = origin;
+            let MessageOrigin::WardianAgent { session_id, .. } = origin;
             validate_inbox_notification(&notification)?;
             let state = app.state::<AppState>();
             let _origin_lifecycle_guard = state.lock_agent_lifecycle(&session_id).await;
@@ -746,7 +746,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             timeout_ms,
             origin,
         } => {
-            let MessageOrigin::WardianAgent { session_id } = origin;
+            let MessageOrigin::WardianAgent { session_id, .. } = origin;
             let state = app.state::<AppState>();
             let timeout = Duration::from_millis(timeout_ms.unwrap_or(30 * 60 * 1000));
             let started = std::time::Instant::now();
@@ -1628,7 +1628,7 @@ async fn deliver_native_message(
         }
     }
     let sender_agent_id =
-        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
+        origin.map(|MessageOrigin::WardianAgent { session_id, .. }| session_id.clone());
     let options = orchestration.cloned().unwrap_or_default();
     let record = state
         .native_delivery
@@ -2128,7 +2128,7 @@ async fn record_headless_message_exchange(
 
     let context = headless_conversation_archive_context(info);
     let provider_session_id = context.provider_session_ids.first().cloned();
-    let sender_agent_id = origin.map(|MessageOrigin::WardianAgent { session_id }| session_id);
+    let sender_agent_id = origin.map(|MessageOrigin::WardianAgent { session_id, .. }| session_id);
     let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let source = Some("headless_process".to_string());
     let events = vec![
@@ -2244,7 +2244,7 @@ async fn message_with_origin(
         return message.to_string();
     }
 
-    let Some(MessageOrigin::WardianAgent { session_id }) = origin else {
+    let Some(MessageOrigin::WardianAgent { session_id, .. }) = origin else {
         return message.to_string();
     };
 
@@ -4256,9 +4256,7 @@ pub(crate) mod tests {
             &state,
             &delivery,
             "Review this change.",
-            Some(&MessageOrigin::WardianAgent {
-                session_id: "source-agent".to_string(),
-            }),
+            Some(&MessageOrigin::wardian_agent("source-agent")),
         )
         .await;
 
@@ -4387,9 +4385,7 @@ pub(crate) mod tests {
             .await
             .expect("delivery info")
             .remove(0);
-        let origin = MessageOrigin::WardianAgent {
-            session_id: "source-agent".to_string(),
-        };
+        let origin = MessageOrigin::wardian_agent("source-agent");
 
         record_headless_message_exchange(
             &state,

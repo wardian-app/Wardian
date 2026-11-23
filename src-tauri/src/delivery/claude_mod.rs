@@ -195,7 +195,7 @@ pub(crate) async fn try_deliver(
                     .unwrap_or_else(|| interaction_id.into()),
                 target_agent_id: request.session_id.clone(),
                 sender_agent_id: request.origin.as_ref().map(|origin| match origin {
-                    wardian_core::control::MessageOrigin::WardianAgent { session_id } => {
+                    wardian_core::control::MessageOrigin::WardianAgent { session_id, .. } => {
                         session_id.clone()
                     }
                 }),
@@ -768,6 +768,7 @@ mod tests {
         assert!(!is_peer_delivery("claude", &request));
         request.origin = Some(MessageOrigin::WardianAgent {
             session_id: "sender".into(),
+            provider_thread_id: None,
         });
         assert!(is_peer_delivery("claude", &request));
         assert!(!is_peer_delivery("pi", &request));

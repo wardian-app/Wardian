@@ -51,6 +51,30 @@ inherits the requester's durable provider conversation binding and is resumed
 through that same conversation when a safe continuation route is available.
 
 Only an assigned task with an explicit `request_id` may use MCP `reply`.
+For Codex callers, the optional `provider_thread_id` in the existing managed
+message origin distinguishes the assigned root thread from native helpers.
+MCP obtains it from `_meta.threadId` or
+`_meta["x-codex-turn-metadata"].thread_id`; an inconsistent pair is rejected
+before dispatch. The CLI obtains it from `CODEX_THREAD_ID`. Codex `sessionId`
+can be shared by a root and its fork and does not establish caller identity.
+
+A present thread must match the task's assigned native root and current
+runtime generation to settle explicitly. The scheduler records the root before
+submitting task input, so a root reply can precede turn acknowledgement.
+A fork, foreign thread, or stale
+generation receives an actionable error; its exact output is retained as
+labelled progress in the owning parent's conversation. Native child messages
+also go to that parent, using existing worker parentage for attribution,
+rather than appearing to the requester as the parent's own result.
+If the app is still identifying the current root, a send with thread
+provenance returns `provider_thread_unavailable` and can be retried when
+ready. Progress tied to a retired or unknown root remains in history.
+Older clients omit the field. A missing thread preserves legacy explicit
+settlement and records `thread_provenance_unavailable` on the task.
+Other providers retain their existing behavior. This prevents accidental
+mis-settlement by cooperating processes owned by the same user; it is not a
+security boundary against deliberately forged environment variables.
+
 An ordinary human chat message completes through the agent's assistant
 response. Its delivery interaction ID is not a task request ID. Informational
 peer messages automatically wake an idle recipient through the same durable

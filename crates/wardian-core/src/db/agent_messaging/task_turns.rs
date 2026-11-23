@@ -205,6 +205,17 @@ pub fn bind_task_turn(
             "Claim does not identify the canonical task recipient and provenance.",
         ));
     }
+    if let Some(prepared) = recipient_origin(&tx, &task.id)? {
+        if prepared.provider != provider
+            || prepared.conversation_id != session
+            || prepared.generation != claim.generation
+        {
+            return Err(Error::new(
+                "invalid_binding",
+                "Acknowledged Codex thread differs from the prepared task root.",
+            ));
+        }
+    }
     let binding = TaskTurnBinding {
         request_id: task.id,
         claim_token: claim.token.clone(),

@@ -51,6 +51,7 @@ fn run_with_sender(test_home: &Path, requests: Vec<Value>, managed: bool) -> Vec
     let mut child = command
         .args(["mcp", "serve"])
         .env("WARDIAN_HOME", test_home)
+        .env("CODEX_THREAD_ID", "shared-process-thread")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -95,6 +96,7 @@ fn spawn_interactive_mcp(
         .args(["mcp", "serve"])
         .env("WARDIAN_HOME", test_home)
         .env("WARDIAN_SESSION_ID", "sender-managed-uuid")
+        .env("CODEX_THREAD_ID", "shared-process-thread")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -482,6 +484,70 @@ fn control_fixture(test_home: &Path, responses: Vec<Value>) -> thread::JoinHandl
     });
     ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     worker
+}
+
+#[test]
+fn stdio_call_metadata_preserves_root_child_and_missing_thread_provenance() {
+    let root = tempfile::tempdir().unwrap();
+    let cases = [
+        (Some(json!({"threadId":"root-thread"})), Some("root-thread")),
+        (
+            Some(json!({"x-codex-turn-metadata":{"thread_id":"child-thread"}})),
+            Some("child-thread"),
+        ),
+        (
+            Some(
+                json!({"threadId":"child-thread","x-codex-turn-metadata":{"thread_id":"child-thread"}}),
+            ),
+            Some("child-thread"),
+        ),
+        (None, None),
+        (Some(json!({"unrelated":"metadata"})), None),
+    ];
+    let receipt = json!({"operation":"send_message","interaction_id":"info-1","delivery_state":"pending","duplicate":false});
+    let server = control_fixture(root.path(), vec![receipt.clone(); cases.len()]);
+    let (mut child, mut stdin, mut stdout) = spawn_interactive_mcp(root.path());
+    write_rpc(&mut stdin, &handshake()[0]);
+    assert_eq!(read_rpc(&mut stdout)["id"], 1);
+    write_rpc(&mut stdin, &handshake()[1]);
+    write_rpc(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":"inconsistent","method":"tools/call",
+            "params":{"name":"send_message","arguments":{"target":"Peer","message":"reject"},
+                "_meta":{"threadId":"root-thread","x-codex-turn-metadata":{"thread_id":"child-thread"}}}
+        }),
+    );
+    assert_eq!(read_rpc(&mut stdout)["error"]["code"], -32602);
+    for (index, (meta, _)) in cases.iter().enumerate() {
+        let mut request = json!({
+            "jsonrpc":"2.0","id":index + 2,"method":"tools/call",
+            "params":{"name":"send_message","arguments":{"target":"Peer","message":format!("call-{index}")}}
+        });
+        if let Some(meta) = meta {
+            request["params"]["_meta"] = meta.clone();
+        }
+        write_rpc(&mut stdin, &request);
+        let result = read_rpc(&mut stdout);
+        assert_eq!(result["id"], request["id"]);
+        assert_eq!(result["result"]["structuredContent"], receipt);
+    }
+    drop(stdin);
+    wait_success(&mut child);
+    let sent = server.join().unwrap();
+    assert_eq!(sent.len(), cases.len());
+    for (index, (_, expected)) in cases.iter().enumerate() {
+        let expected_origin = wardian_core::control::MessageOrigin::WardianAgent {
+            session_id: "sender-managed-uuid".into(),
+            provider_thread_id: expected.map(str::to_owned),
+        };
+        assert_eq!(sent[index]["command"], "agent_messaging");
+        assert_eq!(sent[index]["request"]["message"], format!("call-{index}"));
+        assert_eq!(
+            sent[index]["origin"],
+            serde_json::to_value(expected_origin).unwrap()
+        );
+    }
 }
 
 #[test]

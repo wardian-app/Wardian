@@ -211,6 +211,18 @@ Delivery events describe the transport attempt. Interaction records describe the
 
 Valid interaction kinds are `message`, `task`, `reply`, and `notification`. Valid interaction statuses are `created`, `queued`, `delivering`, `delivered`, `awaiting_reply`, `completed`, `failed`, and `expired`.
 
+Managed control requests use the existing `MessageOrigin::WardianAgent` shape
+with `session_id` and an optional `provider_thread_id`. Older clients omit the
+optional field. For Codex, MCP supplies validated per-call thread metadata and
+the CLI supplies `CODEX_THREAD_ID`. A present thread must match the assigned
+native task root in the current generation before explicit settlement.
+Foreign or stale callers produce labelled progress for the parent and an
+actionable error, without a terminal reply. Missing provenance preserves
+legacy replies with a `thread_provenance_unavailable` delivery diagnostic.
+Other providers retain their existing behavior. See
+[agent messaging tools](./agent-messaging-tools.md) for attribution and the
+cooperating-process trust model.
+
 Structured replies attach to the parent task interaction and carry the reply status separately:
 
 ```json

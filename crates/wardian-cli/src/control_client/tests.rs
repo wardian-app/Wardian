@@ -6,29 +6,100 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     crate::test_support::test_env_lock()
 }
 
+struct RestoreOriginEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl RestoreOriginEnv {
+    fn set(session_id: Option<&str>, thread_id: Option<&str>) -> Self {
+        Self(
+            [
+                ("WARDIAN_SESSION_ID", session_id),
+                ("CODEX_THREAD_ID", thread_id),
+            ]
+            .into_iter()
+            .map(|(key, value)| {
+                let previous = std::env::var_os(key);
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+                (key, previous)
+            })
+            .collect(),
+        )
+    }
+}
+
+impl Drop for RestoreOriginEnv {
+    fn drop(&mut self) {
+        for (key, value) in &self.0 {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 #[test]
 fn current_message_origin_uses_wardian_session_id() {
     let _guard = env_lock();
-    std::env::set_var("WARDIAN_SESSION_ID", "source-1");
+    let _restore = RestoreOriginEnv::set(Some("source-1"), None);
 
     assert_eq!(
-        current_message_origin(),
-        Some(MessageOrigin::WardianAgent {
-            session_id: "source-1".to_string()
-        })
+        require_current_message_origin().unwrap(),
+        MessageOrigin::WardianAgent {
+            session_id: "source-1".to_string(),
+            provider_thread_id: None,
+        }
     );
-
-    std::env::remove_var("WARDIAN_SESSION_ID");
+    assert_eq!(
+        serde_json::to_value(require_current_message_origin().unwrap()).unwrap(),
+        serde_json::json!({"kind":"wardian_agent","session_id":"source-1"})
+    );
 }
 
 #[test]
 fn current_message_origin_ignores_blank_session_id() {
     let _guard = env_lock();
-    std::env::set_var("WARDIAN_SESSION_ID", "   ");
+    let _restore = RestoreOriginEnv::set(Some("   "), Some("native-thread"));
 
-    assert_eq!(current_message_origin(), None);
+    assert_eq!(
+        require_current_message_origin().unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
 
-    std::env::remove_var("WARDIAN_SESSION_ID");
+#[test]
+fn cli_message_origin_reads_each_invocations_native_thread() {
+    let _guard = env_lock();
+    for thread_id in [Some("root-thread"), Some("child-thread"), None, Some("   ")] {
+        let _restore = RestoreOriginEnv::set(Some("shared-session"), thread_id);
+        assert_eq!(
+            require_current_message_origin().unwrap(),
+            MessageOrigin::WardianAgent {
+                session_id: "shared-session".into(),
+                provider_thread_id: thread_id
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned),
+            }
+        );
+    }
+}
+
+#[test]
+fn explicit_message_origin_never_inherits_ambient_thread_id() {
+    let _guard = env_lock();
+    let _restore = RestoreOriginEnv::set(Some("shared-session"), Some("ambient-root-thread"));
+    for thread_id in [None, Some("child-thread".to_owned())] {
+        assert_eq!(
+            require_message_origin(thread_id.clone()).unwrap(),
+            MessageOrigin::WardianAgent {
+                session_id: "shared-session".into(),
+                provider_thread_id: thread_id,
+            }
+        );
+    }
 }
 
 #[test]

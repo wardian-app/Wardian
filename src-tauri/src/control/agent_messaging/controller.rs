@@ -344,6 +344,7 @@ mod tests {
             },
             MessageOrigin::WardianAgent {
                 session_id: WORKER.into(),
+                provider_thread_id: None,
             },
         )
         .await
@@ -512,6 +513,7 @@ mod tests {
                 request,
                 MessageOrigin::WardianAgent {
                     session_id: sender.into(),
+                    provider_thread_id: None,
                 },
             )
             .await
@@ -590,6 +592,7 @@ mod tests {
             },
             MessageOrigin::WardianAgent {
                 session_id: WORKER.into(),
+                provider_thread_id: None,
             },
         )
         .await

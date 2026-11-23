@@ -1,10 +1,34 @@
 //! Exact-turn fallback for canonical Codex tasks, separate from human input.
 
 use super::*;
-use crate::delivery::codex_shared::{CodexSharedClient, CodexSharedReceipt};
+use crate::delivery::codex_shared::{CodexSharedClient, CodexSharedError, CodexSharedReceipt};
 use crate::state::InteractionState;
 use std::sync::Arc;
 use wardian_core::control::ReplyStatus;
+
+/// Snapshot the very client that will submit the task, then establish its root
+/// before exposing input. The provider may call an explicit reply before its
+/// turn acknowledgement arrives, so the preparation cannot wait for the RPC.
+pub(super) async fn submit_codex_task(
+    interactions: &InteractionState,
+    client: &CodexSharedClient,
+    claim: &store::TaskClaim,
+    context: &str,
+) -> Result<CodexSharedReceipt, CodexSharedError> {
+    let owner = client.receipt("owner_ready")?;
+    if claim.record.target_session_ids != [owner.wardian_agent_id.clone()]
+        || claim.generation != owner.generation
+    {
+        return Err(CodexSharedError::unsupported(
+            "Codex client does not own this task and generation.",
+        ));
+    }
+    interactions
+        .prepare_agent_codex_task_root(claim, &owner.wardian_agent_id, &owner.provider_session_id)
+        .await
+        .map_err(|error| CodexSharedError::unsupported(error.to_string()))?;
+    client.followup(&claim.record.id, context).await
+}
 
 pub(super) async fn bind_codex_task(
     state: &AppState,

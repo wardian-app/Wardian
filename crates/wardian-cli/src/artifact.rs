@@ -26,7 +26,7 @@ pub fn handle_artifact(args: ArtifactArgs) -> Result<String, CliError> {
                 artifact.as_deref(),
                 force_new,
                 &addressed_comment_ids,
-                MessageOrigin::WardianAgent { session_id },
+                MessageOrigin::wardian_agent(session_id),
             )
             .map_err(control_error)?;
             render_json(&response)

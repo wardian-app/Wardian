@@ -140,6 +140,15 @@ The CLI `team` and `watchlist` commands read and write `watchlists/index.json` d
 
 Legacy Queue commands persist the desktop Inbox projection and preferences for the active Wardian home. Provider completion items are backend-owned: full queue snapshots may update their read state but cannot delete or replace their canonical identity and response. `dismiss_agent_completions` records durable dismissal tombstones so a replayed provider event cannot restore a dismissed item. Startup hydration may restore these items, but it must not create new completion or action-needed evidence.
 
+The CLI/MCP control endpoint's managed message origin accepts optional
+`provider_thread_id` alongside `session_id`; older callers omit it. Codex
+explicit replies with a present thread require the assigned root and current
+generation. A foreign thread's output is retained as parent progress and its
+settlement is rejected; missing provenance keeps legacy behavior with a
+diagnostic. This does not change the frontend interaction DTOs. See
+[IPC events](./ipc-events.md#interaction-and-delivery-watch-events) and
+[agent messaging tools](./agent-messaging-tools.md) for the full contract.
+
 ## Inbox (`commands/inbox.rs`)
 
 - `list_inbox_notifications`

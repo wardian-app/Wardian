@@ -746,7 +746,8 @@ supports it. Agent-facing `message receive` and `message wait` commands are
 retired; backend mailbox records remain available for diagnostics.
 
 For tasks dispatched through Wardian's native Codex owner, the bound provider
-turn's final answer automatically completes the request. An explicit `message
+turn's final answer completes the request only with its exact accepted-input
+receipt for the current generation and root thread. An explicit `message
 reply` that completed the request takes precedence. Multiple tasks admitted
 into the same turn receive that turn's shared final answer. The resulting
 canonical reply resumes the requester's original provider conversation when a
@@ -1019,6 +1020,18 @@ impersonate another agent. Targets are one exact agent name or UUID.
 
 Send, follow-up and reply bodies accept literal text, `--stdin`, or `--file`.
 Replies retain their canonical `parent_interaction_id` task correlation.
+
+Codex CLI calls include the current `CODEX_THREAD_ID` as optional
+`provider_thread_id` in their managed origin. A present thread must match the
+task's assigned root in the current generation to complete it explicitly.
+Forked or foreign callers receive an actionable rejection; their output is
+retained as labelled progress for the owning parent instead of completing the
+parent's task. Older clients, manual calls, and scripts can omit provenance;
+those replies retain legacy behavior with a `thread_provenance_unavailable`
+diagnostic. Other providers retain their existing behavior. This protects
+cooperating processes from accidental attribution mistakes, not deliberate
+environment forgery. The equivalent MCP caller evidence is described in the
+[messaging tool contract](../developer/agent-messaging-tools.md).
 
 Automatic dispatch uses durable task claims. Codex delivery prefers the
 negotiated native connection. An idle surface fallback is used only when no

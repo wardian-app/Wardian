@@ -11,8 +11,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 type Result<T> = std::result::Result<T, Error>;
+mod caller_threads;
 mod provider_claims;
 mod task_turns;
+pub use caller_threads::{
+    prepare_codex_task_root, publish_provider_thread_progress, reply_with_provider_thread,
+    ProviderThreadCaller, ProviderThreadProgress, ProviderThreadProgressInput, ProviderThreadReply,
+};
 pub use provider_claims::{
     claim_information, claim_reply_continuation, claim_wakeable_information,
     fence_conversation_deliveries, information_highwater, message_context, next_pending_task_id,
@@ -1150,7 +1155,12 @@ pub fn claim_next_task(
         return Ok(None);
     };
     let token = new_id("claim");
-    let changed = tx.execute("UPDATE agent_message_delivery SET owner='dispatching',generation=?2,claim_token=?3 WHERE interaction_id=?1 AND owner='pending'",params![id,generation,token])?;
+    let changed = tx.execute(
+        "UPDATE agent_message_delivery SET owner='dispatching',generation=?2,claim_token=?3,
+        recipient_provider=NULL,recipient_conversation_id=NULL,recipient_generation=NULL
+        WHERE interaction_id=?1 AND owner='pending'",
+        params![id, generation, token],
+    )?;
     if changed != 1 {
         return Ok(None);
     }

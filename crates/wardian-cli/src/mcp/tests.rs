@@ -51,6 +51,7 @@ struct Fake {
     managed: bool,
     controller: bool,
     calls: Vec<AgentMessagingRequest>,
+    thread_ids: Vec<Option<String>>,
     fail: bool,
     response: Value,
 }
@@ -61,6 +62,7 @@ impl Default for Fake {
             managed: true,
             controller: false,
             calls: vec![],
+            thread_ids: vec![],
             fail: false,
             response: json!({"operation":"send_message","interaction_id":"real-id","delivery_state":"pending","duplicate":false}),
         }
@@ -79,8 +81,13 @@ impl Backend for Fake {
             Err(io::ErrorKind::PermissionDenied.into())
         }
     }
-    fn invoke(&mut self, request: AgentMessagingRequest) -> io::Result<Value> {
+    fn invoke(
+        &mut self,
+        request: AgentMessagingRequest,
+        provider_thread_id: Option<String>,
+    ) -> io::Result<Value> {
         self.calls.push(request);
+        self.thread_ids.push(provider_thread_id);
         if self.fail {
             Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -143,11 +150,125 @@ impl Backend for MissingSenderBackend {
         Err(io::ErrorKind::PermissionDenied.into())
     }
 
-    fn invoke(&mut self, _request: AgentMessagingRequest) -> io::Result<Value> {
+    fn invoke(
+        &mut self,
+        _request: AgentMessagingRequest,
+        _provider_thread_id: Option<String>,
+    ) -> io::Result<Value> {
         self.invocations
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Err(io::ErrorKind::PermissionDenied.into())
     }
+}
+
+#[test]
+fn per_call_metadata_selects_root_child_or_no_thread() {
+    let mut session = ready();
+    let mut backend = Fake::default();
+    for (index, (meta, expected)) in [
+        (Some(json!({"threadId":"root-thread"})), Some("root-thread")),
+        (
+            Some(json!({"x-codex-turn-metadata":{"thread_id":"child-thread"}})),
+            Some("child-thread"),
+        ),
+        (
+            Some(json!({"threadId":"child-thread","x-codex-turn-metadata":{"thread_id":"child-thread"}})),
+            Some("child-thread"),
+        ),
+        (None, None),
+        (Some(json!({"unrelated":"metadata"})), None),
+        (Some(json!({"x-codex-turn-metadata":{}})), None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut request = call(
+            json!(index + 2),
+            "send_message",
+            json!({"target":"Peer","message":"literal"}),
+        );
+        if let Some(meta) = meta {
+            request["params"]["_meta"] = meta;
+        }
+        let result = session.handle(request, &mut backend).unwrap();
+        assert_eq!(result["result"]["isError"], false);
+        assert_eq!(backend.thread_ids[index].as_deref(), expected);
+    }
+}
+
+#[test]
+fn thread_metadata_accepts_the_exact_byte_limit() {
+    let mut session = ready();
+    let mut backend = Fake::default();
+    for (index, thread_id) in ["t".repeat(256), "λ".repeat(128)].into_iter().enumerate() {
+        let mut request = call(
+            json!(index + 2),
+            "send_message",
+            json!({"target":"Peer","message":"literal"}),
+        );
+        request["params"]["_meta"] = json!({
+            "threadId":thread_id,
+            "x-codex-turn-metadata":{"thread_id":thread_id}
+        });
+        let result = session.handle(request, &mut backend).unwrap();
+        assert_eq!(result["result"]["isError"], false);
+        assert_eq!(
+            backend.thread_ids[index].as_deref(),
+            Some(thread_id.as_str())
+        );
+    }
+}
+
+#[test]
+fn invalid_thread_metadata_is_rejected_before_any_backend_operation() {
+    let mut session = ready();
+    let mut backend = MissingSenderBackend {
+        sender_checks: Default::default(),
+        invocations: Default::default(),
+    };
+    let mut invalid = vec![
+        Value::Null,
+        json!(false),
+        json!("metadata"),
+        json!([]),
+        json!({"x-codex-turn-metadata":null}),
+        json!({"x-codex-turn-metadata":false}),
+        json!({"x-codex-turn-metadata":"metadata"}),
+        json!({"x-codex-turn-metadata":[]}),
+        json!({"threadId":"root-thread","x-codex-turn-metadata":{"thread_id":"child-thread"}}),
+    ];
+    for value in [
+        Value::Null,
+        json!(false),
+        json!(42),
+        json!([]),
+        json!({}),
+        json!(""),
+        json!("   "),
+        json!(" root-thread"),
+        json!("child-thread "),
+        json!("child\nthread"),
+        json!("child\0thread"),
+        json!("t".repeat(257)),
+        json!("λ".repeat(129)),
+    ] {
+        invalid.push(json!({"threadId":value}));
+        invalid.push(json!({"x-codex-turn-metadata":{"thread_id":value}}));
+        invalid.push(json!({"threadId":"root-thread","x-codex-turn-metadata":{"thread_id":value}}));
+        invalid.push(json!({"threadId":value,"x-codex-turn-metadata":{"thread_id":"root-thread"}}));
+    }
+    for (index, meta) in invalid.into_iter().enumerate() {
+        let mut request = call(
+            json!(index + 2),
+            "send_message",
+            json!({"target":"Peer","message":"literal"}),
+        );
+        request["params"]["_meta"] = meta;
+        let result = session.handle(request, &mut backend).unwrap();
+        assert_eq!(result["error"]["code"], -32602);
+    }
+    assert_eq!(backend.sender_checks.load(Ordering::Relaxed), 0);
+    assert_eq!(backend.invocations.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -248,7 +369,7 @@ fn invalid_arguments_and_missing_sender_never_reach_control() {
         ("list_agents", json!({"scope":"all"})),
     ] {
         let mut backend = Fake::default();
-        let result = messaging::call(name, args, "key", &mut backend);
+        let result = messaging::call(name, args, "key", None, &mut backend);
         assert_eq!(
             result["structuredContent"]["error"]["code"], "invalid_arguments",
             "{name}"
@@ -271,6 +392,7 @@ fn invalid_arguments_and_missing_sender_never_reach_control() {
                 "send_message",
                 json!({"target":target,"message":"x"}),
                 "key",
+                None,
                 &mut backend
             )["isError"],
             true
@@ -289,7 +411,8 @@ fn invalid_arguments_and_missing_sender_never_reach_control() {
             ..Default::default()
         };
         assert_eq!(
-            messaging::call(name, args, "key", &mut backend)["structuredContent"]["error"]["code"],
+            messaging::call(name, args, "key", None, &mut backend)["structuredContent"]["error"]
+                ["code"],
             "missing_managed_sender"
         );
         assert!(backend.calls.is_empty());
@@ -300,7 +423,7 @@ fn invalid_arguments_and_missing_sender_never_reach_control() {
 fn retired_receive_tools_are_unknown_and_never_reach_control() {
     for name in ["receive_messages", "wait_agent"] {
         let mut backend = Fake::default();
-        let result = messaging::call(name, json!({}), "key", &mut backend);
+        let result = messaging::call(name, json!({}), "key", None, &mut backend);
         assert_eq!(
             result["structuredContent"]["error"]["code"],
             "invalid_arguments"
@@ -370,6 +493,7 @@ fn runtime_rejection_and_malformed_receipt_are_not_success() {
                 "send_message",
                 json!({"target":"Peer","message":"x"}),
                 "key",
+                None,
                 &mut backend
             )["isError"],
             true
@@ -543,6 +667,7 @@ fn controller_mailbox_tools_parse_without_reenabling_managed_receive() {
         "receive_messages",
         json!({"timeout_ms":0}),
         "key",
+        None,
         &mut backend,
     );
     assert_eq!(received["isError"], false);
@@ -555,7 +680,13 @@ fn controller_mailbox_tools_parse_without_reenabling_managed_receive() {
     ));
 
     backend.response = json!({"operation":"wait_agent","timed_out":true});
-    let waited = messaging::call("wait_agent", json!({"timeout_ms":0}), "key", &mut backend);
+    let waited = messaging::call(
+        "wait_agent",
+        json!({"timeout_ms":0}),
+        "key",
+        None,
+        &mut backend,
+    );
     assert_eq!(waited["isError"], false);
     assert!(matches!(
         backend.calls.last(),
@@ -568,6 +699,7 @@ fn controller_mailbox_tools_parse_without_reenabling_managed_receive() {
         "reply",
         json!({"request_id":"task","status":"done","message":"spoof"}),
         "key",
+        None,
         &mut backend,
     );
     assert_eq!(reply["isError"], true);
@@ -647,7 +779,11 @@ impl Backend for ConcurrentBackend {
         Ok(())
     }
 
-    fn invoke(&mut self, request: AgentMessagingRequest) -> io::Result<Value> {
+    fn invoke(
+        &mut self,
+        request: AgentMessagingRequest,
+        _provider_thread_id: Option<String>,
+    ) -> io::Result<Value> {
         self.calls.lock().unwrap().push(request.clone());
         let _ = self.started.send(request.clone());
         if matches!(
@@ -895,6 +1031,124 @@ impl Drop for ReleaseGateOnDrop {
     fn drop(&mut self) {
         release_gate(&self.0);
     }
+}
+
+#[test]
+fn concurrent_calls_keep_root_child_and_missing_thread_identity_isolated() {
+    type ObservedCalls = Vec<(String, Option<String>)>;
+
+    #[derive(Clone)]
+    struct IdentityBackend {
+        inner: ConcurrentBackend,
+        observed: Arc<Mutex<ObservedCalls>>,
+    }
+
+    impl Backend for IdentityBackend {
+        fn require_sender(&self) -> io::Result<()> {
+            self.inner.require_sender()
+        }
+
+        fn invoke(
+            &mut self,
+            request: AgentMessagingRequest,
+            provider_thread_id: Option<String>,
+        ) -> io::Result<Value> {
+            let message = match &request {
+                AgentMessagingRequest::SendMessage { message, .. }
+                | AgentMessagingRequest::FollowupTask { message, .. } => message.clone(),
+                _ => unreachable!(),
+            };
+            let response = self.inner.invoke(request, None)?;
+            // Record after the gate so root provenance must survive other calls completing.
+            self.observed
+                .lock()
+                .unwrap()
+                .push((message, provider_thread_id));
+            Ok(response)
+        }
+    }
+
+    let ConcurrentBackendParts {
+        calls,
+        started_rx,
+        gate,
+        started,
+    } = concurrent_backend_parts();
+    let _release_on_failure = ReleaseGateOnDrop(Arc::clone(&gate));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let backend = IdentityBackend {
+        inner: ConcurrentBackend {
+            calls,
+            started,
+            gate: Arc::clone(&gate),
+        },
+        observed: Arc::clone(&observed),
+    };
+    let output = CaptureWriter::default();
+    let server_output = output.clone();
+    let (input_tx, input_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        serve_concurrent(
+            ChannelReader {
+                frames: input_rx,
+                buffered: std::collections::VecDeque::new(),
+            },
+            server_output,
+            move || backend.clone(),
+        )
+    });
+    send_frame(&input_tx, initialize(VERSION));
+    assert!(output.wait_for_id(json!(1), Duration::from_secs(3)));
+    send_frame(
+        &input_tx,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    let mut root = slow_call(2, "hold");
+    root["params"]["_meta"] = json!({"threadId":"root-thread"});
+    send_frame(&input_tx, root);
+    assert!(matches!(
+        started_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+        AgentMessagingRequest::FollowupTask { message, .. } if message == "hold"
+    ));
+
+    let mut child = call(
+        json!(3),
+        "send_message",
+        json!({"target":"Peer","message":"child"}),
+    );
+    child["params"]["_meta"] = json!({"x-codex-turn-metadata":{"thread_id":"child-thread"}});
+    send_frame(&input_tx, child);
+    assert!(output.wait_for_id(json!(3), Duration::from_secs(3)));
+    send_frame(
+        &input_tx,
+        call(
+            json!(4),
+            "send_message",
+            json!({"target":"Peer","message":"legacy"}),
+        ),
+    );
+    assert!(output.wait_for_id(json!(4), Duration::from_secs(3)));
+    assert!(!output.values().iter().any(|response| response["id"] == 2));
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![
+            ("child".to_owned(), Some("child-thread".to_owned())),
+            ("legacy".to_owned(), None)
+        ]
+    );
+
+    release_gate(&gate);
+    drop(input_tx);
+    assert!(server.join().unwrap().is_ok());
+    assert_eq!(
+        observed.lock().unwrap().last(),
+        Some(&("hold".to_owned(), Some("root-thread".to_owned())))
+    );
+    assert!(output
+        .values()
+        .iter()
+        .filter(|response| response["id"] != 1)
+        .all(|response| response["result"]["isError"] == false));
 }
 
 #[test]
