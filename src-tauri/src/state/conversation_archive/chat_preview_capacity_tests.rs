@@ -348,6 +348,7 @@ fn a_normalized_running_prefix_fills_the_default_window_without_retiring_its_adm
             coverage: Vec::new(),
             charge: 1024 + binding.charge(),
             binding: Some(binding.clone()),
+            rollover_hold: None,
             certification: 0,
             native_source: None,
         });

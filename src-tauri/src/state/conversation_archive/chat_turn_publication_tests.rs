@@ -1806,7 +1806,16 @@ fn passive_bound_recent_refresh_keeps_empty_continuity_for_unchanged_and_unquali
             assert!(fresh_bridge.replaces.is_none());
             assert_eq!(fresh.generation.as_deref(), Some("successor-generation"));
 
-            for _ in 0..2 {
+            let diagnostic_count = || {
+                fs::read_to_string(temp.path().join("wardian_debug.log"))
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|line| {
+                        line.contains("Bound generation rollover awaiting exact successor aliases")
+                    })
+                    .count()
+            };
+            for poll in 0..3 {
                 let hold = owner
                     .canonical_bridge_reader(
                         source.clone(),
@@ -1825,6 +1834,12 @@ fn passive_bound_recent_refresh_keeps_empty_continuity_for_unchanged_and_unquali
                     hold.next_before.is_none() && hold.detail.is_none() && !hold.archive_read_ready
                 );
                 assert!(retired_view::split(&hold.revision).is_none());
+                assert_eq!(diagnostic_count(), usize::from(poll > 0));
+                if poll == 0 {
+                    let mut slots = owner.recent.lock().unwrap();
+                    let hold = slots.slots[0].rollover_hold.as_mut().unwrap();
+                    hold.since -= preview_bridge::ROLLOVER_HOLD_LIMIT;
+                }
             }
             let successor = owner.recent_reader_with_hints(
                 source.clone(),
@@ -1837,6 +1852,9 @@ fn passive_bound_recent_refresh_keeps_empty_continuity_for_unchanged_and_unquali
             .unwrap();
             let bridge = value(&successor).preview_bridge.unwrap();
             let previous = bridge.replaces.unwrap();
+            assert!(owner.recent.lock().unwrap().slots[0]
+                .rollover_hold
+                .is_none());
             assert_eq!(bridge.admission_id, receipt.0);
             assert_eq!(previous.admission_id, receipt.0);
             assert_eq!(Some(previous.generation), bound.generation);
@@ -3394,6 +3412,213 @@ fn claude_preview_qualifies_with_captured_large_bookkeeping_and_a_provisional_ta
     let blocked = read(&context, &source, None, None, None).unwrap();
     assert_eq!(blocked.progress, "oversized_record");
     assert!(blocked.presentation.is_none());
+}
+
+#[test]
+fn claude_late_watch_replay_preserves_the_bound_recent_view() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("synthetic-session.jsonl");
+    let mut source = snapshot(&ConversationArchiveContext::for_agent_id(
+        "agent-1", "claude",
+    ));
+    source.log_path = Some(path.clone());
+    source.resume_session = Some("synthetic-session".into());
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    let archive = ConversationArchiveState::default();
+    let owner = &archive.chat_projection;
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let append_native = |frames: &[Value], previous| {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .unwrap();
+        for frame in frames {
+            writeln!(file, "{frame}").unwrap();
+        }
+        drop(file);
+        let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "claude",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            previous,
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut batch.events,
+            "claude",
+            &path,
+        );
+        archive
+            .append_verified_provider_log_batch_with_context(
+                context.clone(),
+                &batch.events,
+                batch.previous.as_ref(),
+                &batch.next,
+                batch.source_proof(),
+            )
+            .unwrap();
+        super::tests::finish_projection(&archive);
+        for _ in 0..16 {
+            if !advance_source_index(&source).unwrap() {
+                return batch.next;
+            }
+        }
+        panic!("Claude fixture source did not settle");
+    };
+    let append_watch = |id: &str, cursor: &str| {
+        let mut watch = event(id, "Synthetic warmup answer.");
+        watch.provider = "claude".into();
+        watch.role = Some(AgentChatRole::Assistant);
+        watch.source = Some("stream_json".into());
+        watch.turn_id = Some("warmup-message".into());
+        watch.sequence = Some(3);
+        watch.metadata = json!({
+            "provider_source":"event", "transcript_cursor":cursor,
+            "transcript_truncated":false, "transcript_omitted_bytes":0, "raw_role":"assistant"
+        });
+        archive
+            .append_chat_events_with_context(context.clone(), &[watch])
+            .unwrap();
+        super::tests::finish_projection(&archive);
+    };
+
+    let primed = append_native(
+        &[json!({"type":"custom-title","sessionId":"synthetic-session","customTitle":"Synthetic"})],
+        None,
+    );
+    let warmup = append_native(
+        &[
+            json!({"type":"user","uuid":"warmup","sessionId":"synthetic-session","parentUuid":null,"message":{"role":"user","content":"Synthetic warmup prompt."}}),
+            json!({"type":"api-request-shape","sessionId":"synthetic-session","messages":[{"role":"user","content":"x".repeat(85_952)}]}),
+            json!({"type":"assistant","uuid":"warmup-answer","sessionId":"synthetic-session","parentUuid":"warmup","message":{"id":"warmup-message","role":"assistant","content":[{"type":"text","text":"Synthetic warmup answer."}],"stop_reason":"end_turn"}}),
+            json!({"type":"attachment","uuid":"warmup-bookkeeping","sessionId":"synthetic-session","parentUuid":"warmup-answer","attachment":{"type":"prompt_snapshot","description":"x".repeat(127_670)}}),
+            json!({"type":"system","subtype":"turn_duration","uuid":"warmup-duration","sessionId":"synthetic-session","parentUuid":"warmup-bookkeeping","durationMs":100}),
+        ],
+        Some(primed),
+    );
+    append_watch("warmup-watch-first", "watch:first");
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    assert!(owner
+        .publish_recent(&source, &runtime, &receipt, Vec::new())
+        .unwrap());
+    let bound = open_then_qualify(owner, &source, &runtime, 8);
+    assert_eq!(
+        value(&bound).preview_bridge.unwrap().admission_id,
+        receipt.0
+    );
+
+    let measured = append_native(
+        &[
+            json!({"type":"user","uuid":"measured","sessionId":"synthetic-session","parentUuid":"warmup-duration","message":{"role":"user","content":"Synthetic measured prompt."}}),
+        ],
+        Some(warmup),
+    );
+    let published = || {
+        let reference = head("agent-1").unwrap().unwrap();
+        store("agent-1").unwrap().read::<Head>(&reference).unwrap()
+    };
+    let before = published();
+    assert_eq!(before.row_count, 3);
+
+    // Retained archive order: native warmup pair, first Watch observation,
+    // native measured prompt, second Watch observation, native measured answer.
+    append_watch("warmup-watch-replay", "watch:replay");
+    let rollover = published();
+    let mut running = source.clone();
+    running.current_status = "Processing".into();
+    let revision = owner.recent_reader_with_hints(
+        running,
+        runtime.clone(),
+        Some(bound.revision.clone()),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap()
+    .map_or_else(|| bound.revision.clone(), |page| page.revision);
+    append_native(
+        &[
+            json!({"type":"assistant","uuid":"measured-answer","sessionId":"synthetic-session","parentUuid":"measured","message":{"id":"measured-message","role":"assistant","content":[{"type":"text","text":"Synthetic measured answer."}],"stop_reason":"end_turn"}}),
+            json!({"type":"system","subtype":"turn_duration","uuid":"measured-duration","sessionId":"synthetic-session","parentUuid":"measured-answer","durationMs":100}),
+        ],
+        Some(measured),
+    );
+    let active = owner.recent_reader_with_hints(
+        source.clone(),
+        runtime.clone(),
+        Some(revision.clone()),
+        8,
+        Some(Vec::new()),
+    )()
+    .unwrap();
+    let passive = owner
+        .canonical_bridge_reader(
+            source,
+            runtime,
+            RetiredChatRead {
+                cursor: None,
+                revision: Some(revision),
+                detail_ref: None,
+                revalidate_ids: None,
+                limit: Some(8),
+            },
+        )
+        .unwrap()()
+    .unwrap();
+    let continued = active.as_ref().unwrap_or(&passive);
+    assert!(
+        rollover.row_count == 3
+            && rollover.generation == before.generation
+            && continued.presentation.is_some()
+            && continued.events.iter().any(|event| event.text.as_deref() == Some("Synthetic measured answer.")),
+        "Watch replay changed Head rows {} -> {}, reused generation={}, active page={}, passive progress={}, passive rows={}",
+        before.row_count, rollover.row_count, rollover.generation == before.generation,
+        active.is_some(), passive.progress, passive.events.len()
+    );
+    let answer = continued
+        .events
+        .iter()
+        .find(|event| event.text.as_deref() == Some("Synthetic warmup answer."))
+        .unwrap();
+    assert!(answer.metadata["chat_source_start"].is_u64());
+    for watch in ["warmup-watch-first", "warmup-watch-replay"] {
+        assert!(continued
+            .aliases
+            .iter()
+            .any(|alias| alias.observation_id == watch && alias.canonical_id == answer.id));
+    }
+    let presentation = value(continued);
+    assert_eq!(presentation.turns.len(), 2);
+    assert!(presentation
+        .turns
+        .iter()
+        .all(|turn| turn.membership_complete
+            && turn.status == ChatTurnStatus::Completed
+            && turn.answer_item_keys.len() == 1));
+    let measured_answer = continued
+        .events
+        .iter()
+        .find(|event| event.text.as_deref() == Some("Synthetic measured answer."))
+        .unwrap();
+    for event in [answer, measured_answer] {
+        assert!(presentation.items.iter().any(|item| {
+            item.kind == ChatPresentedItemKind::Answer
+                && item.provenance == ChatItemProvenance::Canonical
+                && item.event_refs.contains(&event.id)
+        }));
+    }
+    assert!(bound
+        .events
+        .iter()
+        .all(|old| continued.aliases.iter().any(|alias| {
+            alias.observation_id == old.id
+                && continued
+                    .events
+                    .iter()
+                    .any(|event| event.id == alias.canonical_id)
+        })));
 }
 
 #[test]

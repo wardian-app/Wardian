@@ -322,7 +322,14 @@ pub(super) fn build(
     for (root, known) in &build.previous.roots {
         pending_gaps.insert(
             root.clone(),
-            gaps::unresolved(build.store, build.head, root, Some(known), events)?,
+            gaps::unresolved(
+                build.store,
+                build.head,
+                root,
+                Some(known),
+                closed.get(root).map(String::as_str),
+                events,
+            )?,
         );
     }
     let mut remembered_owners = Owners::new();
@@ -367,6 +374,13 @@ pub(super) fn build(
             (unresolved.clone(), gap_unresolvable, boundary_order.clone()),
         );
         let mut group: Vec<_> = indices.iter().map(|index| events[*index].clone()).collect();
+        for event in &mut group {
+            if claude_native_with_watch_aliases(event) {
+                let metadata = event.metadata.as_object_mut().unwrap();
+                metadata.remove("chat_display_member_ids");
+                metadata.remove("chat_display_physical_id");
+            }
+        }
         let partial = group
             .iter()
             .any(|event| event.metadata["chat_turn_membership_partial"] == true);
@@ -595,8 +609,14 @@ pub(super) fn build(
     // that negative evidence now, without assigning the suffix to the turn.
     for (root, known) in &mut state.roots {
         if !build.previous.roots.contains_key(root) {
-            let (unresolved, sticky, boundary) =
-                gaps::unresolved(build.store, build.head, root, Some(known), events)?;
+            let (unresolved, sticky, boundary) = gaps::unresolved(
+                build.store,
+                build.head,
+                root,
+                Some(known),
+                closed.get(root).map(String::as_str),
+                events,
+            )?;
             known.unresolved = unresolved;
             known.gap_unresolvable = sticky;
             known.boundary_order = boundary;

@@ -113,6 +113,7 @@ pub(super) fn unresolved(
     head: &Head,
     root: &str,
     previous: Option<&Certified>,
+    closed_order: Option<&str>,
     events: &[AgentChatEvent],
 ) -> io::Result<(BTreeSet<String>, bool, Option<String>)> {
     let Some(previous) = previous else {
@@ -123,6 +124,7 @@ pub(super) fn unresolved(
         .iter()
         .chain(previous.closed_order.iter())
         .cloned()
+        .chain(closed_order.map(str::to_owned))
         .chain(
             events
                 .iter()
