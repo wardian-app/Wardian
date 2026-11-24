@@ -14,6 +14,19 @@ pub struct RuntimeProcessJob {
     contained_from_launch: bool,
 }
 
+/// Aggregate process accounting for a private job contained before execution.
+#[cfg(windows)]
+#[derive(serde::Serialize)]
+pub(crate) struct RuntimeJobAccounting {
+    active_processes: u32,
+    total_processes: u32,
+    kernel_cpu_us: u64,
+    user_cpu_us: u64,
+    read_operations: u64,
+    write_operations: u64,
+    other_operations: u64,
+}
+
 /// Application-owned evidence that one launch-contained Claude tree was joined.
 ///
 /// Only `RuntimeProcessJob::stop_and_join_for_claude_mod` constructs this receipt.
@@ -419,6 +432,49 @@ impl RuntimeProcessJob {
             ));
         }
         Ok(())
+    }
+
+    /// Sample only this owned tree. The aggregate includes exited members.
+    pub(crate) fn startup_accounting(&self) -> Option<RuntimeJobAccounting> {
+        use winapi::um::{
+            jobapi2::QueryInformationJobObject,
+            winnt::{
+                JobObjectBasicAndIoAccountingInformation,
+                JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION,
+            },
+        };
+        if !self.contained_from_launch {
+            return None;
+        }
+        let mut info =
+            std::mem::MaybeUninit::<JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION>::uninit();
+        // Query the retained job handle directly. The kernel initializes the
+        // fixed-size accounting structure on success.
+        if unsafe {
+            QueryInformationJobObject(
+                self.job.handle() as _,
+                JobObjectBasicAndIoAccountingInformation,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return None;
+        }
+        let info = unsafe { info.assume_init() };
+        Some(RuntimeJobAccounting {
+            active_processes: info.BasicInfo.ActiveProcesses,
+            total_processes: info.BasicInfo.TotalProcesses,
+            kernel_cpu_us: u64::try_from(unsafe { *info.BasicInfo.TotalKernelTime.QuadPart() })
+                .ok()?
+                / 10,
+            user_cpu_us: u64::try_from(unsafe { *info.BasicInfo.TotalUserTime.QuadPart() }).ok()?
+                / 10,
+            read_operations: info.IoInfo.ReadOperationCount,
+            write_operations: info.IoInfo.WriteOperationCount,
+            other_operations: info.IoInfo.OtherOperationCount,
+        })
     }
 
     fn active_processes(&self) -> Result<u32, String> {
@@ -1411,8 +1467,18 @@ mod tests {
         outside.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 120"]);
         let mut outside = TestChildCleanup(outside.spawn().unwrap());
         let (job, mut child, _pair, descendant) = super::test_contained_pty_tree(temp.path()).await;
+        let active = job.startup_accounting().unwrap();
+        assert!(active.active_processes >= 2);
+        assert!(active.total_processes >= active.active_processes);
+        let diagnostic = serde_json::to_value(&active).unwrap();
+        let fields = diagnostic.as_object().unwrap();
+        assert_eq!(fields.len(), 7);
+        assert!(fields.values().all(serde_json::Value::is_u64));
         job.stop_and_join(child.as_mut()).await.unwrap();
         assert_eq!(job.active_processes().unwrap(), 0);
+        let stopped = job.startup_accounting().unwrap();
+        assert_eq!(stopped.active_processes, 0);
+        assert!(stopped.total_processes >= active.total_processes);
         assert_eq!(
             unsafe {
                 winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0)

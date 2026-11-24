@@ -44,6 +44,7 @@ pub(super) struct OwnerStartTimings {
     socket_wait: std::time::Duration,
     socket_wait_diagnostic: Option<SocketWaitDiagnostic>,
     socket_wait_resources: Value,
+    socket_wait_job: Value,
     proxy_connect: std::time::Duration,
     initialize: std::time::Duration,
     launch_model: std::time::Duration,
@@ -219,7 +220,7 @@ impl OwnerStartTimings {
 habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messaging_ms={} \
             socket_recovery_ms={} launch_config_ms={} child_spawn_ms={} \
             stderr_diagnostic={} socket_wait_ms={} \
-            socket_wait_diagnostic={} socket_wait_resources={} proxy_connect_ms={} initialize_ms={} launch_model_ms={} reviewer_checkpoint_ms={}",
+            socket_wait_diagnostic={} socket_wait_resources={} proxy_connect_ms={} initialize_ms={} launch_model_ms={} reviewer_checkpoint_ms={} socket_wait_job={}",
             self.total.as_millis(),
             self.quiescent.as_millis(),
             self.habitat_workspace.as_millis(),
@@ -238,6 +239,7 @@ habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messagi
             self.initialize.as_millis(),
             self.launch_model.as_millis(),
             self.reviewer_checkpoint.as_millis(),
+            self.socket_wait_job,
         ));
     }
 }
@@ -547,6 +549,10 @@ impl CodexSharedOwner {
             .await;
             timings.record_socket_wait(socket_wait);
             timings.record_socket_wait_resources(resources.finish());
+            #[cfg(windows)]
+            {
+                timings.socket_wait_job = json!(job.startup_accounting());
+            }
             socket_wait.outcome.into_result()?;
             let mut proxy_command = Command::new(&program);
             proxy_command.args(&prefix_args).current_dir(&spec.workspace).env("CODEX_HOME", &codex_home);

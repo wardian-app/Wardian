@@ -444,6 +444,12 @@ does not retry provider work. These are process accounting counters, including
 device and pipe I/O, not disk throughput or a backfill phase diagnosis. They
 exclude descendant processes and contain no paths or provider text.
 
+`socket_wait_job` separately reports aggregate accounting from the owner's
+private Windows Job Object at the end of socket wait. It includes forwarded
+processes and exited job members, and reports process counts, CPU time in
+microseconds, and operation counts since launch. The field is `null` when
+accounting is unavailable. It contains no process identifiers or paths.
+
 The ordinary TUI startup overlay also sets
 `check_for_update_on_startup = false` so an interactive update notice cannot
 block attachment. The guarded journal restores the prior setting after the TUI
