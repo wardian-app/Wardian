@@ -3,6 +3,7 @@ use crate::control::test_support::TestWardianHome;
 use serde_json::{json, Value};
 use wardian_core::agent_spawn::{self, recovery::Action, AgentSpawnRequest, AgentSpawnState};
 use wardian_core::db::{self, AgentUpsert};
+use wardian_core::native_transport::{NativeSessionBinding, NativeTransportCapabilities};
 
 const ORIGINAL_MODEL: &str = "fixture-original-model";
 const CORRECTED_MODEL: &str = "fixture-corrected-model";
@@ -137,6 +138,19 @@ impl Fixture {
         .unwrap()
     }
 
+    fn publish_binding(&self, generation: u64) {
+        db::upsert_native_session_binding(&NativeSessionBinding {
+            target_agent_id: self.config.session_id.clone(),
+            generation,
+            provider: "codex".into(),
+            transport: "codex_app_server_ws".into(),
+            provider_session_id: Some(self.native_id.clone()),
+            capabilities: NativeTransportCapabilities::degraded("codex", "codex_app_server_ws"),
+            observed_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .unwrap();
+    }
+
     #[cfg(windows)]
     fn set_owner(&self, id: &str) {
         db::get_db_conn(|conn| {
@@ -211,6 +225,44 @@ async fn spawn_recovery_legacy_pre_effect_crash_and_replays_leave_the_claim_quar
     assert!(persisted_roster().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn spawn_recovery_restart_keeps_a_saved_unknown_with_stale_binding_quarantined() {
+    let home = TestWardianHome::new_async().await;
+    let fixture = Fixture::unknown(&home, CORRECTED_MODEL, true);
+    crate::manager::try_save_state_snapshot(std::slice::from_ref(&fixture.config)).unwrap();
+    fixture.publish_binding(7);
+    db::get_db_conn(|conn| {
+        conn.execute(
+            "UPDATE agents SET last_status='Idle' WHERE session_id=?1",
+            [&fixture.config.session_id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let claim = fixture.owner();
+    let original = fixture.attempt_evidence();
+    let saved_path = home.path().join("settings/state.json");
+    let saved = std::fs::read(&saved_path).unwrap();
+
+    crate::spawn_operations::recover_after_owner_acquired().unwrap();
+    assert!(agent_spawn::restore_is_excluded(&fixture.config.session_id).unwrap());
+    assert!(agent_spawn::queued_operation_ids().unwrap().is_empty());
+    // Startup skips this row before it can publish a live agent.
+    let state = AppState::new();
+    state.agent_roster_restored.store(true, Ordering::Release);
+    assert_eq!(
+        recover(&state, fixture.request.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "spawn_recovery_native_unverified"
+    );
+    assert_eq!(fixture.owner(), claim);
+    assert_eq!(fixture.attempt_evidence(), original);
+    assert_eq!(std::fs::read(saved_path).unwrap(), saved);
+    assert!(state.agents.lock().await.is_empty());
+}
+
 #[cfg(windows)]
 mod registered {
     use super::*;
@@ -219,7 +271,6 @@ mod registered {
     use portable_pty::{Child, ChildKiller, ExitStatus};
     use std::sync::Arc;
     use wardian_core::models::TerminalGeometry;
-    use wardian_core::native_transport::{NativeSessionBinding, NativeTransportCapabilities};
 
     #[derive(Debug, Clone)]
     struct FixtureChild;
@@ -250,19 +301,6 @@ mod registered {
 
     fn persist(config: &AgentConfig) {
         crate::manager::try_save_state_snapshot(std::slice::from_ref(config)).unwrap();
-    }
-
-    fn publish_binding(fixture: &Fixture, generation: u64) {
-        db::upsert_native_session_binding(&NativeSessionBinding {
-            target_agent_id: fixture.config.session_id.clone(),
-            generation,
-            provider: "codex".into(),
-            transport: "codex_app_server_ws".into(),
-            provider_session_id: Some(fixture.native_id.clone()),
-            capabilities: NativeTransportCapabilities::degraded("codex", "codex_app_server_ws"),
-            observed_at: chrono::Utc::now().to_rfc3339(),
-        })
-        .unwrap();
     }
 
     #[tokio::test]
@@ -339,7 +377,7 @@ mod registered {
                 .code,
             "spawn_recovery_native_unverified"
         );
-        publish_binding(&fixture, native_generation - 1);
+        fixture.publish_binding(native_generation - 1);
         assert_eq!(
             recover(&state, fixture.request.clone())
                 .await
@@ -347,7 +385,7 @@ mod registered {
                 .code,
             "spawn_recovery_native_unverified"
         );
-        publish_binding(&fixture, native_generation);
+        fixture.publish_binding(native_generation);
 
         config_handle.lock().unwrap().model = Some(ORIGINAL_MODEL.into());
         assert_eq!(
@@ -405,7 +443,10 @@ mod registered {
         );
         wardian_core::conversation_lease::save_leases(&[]).unwrap();
 
-        let plan = recovery::plan_for_recovery(&fixture.request).unwrap();
+        let Admission::NeedsLiveProof(plan) = recovery::admit_recovery(&fixture.request).unwrap()
+        else {
+            panic!("a still uncertain operation requires live proof");
+        };
         let proof = RegistrationEvidence {
             config: fixture.config.clone(),
             terminal_generation: generation,
@@ -471,16 +512,89 @@ mod registered {
             success.original_attempt_id,
             fixture.request.expected_attempt_id
         );
-        assert_eq!(duplicate.unwrap_err().code, "spawn_recovery_not_uncertain");
+        assert_eq!(success.action, Action::FinalizeRegistered);
+        assert_eq!(success.operation_id, fixture.request.operation_id);
+        assert_eq!(success.confirmed_model, CORRECTED_MODEL);
+        let committed_operation = agent_spawn::get(&fixture.request.operation_id)
+            .unwrap()
+            .unwrap();
+        let read_audit = || {
+            db::get_db_conn(|conn| {
+            let rows: (u32, String, String, String) = conn.query_row(
+                "SELECT COUNT(*),confirmed_model,original_error_code,finalized_at FROM agent_spawn_recovery_audit WHERE operation_id=?1",
+                [&fixture.request.operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            Ok(rows)
+        }).unwrap()
+        };
+        let audit = read_audit();
+        assert_eq!(audit.0, 1);
+        assert_eq!(audit.1, CORRECTED_MODEL);
+        assert_eq!(audit.2, "interrupted_after_claim");
+
+        // The first pipe reply can disappear after the durable commit. The
+        // next process may have no roster, provider, or startup readiness.
+        crate::spawn_operations::recover_after_owner_acquired().unwrap();
+        assert!(!agent_spawn::restore_is_excluded(id).unwrap());
+        let restarted = AppState::new();
+        let after_reply_loss = recover(&restarted, fixture.request.clone()).await;
+        assert_eq!(
+            duplicate,
+            Ok(success.clone()),
+            "the concurrent loser must replay the same receipt; later retry was {after_reply_loss:?}"
+        );
+        assert_eq!(after_reply_loss, Ok(success.clone()));
+        let original_reply = serde_json::to_vec(&success).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&duplicate.unwrap()).unwrap(),
+            original_reply
+        );
+        assert_eq!(
+            serde_json::to_vec(&after_reply_loss.unwrap()).unwrap(),
+            original_reply
+        );
+        for mismatch in [
+            Request {
+                action: Action::LaunchIfAbsent,
+                ..fixture.request.clone()
+            },
+            Request {
+                expected_attempt_id: agent_spawn::new_operation_id(),
+                ..fixture.request.clone()
+            },
+            Request {
+                expected_model: ORIGINAL_MODEL.into(),
+                ..fixture.request.clone()
+            },
+        ] {
+            assert_eq!(
+                recover(&restarted, mismatch).await.unwrap_err().code,
+                "spawn_recovery_receipt_mismatch"
+            );
+        }
+        // A caller can also reach the durable fence with a stale plan.
+        // Receipt replay must never consult new live or lease evidence.
+        std::fs::write(
+            wardian_core::conversation_lease::lease_path().unwrap(),
+            b"invalid after commit",
+        )
+        .unwrap();
+        let mut stale = proof;
+        stale.config.resume_session = None;
+        let replay = recovery::finalize_registered(&fixture.request, &plan, &stale, || {
+            panic!("replaying an audit receipt must not check the native owner")
+        })
+        .unwrap();
+        assert_eq!(serde_json::to_vec(&replay).unwrap(), original_reply);
         assert_eq!(fixture.owner(), ("agent".into(), id.clone()));
         assert_eq!(fixture.attempt_evidence(), before);
+        assert_eq!(committed_operation.state, AgentSpawnState::Registered);
         assert_eq!(
-            agent_spawn::get(&fixture.request.operation_id)
-                .unwrap()
-                .unwrap()
-                .state,
-            AgentSpawnState::Registered
+            agent_spawn::get(&fixture.request.operation_id).unwrap(),
+            Some(committed_operation)
         );
+        assert_eq!(read_audit(), audit);
         assert_eq!(std::fs::read(saved_path).unwrap(), saved_before);
         assert!(Arc::ptr_eq(
             &state.agents.lock().await[id].config,
@@ -490,15 +604,6 @@ mod registered {
             owner.requests.lock().unwrap().is_empty(),
             "metadata recovery sends no native RPC"
         );
-        db::get_db_conn(|conn| {
-            let rows: (u32, String, String) = conn.query_row(
-                "SELECT COUNT(*),confirmed_model,original_error_code FROM agent_spawn_recovery_audit WHERE operation_id=?1",
-                [&fixture.request.operation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-            assert_eq!(rows, (1, CORRECTED_MODEL.into(), "interrupted_after_claim".into()));
-            Ok(())
-        }).unwrap();
         owner.cleanup().await;
     }
 }

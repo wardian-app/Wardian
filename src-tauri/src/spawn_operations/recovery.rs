@@ -2,7 +2,7 @@ use super::persisted_roster;
 use crate::state::AppState;
 use std::sync::atomic::Ordering;
 use wardian_core::agent_spawn::recovery::{
-    self, Blocker, Finalized, RegistrationEvidence, Request,
+    self, Admission, Blocker, Finalized, RegistrationEvidence, Request,
 };
 use wardian_core::models::{AgentConfig, TerminalRuntimeState};
 
@@ -13,21 +13,33 @@ mod tests;
 /// stays pinned through the metadata commit.
 pub(crate) async fn recover(state: &AppState, request: Request) -> Result<Finalized, Blocker> {
     let expected = request.clone();
-    let plan = tokio::task::spawn_blocking(move || recovery::plan_for_recovery(&expected))
+    let admission = tokio::task::spawn_blocking(move || recovery::admit_recovery(&expected))
         .await
         .map_err(|_| evidence_unavailable())??;
+    let plan = match admission {
+        Admission::Committed(receipt) => return Ok(receipt),
+        Admission::NeedsLiveProof(plan) => plan,
+    };
     let agent_id = &plan.operation.agent_id;
     let native_id = plan
         .provider_session_id
         .as_deref()
         .ok_or_else(native_unverified)?;
+    let lifecycle = state.lock_agent_lifecycle(agent_id).await;
+    let expected = request.clone();
+    if let Some(receipt) =
+        tokio::task::spawn_blocking(move || recovery::committed_receipt(&expected))
+            .await
+            .map_err(|_| evidence_unavailable())??
+    {
+        return Ok(receipt);
+    }
     if !state.agent_roster_restored.load(Ordering::Acquire) {
         return Err(Blocker::new(
             "spawn_recovery_roster_unavailable",
             "The current app has not completed roster restoration.",
         ));
     }
-    let lifecycle = state.lock_agent_lifecycle(agent_id).await;
     let roster = crate::manager::roster_io::acquire_roster_barrier()
         .await
         .map_err(|_| evidence_unavailable())?;

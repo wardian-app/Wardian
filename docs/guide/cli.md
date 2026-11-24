@@ -601,12 +601,17 @@ and configured model from the original operation evidence.
 wardian agent spawn-recover <operation-id> --expected-attempt <attempt-id> --expected-model <model> --action finalize-registered
 ```
 
-The desktop must still own the same idle native runtime and have a matching
-saved roster, SQLite summary, and name claim. The command preserves the
-original request and attempt evidence. `--action launch-if-absent` returns a
-typed blocker for these legacy uncertain attempts because their records
-cannot establish that the provider never took effect. Recovery uses the
-matching CLI and desktop control endpoint.
+For a new finalization, the desktop must still own the same idle native
+runtime and have a matching saved roster, SQLite summary, and name claim. A
+restart keeps saved `outcome_unknown` rows out of automatic restore, so
+installing a build with this command cannot recover an already uncertain
+registration from its saved row. An exact retry of a completed finalization
+returns its audit receipt, including the confirmed model, even after a restart.
+The command preserves the original request and attempt evidence.
+
+`--action launch-if-absent` returns a typed blocker for these legacy uncertain
+attempts because their records cannot establish that the provider never took
+effect. Recovery uses the matching CLI and desktop control endpoint.
 
 Legacy spawn, clone, or rename can report `[agent-name-ownership-pending]`
 after publication. The error includes the stable agent and attempt IDs. Keep

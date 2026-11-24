@@ -2,7 +2,7 @@
 
 use super::{canonical_uuid, load_plan_with_conn, AgentSpawnPlan, AgentSpawnState};
 use crate::models::AgentConfig;
-use rusqlite::{params, Connection, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -28,6 +28,12 @@ pub struct Finalized {
     pub original_attempt_id: String,
     pub agent_id: String,
     pub action: Action,
+    pub confirmed_model: String,
+}
+
+pub enum Admission {
+    Committed(Finalized),
+    NeedsLiveProof(Box<AgentSpawnPlan>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,12 +110,67 @@ pub fn validate_request(request: &Request) -> Result<(), Blocker> {
     Ok(())
 }
 
-/// Resolve the exact uncertain operation and its unchanged durable claim.
-/// Legacy attempts cannot establish that provider effects never began.
-pub fn plan_for_recovery(request: &Request) -> Result<AgentSpawnPlan, Blocker> {
+/// Return an exact committed receipt before asking for any live evidence.
+/// A read transaction keeps the receipt and operation lookup on one snapshot.
+pub fn admit_recovery(request: &Request) -> Result<Admission, Blocker> {
     validate_request(request)?;
-    crate::db::get_db_conn(|conn| Ok(read_plan(conn, request)))
+    crate::db::get_db_conn(|conn| Ok(admit_with_conn(conn, request)))
         .map_err(|_| storage_unavailable())?
+}
+
+fn admit_with_conn(conn: &Connection, request: &Request) -> Result<Admission, Blocker> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
+    let admission = match read_receipt(&tx, request)? {
+        Some(receipt) => Admission::Committed(receipt),
+        None => Admission::NeedsLiveProof(Box::new(read_plan(&tx, request)?)),
+    };
+    tx.commit()?;
+    Ok(admission)
+}
+
+/// Recheck after waiting for an admission lock another caller may have held
+/// through its commit.
+pub fn committed_receipt(request: &Request) -> Result<Option<Finalized>, Blocker> {
+    validate_request(request)?;
+    crate::db::get_db_conn(|conn| Ok(read_receipt(conn, request)))
+        .map_err(|_| storage_unavailable())?
+}
+
+fn read_receipt(conn: &Connection, request: &Request) -> Result<Option<Finalized>, Blocker> {
+    // This audit only records metadata finalization. The operation retains
+    // its immutable planned agent ID even after the live agent is removed.
+    let stored: Option<(String, String, Option<String>)> = conn
+        .query_row(
+            "SELECT a.original_attempt_id,a.confirmed_model,o.planned_agent_id
+             FROM agent_spawn_recovery_audit a
+             LEFT JOIN agent_spawn_operations o ON o.operation_id=a.operation_id
+               AND o.attempt_id=a.original_attempt_id AND o.state='registered' AND o.provider='codex'
+             WHERE a.operation_id=?1",
+            [&request.operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((original_attempt_id, confirmed_model, agent_id)) = stored else {
+        return Ok(None);
+    };
+    if request.action != Action::FinalizeRegistered
+        || request.expected_attempt_id != original_attempt_id
+        || request.expected_model != confirmed_model
+    {
+        return Err(Blocker::new(
+            "spawn_recovery_receipt_mismatch",
+            "The committed recovery belongs to a different action, attempt, or model.",
+        ));
+    }
+    let agent_id = agent_id.ok_or_else(storage_unavailable)?;
+    Ok(Some(Finalized {
+        schema: crate::control::CONTROL_SCHEMA,
+        operation_id: request.operation_id.clone(),
+        original_attempt_id,
+        agent_id,
+        action: Action::FinalizeRegistered,
+        confirmed_model,
+    }))
 }
 
 fn read_plan(conn: &Connection, request: &Request) -> Result<AgentSpawnPlan, Blocker> {
@@ -206,7 +267,9 @@ pub fn finalize_registered(
     evidence: &RegistrationEvidence,
     native_still_idle: impl FnOnce() -> bool,
 ) -> Result<Finalized, Blocker> {
-    validate_request(request)?;
+    if let Some(receipt) = committed_receipt(request)? {
+        return Ok(receipt);
+    }
     let session = evidence.config.resume_session.as_deref().ok_or_else(|| {
         Blocker::new(
             "spawn_recovery_native_unverified",
@@ -256,6 +319,9 @@ fn finalize_with_conn(
     native_still_idle: impl FnOnce() -> bool,
 ) -> Result<Finalized, Blocker> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    if let Some(receipt) = read_receipt(&tx, request)? {
+        return Ok(receipt);
+    }
     let current = read_plan(&tx, request)?;
     if current != *expected {
         return Err(Blocker::new(
@@ -343,12 +409,75 @@ fn finalize_with_conn(
             now
         ],
     )?;
+    let receipt = read_receipt(&tx, request)?.ok_or_else(storage_unavailable)?;
     tx.commit()?;
-    Ok(Finalized {
-        schema: crate::control::CONTROL_SCHEMA,
-        operation_id: request.operation_id.clone(),
-        original_attempt_id: request.expected_attempt_id.clone(),
-        agent_id: operation.agent_id.clone(),
-        action: request.action,
-    })
+    Ok(receipt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_recovery_writer_replays_when_a_receipt_already_won_admission() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::migrate(&conn).unwrap();
+        let request = Request {
+            operation_id: super::super::new_operation_id(),
+            expected_attempt_id: super::super::new_operation_id(),
+            expected_model: "fixture-model".into(),
+            action: Action::FinalizeRegistered,
+        };
+        let agent_id = super::super::new_operation_id();
+        let payload = serde_json::json!({
+            "provider":"codex", "class":"Fixture", "name":"fixture",
+            "workspace":"/fixture", "model":request.expected_model, "reasoning_effort":null,
+        })
+        .to_string();
+        let hash = format!("{:x}", Sha256::digest(payload.as_bytes()));
+        conn.execute(
+            "INSERT INTO agent_spawn_operations (
+                operation_id,payload_hash,request_json,planned_agent_id,session_name,provider,class,
+                state,attempt_id,created_at,updated_at
+             ) VALUES (?1,?2,?3,?4,'fixture','codex','Fixture','outcome_unknown',?5,'fixture','fixture')",
+            params![request.operation_id, hash, payload, agent_id, request.expected_attempt_id],
+        ).unwrap();
+        let stale = load_plan_with_conn(&conn, &request.operation_id)
+            .unwrap()
+            .unwrap();
+        let winner = conn.unchecked_transaction().unwrap();
+        winner
+            .execute(
+                "UPDATE agent_spawn_operations SET state='registered' WHERE operation_id=?1",
+                [&request.operation_id],
+            )
+            .unwrap();
+        winner.execute(
+            "INSERT INTO agent_spawn_recovery_audit VALUES (?1,?2,NULL,NULL,?3,'fixture-native',7,8,'fixture')",
+            params![request.operation_id, request.expected_attempt_id, request.expected_model],
+        ).unwrap();
+        winner.commit().unwrap();
+
+        // The contender had already chosen the plan and reached its writer
+        // transaction. Nothing in its now-stale evidence is authoritative.
+        let proof = RegistrationEvidence {
+            config: AgentConfig::default(),
+            terminal_generation: 0,
+            provider_generation: 0,
+        };
+        let recorded = read_receipt(&conn, &request).unwrap().unwrap();
+        let reply = finalize_with_conn(&conn, &request, &stale, &proof, "", || {
+            panic!("the writer must replay before inspecting stale proof")
+        })
+        .unwrap();
+        assert_eq!(reply, recorded);
+        let count: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_spawn_recovery_audit",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }
