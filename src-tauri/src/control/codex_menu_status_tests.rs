@@ -50,6 +50,7 @@ async fn fixture() -> (
             input_generation,
             runtime_generation,
             current_status,
+            startup_action_intent_revision: None,
         },
         rx,
     )

@@ -2800,6 +2800,55 @@ async fn terminal_session_replacement_lifecycle_notifications_never_regress_gene
     assert_eq!(replaced_new.runtime_generation, second);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoned_startup_readiness_commands_have_no_effect() {
+    let broker = Arc::new(TerminalSessionBroker::default());
+    let (input_tx, mut input_rx) = mpsc::channel(2);
+    let runtime = TerminalRuntimeHandles::new(input_tx, |_| Ok(()));
+    broker
+        .start_or_replace_runtime("abandoned-readiness", runtime, geometry(80, 24))
+        .await
+        .expect("start runtime");
+    let expected = broker
+        .readiness_observation("abandoned-readiness")
+        .await
+        .expect("current readiness observation");
+    let release = broker
+        .block_actor_for_test("abandoned-readiness")
+        .await
+        .expect("block actor before readiness commands");
+
+    let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let committed_by_command = committed.clone();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(25),
+        broker.commit_if_readiness_observation_current(expected.clone(), move || {
+            committed_by_command.store(true, std::sync::atomic::Ordering::Release);
+            true
+        }),
+    )
+    .await
+    .is_err());
+    assert!(tokio::time::timeout(
+        Duration::from_millis(25),
+        broker.send_privileged_input_if_readiness_current(expected.clone(), b"trust key".to_vec()),
+    )
+    .await
+    .is_err());
+
+    release.send(()).expect("release actor");
+    let after = broker
+        .readiness_observation("abandoned-readiness")
+        .await
+        .expect("process abandoned messages");
+    assert!(!committed.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(after.input_sequence, expected.input_sequence);
+    assert!(
+        input_rx.try_recv().is_err(),
+        "no abandoned trust key is sent"
+    );
+}
+
 fn process_output_for_session(
     broker: Arc<TerminalSessionBroker>,
     session_id: &'static str,

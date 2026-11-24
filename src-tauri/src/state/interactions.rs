@@ -38,6 +38,55 @@ pub(crate) struct ProviderInputGenerationFence {
     _guard: tokio::sync::OwnedMutexGuard<Option<u64>>,
 }
 
+/// Holds the exact input-state mutation and generation fences while a terminal
+/// actor performs its serialized screen comparison. The commit is synchronous
+/// so the actor can keep repaint processing behind that comparison.
+pub(crate) struct PreparedStartupPromptReadiness {
+    state: Arc<InteractionState>,
+    session_id: String,
+    generation: u64,
+    _mutation_guard: tokio::sync::OwnedMutexGuard<()>,
+    generation_guard: tokio::sync::OwnedMutexGuard<Option<u64>>,
+}
+
+impl PreparedStartupPromptReadiness {
+    pub(crate) fn commit(self) -> bool {
+        if *self.generation_guard != Some(self.generation) {
+            return false;
+        }
+        let Ok(deleted_sessions) = self.state.deleted_sessions.try_lock() else {
+            return false;
+        };
+        if deleted_sessions.contains(&self.session_id) {
+            return false;
+        }
+        drop(deleted_sessions);
+
+        let Ok(mut inputs) = self.state.provider_inputs.try_lock() else {
+            return false;
+        };
+        if !inputs.get(&self.session_id).is_some_and(|existing| {
+            existing.generation == self.generation
+                && existing.state == ProviderInputReadiness::ActionRequired
+        }) {
+            return false;
+        }
+
+        let record = ProviderInputState {
+            session_id: self.session_id,
+            generation: self.generation,
+            state: ProviderInputReadiness::Ready,
+            ready_evidence: Some(ProviderReadyEvidence::PromptDetected),
+            observed_at: now_rfc3339_millis(),
+        };
+        if wardian_core::db::upsert_provider_input_state(&record).is_err() {
+            return false;
+        }
+        inputs.insert(record.session_id.clone(), record);
+        true
+    }
+}
+
 impl InteractionState {
     pub async fn create_message_durable(
         &self,
@@ -499,7 +548,6 @@ impl InteractionState {
             generation,
             state,
             ready_evidence,
-            false,
         )
         .await
     }
@@ -508,36 +556,31 @@ impl InteractionState {
     /// an owned startup action. This narrowly clears the ActionRequired state
     /// created by that action; ordinary readiness observations still preserve
     /// ActionRequired and Busy input states.
-    pub(crate) async fn record_provider_ready_after_startup_action(
-        &self,
+    pub(crate) async fn prepare_provider_ready_after_startup_action(
+        self: &Arc<Self>,
         session_id: &str,
         generation: u64,
-    ) -> bool {
-        let (_mutation, _generation_cell, mut current_generation) = self
+    ) -> Option<PreparedStartupPromptReadiness> {
+        let (mutation_guard, generation_cell, generation_guard) = self
             .lock_mutation_and_provider_generation(session_id, true)
             .await;
         if self.deleted_sessions.lock().await.contains(session_id) {
-            return false;
+            return None;
         }
-        let Some(generation_guard) = current_generation.as_mut() else {
-            return false;
+        let Some(generation_guard) = generation_guard else {
+            return None;
         };
-        if **generation_guard != Some(generation) {
-            return false;
+        if *generation_guard != Some(generation) {
+            return None;
         }
-        let (record, _) = self
-            .record_provider_input_state_with_generation(
-                session_id,
-                generation,
-                ProviderInputReadiness::Ready,
-                Some(ProviderReadyEvidence::PromptDetected),
-                true,
-                generation_guard,
-            )
-            .await;
-        record.generation == generation
-            && record.state == ProviderInputReadiness::Ready
-            && record.ready_evidence == Some(ProviderReadyEvidence::PromptDetected)
+        let _generation_cell = generation_cell?;
+        Some(PreparedStartupPromptReadiness {
+            state: self.clone(),
+            session_id: session_id.to_string(),
+            generation,
+            _mutation_guard: mutation_guard,
+            generation_guard,
+        })
     }
 
     async fn record_provider_input_state_with_transition_policy(
@@ -546,7 +589,6 @@ impl InteractionState {
         generation: u64,
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
-        allow_action_required_ready: bool,
     ) -> (ProviderInputState, bool) {
         let (_mutation, _generation_cell, mut current_generation) = self
             .lock_mutation_and_provider_generation(session_id, true)
@@ -562,7 +604,6 @@ impl InteractionState {
             generation,
             state,
             ready_evidence,
-            allow_action_required_ready,
             current_generation
                 .as_mut()
                 .expect("created provider generation cell has a guard"),
@@ -576,7 +617,6 @@ impl InteractionState {
         generation: u64,
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
-        allow_action_required_ready: bool,
         current_generation: &mut Option<u64>,
     ) -> (ProviderInputState, bool) {
         if self.deleted_sessions.lock().await.contains(session_id) {
@@ -593,14 +633,7 @@ impl InteractionState {
         }
         let mut inputs = self.provider_inputs.lock().await;
         if let Some(existing) = inputs.get(session_id) {
-            let publishing_confirmed_startup_prompt = allow_action_required_ready
-                && generation == existing.generation
-                && existing.state == ProviderInputReadiness::ActionRequired
-                && state == ProviderInputReadiness::Ready
-                && ready_evidence == Some(ProviderReadyEvidence::PromptDetected);
-            if keep_existing_provider_input_state(existing, generation, state, ready_evidence)
-                && !publishing_confirmed_startup_prompt
-            {
+            if keep_existing_provider_input_state(existing, generation, state, ready_evidence) {
                 return (existing.clone(), false);
             }
         }
@@ -678,7 +711,6 @@ impl InteractionState {
             generation,
             state,
             ready_evidence,
-            false,
             current_generation
                 .as_mut()
                 .expect("created provider generation cell has a guard"),
@@ -712,7 +744,6 @@ impl InteractionState {
             generation,
             state,
             ready_evidence,
-            false,
             generation_guard,
         )
         .await
@@ -1431,7 +1462,8 @@ mod tests {
 
     #[tokio::test]
     async fn confirmed_startup_action_clears_only_current_action_required_generation() {
-        let state = InteractionState::default();
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let state = Arc::new(InteractionState::default());
         let startup = state
             .start_provider_input_generation("agent-1", ProviderInputReadiness::Booting, None)
             .await;
@@ -1444,11 +1476,11 @@ mod tests {
             )
             .await;
 
-        assert!(
-            state
-                .record_provider_ready_after_startup_action("agent-1", startup.generation)
-                .await
-        );
+        assert!(state
+            .prepare_provider_ready_after_startup_action("agent-1", startup.generation)
+            .await
+            .expect("current ActionRequired input generation")
+            .commit());
         let ready = state.provider_input_state("agent-1").await.unwrap();
         assert_eq!(ready.generation, startup.generation);
         assert_eq!(ready.state, ProviderInputReadiness::Ready);
@@ -1460,16 +1492,15 @@ mod tests {
         let next = state
             .start_provider_input_generation("agent-1", ProviderInputReadiness::Busy, None)
             .await;
-        assert!(
-            !state
-                .record_provider_ready_after_startup_action("agent-1", startup.generation)
-                .await
-        );
-        assert!(
-            !state
-                .record_provider_ready_after_startup_action("agent-1", next.generation)
-                .await
-        );
+        assert!(state
+            .prepare_provider_ready_after_startup_action("agent-1", startup.generation)
+            .await
+            .is_none());
+        assert!(!state
+            .prepare_provider_ready_after_startup_action("agent-1", next.generation)
+            .await
+            .expect("current Busy input generation")
+            .commit());
         assert_eq!(
             state.provider_input_state("agent-1").await.unwrap(),
             next,

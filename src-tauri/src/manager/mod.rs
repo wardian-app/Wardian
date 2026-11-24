@@ -307,6 +307,27 @@ pub(crate) fn set_agent_status(
     );
 }
 
+/// Applies a status transition and returns the exact admitted intent revision.
+/// Startup handoffs retain this token so a later intent with the same text
+/// cannot be mistaken for the transition that assigned the startup action.
+pub(crate) fn set_agent_status_and_get_intent(
+    app: &AppHandle,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    next_status: &str,
+) -> Option<u64> {
+    let Ok(expected_status) = current_status.lock().map(|status| status.clone()) else {
+        return None;
+    };
+    set_agent_status_if_current_with_intent(
+        app,
+        session_id,
+        current_status,
+        &expected_status,
+        next_status,
+    )
+}
+
 /// Applies a status transition only while the caller's expected state remains
 /// current. Delayed startup handoffs use this to preserve a newer provider
 /// action that arrives between screen validation and publication.
@@ -317,10 +338,26 @@ pub(crate) fn set_agent_status_if_current(
     expected_status: &str,
     next_status: &str,
 ) {
+    let _ = set_agent_status_if_current_with_intent(
+        app,
+        session_id,
+        current_status,
+        expected_status,
+        next_status,
+    );
+}
+
+fn set_agent_status_if_current_with_intent(
+    app: &AppHandle,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+    next_status: &str,
+) -> Option<u64> {
     let admission =
         codex_onboarding::status_admission(app, session_id, current_status, next_status);
     if admission == codex_onboarding::CodexStatusAdmission::Blocked {
-        return;
+        return None;
     }
     let state = app.state::<AppState>();
     let Some(intent_revision) = reserve_agent_status_intent(
@@ -331,10 +368,10 @@ pub(crate) fn set_agent_status_if_current(
         expected_status,
         next_status,
     ) else {
-        return;
+        return None;
     };
     match admission {
-        codex_onboarding::CodexStatusAdmission::Blocked => return,
+        codex_onboarding::CodexStatusAdmission::Blocked => return None,
         codex_onboarding::CodexStatusAdmission::WaitForRoster => {
             codex_onboarding::defer_status_transition(
                 app,
@@ -344,7 +381,7 @@ pub(crate) fn set_agent_status_if_current(
                 intent_revision,
                 next_status.to_string(),
             );
-            return;
+            return Some(intent_revision);
         }
         codex_onboarding::CodexStatusAdmission::Allowed => {}
     }
@@ -365,6 +402,7 @@ pub(crate) fn set_agent_status_if_current(
             status_revision,
         );
     }
+    Some(intent_revision)
 }
 
 /// Commit an admitted status only while its exact runtime and intent still win.
@@ -377,13 +415,68 @@ pub(crate) fn apply_admitted_status_transition(
     intent_revision: u64,
     next_status: &str,
 ) -> Option<(u64, u64)> {
+    apply_admitted_status_transition_after_commit(
+        state,
+        session_id,
+        current_status,
+        expected_status,
+        intent_revision,
+        next_status,
+        || true,
+    )
+}
+
+/// Commits a caller-owned readiness proof before exposing its associated
+/// status, while the exact status Arc and admitted intent are locked.
+pub(crate) fn apply_admitted_status_transition_after_commit<F>(
+    state: &AppState,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+    intent_revision: u64,
+    next_status: &str,
+    commit: F,
+) -> Option<(u64, u64)>
+where
+    F: FnOnce() -> bool,
+{
     let mut status = current_status.lock().ok()?;
     if state.status_intent_revision(session_id, current_status) != intent_revision
         || *status != expected_status
         || *status == next_status
+        || !commit()
     {
         return None;
     }
+    *status = next_status.to_string();
+    let status_revision = state.commit_status_revision(session_id, current_status, next_status);
+    let status_sequence = state.next_status_observation_sequence(session_id);
+    Some((status_sequence, status_revision))
+}
+
+/// Commits a readiness proof and its status intent only while the exact
+/// previously observed intent still owns the current status Arc.
+pub(crate) fn apply_admitted_status_transition_if_revision_after_commit<F>(
+    state: &AppState,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+    expected_intent_revision: u64,
+    next_status: &str,
+    commit: F,
+) -> Option<(u64, u64)>
+where
+    F: FnOnce() -> bool,
+{
+    let mut status = current_status.lock().ok()?;
+    if state.status_intent_revision(session_id, current_status) != expected_intent_revision
+        || *status != expected_status
+        || *status == next_status
+        || !commit()
+    {
+        return None;
+    }
+    state.reserve_status_intent(session_id, current_status, next_status);
     *status = next_status.to_string();
     let status_revision = state.commit_status_revision(session_id, current_status, next_status);
     let status_sequence = state.next_status_observation_sequence(session_id);
@@ -457,6 +550,49 @@ fn schedule_agent_status_observation(
     status: String,
     status_sequence: u64,
     status_revision: u64,
+) {
+    schedule_agent_status_observation_inner(
+        app,
+        session_id,
+        current_status,
+        status,
+        status_sequence,
+        status_revision,
+        Some(Box::new(|app, session_id, status| {
+            crate::control::spawn_agent_messaging_if_idle(app, session_id, status);
+        })),
+    );
+}
+
+/// Persists and publishes a startup status without consuming the one-shot
+/// queue opportunity while the provider startup lease is still held.
+pub(crate) fn schedule_startup_readiness_status_observation<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    status: String,
+    status_sequence: u64,
+    status_revision: u64,
+) {
+    schedule_agent_status_observation_inner(
+        app,
+        session_id,
+        current_status,
+        status,
+        status_sequence,
+        status_revision,
+        None,
+    );
+}
+
+fn schedule_agent_status_observation_inner<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    status: String,
+    status_sequence: u64,
+    status_revision: u64,
+    queue_dispatch: Option<Box<dyn FnOnce(&AppHandle<R>, &str, &str) + Send + 'static>>,
 ) {
     let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let status_app = app.clone();
@@ -553,7 +689,9 @@ fn schedule_agent_status_observation(
                 "current_status": status.clone(),
             }),
         );
-        crate::control::spawn_agent_messaging_if_idle(&status_app, &status_session_id, &status);
+        if let Some(queue_dispatch) = queue_dispatch {
+            queue_dispatch(&status_app, &status_session_id, &status);
+        }
     });
 }
 
@@ -1900,6 +2038,44 @@ mod tests {
         let existing = std::ffi::OsStr::from_bytes(b"plugin-\xff");
         let value = append_claude_plugin_dirs(Some(existing), Path::new("mod")).unwrap();
         assert_eq!(value.as_encoded_bytes(), b"plugin-\xff:mod");
+    }
+
+    #[test]
+    fn rejected_startup_readiness_commit_does_not_reserve_idle_intent() {
+        let state = AppState::new();
+        let status = std::sync::Arc::new(std::sync::Mutex::new("Action Needed".to_string()));
+
+        assert!(apply_admitted_status_transition_if_revision_after_commit(
+            &state,
+            "startup-agent",
+            &status,
+            "Action Needed",
+            0,
+            "Idle",
+            || false,
+        )
+        .is_none());
+        assert_eq!(*status.lock().unwrap(), "Action Needed");
+        assert_eq!(state.status_intent_revision("startup-agent", &status), 0);
+        assert_eq!(state.status_intent_status("startup-agent", &status), None);
+
+        assert!(apply_admitted_status_transition_if_revision_after_commit(
+            &state,
+            "startup-agent",
+            &status,
+            "Action Needed",
+            0,
+            "Idle",
+            || true,
+        )
+        .is_some());
+        assert_eq!(*status.lock().unwrap(), "Idle");
+        assert_eq!(
+            state
+                .status_intent_status("startup-agent", &status)
+                .as_deref(),
+            Some("Idle")
+        );
     }
 
     /// Models an independently admitted snapshot writer for persistence fixtures.

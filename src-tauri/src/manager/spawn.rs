@@ -244,6 +244,15 @@ struct SpawnPublicationGate {
     registration: Option<std::sync::Arc<RegistrationPublicationState>>,
     pi_bridge: Option<std::sync::Arc<crate::delivery::pi_bridge::PiBridgeOwner>>,
     codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
+    startup_ready_wake: Option<std::sync::Arc<StartupReadinessLeaseWake>>,
+}
+
+struct StartupReadinessLeaseWake {
+    input_generation: u64,
+    published: std::sync::atomic::AtomicBool,
+    lease_released: std::sync::atomic::AtomicBool,
+    dispatch_claimed: std::sync::atomic::AtomicBool,
+    dispatch: std::sync::Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Registration may put a runtime in the map before its roster and provider
@@ -1243,22 +1252,30 @@ async fn wait_for_claude_trust_selection(
     selection: (bool, bool),
     wait_for_selection: bool,
     settle_interval: std::time::Duration,
-) -> Result<TerminalSnapshot, String> {
+    expected_input_sequence: Option<u64>,
+) -> Result<crate::state::terminal_session::TerminalReadinessObservation, String> {
     let deadline = tokio::time::Instant::now() + CLAUDE_TRUST_SELECTION_TIMEOUT;
     loop {
-        let before = tokio::time::timeout_at(deadline, terminal_sessions.snapshot(session_id))
-            .await
-            .map_err(|_| "Claude trust screen timed out".to_string())?
-            .map_err(|error| format!("Claude trust screen unavailable: {error}"))?;
-        if before.runtime_generation != runtime_generation {
+        let before = tokio::time::timeout_at(
+            deadline,
+            terminal_sessions.readiness_observation(session_id),
+        )
+        .await
+        .map_err(|_| "Claude trust screen timed out".to_string())?
+        .map_err(|error| format!("Claude trust screen unavailable: {error}"))?;
+        if expected_input_sequence.is_some_and(|expected| before.input_sequence != expected) {
+            return Err("opposing terminal input arrived during Claude trust confirmation".into());
+        }
+        let before_snapshot = &before.snapshot;
+        if before_snapshot.runtime_generation != runtime_generation {
             return Err("Claude trust runtime generation changed".to_string());
         }
-        if !claude_trust_screen_displays_workspace(&before.visible_grid, display_path) {
+        if !claude_trust_screen_displays_workspace(&before_snapshot.visible_grid, display_path) {
             return Err("Claude trust prompt or assigned workspace changed".to_string());
         }
 
         let observed = crate::control::startup_readiness::claude_workspace_trust_prompt_selection(
-            &before.visible_grid,
+            &before_snapshot.visible_grid,
         );
         if observed != Some(selection) {
             if !wait_for_selection {
@@ -1276,29 +1293,37 @@ async fn wait_for_claude_trust_selection(
         tokio::time::timeout_at(deadline, tokio::time::sleep(settle_interval))
             .await
             .map_err(|_| "Claude trust screen did not settle".to_string())?;
-        let after = tokio::time::timeout_at(deadline, terminal_sessions.snapshot(session_id))
-            .await
-            .map_err(|_| "Claude trust screen timed out".to_string())?
-            .map_err(|error| format!("Claude trust screen unavailable: {error}"))?;
-        if after.runtime_generation != runtime_generation {
+        let after = tokio::time::timeout_at(
+            deadline,
+            terminal_sessions.readiness_observation(session_id),
+        )
+        .await
+        .map_err(|_| "Claude trust screen timed out".to_string())?
+        .map_err(|error| format!("Claude trust screen unavailable: {error}"))?;
+        if expected_input_sequence.is_some_and(|expected| after.input_sequence != expected) {
+            return Err("opposing terminal input arrived during Claude trust confirmation".into());
+        }
+        let after_snapshot = &after.snapshot;
+        if after_snapshot.runtime_generation != runtime_generation {
             return Err("Claude trust runtime generation changed".to_string());
         }
-        if !claude_trust_screen_displays_workspace(&after.visible_grid, display_path) {
+        if !claude_trust_screen_displays_workspace(&after_snapshot.visible_grid, display_path) {
             return Err("Claude trust prompt or assigned workspace changed".to_string());
         }
         if crate::control::startup_readiness::claude_workspace_trust_prompt_selection(
-            &after.visible_grid,
+            &after_snapshot.visible_grid,
         ) != Some(selection)
         {
             return Err("Claude trust selection changed while settling".to_string());
         }
         if claude_trust_snapshots_are_stable(
-            &before,
-            &after,
+            &before_snapshot,
+            &after_snapshot,
             runtime_generation,
             display_path,
             selection,
-        ) {
+        ) && before.input_sequence == after.input_sequence
+        {
             return Ok(after);
         }
     }
@@ -1306,20 +1331,13 @@ async fn wait_for_claude_trust_selection(
 
 async fn send_claude_trust_key(
     terminal_sessions: std::sync::Arc<crate::state::terminal_session::TerminalSessionBroker>,
-    session_id: String,
-    runtime_generation: u64,
+    expected: crate::state::terminal_session::TerminalReadinessObservation,
     key: &'static [u8],
-) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        terminal_sessions.send_privileged_input_blocking(
-            &session_id,
-            runtime_generation,
-            key.to_vec(),
-        )
-    })
-    .await
-    .map_err(|error| format!("Claude trust input worker failed: {error}"))?
-    .map_err(|error| format!("Claude trust input rejected: {error}"))
+) -> Result<crate::state::terminal_session::TerminalReadinessObservation, String> {
+    terminal_sessions
+        .send_privileged_input_if_readiness_current(expected, key.to_vec())
+        .await
+        .map_err(|error| format!("Claude trust input rejected: {error}"))
 }
 
 async fn wait_for_claude_startup_ready_prompt(
@@ -1327,7 +1345,8 @@ async fn wait_for_claude_startup_ready_prompt(
     session_id: &str,
     runtime_generation: u64,
     display_path: &str,
-) -> Result<TerminalSnapshot, String> {
+    expected_input_sequence: u64,
+) -> Result<crate::state::terminal_session::TerminalReadinessObservation, String> {
     wait_for_claude_startup_ready_prompt_with_timing(
         terminal_sessions,
         session_id,
@@ -1336,6 +1355,7 @@ async fn wait_for_claude_startup_ready_prompt(
         CLAUDE_TRUST_SELECTION_TIMEOUT,
         CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL,
         CLAUDE_TRUST_SELECTION_POLL_INTERVAL,
+        Some(expected_input_sequence),
     )
     .await
 }
@@ -1348,40 +1368,67 @@ async fn wait_for_claude_startup_ready_prompt_with_timing(
     timeout: std::time::Duration,
     settle_interval: std::time::Duration,
     poll_interval: std::time::Duration,
-) -> Result<TerminalSnapshot, String> {
+    expected_input_sequence: Option<u64>,
+) -> Result<crate::state::terminal_session::TerminalReadinessObservation, String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let before = tokio::time::timeout_at(deadline, terminal_sessions.snapshot(session_id))
-            .await
-            .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?
-            .map_err(|error| format!("Claude ready screen unavailable: {error}"))?;
-        if before.runtime_generation != runtime_generation {
+        let before = tokio::time::timeout_at(
+            deadline,
+            terminal_sessions.readiness_observation(session_id),
+        )
+        .await
+        .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?
+        .map_err(|error| format!("Claude ready screen unavailable: {error}"))?;
+        if expected_input_sequence.is_some_and(|expected| before.input_sequence != expected) {
+            return Err("opposing terminal input arrived after Claude trust confirmation".into());
+        }
+        let before_snapshot = &before.snapshot;
+        if before_snapshot.runtime_generation != runtime_generation {
             return Err("Claude trust runtime generation changed after confirmation".to_string());
         }
-        if crate::control::provider_output_has_startup_ready_prompt("claude", &before.visible_grid)
-        {
+        if crate::control::provider_output_has_startup_ready_prompt(
+            "claude",
+            &before_snapshot.visible_grid,
+        ) {
             tokio::time::timeout_at(deadline, tokio::time::sleep(settle_interval))
                 .await
                 .map_err(|_| {
                     "Claude ready prompt did not settle after trust confirmation".to_string()
                 })?;
-            let after = tokio::time::timeout_at(deadline, terminal_sessions.snapshot(session_id))
-                .await
-                .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?
-                .map_err(|error| format!("Claude ready screen unavailable: {error}"))?;
-            if after.runtime_generation != runtime_generation {
+            let after = tokio::time::timeout_at(
+                deadline,
+                terminal_sessions.readiness_observation(session_id),
+            )
+            .await
+            .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?
+            .map_err(|error| format!("Claude ready screen unavailable: {error}"))?;
+            if expected_input_sequence.is_some_and(|expected| after.input_sequence != expected) {
+                return Err(
+                    "opposing terminal input arrived after Claude trust confirmation".into(),
+                );
+            }
+            let after_snapshot = &after.snapshot;
+            if after_snapshot.runtime_generation != runtime_generation {
                 return Err(
                     "Claude trust runtime generation changed after confirmation".to_string()
                 );
             }
-            if claude_startup_ready_snapshots_are_stable(&before, &after, runtime_generation) {
+            if before.input_sequence == after.input_sequence
+                && claude_startup_ready_snapshots_are_stable(
+                    &before_snapshot,
+                    &after_snapshot,
+                    runtime_generation,
+                )
+            {
                 return Ok(after);
             }
         } else if crate::control::provider_output_requires_startup_action(
             "claude",
-            &before.visible_grid,
-        ) && !claude_assigned_trust_menu_is_current(&before.visible_grid, display_path)
-        {
+            &before_snapshot.visible_grid,
+        ) && !claude_assigned_trust_menu_is_current(
+            &before_snapshot.visible_grid,
+            display_path,
+        ) {
             return Err("Claude displayed another startup action after trust confirmation".into());
         }
         tokio::time::timeout_at(deadline, tokio::time::sleep(poll_interval))
@@ -1395,8 +1442,8 @@ async fn confirm_claude_workspace_trust(
     session_id: String,
     runtime_generation: u64,
     display_path: String,
-) -> Result<TerminalSnapshot, String> {
-    wait_for_claude_trust_selection(
+) -> Result<crate::state::terminal_session::TerminalReadinessObservation, String> {
+    let no_selection = wait_for_claude_trust_selection(
         &terminal_sessions,
         &session_id,
         runtime_generation,
@@ -1404,16 +1451,12 @@ async fn confirm_claude_workspace_trust(
         (true, false),
         false,
         CLAUDE_TRUST_PROMPT_SETTLE_INTERVAL,
+        None,
     )
     .await?;
-    send_claude_trust_key(
-        terminal_sessions.clone(),
-        session_id.clone(),
-        runtime_generation,
-        b"\x1b[B",
-    )
-    .await?;
-    wait_for_claude_trust_selection(
+    let selected_yes =
+        send_claude_trust_key(terminal_sessions.clone(), no_selection, b"\x1b[B").await?;
+    let selected_yes = wait_for_claude_trust_selection(
         &terminal_sessions,
         &session_id,
         runtime_generation,
@@ -1421,20 +1464,16 @@ async fn confirm_claude_workspace_trust(
         (false, true),
         true,
         CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL,
+        Some(selected_yes.input_sequence),
     )
     .await?;
-    send_claude_trust_key(
-        terminal_sessions.clone(),
-        session_id.clone(),
-        runtime_generation,
-        b"\r",
-    )
-    .await?;
+    let after_enter = send_claude_trust_key(terminal_sessions.clone(), selected_yes, b"\r").await?;
     wait_for_claude_startup_ready_prompt(
         &terminal_sessions,
         &session_id,
         runtime_generation,
         &display_path,
+        after_enter.input_sequence,
     )
     .await
 }
@@ -1446,8 +1485,8 @@ struct ClaudeTrustReadinessHandoff {
     trust_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     readiness_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pending_memory_injection: std::sync::Arc<std::sync::Mutex<Option<PendingMemoryInjection>>>,
-    ready_snapshot: TerminalSnapshot,
-    terminal_sessions: std::sync::Arc<crate::state::terminal_session::TerminalSessionBroker>,
+    startup_readiness_wake: std::sync::Arc<StartupReadinessLeaseWake>,
+    ready_snapshot: crate::state::terminal_session::TerminalReadinessObservation,
 }
 
 async fn publish_claude_trust_readiness(
@@ -1460,72 +1499,78 @@ async fn publish_claude_trust_readiness(
         trust_state,
         readiness_claimed,
         pending_memory_injection,
+        startup_readiness_wake,
         ready_snapshot,
-        terminal_sessions,
     } = handoff;
     if !claim_startup_readiness(&readiness_claimed) {
         return Err("Claude startup readiness was already claimed".to_string());
     }
 
-    let status_app = app.clone();
-    let status_arc = observation.current_status.clone();
-    let status_session_id = session_id.clone();
     let state = app.state::<AppState>();
-    let validation_broker = terminal_sessions.clone();
-    let validation_session_id = session_id.clone();
-    let validation_snapshot = ready_snapshot.clone();
-    let validation_generation = observation.runtime_generation;
-    let validate_ready = move || {
-        let broker = validation_broker.clone();
-        let session = validation_session_id.clone();
-        let expected = validation_snapshot.clone();
-        async move {
-            broker.snapshot(&session).await.is_ok_and(|current| {
-                claude_startup_ready_snapshots_are_stable(
-                    &expected,
-                    &current,
-                    validation_generation,
-                )
-            })
+    let owner_trust_state = trust_state.clone();
+    let owner_readiness_claimed = readiness_claimed.clone();
+    let owner_can_commit: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
+        std::sync::Arc::new(move || {
+            owner_readiness_claimed.load(std::sync::atomic::Ordering::Acquire)
+                && owner_trust_state.load(std::sync::atomic::Ordering::Acquire)
+                    == CLAUDE_TRUST_CONFIRMATION_PENDING
+        });
+    let committed_app = app.clone();
+    let committed_session_id = session_id.clone();
+    let committed_status = observation.current_status.clone();
+    let committed_runtime_generation = observation.runtime_generation;
+    let committed_trust_state = trust_state.clone();
+    let committed_readiness_claimed = readiness_claimed.clone();
+    let committed_memory_injection = pending_memory_injection.clone();
+    let committed_wake = startup_readiness_wake.clone();
+    let on_committed: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+        if let Ok(mut pending) = committed_memory_injection.lock() {
+            record_pending_memory_injection(&mut pending, &committed_session_id, "claude");
         }
-    };
-    let published =
+        let finalized = finish_claude_trust_readiness(
+            &committed_trust_state,
+            &committed_readiness_claimed,
+            || {},
+        );
+        debug_assert!(finalized);
+        committed_wake
+            .published
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let app = committed_app.clone();
+        let session_id = committed_session_id.clone();
+        let status = committed_status.clone();
+        let runtime_generation = committed_runtime_generation;
+        let wake = committed_wake.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
+            wake_after_startup_lease_release(
+                state.inner(),
+                &session_id,
+                &status,
+                runtime_generation,
+                &wake,
+            )
+            .await;
+        });
+    });
+    if let Err(reason) =
         crate::control::startup_readiness::publish_startup_readiness_from_action_needed(
+            &app,
             state.inner(),
             &session_id,
             &observation,
-            wardian_core::control::ProviderReadyEvidence::PromptDetected,
-            validate_ready,
-            move |next_status| {
-                let expected_status = match next_status {
-                    "Idle" => "Action Needed",
-                    "Action Needed" => "Idle",
-                    _ => return,
-                };
-                crate::manager::set_agent_status_if_current(
-                    &status_app,
-                    &status_session_id,
-                    &status_arc,
-                    expected_status,
-                    next_status,
-                );
-            },
+            ready_snapshot,
+            owner_can_commit,
+            on_committed,
         )
-        .await;
-    if !published {
+        .await
+    {
         readiness_claimed.store(false, std::sync::atomic::Ordering::Release);
-        return Err("Claude startup readiness no longer owns the active runtime".to_string());
-    }
-
-    if let Ok(mut pending) = pending_memory_injection.lock() {
-        record_pending_memory_injection(&mut pending, &session_id, "claude");
-    }
-    let wake_app = app.clone();
-    let wake_session_id = session_id.clone();
-    if !finish_claude_trust_readiness(&trust_state, &readiness_claimed, move || {
-        crate::control::spawn_agent_messaging_if_idle(&wake_app, &wake_session_id, "Idle");
-    }) {
-        return Err("Claude startup readiness handoff was no longer pending".to_string());
+        return Err(format!(
+            "Claude startup readiness rejected: {}",
+            reason.diagnostic_code()
+        ));
     }
     Ok(())
 }
@@ -2023,11 +2068,16 @@ fn release_provider_spawn_lease_after_readiness<R: tauri::Runtime>(
                 .unwrap_or_else(|_| "Error".to_string());
             let bootstrap_observed = bootstrap_complete.load(std::sync::atomic::Ordering::Acquire);
             let ready = provider_spawn_lease_should_release(&status) || bootstrap_observed;
+            let readiness_committed = gate.startup_ready_wake.as_ref().is_none_or(|readiness| {
+                readiness
+                    .published
+                    .load(std::sync::atomic::Ordering::Acquire)
+            }) || matches!(status.as_str(), "Error" | "Off");
             let committed = gate
                 .registration
                 .as_ref()
                 .is_none_or(|state| state.state() == RegistrationPublicationState::COMMITTED);
-            if ready && committed {
+            if ready && committed && readiness_committed {
                 let state = app.state::<AppState>();
                 let (published_generation, same_status_arc) = {
                     let agents = state.agents.lock().await;
@@ -2041,10 +2091,27 @@ fn release_provider_spawn_lease_after_readiness<R: tauri::Runtime>(
                 };
                 let published = published_generation == Some(runtime_generation) && same_status_arc;
                 if published {
-                    if let Err(error) = lease.release() {
-                        log_debug(&format!(
-                            "[Wardian] Provider startup lease release failed for {session_id}: {error}"
-                        ));
+                    match lease.release() {
+                        Ok(()) => {
+                            if let Some(readiness) = gate.startup_ready_wake.as_ref() {
+                                readiness
+                                    .lease_released
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                                wake_after_startup_lease_release(
+                                    &state,
+                                    &session_id,
+                                    &current_status,
+                                    runtime_generation,
+                                    readiness,
+                                )
+                                .await;
+                            }
+                        }
+                        Err(error) => {
+                            log_debug(&format!(
+                                "[Wardian] Provider startup lease release failed for {session_id}: {error}"
+                            ));
+                        }
                     }
                     break;
                 }
@@ -2077,6 +2144,64 @@ fn release_provider_spawn_lease_after_readiness<R: tauri::Runtime>(
         }
         drop(lease);
     })
+}
+
+async fn wake_after_startup_lease_release(
+    state: &AppState,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    runtime_generation: u64,
+    readiness: &StartupReadinessLeaseWake,
+) {
+    use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
+
+    if !readiness
+        .published
+        .load(std::sync::atomic::Ordering::Acquire)
+        || !readiness
+            .lease_released
+            .load(std::sync::atomic::Ordering::Acquire)
+        || !current_status
+            .lock()
+            .is_ok_and(|status| status.eq_ignore_ascii_case("Idle"))
+    {
+        return;
+    }
+    let input_ready = state
+        .interactions
+        .provider_input_state(session_id)
+        .await
+        .is_some_and(|input| {
+            input.generation == readiness.input_generation
+                && input.state == ProviderInputReadiness::Ready
+                && input.ready_evidence == Some(ProviderReadyEvidence::PromptDetected)
+        });
+    if !input_ready {
+        return;
+    }
+    let same_runtime = {
+        let agents = state.agents.lock().await;
+        agents.get(session_id).is_some_and(|agent| {
+            agent.runtime_generation == Some(runtime_generation)
+                && std::sync::Arc::ptr_eq(&agent.current_status, current_status)
+        })
+    };
+    if same_runtime
+        && current_status
+            .lock()
+            .is_ok_and(|status| status.eq_ignore_ascii_case("Idle"))
+        && readiness
+            .dispatch_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    {
+        (readiness.dispatch)();
+    }
 }
 
 fn pty_status_event_policy_for_provider(provider_name: &str) -> ProviderStatusEventPolicy {
@@ -3288,6 +3413,7 @@ async fn spawn_agent_inner(
         input_generation: provider_generation,
         runtime_generation,
         current_status: current_status.clone(),
+        startup_action_intent_revision: None,
     };
     let watch_state = std::sync::Arc::new(std::sync::Mutex::new(AgentWatchState::new(
         config.session_id.clone(),
@@ -3358,6 +3484,20 @@ async fn spawn_agent_inner(
     let auto_confirm_claude_workspace_trust =
         config.provider == "claude" && claude_workspace_trust_display_path.is_some();
     let claude_workspace_trust_display_path = claude_workspace_trust_display_path.clone();
+    let wake_app = app.clone();
+    let wake_session_id = config.session_id.clone();
+    let claude_trust_readiness_wake = std::sync::Arc::new(StartupReadinessLeaseWake {
+        input_generation: provider_generation,
+        published: std::sync::atomic::AtomicBool::new(false),
+        lease_released: std::sync::atomic::AtomicBool::new(false),
+        dispatch_claimed: std::sync::atomic::AtomicBool::new(false),
+        dispatch: std::sync::Arc::new(move || {
+            crate::control::spawn_agent_messaging_if_idle(&wake_app, &wake_session_id, "Idle");
+        }),
+    });
+    if config.provider == "claude" {
+        gate.startup_ready_wake = Some(claude_trust_readiness_wake.clone());
+    }
     let claude_workspace_trust_state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
         CLAUDE_TRUST_CONFIRMATION_NOT_STARTED,
     ));
@@ -3742,21 +3882,42 @@ async fn spawn_agent_inner(
                                     &current_status_clone,
                                     "Idle",
                                 );
+                                let is_claude_startup = provider_name_for_pty == "claude";
+                                let readiness_wake = claude_trust_readiness_wake.clone();
+                                let readiness_status = current_status_clone.clone();
+                                let readiness_runtime_generation = reader_runtime_generation;
                                 tauri::async_runtime::spawn(async move {
                                     let state = readiness_app.state::<AppState>();
-                                    crate::control::startup_readiness::publish_startup_readiness(
-                                        Some(&readiness_app),
-                                        state.inner(),
-                                        &readiness_session_id,
-                                        &observation,
-                                        wardian_core::control::ProviderReadyEvidence::PromptDetected,
-                                    )
-                                    .await;
-                                    crate::control::spawn_agent_messaging_if_idle(
-                                        &readiness_app,
-                                        &readiness_session_id,
-                                        "Idle",
-                                    );
+                                    let published =
+                                        crate::control::startup_readiness::publish_startup_readiness(
+                                            (!is_claude_startup).then_some(&readiness_app),
+                                            state.inner(),
+                                            &readiness_session_id,
+                                            &observation,
+                                            wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                        )
+                                        .await;
+                                    if is_claude_startup {
+                                        if published {
+                                            readiness_wake
+                                                .published
+                                                .store(true, std::sync::atomic::Ordering::Release);
+                                            wake_after_startup_lease_release(
+                                                state.inner(),
+                                                &readiness_session_id,
+                                                &readiness_status,
+                                                readiness_runtime_generation,
+                                                &readiness_wake,
+                                            )
+                                            .await;
+                                        }
+                                    } else {
+                                        crate::control::spawn_agent_messaging_if_idle(
+                                            &readiness_app,
+                                            &readiness_session_id,
+                                            "Idle",
+                                        );
+                                    }
                                 });
                             }
                         }
@@ -3764,12 +3925,13 @@ async fn spawn_agent_inner(
                         trust_state,
                         assigned_claude_trust_prompt,
                     ) {
-                        set_agent_status(
-                            &pty_app,
-                            &sid_for_pty,
-                            &current_status_clone,
-                            "Action Needed",
-                        );
+                        let trust_action_intent_revision =
+                            crate::manager::set_agent_status_and_get_intent(
+                                &pty_app,
+                                &sid_for_pty,
+                                &current_status_clone,
+                                "Action Needed",
+                            );
                         if !claude_workspace_trust_started
                             && startup_screen.as_deref().is_some_and(|output| {
                                 crate::control::startup_readiness::
@@ -3787,9 +3949,12 @@ async fn spawn_agent_inner(
                                 let trust_session = sid_for_pty.clone();
                                 let trust_state = reader_claude_workspace_trust_state.clone();
                                 let trust_app = pty_app.clone();
-                                let trust_observation = startup_observation.clone();
+                                let mut trust_observation = startup_observation.clone();
+                                trust_observation.startup_action_intent_revision =
+                                    trust_action_intent_revision;
                                 let trust_memory_injection = pending_memory_injection.clone();
                                 let trust_readiness_claimed = startup_readiness_claimed.clone();
+                                let trust_readiness_wake = claude_trust_readiness_wake.clone();
                                 tauri::async_runtime::spawn(async move {
                                     match confirm_claude_workspace_trust(
                                         trust_broker.clone(),
@@ -3807,8 +3972,8 @@ async fn spawn_agent_inner(
                                                 trust_state: trust_state.clone(),
                                                 readiness_claimed: trust_readiness_claimed,
                                                 pending_memory_injection: trust_memory_injection,
+                                                startup_readiness_wake: trust_readiness_wake,
                                                 ready_snapshot,
-                                                terminal_sessions: trust_broker,
                                             },
                                         )
                                         .await
@@ -6100,6 +6265,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_queue_wake_waits_for_readiness_and_lease_then_dispatches_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tauri::Manager;
+        use tokio::sync::mpsc;
+        use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
+
+        let home = crate::control::test_support::TestWardianHome::new_async().await;
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        for (case, ready_before_release) in [
+            ("ready-first", true),
+            ("release-first", false),
+            ("provisional-idle", false),
+        ] {
+            let session_id = format!("startup-queue-{case}");
+            let (input_tx, mut input_rx) = mpsc::channel(4);
+            let state = app.state::<AppState>();
+            let runtime_generation = state
+                .terminal_sessions
+                .start_or_replace_runtime(
+                    &session_id,
+                    crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| {
+                        Ok(())
+                    }),
+                    wardian_core::models::TerminalGeometry {
+                        cols: 100,
+                        rows: 30,
+                    },
+                )
+                .await
+                .unwrap();
+            let config = AgentConfig {
+                session_id: session_id.clone(),
+                session_name: session_id.clone(),
+                provider: "mock".into(),
+                folder: home.path().to_string_lossy().into_owned(),
+                resume_session: Some(format!("mock-{case}")),
+                ..Default::default()
+            };
+            let status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
+            let mut recipient = agent_without_pty();
+            recipient.config = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
+            recipient.current_status = status.clone();
+            recipient.runtime_generation = Some(runtime_generation);
+            let sender = agent_without_pty();
+            {
+                let mut sender_config = sender.config.lock().unwrap();
+                sender_config.session_id = "startup-queue-sender".into();
+                sender_config.session_name = "Startup queue sender".into();
+            }
+            {
+                let mut agents = state.agents.lock().await;
+                agents.insert(session_id.clone(), recipient);
+                agents.insert("startup-queue-sender".into(), sender);
+            }
+            let ready = state
+                .interactions
+                .start_provider_input_generation(
+                    &session_id,
+                    ProviderInputReadiness::Ready,
+                    Some(ProviderReadyEvidence::PromptDetected),
+                )
+                .await;
+            let admitted = state
+                .interactions
+                .admit_agent_message(wardian_core::db::agent_messaging::Admission {
+                    sender: "startup-queue-sender",
+                    recipient: &session_id,
+                    message: "deliver once after startup lease release",
+                    idempotency_key: None,
+                    task: true,
+                    generation: ready.generation,
+                })
+                .await
+                .unwrap();
+            let dispatch_count = std::sync::Arc::new(AtomicUsize::new(0));
+            let callback_count = dispatch_count.clone();
+            let app_for_dispatch = app.handle().clone();
+            let recipient_for_dispatch = session_id.clone();
+            let (dispatch_done_tx, dispatch_done_rx) = tokio::sync::oneshot::channel();
+            let dispatch_done = std::sync::Arc::new(std::sync::Mutex::new(Some(dispatch_done_tx)));
+            let dispatch_done_for_callback = dispatch_done.clone();
+            let wake = std::sync::Arc::new(StartupReadinessLeaseWake {
+                input_generation: ready.generation,
+                published: std::sync::atomic::AtomicBool::new(ready_before_release),
+                lease_released: std::sync::atomic::AtomicBool::new(false),
+                dispatch_claimed: std::sync::atomic::AtomicBool::new(false),
+                dispatch: std::sync::Arc::new(move || {
+                    callback_count.fetch_add(1, Ordering::AcqRel);
+                    let app = app_for_dispatch.clone();
+                    let recipient = recipient_for_dispatch.clone();
+                    let done = dispatch_done_for_callback.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app.state::<AppState>();
+                        crate::control::dispatch_agent_messaging_from_status_observation(
+                            None, &state, &recipient,
+                        )
+                        .await;
+                        if let Ok(mut done) = done.lock() {
+                            if let Some(done) = done.take() {
+                                let _ = done.send(());
+                            }
+                        }
+                    });
+                }),
+            });
+            let mut lease = acquire_provider_spawn_lease_for_startup(&config).unwrap();
+            let owner = lease.owner().clone();
+            if case == "release-first" {
+                lease.release().expect("release exact startup lease");
+                wake.lease_released.store(true, Ordering::Release);
+            } else {
+                let watcher = release_provider_spawn_lease_after_readiness(
+                    lease,
+                    status.clone(),
+                    session_id.clone(),
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    app.handle().clone(),
+                    runtime_generation,
+                    SpawnPublicationGate {
+                        startup_ready_wake: Some(wake.clone()),
+                        ..Default::default()
+                    },
+                );
+                if case == "provisional-idle" {
+                    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                    assert!(
+                        wardian_core::conversation_lease::load_leases_checked()
+                            .unwrap()
+                            .iter()
+                            .any(|lease| lease.owner() == owner),
+                        "visible Idle cannot release the lease before readiness commits"
+                    );
+                    assert_eq!(dispatch_count.load(Ordering::Acquire), 0);
+                    wake.published.store(true, Ordering::Release);
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(3), watcher)
+                    .await
+                    .expect("startup lease watcher releases the published runtime")
+                    .expect("startup lease watcher completes");
+            }
+            assert!(
+                !wardian_core::conversation_lease::load_leases_checked()
+                    .unwrap()
+                    .iter()
+                    .any(|lease| lease.owner() == owner),
+                "the exact startup lease is released before the queue opportunity"
+            );
+
+            if case == "release-first" {
+                assert_eq!(dispatch_count.load(Ordering::Acquire), 0);
+                wake.published.store(true, Ordering::Release);
+                wake_after_startup_lease_release(
+                    &state,
+                    &session_id,
+                    &status,
+                    runtime_generation,
+                    &wake,
+                )
+                .await;
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(10), dispatch_done_rx)
+                .await
+                .expect("canonical queue dispatch completes")
+                .expect("dispatch completion signal");
+            wake_after_startup_lease_release(
+                &state,
+                &session_id,
+                &status,
+                runtime_generation,
+                &wake,
+            )
+            .await;
+            assert_eq!(dispatch_count.load(Ordering::Acquire), 1);
+            let mut submitted = Vec::new();
+            while let Ok(bytes) = input_rx.try_recv() {
+                submitted.extend(bytes);
+            }
+            let submitted = String::from_utf8(submitted).unwrap();
+            assert_eq!(
+                submitted
+                    .matches("deliver once after startup lease release")
+                    .count(),
+                1,
+                "case={case}: the exact queued payload is submitted once"
+            );
+            assert_eq!(
+                submitted.bytes().filter(|byte| *byte == b'\r').count(),
+                1,
+                "case={case}: the composer submit key is sent once"
+            );
+            assert_eq!(
+                wardian_core::db::agent_messaging::with_db(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT owner FROM agent_message_delivery WHERE interaction_id=?1",
+                        [&admitted.record.id],
+                        |row| row.get::<_, String>(0),
+                    )?)
+                })
+                .unwrap(),
+                "uncertain",
+                "the isolated PTY proves one submit, but has no provider receipt"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn unpublished_replacement_failure_stops_renewal_but_keeps_fence_until_expiry() {
         let _home = crate::control::test_support::TestWardianHome::new_async().await;
         let config = AgentConfig {
@@ -7101,6 +7473,7 @@ mod tests {
                 "trust-waiter",
                 generation,
                 display_path,
+                0,
             )
             .await
         });
@@ -7164,6 +7537,7 @@ mod tests {
             "trust-waiter-action",
             generation,
             r"C:\Wardian\agents\test-agent\habitat\workspace",
+            0,
         )
         .await
         .unwrap_err();
@@ -7210,6 +7584,7 @@ mod tests {
             std::time::Duration::from_millis(20),
             std::time::Duration::from_millis(2),
             std::time::Duration::from_millis(2),
+            Some(0),
         )
         .await
         .unwrap_err();
@@ -7312,7 +7687,7 @@ mod tests {
             .unwrap();
         assert!(crate::control::provider_output_has_startup_ready_prompt(
             "claude",
-            &ready_snapshot.visible_grid
+            &ready_snapshot.snapshot.visible_grid
         ));
         assert!(
             input_rx.try_recv().is_err(),

@@ -3,10 +3,11 @@ use super::{
     pi_output_has_startup_ready_prompt,
 };
 use crate::providers::claude::claude_output_has_bypass_permissions_consent_prompt;
+use crate::state::terminal_session::{StartupScreenCommitResult, TerminalReadinessObservation};
 use crate::state::AppState;
 use crate::utils::strip_ansi_controls;
 use std::sync::{Arc, Mutex};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
 
 pub(super) async fn record_provider_ready_evidence(
@@ -98,6 +99,7 @@ pub(crate) struct ProviderStartupObservation {
     pub input_generation: u64,
     pub runtime_generation: u64,
     pub current_status: Arc<Mutex<String>>,
+    pub startup_action_intent_revision: Option<u64>,
 }
 
 impl ProviderStartupObservation {
@@ -107,17 +109,21 @@ impl ProviderStartupObservation {
         session_id: &str,
         expected_status: Option<&str>,
     ) -> bool {
-        let agents = state.agents.lock().await;
-        agents.get(session_id).is_some_and(|agent| {
-            agent.runtime_generation == Some(self.runtime_generation)
-                && Arc::ptr_eq(&agent.current_status, &self.current_status)
-                && expected_status.is_none_or(|expected| {
-                    agent
-                        .current_status
-                        .lock()
-                        .is_ok_and(|status| status.eq_ignore_ascii_case(expected))
-                })
-        })
+        let Some((runtime_generation, current_status)) = ({
+            let agents = state.agents.lock().await;
+            agents
+                .get(session_id)
+                .map(|agent| (agent.runtime_generation, agent.current_status.clone()))
+        }) else {
+            return false;
+        };
+        runtime_generation == Some(self.runtime_generation)
+            && Arc::ptr_eq(&current_status, &self.current_status)
+            && expected_status.is_none_or(|expected| {
+                current_status
+                    .lock()
+                    .is_ok_and(|status| status.eq_ignore_ascii_case(expected))
+            })
     }
 
     async fn is_current(&self, state: &AppState, session_id: &str) -> bool {
@@ -137,48 +143,195 @@ pub(crate) async fn publish_startup_readiness(
     evidence: ProviderReadyEvidence,
 ) -> bool {
     let _lifecycle = state.lock_agent_lifecycle(session_id).await;
-    publish_startup_readiness_locked(app, state, session_id, observation, evidence, false).await
+    publish_startup_readiness_locked(app, state, session_id, observation, evidence).await
 }
 
-/// Revalidates the ready screen and moves the owning startup attempt from
-/// Action Needed to Idle before publication, all under the lifecycle lock.
-/// The screen validator runs before and after the guarded status transition.
-pub(crate) async fn publish_startup_readiness_from_action_needed<Validate, Validation, SetStatus>(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupReadinessRejection {
+    RuntimeChanged,
+    StatusOrOwnerChanged,
+    BlockingAction,
+    OpposingInput,
+    InputOrStatusChanged,
+    RepaintDidNotSettle,
+    BrokerUnavailable,
+}
+
+impl StartupReadinessRejection {
+    pub(crate) fn diagnostic_code(self) -> &'static str {
+        match self {
+            Self::RuntimeChanged => "runtime_changed",
+            Self::StatusOrOwnerChanged => "status_or_owner_changed",
+            Self::BlockingAction => "blocking_action",
+            Self::OpposingInput => "opposing_input",
+            Self::InputOrStatusChanged => "input_or_status_changed",
+            Self::RepaintDidNotSettle => "repaint_did_not_settle",
+            Self::BrokerUnavailable => "broker_unavailable",
+        }
+    }
+}
+
+const CLAUDE_READY_REOBSERVATION_LIMIT: usize = 3;
+const CLAUDE_READY_REOBSERVATION_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(20);
+
+/// Commits confirmed Claude readiness at the terminal actor's serialized
+/// screen/input boundary. The provider generation fence is acquired before
+/// asking the actor to commit, so an admitted input can finish without an
+/// actor-to-interaction lock cycle. Idle becomes visible only after the input
+/// proof has been durably recorded.
+pub(crate) async fn publish_startup_readiness_from_action_needed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     session_id: &str,
     observation: &ProviderStartupObservation,
-    evidence: ProviderReadyEvidence,
-    mut validate_ready: Validate,
-    mut set_status: SetStatus,
-) -> bool
-where
-    Validate: FnMut() -> Validation + Send,
-    Validation: std::future::Future<Output = bool> + Send,
-    SetStatus: FnMut(&str) + Send,
-{
+    initial: TerminalReadinessObservation,
+    owner_can_commit: Arc<dyn Fn() -> bool + Send + Sync>,
+    on_committed: Arc<dyn Fn() + Send + Sync>,
+) -> Result<(), StartupReadinessRejection> {
     let _lifecycle = state.lock_agent_lifecycle(session_id).await;
-    if !observation
-        .is_current_with_status(state, session_id, Some("Action Needed"))
-        .await
+    let Some(expected_status_intent_revision) = observation.startup_action_intent_revision else {
+        return Err(StartupReadinessRejection::StatusOrOwnerChanged);
+    };
+    if state.status_intent_revision(session_id, &observation.current_status)
+        != expected_status_intent_revision
+        || !state
+            .status_intent_status(session_id, &observation.current_status)
+            .is_some_and(|intent| intent.eq_ignore_ascii_case("Action Needed"))
     {
-        return false;
+        return Err(StartupReadinessRejection::StatusOrOwnerChanged);
     }
+    let mut expected = initial;
+    for attempt in 0..CLAUDE_READY_REOBSERVATION_LIMIT {
+        if !observation
+            .is_current_with_status(state, session_id, Some("Action Needed"))
+            .await
+        {
+            return Err(StartupReadinessRejection::StatusOrOwnerChanged);
+        }
+        if expected.snapshot.runtime_generation != observation.runtime_generation {
+            return Err(StartupReadinessRejection::RuntimeChanged);
+        }
 
-    if !validate_ready().await {
-        return false;
+        let screen = &expected.snapshot.visible_grid;
+        if !provider_output_has_startup_ready_prompt("claude", screen) {
+            if provider_output_requires_startup_action("claude", screen)
+                || claude_output_has_bypass_permissions_consent_prompt(screen)
+            {
+                return Err(StartupReadinessRejection::BlockingAction);
+            }
+            if attempt + 1 == CLAUDE_READY_REOBSERVATION_LIMIT {
+                return Err(StartupReadinessRejection::RepaintDidNotSettle);
+            }
+            tokio::time::sleep(CLAUDE_READY_REOBSERVATION_INTERVAL).await;
+            expected = state
+                .terminal_sessions
+                .readiness_observation(session_id)
+                .await
+                .map_err(|_| StartupReadinessRejection::BrokerUnavailable)?;
+            continue;
+        }
+
+        let Some(input_commit) = state
+            .interactions
+            .prepare_provider_ready_after_startup_action(session_id, observation.input_generation)
+            .await
+        else {
+            return Err(StartupReadinessRejection::InputOrStatusChanged);
+        };
+        let commit_app = app.clone();
+        let commit_session_id = session_id.to_string();
+        let commit_status = observation.current_status.clone();
+        let commit_runtime_generation = observation.runtime_generation;
+        let commit_expected_status_intent_revision = expected_status_intent_revision;
+        let commit_owner_can_commit = owner_can_commit.clone();
+        let commit_on_committed = on_committed.clone();
+        let result = state
+            .terminal_sessions
+            .commit_if_readiness_observation_current(expected.clone(), move || {
+                if !commit_owner_can_commit() {
+                    return false;
+                }
+                let commit_state = commit_app.state::<AppState>();
+                let current_agent = {
+                    let Ok(agents) = commit_state.agents.try_lock() else {
+                        return false;
+                    };
+                    agents.get(&commit_session_id).map(|agent| {
+                        (
+                            agent.runtime_generation,
+                            agent.current_status.clone(),
+                            agent.config.clone(),
+                        )
+                    })
+                };
+                let Some((current_generation, current_status, current_config)) = current_agent
+                else {
+                    return false;
+                };
+                let is_current = current_generation == Some(commit_runtime_generation)
+                    && Arc::ptr_eq(&current_status, &commit_status)
+                    && current_status
+                        .lock()
+                        .is_ok_and(|status| status.eq_ignore_ascii_case("Action Needed"))
+                    && current_config
+                        .lock()
+                        .is_ok_and(|config| config.provider == "claude");
+                if !is_current {
+                    return false;
+                }
+                // The roster snapshot above proves this is Claude, which has no
+                // Codex attachment admission gate.
+                let Some((status_sequence, status_revision)) =
+                    crate::manager::apply_admitted_status_transition_if_revision_after_commit(
+                        commit_state.inner(),
+                        &commit_session_id,
+                        &commit_status,
+                        "Action Needed",
+                        commit_expected_status_intent_revision,
+                        "Idle",
+                        move || input_commit.commit(),
+                    )
+                else {
+                    return false;
+                };
+                crate::manager::schedule_startup_readiness_status_observation(
+                    &commit_app,
+                    &commit_session_id,
+                    &commit_status,
+                    "Idle".to_string(),
+                    status_sequence,
+                    status_revision,
+                );
+                commit_on_committed();
+                true
+            })
+            .await;
+        match result {
+            Ok(StartupScreenCommitResult::Committed) => return Ok(()),
+            Ok(StartupScreenCommitResult::InputChanged) => {
+                return Err(StartupReadinessRejection::OpposingInput)
+            }
+            Ok(StartupScreenCommitResult::CommitRejected) => {
+                return Err(StartupReadinessRejection::InputOrStatusChanged)
+            }
+            Ok(StartupScreenCommitResult::ScreenChanged) => {
+                if attempt + 1 == CLAUDE_READY_REOBSERVATION_LIMIT {
+                    return Err(StartupReadinessRejection::RepaintDidNotSettle);
+                }
+                expected = state
+                    .terminal_sessions
+                    .readiness_observation(session_id)
+                    .await
+                    .map_err(|_| StartupReadinessRejection::BrokerUnavailable)?;
+            }
+            Err(crate::state::terminal_session::TerminalBrokerError::StaleRuntimeGeneration {
+                ..
+            }) => return Err(StartupReadinessRejection::RuntimeChanged),
+            Err(_) => return Err(StartupReadinessRejection::BrokerUnavailable),
+        }
     }
-    set_status("Idle");
-    if !validate_ready().await {
-        set_status("Action Needed");
-        return false;
-    }
-    if publish_startup_readiness_locked(None, state, session_id, observation, evidence, true).await
-    {
-        true
-    } else {
-        set_status("Action Needed");
-        false
-    }
+    Err(StartupReadinessRejection::RepaintDidNotSettle)
 }
 
 /// Publish a delayed OpenCode startup observation only while it still owns a
@@ -211,8 +364,7 @@ where
         set_status("Starting");
         return false;
     }
-    if publish_startup_readiness_locked(None, state, session_id, observation, evidence, false).await
-    {
+    if publish_startup_readiness_locked(None, state, session_id, observation, evidence).await {
         true
     } else {
         set_status("Starting");
@@ -226,7 +378,6 @@ async fn publish_startup_readiness_locked(
     session_id: &str,
     observation: &ProviderStartupObservation,
     evidence: ProviderReadyEvidence,
-    allow_confirmed_startup_action: bool,
 ) -> bool {
     if !observation.is_current(state, session_id).await {
         return false;
@@ -250,14 +401,6 @@ async fn publish_startup_readiness_locked(
         return false;
     }
     let ready = match evidence {
-        ProviderReadyEvidence::PromptDetected if allow_confirmed_startup_action => {
-            record_provider_ready_prompt_after_startup_action(
-                state,
-                session_id,
-                observation.input_generation,
-            )
-            .await
-        }
         ProviderReadyEvidence::PromptDetected => {
             record_provider_ready_prompt(state, session_id, observation.input_generation).await
         }
@@ -273,25 +416,6 @@ async fn publish_startup_readiness_locked(
         super::spawn_agent_messaging_if_idle(app, session_id, "Idle");
     }
     true
-}
-
-async fn record_provider_ready_prompt_after_startup_action(
-    state: &AppState,
-    session_id: &str,
-    generation: u64,
-) -> bool {
-    let attachment_ready = state
-        .agents
-        .lock()
-        .await
-        .get(session_id)
-        .map(crate::manager::codex_onboarding::codex_attachment_is_ready)
-        .unwrap_or(true);
-    attachment_ready
-        && state
-            .interactions
-            .record_provider_ready_after_startup_action(session_id, generation)
-            .await
 }
 
 /// Recognizes initial compose readiness. Codex, Claude, OpenCode and Pi callers
@@ -818,11 +942,14 @@ mod tests {
     async fn claude_trust_watcher_publishes_ready_screen_after_reader_consumed_final_output() {
         use super::super::{test_support::TestWardianHome, tests::insert_test_agent};
         use crate::state::terminal_session::TerminalRuntimeHandles;
+        use tauri::Manager;
         use tokio::sync::mpsc;
         use wardian_core::control::ProviderInputReadiness;
 
         let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
         const SESSION_ID: &str = "claude-trust-handoff";
         insert_test_agent(&state, SESSION_ID, "ClaudeTrust", "Coder").await;
         let (tx, mut input_rx) = mpsc::channel(1);
@@ -860,10 +987,15 @@ mod tests {
             *agent.current_status.lock().unwrap() = "Action Needed".to_string();
             agent.current_status.clone()
         };
+        let startup_action_intent_revision = {
+            let _status = current_status.lock().unwrap();
+            state.reserve_status_intent(SESSION_ID, &current_status, "Action Needed")
+        };
         let observation = ProviderStartupObservation {
             input_generation,
             runtime_generation,
             current_status: current_status.clone(),
+            startup_action_intent_revision: Some(startup_action_intent_revision),
         };
         let output = "Claude Code v2.1.283\n❯ Try ask Claude\n────────\nHaiku 4.5 | workspace | /rc\n⏵⏵ bypass permissions on (shift+tab to cycle)";
         let terminal = state.terminal_sessions.clone();
@@ -882,33 +1014,50 @@ mod tests {
             "claude",
             &final_output.visible_grid
         ));
-        let validation_broker = state.terminal_sessions.clone();
-        let expected_snapshot = final_output.clone();
-        let validate_ready = move || {
-            let broker = validation_broker.clone();
-            let expected = expected_snapshot.clone();
-            async move {
-                broker.snapshot(SESSION_ID).await.is_ok_and(|current| {
-                    current.runtime_generation == expected.runtime_generation
-                        && current.sequence_barrier == expected.sequence_barrier
-                        && current.visible_grid == expected.visible_grid
-                        && provider_output_has_startup_ready_prompt("claude", &current.visible_grid)
-                })
-            }
-        };
-        let status_arc = current_status.clone();
-        assert!(
-            publish_startup_readiness_from_action_needed(
-                &state,
-                SESSION_ID,
-                &observation,
-                ProviderReadyEvidence::PromptDetected,
-                validate_ready,
-                move |next_status| {
-                    *status_arc.lock().unwrap() = next_status.to_string();
-                },
-            )
+        let initial_readiness = state
+            .terminal_sessions
+            .readiness_observation(SESSION_ID)
             .await
+            .unwrap();
+        let repaint_broker = state.terminal_sessions.clone();
+        let repaint = output.replace("Try ask Claude", "draft stays here");
+        tokio::task::spawn_blocking(move || {
+            repaint_broker.process_output_blocking(
+                SESSION_ID,
+                runtime_generation,
+                format!("\x1b[2J\x1b[H{}", repaint.replace('\n', "\r\n")).into_bytes(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(provider_output_has_startup_ready_prompt(
+            "claude",
+            &state
+                .terminal_sessions
+                .snapshot(SESSION_ID)
+                .await
+                .unwrap()
+                .visible_grid
+        ));
+        let committed_hooks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let committed_hooks_for_callback = committed_hooks.clone();
+        assert!(publish_startup_readiness_from_action_needed(
+            &app.handle().clone(),
+            &state,
+            SESSION_ID,
+            &observation,
+            initial_readiness,
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(move || {
+                committed_hooks_for_callback.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }),
+        )
+        .await
+        .is_ok());
+        assert_eq!(
+            committed_hooks.load(std::sync::atomic::Ordering::Acquire),
+            1
         );
 
         assert_eq!(*current_status.lock().unwrap(), "Idle");
@@ -922,15 +1071,15 @@ mod tests {
             ProviderInputReadiness::Ready,
             "the watcher publishes readiness without another PTY output"
         );
-        assert_eq!(
+        assert!(
             state
                 .terminal_sessions
                 .snapshot(SESSION_ID)
                 .await
                 .unwrap()
-                .sequence_barrier,
-            final_output.sequence_barrier,
-            "no later provider output is needed for watcher publication"
+                .sequence_barrier
+                > final_output.sequence_barrier,
+            "the benign repaint is processed before the readiness proof is refreshed"
         );
         assert!(input_rx.try_recv().is_err());
 
@@ -949,83 +1098,45 @@ mod tests {
             )
             .await;
         *current_status.lock().unwrap() = "Action Needed".to_string();
+        let direct_action_intent_revision = {
+            let _status = current_status.lock().unwrap();
+            state.reserve_status_intent(SESSION_ID, &current_status, "Action Needed")
+        };
         let direct_input_observation = ProviderStartupObservation {
             input_generation: next_input_generation,
             runtime_generation,
             current_status: current_status.clone(),
+            startup_action_intent_revision: Some(direct_action_intent_revision),
         };
-        let before_direct_input = state.terminal_sessions.snapshot(SESSION_ID).await.unwrap();
-        let direct_screen = output.replace("Try ask Claude", "manual draft");
-        assert!(provider_output_has_startup_ready_prompt(
-            "claude",
-            &direct_screen
-        ));
-        let direct_broker = state.terminal_sessions.clone();
-        let direct_status = current_status.clone();
-        let validate_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let validate_count_for_call = validate_count.clone();
-        let validate_ready = move || {
-            let broker = direct_broker.clone();
-            let expected = before_direct_input.clone();
-            let count = validate_count_for_call.clone();
-            let status = direct_status.clone();
-            let direct_screen = direct_screen.clone();
-            async move {
-                if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
-                    let decision = broker
-                        .send_legacy_input(SESSION_ID, b"manual opposing input\r".to_vec())
-                        .await
-                        .unwrap();
-                    assert_eq!(
-                        decision.status,
-                        wardian_core::models::TerminalLeaseDecisionStatus::Accepted
-                    );
-                    let output_broker = broker.clone();
-                    tokio::task::spawn_blocking(move || {
-                        output_broker.process_output_blocking(
-                            SESSION_ID,
-                            runtime_generation,
-                            format!("\x1b[2J\x1b[H{}", direct_screen.replace('\n', "\r\n"))
-                                .into_bytes(),
-                        )
-                    })
-                    .await
-                    .unwrap()
-                    .unwrap();
-                    *status.lock().unwrap() = "Processing...".to_string();
-                }
-                broker.snapshot(SESSION_ID).await.is_ok_and(|current| {
-                    current.runtime_generation == expected.runtime_generation
-                        && current.sequence_barrier == expected.sequence_barrier
-                        && current.visible_grid == expected.visible_grid
-                        && provider_output_has_startup_ready_prompt("claude", &current.visible_grid)
-                })
-            }
-        };
-        let status_arc = current_status.clone();
-        assert!(
-            !publish_startup_readiness_from_action_needed(
+        let before_direct_input = state
+            .terminal_sessions
+            .readiness_observation(SESSION_ID)
+            .await
+            .unwrap();
+        let decision = state
+            .terminal_sessions
+            .send_legacy_input(SESSION_ID, b"manual opposing input\r".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            decision.status,
+            wardian_core::models::TerminalLeaseDecisionStatus::Accepted
+        );
+        assert_eq!(
+            publish_startup_readiness_from_action_needed(
+                &app.handle().clone(),
                 &state,
                 SESSION_ID,
                 &direct_input_observation,
-                ProviderReadyEvidence::PromptDetected,
-                validate_ready,
-                move |next_status| {
-                    let expected_status = match next_status {
-                        "Idle" => "Action Needed",
-                        "Action Needed" => "Idle",
-                        _ => return,
-                    };
-                    let mut status = status_arc.lock().unwrap();
-                    if *status == expected_status {
-                        *status = next_status.to_string();
-                    }
-                },
+                before_direct_input.clone(),
+                std::sync::Arc::new(|| true),
+                std::sync::Arc::new(|| {}),
             )
-            .await
+            .await,
+            Err(StartupReadinessRejection::OpposingInput),
+            "actor-serialized input evidence rejects a direct input already in flight"
         );
-        assert_eq!(validate_count.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert_eq!(*current_status.lock().unwrap(), "Processing...");
+        assert_eq!(*current_status.lock().unwrap(), "Action Needed");
         let still_action_required = state
             .interactions
             .provider_input_state(SESSION_ID)
@@ -1062,17 +1173,17 @@ mod tests {
             agent.runtime_generation = Some(replacement_runtime_generation);
             agent.current_status = replacement_status.clone();
         }
-        assert!(
-            !publish_startup_readiness_from_action_needed(
-                &state,
-                SESSION_ID,
-                &direct_input_observation,
-                ProviderReadyEvidence::PromptDetected,
-                || async { true },
-                |_| panic!("a replaced runtime must not enter the status transition"),
-            )
-            .await
-        );
+        assert!(publish_startup_readiness_from_action_needed(
+            &app.handle().clone(),
+            &state,
+            SESSION_ID,
+            &direct_input_observation,
+            before_direct_input,
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(|| {}),
+        )
+        .await
+        .is_err());
         assert_eq!(*replacement_status.lock().unwrap(), "Starting");
         assert_eq!(
             state
@@ -1083,6 +1194,207 @@ mod tests {
             still_action_required,
             "a stale runtime cannot change the replacement input generation"
         );
+    }
+
+    #[tokio::test]
+    async fn claude_startup_handoff_preserves_blocking_action_busy_and_replacement() {
+        use super::super::{test_support::TestWardianHome, tests::insert_test_agent};
+        use crate::state::terminal_session::TerminalRuntimeHandles;
+        use tauri::Manager;
+        use tokio::sync::mpsc;
+        use wardian_core::control::ProviderInputReadiness;
+
+        let _home = TestWardianHome::new_async().await;
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+
+        for case in [
+            "blocking-action",
+            "busy-input",
+            "later-status",
+            "pending-later-action",
+            "pending-same-status-action",
+            "replacement",
+        ] {
+            let session_id = format!("claude-{case}");
+            insert_test_agent(&state, &session_id, case, "Coder").await;
+            let (input_tx, mut input_rx) = mpsc::channel(2);
+            let runtime_generation = state
+                .terminal_sessions
+                .start_or_replace_runtime(
+                    &session_id,
+                    TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                    wardian_core::models::TerminalGeometry {
+                        rows: 24,
+                        cols: 120,
+                    },
+                )
+                .await
+                .unwrap();
+            let input_generation = state
+                .interactions
+                .start_provider_input_generation(&session_id, ProviderInputReadiness::Booting, None)
+                .await
+                .generation;
+            state
+                .interactions
+                .record_provider_input_state(
+                    &session_id,
+                    input_generation,
+                    ProviderInputReadiness::ActionRequired,
+                    None,
+                )
+                .await;
+            let current_status = {
+                let mut agents = state.agents.lock().await;
+                let agent = agents.get_mut(&session_id).unwrap();
+                agent.runtime_generation = Some(runtime_generation);
+                agent.config.lock().unwrap().provider = "claude".to_string();
+                *agent.current_status.lock().unwrap() = "Action Needed".to_string();
+                agent.current_status.clone()
+            };
+            let startup_action_intent_revision = {
+                let _status = current_status.lock().unwrap();
+                state.reserve_status_intent(&session_id, &current_status, "Action Needed")
+            };
+            let observation = ProviderStartupObservation {
+                input_generation,
+                runtime_generation,
+                current_status: current_status.clone(),
+                startup_action_intent_revision: Some(startup_action_intent_revision),
+            };
+            let output_broker = state.terminal_sessions.clone();
+            tokio::task::spawn_blocking({
+                let session_id = session_id.clone();
+                move || {
+                    output_broker.process_output_blocking(
+                        &session_id,
+                        runtime_generation,
+                        "\x1b[2J\x1b[HClaude Code\r\n❯ Try ask Claude\r\n────────\r\nHaiku 4.5 | workspace | /rc\r\n⏵⏵ bypass permissions on (shift+tab to cycle)".as_bytes().to_vec(),
+                    )
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            let initial = state
+                .terminal_sessions
+                .readiness_observation(&session_id)
+                .await
+                .unwrap();
+
+            let expected_rejection = match case {
+                "blocking-action" => {
+                    let output_broker = state.terminal_sessions.clone();
+                    let repaint_session = session_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        output_broker.process_output_blocking(
+                            &repaint_session,
+                            runtime_generation,
+                            b"\x1b[2J\x1b[HAllow external CLAUDE.md file imports?\r\nNo, disable external imports\r\nYes, allow external imports".to_vec(),
+                        )
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    StartupReadinessRejection::BlockingAction
+                }
+                "busy-input" => {
+                    state
+                        .interactions
+                        .record_provider_input_state(
+                            &session_id,
+                            input_generation,
+                            ProviderInputReadiness::Busy,
+                            None,
+                        )
+                        .await;
+                    StartupReadinessRejection::InputOrStatusChanged
+                }
+                "later-status" => {
+                    *current_status.lock().unwrap() = "Processing...".to_string();
+                    StartupReadinessRejection::StatusOrOwnerChanged
+                }
+                "pending-later-action" => {
+                    let _status = current_status.lock().unwrap();
+                    state.reserve_status_intent(&session_id, &current_status, "Processing...");
+                    StartupReadinessRejection::StatusOrOwnerChanged
+                }
+                "pending-same-status-action" => {
+                    let _status = current_status.lock().unwrap();
+                    state.reserve_status_intent(&session_id, &current_status, "Action Needed");
+                    StartupReadinessRejection::StatusOrOwnerChanged
+                }
+                "replacement" => {
+                    let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+                    let replacement_runtime = state
+                        .terminal_sessions
+                        .start_or_replace_runtime(
+                            &session_id,
+                            TerminalRuntimeHandles::new(replacement_tx, |_| Ok(())),
+                            wardian_core::models::TerminalGeometry {
+                                rows: 24,
+                                cols: 120,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    let replacement_input = state
+                        .interactions
+                        .start_provider_input_generation(
+                            &session_id,
+                            ProviderInputReadiness::Booting,
+                            None,
+                        )
+                        .await;
+                    let replacement_status =
+                        std::sync::Arc::new(std::sync::Mutex::new("Starting".to_string()));
+                    let mut agents = state.agents.lock().await;
+                    let agent = agents.get_mut(&session_id).unwrap();
+                    agent.runtime_generation = Some(replacement_runtime);
+                    agent.current_status = replacement_status;
+                    drop(agents);
+                    assert_eq!(
+                        state
+                            .interactions
+                            .provider_input_state(&session_id)
+                            .await
+                            .unwrap(),
+                        replacement_input
+                    );
+                    StartupReadinessRejection::StatusOrOwnerChanged
+                }
+                _ => unreachable!(),
+            };
+
+            let rejected = publish_startup_readiness_from_action_needed(
+                &app.handle().clone(),
+                &state,
+                &session_id,
+                &observation,
+                initial,
+                std::sync::Arc::new(|| true),
+                std::sync::Arc::new(|| {}),
+            )
+            .await;
+            assert_eq!(rejected, Err(expected_rejection), "case={case}");
+            assert!(
+                input_rx.try_recv().is_err(),
+                "case={case}: no trust keys replayed"
+            );
+            let current_input = state
+                .interactions
+                .provider_input_state(&session_id)
+                .await
+                .unwrap();
+            if case == "busy-input" {
+                assert_eq!(current_input.state, ProviderInputReadiness::Busy);
+            } else if case != "replacement" {
+                assert_eq!(current_input.generation, input_generation);
+                assert_eq!(current_input.state, ProviderInputReadiness::ActionRequired);
+            }
+        }
     }
 
     #[tokio::test]
@@ -1126,6 +1438,7 @@ mod tests {
             input_generation,
             runtime_generation,
             current_status: current_status.clone(),
+            startup_action_intent_revision: None,
         };
         let broker = state.terminal_sessions.clone();
         let ready = b"\x1b[2J\x1b[HAsk anything...\r\nBuild  mimo-v2.5-free\r\nctrl+p commands";
