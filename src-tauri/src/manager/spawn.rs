@@ -1328,7 +1328,28 @@ async fn wait_for_claude_startup_ready_prompt(
     runtime_generation: u64,
     display_path: &str,
 ) -> Result<TerminalSnapshot, String> {
-    let deadline = tokio::time::Instant::now() + CLAUDE_TRUST_SELECTION_TIMEOUT;
+    wait_for_claude_startup_ready_prompt_with_timing(
+        terminal_sessions,
+        session_id,
+        runtime_generation,
+        display_path,
+        CLAUDE_TRUST_SELECTION_TIMEOUT,
+        CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL,
+        CLAUDE_TRUST_SELECTION_POLL_INTERVAL,
+    )
+    .await
+}
+
+async fn wait_for_claude_startup_ready_prompt_with_timing(
+    terminal_sessions: &crate::state::terminal_session::TerminalSessionBroker,
+    session_id: &str,
+    runtime_generation: u64,
+    display_path: &str,
+    timeout: std::time::Duration,
+    settle_interval: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> Result<TerminalSnapshot, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let before = tokio::time::timeout_at(deadline, terminal_sessions.snapshot(session_id))
             .await
@@ -1339,14 +1360,11 @@ async fn wait_for_claude_startup_ready_prompt(
         }
         if crate::control::provider_output_has_startup_ready_prompt("claude", &before.visible_grid)
         {
-            tokio::time::timeout_at(
-                deadline,
-                tokio::time::sleep(CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL),
-            )
-            .await
-            .map_err(|_| {
-                "Claude ready prompt did not settle after trust confirmation".to_string()
-            })?;
+            tokio::time::timeout_at(deadline, tokio::time::sleep(settle_interval))
+                .await
+                .map_err(|_| {
+                    "Claude ready prompt did not settle after trust confirmation".to_string()
+                })?;
             let after = tokio::time::timeout_at(deadline, terminal_sessions.snapshot(session_id))
                 .await
                 .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?
@@ -1366,12 +1384,9 @@ async fn wait_for_claude_startup_ready_prompt(
         {
             return Err("Claude displayed another startup action after trust confirmation".into());
         }
-        tokio::time::timeout_at(
-            deadline,
-            tokio::time::sleep(CLAUDE_TRUST_SELECTION_POLL_INTERVAL),
-        )
-        .await
-        .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?;
+        tokio::time::timeout_at(deadline, tokio::time::sleep(poll_interval))
+            .await
+            .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?;
     }
 }
 
@@ -1482,7 +1497,18 @@ async fn publish_claude_trust_readiness(
             wardian_core::control::ProviderReadyEvidence::PromptDetected,
             validate_ready,
             move |next_status| {
-                set_agent_status(&status_app, &status_session_id, &status_arc, next_status);
+                let expected_status = match next_status {
+                    "Idle" => "Action Needed",
+                    "Action Needed" => "Idle",
+                    _ => return,
+                };
+                crate::manager::set_agent_status_if_current(
+                    &status_app,
+                    &status_session_id,
+                    &status_arc,
+                    expected_status,
+                    next_status,
+                );
             },
         )
         .await;
@@ -7142,6 +7168,156 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.contains("another startup action"));
+    }
+
+    #[tokio::test]
+    async fn claude_ready_waiter_times_out_while_assigned_trust_prompt_remains() {
+        let broker =
+            std::sync::Arc::new(crate::state::terminal_session::TerminalSessionBroker::default());
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(2);
+        let generation = broker
+            .start_or_replace_runtime(
+                "trust-waiter-timeout",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    rows: 24,
+                    cols: 120,
+                },
+            )
+            .await
+            .unwrap();
+        let display_path = r"C:\Wardian\agents\test-agent\habitat\workspace";
+        let trust_menu = format!(
+            "Accessing workspace: {display_path}\n\nQuick safety check: Is this a project you created or one you trust?\n❯ No, exit\n  Yes, I trust this folder"
+        );
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                "trust-waiter-timeout",
+                generation,
+                format!("\x1b[2J\x1b[H{}", trust_menu.replace('\n', "\r\n")).into_bytes(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let error = wait_for_claude_startup_ready_prompt_with_timing(
+            &broker,
+            "trust-waiter-timeout",
+            generation,
+            display_path,
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(2),
+            std::time::Duration::from_millis(2),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("timed out after trust confirmation"));
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn claude_trust_confirmation_sends_each_key_once_before_ready() {
+        let broker =
+            std::sync::Arc::new(crate::state::terminal_session::TerminalSessionBroker::default());
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(4);
+        let session_id = "trust-confirm-once";
+        let generation = broker
+            .start_or_replace_runtime(
+                session_id,
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    rows: 24,
+                    cols: 120,
+                },
+            )
+            .await
+            .unwrap();
+        let display_path = r"C:\Wardian\agents\test-agent\habitat\workspace";
+        let trust_menu = format!(
+            "Accessing workspace: {display_path}\n\nQuick safety check: Is this a project you created or one you trust?\n❯ No, exit\n  Yes, I trust this folder"
+        );
+        let initial_trust_menu = trust_menu.clone();
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                session_id,
+                generation,
+                format!("\x1b[2J\x1b[H{}", initial_trust_menu.replace('\n', "\r\n")).into_bytes(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let confirmation_broker = broker.clone();
+        let confirmation_session = session_id.to_string();
+        let confirmation_path = display_path.to_string();
+        let confirmation = tokio::spawn(async move {
+            confirm_claude_workspace_trust(
+                confirmation_broker,
+                confirmation_session,
+                generation,
+                confirmation_path,
+            )
+            .await
+        });
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(4), input_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            b"\x1b[B".to_vec()
+        );
+
+        let yes_screen = trust_menu
+            .replace("❯ No, exit", "No, exit")
+            .replace("  Yes, I trust this folder", "❯ Yes, I trust this folder");
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                session_id,
+                generation,
+                format!("\x1b[2J\x1b[H{}", yes_screen.replace('\n', "\r\n")).into_bytes(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), input_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            b"\r".to_vec()
+        );
+
+        let composer = "Claude Code v2.1.283\n❯ Try ask Claude\n────────\nHaiku 4.5 | workspace | /rc\n⏵⏵ bypass permissions on (shift+tab to cycle)";
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                session_id,
+                generation,
+                format!("\x1b[2J\x1b[H{}", composer.replace('\n', "\r\n")).into_bytes(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let ready_snapshot = tokio::time::timeout(std::time::Duration::from_secs(2), confirmation)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(crate::control::provider_output_has_startup_ready_prompt(
+            "claude",
+            &ready_snapshot.visible_grid
+        ));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "trust keys must not be replayed"
+        );
     }
 
     #[test]

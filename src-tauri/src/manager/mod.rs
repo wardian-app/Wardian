@@ -298,6 +298,25 @@ pub(crate) fn set_agent_status(
     let Ok(expected_status) = current_status.lock().map(|status| status.clone()) else {
         return;
     };
+    set_agent_status_if_current(
+        app,
+        session_id,
+        current_status,
+        &expected_status,
+        next_status,
+    );
+}
+
+/// Applies a status transition only while the caller's expected state remains
+/// current. Delayed startup handoffs use this to preserve a newer provider
+/// action that arrives between screen validation and publication.
+pub(crate) fn set_agent_status_if_current(
+    app: &AppHandle,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+    next_status: &str,
+) {
     let admission =
         codex_onboarding::status_admission(app, session_id, current_status, next_status);
     if admission == codex_onboarding::CodexStatusAdmission::Blocked {
@@ -309,7 +328,7 @@ pub(crate) fn set_agent_status(
         admission,
         session_id,
         current_status,
-        &expected_status,
+        expected_status,
         next_status,
     ) else {
         return;
@@ -321,7 +340,7 @@ pub(crate) fn set_agent_status(
                 app,
                 session_id,
                 current_status,
-                expected_status,
+                expected_status.to_string(),
                 intent_revision,
                 next_status.to_string(),
             );
@@ -333,7 +352,7 @@ pub(crate) fn set_agent_status(
         state.inner(),
         session_id,
         current_status,
-        &expected_status,
+        expected_status,
         intent_revision,
         next_status,
     ) {

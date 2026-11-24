@@ -137,7 +137,7 @@ pub(crate) async fn publish_startup_readiness(
     evidence: ProviderReadyEvidence,
 ) -> bool {
     let _lifecycle = state.lock_agent_lifecycle(session_id).await;
-    publish_startup_readiness_locked(app, state, session_id, observation, evidence).await
+    publish_startup_readiness_locked(app, state, session_id, observation, evidence, false).await
 }
 
 /// Revalidates the ready screen and moves the owning startup attempt from
@@ -172,7 +172,8 @@ where
         set_status("Action Needed");
         return false;
     }
-    if publish_startup_readiness_locked(None, state, session_id, observation, evidence).await {
+    if publish_startup_readiness_locked(None, state, session_id, observation, evidence, true).await
+    {
         true
     } else {
         set_status("Action Needed");
@@ -210,7 +211,8 @@ where
         set_status("Starting");
         return false;
     }
-    if publish_startup_readiness_locked(None, state, session_id, observation, evidence).await {
+    if publish_startup_readiness_locked(None, state, session_id, observation, evidence, false).await
+    {
         true
     } else {
         set_status("Starting");
@@ -224,6 +226,7 @@ async fn publish_startup_readiness_locked(
     session_id: &str,
     observation: &ProviderStartupObservation,
     evidence: ProviderReadyEvidence,
+    allow_confirmed_startup_action: bool,
 ) -> bool {
     if !observation.is_current(state, session_id).await {
         return false;
@@ -247,6 +250,14 @@ async fn publish_startup_readiness_locked(
         return false;
     }
     let ready = match evidence {
+        ProviderReadyEvidence::PromptDetected if allow_confirmed_startup_action => {
+            record_provider_ready_prompt_after_startup_action(
+                state,
+                session_id,
+                observation.input_generation,
+            )
+            .await
+        }
         ProviderReadyEvidence::PromptDetected => {
             record_provider_ready_prompt(state, session_id, observation.input_generation).await
         }
@@ -262,6 +273,25 @@ async fn publish_startup_readiness_locked(
         super::spawn_agent_messaging_if_idle(app, session_id, "Idle");
     }
     true
+}
+
+async fn record_provider_ready_prompt_after_startup_action(
+    state: &AppState,
+    session_id: &str,
+    generation: u64,
+) -> bool {
+    let attachment_ready = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .map(crate::manager::codex_onboarding::codex_attachment_is_ready)
+        .unwrap_or(true);
+    attachment_ready
+        && state
+            .interactions
+            .record_provider_ready_after_startup_action(session_id, generation)
+            .await
 }
 
 /// Recognizes initial compose readiness. Codex, Claude, OpenCode and Pi callers
@@ -813,6 +843,15 @@ mod tests {
             .start_provider_input_generation(SESSION_ID, ProviderInputReadiness::Booting, None)
             .await
             .generation;
+        state
+            .interactions
+            .record_provider_input_state(
+                SESSION_ID,
+                input_generation,
+                ProviderInputReadiness::ActionRequired,
+                None,
+            )
+            .await;
         let current_status = {
             let mut agents = state.agents.lock().await;
             let agent = agents.get_mut(SESSION_ID).unwrap();
@@ -894,6 +933,156 @@ mod tests {
             "no later provider output is needed for watcher publication"
         );
         assert!(input_rx.try_recv().is_err());
+
+        let next_input_generation = state
+            .interactions
+            .start_provider_input_generation(SESSION_ID, ProviderInputReadiness::Booting, None)
+            .await
+            .generation;
+        state
+            .interactions
+            .record_provider_input_state(
+                SESSION_ID,
+                next_input_generation,
+                ProviderInputReadiness::ActionRequired,
+                None,
+            )
+            .await;
+        *current_status.lock().unwrap() = "Action Needed".to_string();
+        let direct_input_observation = ProviderStartupObservation {
+            input_generation: next_input_generation,
+            runtime_generation,
+            current_status: current_status.clone(),
+        };
+        let before_direct_input = state.terminal_sessions.snapshot(SESSION_ID).await.unwrap();
+        let direct_screen = output.replace("Try ask Claude", "manual draft");
+        assert!(provider_output_has_startup_ready_prompt(
+            "claude",
+            &direct_screen
+        ));
+        let direct_broker = state.terminal_sessions.clone();
+        let direct_status = current_status.clone();
+        let validate_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let validate_count_for_call = validate_count.clone();
+        let validate_ready = move || {
+            let broker = direct_broker.clone();
+            let expected = before_direct_input.clone();
+            let count = validate_count_for_call.clone();
+            let status = direct_status.clone();
+            let direct_screen = direct_screen.clone();
+            async move {
+                if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    let decision = broker
+                        .send_legacy_input(SESSION_ID, b"manual opposing input\r".to_vec())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        decision.status,
+                        wardian_core::models::TerminalLeaseDecisionStatus::Accepted
+                    );
+                    let output_broker = broker.clone();
+                    tokio::task::spawn_blocking(move || {
+                        output_broker.process_output_blocking(
+                            SESSION_ID,
+                            runtime_generation,
+                            format!("\x1b[2J\x1b[H{}", direct_screen.replace('\n', "\r\n"))
+                                .into_bytes(),
+                        )
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    *status.lock().unwrap() = "Processing...".to_string();
+                }
+                broker.snapshot(SESSION_ID).await.is_ok_and(|current| {
+                    current.runtime_generation == expected.runtime_generation
+                        && current.sequence_barrier == expected.sequence_barrier
+                        && current.visible_grid == expected.visible_grid
+                        && provider_output_has_startup_ready_prompt("claude", &current.visible_grid)
+                })
+            }
+        };
+        let status_arc = current_status.clone();
+        assert!(
+            !publish_startup_readiness_from_action_needed(
+                &state,
+                SESSION_ID,
+                &direct_input_observation,
+                ProviderReadyEvidence::PromptDetected,
+                validate_ready,
+                move |next_status| {
+                    let expected_status = match next_status {
+                        "Idle" => "Action Needed",
+                        "Action Needed" => "Idle",
+                        _ => return,
+                    };
+                    let mut status = status_arc.lock().unwrap();
+                    if *status == expected_status {
+                        *status = next_status.to_string();
+                    }
+                },
+            )
+            .await
+        );
+        assert_eq!(validate_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(*current_status.lock().unwrap(), "Processing...");
+        let still_action_required = state
+            .interactions
+            .provider_input_state(SESSION_ID)
+            .await
+            .unwrap();
+        assert_eq!(still_action_required.generation, next_input_generation);
+        assert_eq!(
+            still_action_required.state,
+            ProviderInputReadiness::ActionRequired
+        );
+        assert_eq!(
+            input_rx.try_recv().unwrap(),
+            b"manual opposing input\r".to_vec(),
+            "the readiness publisher neither consumes nor resends direct input"
+        );
+
+        let (replacement_input_tx, _replacement_input_rx) = mpsc::channel(1);
+        let replacement_runtime_generation = state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                SESSION_ID,
+                TerminalRuntimeHandles::new(replacement_input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    rows: 24,
+                    cols: 120,
+                },
+            )
+            .await
+            .unwrap();
+        let replacement_status = std::sync::Arc::new(std::sync::Mutex::new("Starting".to_string()));
+        {
+            let mut agents = state.agents.lock().await;
+            let agent = agents.get_mut(SESSION_ID).unwrap();
+            agent.runtime_generation = Some(replacement_runtime_generation);
+            agent.current_status = replacement_status.clone();
+        }
+        assert!(
+            !publish_startup_readiness_from_action_needed(
+                &state,
+                SESSION_ID,
+                &direct_input_observation,
+                ProviderReadyEvidence::PromptDetected,
+                || async { true },
+                |_| panic!("a replaced runtime must not enter the status transition"),
+            )
+            .await
+        );
+        assert_eq!(*replacement_status.lock().unwrap(), "Starting");
+        assert_eq!(
+            state
+                .interactions
+                .provider_input_state(SESSION_ID)
+                .await
+                .unwrap(),
+            still_action_required,
+            "a stale runtime cannot change the replacement input generation"
+        );
     }
 
     #[tokio::test]
