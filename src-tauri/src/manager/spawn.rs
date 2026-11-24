@@ -7763,6 +7763,18 @@ mod tests {
         app.manage(AppState::new());
         let state = app.state::<AppState>();
         let session_id = "claude-trust-two-paints";
+        wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+            session_id,
+            session_name: session_id,
+            description: "",
+            agent_class: "Coder",
+            provider: "claude",
+            workspace: None,
+            project: None,
+            is_off: false,
+            created_at: None,
+        })
+        .expect("persist the fixture agent for status publication");
         let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(4);
         let runtime_generation = state
             .terminal_sessions
@@ -7781,18 +7793,19 @@ mod tests {
             .start_provider_input_generation(session_id, ProviderInputReadiness::Booting, None)
             .await
             .generation;
-        let current_status = {
+        let (current_status, watch_state) = {
             let mut agent = agent_without_pty();
             agent.runtime_generation = Some(runtime_generation);
             agent.config.lock().unwrap().provider = "claude".to_string();
             *agent.current_status.lock().unwrap() = "Starting".to_string();
             let status = agent.current_status.clone();
+            let watch_state = agent.watch_state.clone();
             state
                 .agents
                 .lock()
                 .await
                 .insert(session_id.to_string(), agent);
-            status
+            (status, watch_state)
         };
         let display_path = r"C:\Wardian\agents\test-agent\habitat\workspace";
         let header_only = format!(
@@ -7847,6 +7860,77 @@ mod tests {
         })
         .await
         .expect("the committed Action Needed observation should reach provider input state");
+
+        let observation_cursor_before_publish = watch_state.lock().unwrap().latest_cursor();
+        let sequence_before_publish = state
+            .status_observation_sequences
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .copied()
+            .unwrap_or_default();
+        crate::manager::publish_agent_status_with_observers(
+            &app.handle().clone(),
+            session_id,
+            &current_status,
+            |_, _, _, _| {},
+            |app, session_id, current_status, status, status_sequence, status_revision| {
+                crate::manager::schedule_agent_status_observation_inner(
+                    app,
+                    session_id,
+                    current_status,
+                    status,
+                    status_sequence,
+                    status_revision,
+                    None,
+                    None,
+                );
+            },
+        );
+        assert_eq!(
+            state.status_intent_revision(session_id, &current_status),
+            first_revision,
+            "republishing the exact committed Action Needed Arc must retain its intent revision"
+        );
+        assert!(claude_trust_action_intent_is_current(
+            &app.handle().clone(),
+            session_id,
+            &current_status,
+            first_revision,
+        ));
+        assert_eq!(
+            state
+                .status_observation_sequences
+                .lock()
+                .unwrap()
+                .get(session_id)
+                .copied(),
+            Some(sequence_before_publish + 1),
+            "same-value publication must still allocate its observation sequence"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if watch_state.lock().unwrap().latest_cursor() != observation_cursor_before_publish
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("same-value publication should still schedule its ordinary observer");
+        assert_eq!(
+            state.remote_agent_status(session_id).as_deref(),
+            Some("Action Needed")
+        );
+        let persisted_status = wardian_core::db::get_db_conn(|conn| {
+            Ok(
+                wardian_core::db::get_agent_by_session_id_with_conn(conn, session_id)?
+                    .and_then(|agent| agent.last_status),
+            )
+        })
+        .expect("read published status from the fixture database");
+        assert_eq!(persisted_status.as_deref(), Some("Action Needed"));
 
         let trust_menu = format!(
             "Accessing workspace: {display_path}\n\nQuick safety check: Is this a project you created or one you trust?\n❯ No, exit\n  Yes, I trust this folder"

@@ -271,7 +271,8 @@ pub(crate) fn reserve_agent_status_intent(
 }
 
 /// Commit a replacement publication only while its status still matches and
-/// no newer admitted intent targets a different status.
+/// no newer admitted intent targets a different status. Preserve a revision
+/// already committed for this exact Arc and value.
 pub(crate) fn commit_agent_status_publication(
     state: &AppState,
     session_id: &str,
@@ -279,14 +280,10 @@ pub(crate) fn commit_agent_status_publication(
     expected_status: &str,
 ) -> Option<u64> {
     let current = current_status.lock().ok()?;
-    if *current != expected_status
-        || state
-            .status_intent_status(session_id, current_status)
-            .is_some_and(|intent_status| intent_status != expected_status)
-    {
+    if *current != expected_status {
         return None;
     }
-    Some(state.commit_status_revision(session_id, current_status, expected_status))
+    state.commit_status_publication_revision(session_id, current_status, expected_status)
 }
 
 pub(crate) fn set_agent_status(
@@ -528,6 +525,32 @@ pub(crate) fn publish_agent_status(
     session_id: &str,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
 ) {
+    publish_agent_status_with_observers(
+        app,
+        session_id,
+        current_status,
+        codex_onboarding::defer_status_publication,
+        schedule_agent_status_observation,
+    );
+}
+
+/// Shared publication path for Wry and mock-runtime callers. The adapters
+/// isolate only runtime-specific scheduling; admission and revision handling
+/// remain identical.
+fn publish_agent_status_with_observers<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    defer_publication: impl FnOnce(&AppHandle<R>, &str, &std::sync::Arc<std::sync::Mutex<String>>, u64),
+    schedule_observation: impl FnOnce(
+        &AppHandle<R>,
+        &str,
+        &std::sync::Arc<std::sync::Mutex<String>>,
+        String,
+        u64,
+        u64,
+    ),
+) {
     let Ok(expected_status) = current_status.lock().map(|status| status.clone()) else {
         return;
     };
@@ -548,12 +571,7 @@ pub(crate) fn publish_agent_status(
     match admission {
         codex_onboarding::CodexStatusAdmission::Blocked => return,
         codex_onboarding::CodexStatusAdmission::WaitForRoster => {
-            codex_onboarding::defer_status_publication(
-                app,
-                session_id,
-                current_status,
-                status_revision,
-            );
+            defer_publication(app, session_id, current_status, status_revision);
             return;
         }
         codex_onboarding::CodexStatusAdmission::Allowed => {}
@@ -569,7 +587,7 @@ pub(crate) fn publish_agent_status(
         }
         state.next_status_observation_sequence(session_id)
     };
-    schedule_agent_status_observation(
+    schedule_observation(
         app,
         session_id,
         current_status,
