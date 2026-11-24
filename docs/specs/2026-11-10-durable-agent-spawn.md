@@ -134,8 +134,12 @@ descriptor. Exclusive startup can seal an exact preparation witness while
 that attempt is still `preparing`. Startup writes the witness and quarantines
 the operation in the same transaction. The witness establishes the old
 attempt's pre-effect boundary. Launch still requires separate vacancy and
-ownership evidence spanning bootstrap and registration. Startup never queues
-work from a witness.
+ownership evidence spanning bootstrap and registration. Explicit recovery
+claims one new unqueued attempt and records the effective model and original
+attempt in the same transaction. The same lifecycle acquisition covers local
+rollout materialization and is retargeted by provisional registration. Recovery
+bootstrap uses local materialization only. Startup never queues work from a
+witness or replays an interrupted recovery attempt.
 
 ## Codex launch authority
 

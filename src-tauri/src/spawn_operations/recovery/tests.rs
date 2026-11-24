@@ -119,14 +119,13 @@ async fn spawn_recovery_seals_only_a_proved_startup_pre_effect_cut() {
         .is_empty());
     assert_eq!(proof(), 1);
     let state = AppState::new();
-    let (one, two) = tokio::join!(
-        recover(&state, pre_effect.clone()),
-        recover(&state, pre_effect.clone()),
-    );
-    assert_eq!(one, two);
     assert_eq!(
-        one.unwrap_err().code,
-        "spawn_recovery_launch_boundary_unavailable"
+        recovery::plan_launch(&pre_effect)
+            .unwrap()
+            .plan
+            .operation
+            .agent_id,
+        agent_id
     );
     for (request, code) in [
         (&post_effect, "spawn_recovery_launch_absence_unverified"),
@@ -137,7 +136,10 @@ async fn spawn_recovery_seals_only_a_proved_startup_pre_effect_cut() {
         for model in [CORRECTED_MODEL, CORRECTED_MODEL, "fixture-other-model"] {
             let mut request = request.clone();
             request.expected_model = model.into();
-            assert_eq!(recover(&state, request).await.unwrap_err().code, code);
+            assert_eq!(
+                admit_launch(&state, request).await.err().unwrap().code,
+                code
+            );
         }
     }
     let retained = agent_spawn::plan(&pre_effect.operation_id)
@@ -169,10 +171,316 @@ async fn spawn_recovery_seals_only_a_proved_startup_pre_effect_cut() {
     })
     .unwrap();
     assert_eq!(
-        recover(&state, pre_effect).await.unwrap_err().code,
+        admit_launch(&state, pre_effect).await.err().unwrap().code,
         "spawn_recovery_launch_absence_unverified"
     );
     assert_eq!(proof(), 1);
+}
+
+#[tokio::test]
+async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acquisition() {
+    use crate::commands::agent::{
+        bootstrap_prepared_agent_spawn, prepare_durable_agent_spawn, RegisteredAgentSpawn,
+    };
+    use crate::spawn_operations::{finish_prepared_operation, WorkerOutcomeGuard};
+
+    struct ScopedEnv(&'static str, Option<std::ffi::OsString>);
+    impl ScopedEnv {
+        fn set(name: &'static str, value: &std::path::Path) -> Self {
+            let old = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self(name, old)
+        }
+    }
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            if let Some(value) = &self.1 {
+                std::env::set_var(self.0, value);
+            } else {
+                std::env::remove_var(self.0);
+            }
+        }
+    }
+
+    let home = TestWardianHome::new_async().await;
+    let bin = home.path().join("bin");
+    let upstream = home.path().join("upstream");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::create_dir(&upstream).unwrap();
+    // Readiness only checks presence. This fixture cannot execute as Codex.
+    std::fs::write(
+        bin.join(if cfg!(windows) { "codex.exe" } else { "codex" }),
+        b"fixture",
+    )
+    .unwrap();
+    let _path = ScopedEnv::set("PATH", &bin);
+    let _upstream = ScopedEnv::set("CODEX_HOME", &upstream);
+    let create_witness = |name: &str| {
+        let agent_id = agent_spawn::new_operation_id();
+        let operation_id = agent_spawn::new_operation_id();
+        let request = AgentSpawnRequest {
+            provider: "codex".into(),
+            class: "Generalist".into(),
+            name: Some(name.into()),
+            workspace: Some(home.path().to_string_lossy().replace('\\', "/")),
+            model: Some(ORIGINAL_MODEL.into()),
+            reasoning_effort: None,
+        };
+        agent_spawn::admit(&operation_id, &request, &agent_id, None).unwrap();
+        let plan = agent_spawn::claim_queued(&operation_id).unwrap().unwrap();
+        let attempt = plan.attempt_id.clone().unwrap();
+        let prepared = prepare_durable_agent_spawn(request, plan).unwrap();
+        (
+            Request {
+                operation_id,
+                expected_attempt_id: attempt,
+                expected_model: CORRECTED_MODEL.into(),
+                action: Action::LaunchIfAbsent,
+            },
+            prepared.config,
+        )
+    };
+    let (request, initial_config) = create_witness("guarded-materialization");
+    let (crash_request, _) = create_witness("guarded-crash");
+    agent_spawn::recover_after_owner_acquired().unwrap();
+    let state = AppState::new();
+    state.agent_roster_restored.store(true, Ordering::Release);
+    let agent_id = &initial_config.session_id;
+    let exact_identity = recovery::plan_launch(&request).unwrap();
+
+    let active = crate::restored_agent_without_process(
+        initial_config.clone(),
+        "Idle",
+        "fixture".into(),
+        None,
+        None,
+    );
+    state.agents.lock().await.insert(agent_id.clone(), active);
+    assert_eq!(
+        admit_launch(&state, request.clone())
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "spawn_recovery_agent_occupied"
+    );
+    state.agents.lock().await.remove(agent_id);
+    crate::manager::try_save_state_snapshot(std::slice::from_ref(&initial_config)).unwrap();
+    assert_eq!(
+        admit_launch(&state, request.clone())
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "spawn_recovery_agent_occupied"
+    );
+    std::fs::write(home.path().join("settings/state.json"), b"[]").unwrap();
+    let existing_lease =
+        crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+            agent_id,
+            &initial_config.session_name,
+            "codex",
+            "",
+            "fixture",
+        )
+        .unwrap();
+    assert_eq!(
+        admit_launch(&state, request.clone())
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "spawn_recovery_lease_conflict"
+    );
+    drop(existing_lease);
+    let changed_source = upstream.join("config.toml");
+    std::fs::write(&changed_source, b"model = 'fixture-foreign-model'").unwrap();
+    assert_eq!(
+        admit_launch(&state, request.clone())
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "spawn_recovery_preparation_changed"
+    );
+    std::fs::remove_file(changed_source).unwrap();
+
+    let mut first = Box::pin(admit_launch(&state, request.clone()));
+    let mut second = Box::pin(admit_launch(&state, request.clone()));
+    let (accepted, competing) = tokio::select! {
+        result = &mut first => (result, second),
+        result = &mut second => (result, first),
+    };
+    let (receipt, prepared, bootstrap) = accepted.unwrap();
+    assert_eq!(&receipt.agent_id, agent_id);
+    assert_eq!(receipt.original_attempt_id, request.expected_attempt_id);
+    assert_ne!(receipt.accepted_attempt_id, request.expected_attempt_id);
+    assert_eq!(receipt.effective_model, CORRECTED_MODEL);
+    let owner = bootstrap.lease.owner().clone();
+    assert_eq!(
+        recovery::claim_recovery_launch(&request, &exact_identity, &bootstrap.lease)
+            .unwrap_err()
+            .code,
+        "spawn_recovery_witness_used"
+    );
+    let mut different = request.clone();
+    different.expected_model = "fixture-different-model".into();
+    assert_eq!(
+        admit_launch(&state, different).await.err().unwrap().code,
+        "spawn_recovery_witness_used"
+    );
+    assert!(agent_spawn::queued_operation_ids().unwrap().is_empty());
+    let keys = (
+        receipt.operation_id.clone(),
+        receipt.accepted_attempt_id.clone(),
+    );
+    assert_eq!(
+        agent_spawn::get(&keys.0).unwrap().unwrap().state,
+        AgentSpawnState::Preparing
+    );
+    let launch_calls = std::cell::Cell::new(0);
+    let launch_state = &state;
+    let lease_owner = &owner;
+    let calls = &launch_calls;
+    let worker = finish_prepared_operation(
+        &state,
+        WorkerOutcomeGuard {
+            operation_id: keys.0.clone(),
+            attempt_id: keys.1.clone(),
+            terminal: false,
+        },
+        prepared,
+        Some(bootstrap),
+        |mut prepared, recovery, keys| async move {
+            calls.set(calls.get() + 1);
+            assert_eq!(
+                agent_spawn::get(&keys.0).unwrap().unwrap().state,
+                AgentSpawnState::Launching
+            );
+            assert!(!agent_spawn::mark_launching(&keys.0, &keys.1).unwrap());
+            let inherited = bootstrap_prepared_agent_spawn(&mut prepared, Some(&keys), recovery)
+                .await
+                .unwrap()
+                .unwrap();
+            let reentered = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                launch_state.lock_agent_lifecycle(agent_id),
+            )
+            .await
+            .expect("registration must be able to reacquire local exclusion");
+            drop(reentered);
+            assert_eq!(inherited.owner(), lease_owner);
+            let native_id = prepared.config.resume_session.as_deref().unwrap();
+            assert_eq!(
+                prepared.config.fresh_provider_session_id.as_deref(),
+                Some(native_id)
+            );
+            assert_eq!(prepared.config.model.as_deref(), Some(CORRECTED_MODEL));
+            assert_eq!(
+                serde_json::to_value(&prepared.config).unwrap()["model"],
+                CORRECTED_MODEL
+            );
+            assert_eq!(
+                agent_spawn::plan(&keys.0)
+                    .unwrap()
+                    .unwrap()
+                    .provider_session_id
+                    .as_deref(),
+                Some(native_id)
+            );
+            let mut registration_lease = crate::manager::spawn::provider_spawn_lease_for_startup(
+                &prepared.config,
+                Some(inherited),
+            )
+            .unwrap();
+            assert_eq!(registration_lease.owner(), lease_owner);
+            assert!(wardian_core::conversation_lease::load_leases_checked()
+                .unwrap()
+                .iter()
+                .any(|lease| &lease.owner() == lease_owner && lease.resume_session == native_id,));
+
+            // Substitute only native completion. The real worker still has
+            // to commit this exact incarnation from live and saved evidence.
+            crate::manager::try_save_state_snapshot(std::slice::from_ref(&prepared.config))
+                .unwrap();
+            let saved = persisted_roster().unwrap();
+            assert_eq!(saved[0].resume_session.as_deref(), Some(native_id));
+            assert!(saved[0].fresh_provider_session_id.is_none());
+            db::upsert_agent(&AgentUpsert {
+                session_id: agent_id,
+                session_name: &prepared.config.session_name,
+                description: "",
+                agent_class: &prepared.config.agent_class,
+                provider: "codex",
+                workspace: Some(&prepared.config.folder),
+                project: None,
+                is_off: false,
+                created_at: None,
+            })
+            .unwrap();
+            let active = crate::restored_agent_without_process(
+                prepared.config.clone(),
+                "Idle",
+                "fixture".into(),
+                None,
+                None,
+            );
+            let registered = RegisteredAgentSpawn {
+                config: prepared.config,
+                config_handle: active.config.clone(),
+                runtime_generation: active.runtime_generation,
+            };
+            launch_state
+                .agents
+                .lock()
+                .await
+                .insert(agent_id.clone(), active);
+            registration_lease.release().unwrap();
+            Ok(registered)
+        },
+    );
+    let ((), competing_result) = tokio::join!(worker, competing);
+    assert_eq!(launch_calls.get(), 1);
+    assert_eq!(
+        agent_spawn::get(&keys.0).unwrap().unwrap().state,
+        AgentSpawnState::Registered
+    );
+    assert!(matches!(
+        competing_result.err().unwrap().code,
+        "spawn_recovery_witness_used" | "spawn_recovery_agent_occupied"
+    ));
+    assert_eq!(
+        agent_spawn::plan(&keys.0).unwrap().unwrap().request,
+        exact_identity.plan.request
+    );
+
+    let (crash, _, mut lease) = admit_launch(&state, crash_request.clone()).await.unwrap();
+    lease.lease.retain_on_drop();
+    drop(lease);
+    agent_spawn::recover_after_owner_acquired().unwrap();
+    assert_eq!(
+        agent_spawn::get(&crash.operation_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        AgentSpawnState::OutcomeUnknown
+    );
+    assert!(agent_spawn::restore_is_excluded(&crash.agent_id).unwrap());
+    assert!(agent_spawn::queued_operation_ids().unwrap().is_empty());
+    assert_eq!(
+        admit_launch(&state, crash_request)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "spawn_recovery_witness_used"
+    );
+    let audited = db::get_db_conn(|conn| Ok(conn.query_row(
+        "SELECT COUNT(*) FROM agent_spawn_codex_launch_audit WHERE operation_id=?1 AND effective_model=?2 AND lease_acquisition_id=?3",
+        rusqlite::params![keys.0, CORRECTED_MODEL, owner.acquisition_id],
+        |row| row.get::<_, u32>(0),
+    )?)).unwrap();
+    assert_eq!(audited, 1);
 }
 
 struct Fixture {
@@ -345,7 +653,11 @@ async fn spawn_recovery_legacy_pre_effect_crash_and_replays_leave_the_claim_quar
     for model in [CORRECTED_MODEL, CORRECTED_MODEL, "fixture-another-model"] {
         launch.expected_model = model.into();
         assert_eq!(
-            recover(&state, launch.clone()).await.unwrap_err().code,
+            admit_launch(&state, launch.clone())
+                .await
+                .err()
+                .unwrap()
+                .code,
             "spawn_recovery_launch_absence_unverified"
         );
     }
@@ -363,7 +675,11 @@ async fn spawn_recovery_legacy_pre_effect_crash_and_replays_leave_the_claim_quar
         .await
         .insert(fixture.config.session_id.clone(), candidate);
     assert_eq!(
-        recover(&state, launch.clone()).await.unwrap_err().code,
+        admit_launch(&state, launch.clone())
+            .await
+            .err()
+            .unwrap()
+            .code,
         "spawn_recovery_launch_absence_unverified"
     );
     assert_eq!(
@@ -375,7 +691,7 @@ async fn spawn_recovery_legacy_pre_effect_crash_and_replays_leave_the_claim_quar
     );
     launch.expected_attempt_id = agent_spawn::new_operation_id();
     assert_eq!(
-        recover(&state, launch).await.unwrap_err().code,
+        admit_launch(&state, launch).await.err().unwrap().code,
         "spawn_recovery_attempt_changed"
     );
     assert_eq!(fixture.attempt_evidence(), evidence);

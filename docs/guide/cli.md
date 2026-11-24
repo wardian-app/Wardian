@@ -609,14 +609,19 @@ registration from its saved row. An exact retry of a completed finalization
 returns its audit receipt, including the confirmed model, even after a restart.
 The command preserves the original request and attempt evidence.
 
-`launch-if-absent` remains blocked. For a fully prepared Codex attempt
-interrupted before launch authorization, startup can preserve evidence of
-that boundary. `spawn_recovery_launch_boundary_unavailable` reports that
-evidence while leaving the original operation quarantined.
+For a fully prepared Codex attempt interrupted before launch authorization,
+exclusive startup can record the pre-effect evidence required by
+`launch-if-absent`. Use the same operation ID and the interrupted attempt ID.
+Supply the exact model for the new attempt.
 
-`--action launch-if-absent` returns a typed blocker for these legacy uncertain
-attempts because their records cannot establish that the provider never took
-effect. Recovery uses the matching CLI and desktop control endpoint.
+```bash
+wardian agent spawn-recover <operation-id> --expected-attempt <attempt-id> --expected-model <model> --action launch-if-absent
+```
+
+A successful response reports an `accepted_attempt_id` and `effective_model`.
+Use `spawn-status` to check registration. A witnessed operation can be accepted
+once, and startup never replays an interrupted recovery attempt. Legacy
+uncertain attempts and occupied identities stay blocked.
 
 Legacy spawn, clone, or rename can report `[agent-name-ownership-pending]`
 after publication. The error includes the stable agent and attempt IDs. Keep

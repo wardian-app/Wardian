@@ -2546,6 +2546,7 @@ pub(crate) async fn spawn_agent_provisionally_with_codex_context(
     initial_timestamp: Option<String>,
     registration: std::sync::Arc<RegistrationPublicationState>,
     codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
+    inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
 ) -> Result<SpawnedAgent, String> {
     spawn_agent_inner(
         app,
@@ -2553,7 +2554,7 @@ pub(crate) async fn spawn_agent_provisionally_with_codex_context(
         is_restored,
         initial_timestamp,
         SpawnPublication::Provisional,
-        None,
+        inherited_lease,
         SpawnPublicationGate {
             unpublished_failure: None,
             registration: Some(registration),
@@ -2637,7 +2638,11 @@ async fn spawn_agent_inner(
         super::codex_stop::await_quiescent(&home, &config.session_id).await?;
     }
 
-    let cwd = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id);
+    let cwd = if publication == SpawnPublication::Provisional && inherited_lease.is_some() {
+        crate::utils::fs::validate_exact_spawn_workspace(&config.folder)?
+    } else {
+        crate::utils::fs::resolve_cwd(&config.folder, &config.session_id)
+    };
     let antigravity_database_baseline = if config.provider == "antigravity"
         && config
             .resume_session

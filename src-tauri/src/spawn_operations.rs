@@ -1,3 +1,4 @@
+use crate::commands::agent::{PreparedAgentSpawn, RecoveryBootstrap, RegisteredAgentSpawn};
 use crate::state::AppState;
 use tauri::{AppHandle, Manager};
 
@@ -65,6 +66,49 @@ pub(crate) fn schedule(app: AppHandle, operation_id: String) {
         };
         run_operation(app, operation_id).await;
     });
+}
+
+/// Detach authorization and dispatch together from the control request. A
+/// lost response must not cancel a committed attempt or authorize another.
+pub(crate) async fn recover_launch(
+    app: AppHandle,
+    request: wardian_core::agent_spawn::recovery::Request,
+) -> Result<
+    wardian_core::agent_spawn::recovery::LaunchAccepted,
+    wardian_core::agent_spawn::recovery::Blocker,
+> {
+    use wardian_core::agent_spawn::recovery::Blocker;
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let permit = state
+            .spawn_operation_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                Blocker::new(
+                    "spawn_recovery_worker_unavailable",
+                    "A durable spawn worker is not available.",
+                )
+            })?;
+        let (receipt, prepared, bootstrap) = recovery::admit_launch(&state, request).await?;
+        let outcome = WorkerOutcomeGuard {
+            operation_id: receipt.operation_id.clone(),
+            attempt_id: receipt.accepted_attempt_id.clone(),
+            terminal: false,
+        };
+        tauri::async_runtime::spawn(async move {
+            let _permit = permit;
+            launch_operation(app, outcome, prepared, Some(bootstrap)).await;
+        });
+        Ok(receipt)
+    })
+    .await
+    .map_err(|_| {
+        Blocker::new(
+            "spawn_recovery_worker_unavailable",
+            "The guarded spawn worker could not be reached.",
+        )
+    })?
 }
 
 pub(crate) async fn wait_for_operation(
@@ -219,7 +263,47 @@ async fn run_operation(app: AppHandle, operation_id: String) {
             return;
         }
     };
+    launch_operation(app, outcome_guard, prepared, None).await;
+}
 
+async fn launch_operation(
+    app: AppHandle,
+    outcome: WorkerOutcomeGuard,
+    prepared: PreparedAgentSpawn,
+    recovery: Option<RecoveryBootstrap>,
+) {
+    let state = app.state::<AppState>();
+    finish_prepared_operation(
+        state.inner(),
+        outcome,
+        prepared,
+        recovery,
+        |prepared, recovery, keys| {
+            crate::commands::agent::launch_prepared_agent_spawn(
+                prepared,
+                state.inner(),
+                &app,
+                None,
+                Some(keys),
+                recovery,
+            )
+        },
+    )
+    .await;
+}
+
+async fn finish_prepared_operation<F>(
+    state: &AppState,
+    mut outcome_guard: WorkerOutcomeGuard,
+    prepared: PreparedAgentSpawn,
+    recovery: Option<RecoveryBootstrap>,
+    launch: impl FnOnce(PreparedAgentSpawn, Option<RecoveryBootstrap>, (String, String)) -> F,
+) where
+    F: std::future::Future<Output = Result<RegisteredAgentSpawn, String>>,
+{
+    let operation_id = &outcome_guard.operation_id;
+    let attempt_id = &outcome_guard.attempt_id;
+    let recovery_model = recovery.as_ref().and(prepared.config.model.clone());
     let operation_key = operation_id.clone();
     let attempt_key = attempt_id.clone();
     match tokio::task::spawn_blocking(move || {
@@ -243,14 +327,10 @@ async fn run_operation(app: AppHandle, operation_id: String) {
         }
     }
 
-    let state = app.state::<AppState>();
-    let durable_operation = Some((operation_id.clone(), attempt_id.clone()));
-    let agent = crate::commands::agent::launch_prepared_agent_spawn(
+    let agent = launch(
         prepared,
-        state.inner(),
-        &app,
-        None,
-        durable_operation,
+        recovery,
+        (operation_id.clone(), attempt_id.clone()),
     )
     .await;
     let registration = match agent {
@@ -276,7 +356,6 @@ async fn run_operation(app: AppHandle, operation_id: String) {
     };
     let agent = &registration.config;
 
-    let state = app.state::<AppState>();
     let _lifecycle = state.lock_agent_lifecycle(&agent.session_id).await;
     let _roster = match crate::manager::roster_io::acquire_roster_barrier().await {
         Ok(barrier) => barrier,
@@ -298,6 +377,11 @@ async fn run_operation(app: AppHandle, operation_id: String) {
         drop(agents);
         config
     };
+    if recovery_model.as_ref().is_some_and(|model| {
+        agent.model.as_ref() != Some(model) || registration.config.model.as_ref() != Some(model)
+    }) {
+        return;
+    }
     let Some(home) = crate::utils::fs::get_wardian_home() else {
         return;
     };
@@ -309,6 +393,7 @@ async fn run_operation(app: AppHandle, operation_id: String) {
     let expected_folder = agent.folder.clone();
     let expected_resume = agent.resume_session.clone();
     let expected_fresh = agent.fresh_provider_session_id.clone();
+    let saved_model = recovery_model.clone();
     let saved = tokio::task::spawn_blocking(move || {
         std::fs::read_to_string(state_path)
             .ok()
@@ -323,7 +408,12 @@ async fn run_operation(app: AppHandle, operation_id: String) {
                         && config.agent_class == expected_class
                         && config.folder == expected_folder
                         && config.resume_session == expected_resume
-                        && config.fresh_provider_session_id == expected_fresh
+                        && match &saved_model {
+                            // Codex's fresh marker is runtime-only. Exact
+                            // saved resume and model prove this recovery row.
+                            Some(model) => config.model.as_ref() == Some(model),
+                            None => config.fresh_provider_session_id == expected_fresh,
+                        }
                 })
             })
     })
@@ -334,9 +424,15 @@ async fn run_operation(app: AppHandle, operation_id: String) {
     }
     let current = {
         let agents = state.agents.lock().await;
-        agents
-            .get(&agent.session_id)
-            .is_some_and(|active| registration.matches(active))
+        agents.get(&agent.session_id).is_some_and(|active| {
+            registration.matches(active)
+                && recovery_model.as_ref().is_none_or(|model| {
+                    active
+                        .config
+                        .lock()
+                        .is_ok_and(|config| config.model.as_ref() == Some(model))
+                })
+        })
     };
     if !current {
         return;

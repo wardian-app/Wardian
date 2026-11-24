@@ -1,8 +1,9 @@
 use super::persisted_roster;
+use crate::commands::agent::{self, PreparedAgentSpawn, RecoveryBootstrap};
 use crate::state::AppState;
 use std::sync::atomic::Ordering;
 use wardian_core::agent_spawn::recovery::{
-    self, Admission, Blocker, Finalized, RegistrationEvidence, Request,
+    self, Admission, Blocker, Finalized, LaunchAccepted, RegistrationEvidence, Request,
 };
 use wardian_core::models::{AgentConfig, TerminalRuntimeState};
 
@@ -103,6 +104,131 @@ pub(crate) async fn recover(state: &AppState, request: Request) -> Result<Finali
     })
     .await
     .map_err(|_| evidence_unavailable())?
+}
+
+/// Authorize only a vacant witnessed identity. The worker inherits the same
+/// lease and both local barriers through its first materialization.
+pub(super) async fn admit_launch(
+    state: &AppState,
+    request: Request,
+) -> Result<(LaunchAccepted, PreparedAgentSpawn, RecoveryBootstrap), Blocker> {
+    let expected = request.clone();
+    let plan = tokio::task::spawn_blocking(move || recovery::plan_launch(&expected))
+        .await
+        .map_err(|_| evidence_unavailable())??;
+    let agent_id = &plan.plan.operation.agent_id;
+    let name = &plan.plan.operation.agent_name;
+    if !state.agent_roster_restored.load(Ordering::Acquire) {
+        return Err(Blocker::new(
+            "spawn_recovery_roster_unavailable",
+            "The current app has not completed roster restoration.",
+        ));
+    }
+    let lifecycle = state.lock_agent_lifecycle(agent_id).await;
+    let roster = crate::manager::roster_io::acquire_roster_barrier()
+        .await
+        .map_err(|_| evidence_unavailable())?;
+    {
+        let agents = state.agents.lock().await;
+        if agents.contains_key(agent_id) || state.agent_order.lock().await.contains(agent_id) {
+            return Err(agent_occupied());
+        }
+        for other in agents.values() {
+            let config = other.config.lock().map_err(|_| evidence_unavailable())?;
+            if config.session_id == *agent_id || config.session_name.eq_ignore_ascii_case(name) {
+                return Err(agent_occupied());
+            }
+        }
+    }
+    if state
+        .native_delivery
+        .has_agent_owner(agent_id)
+        .await
+        .map_err(|_| evidence_unavailable())?
+    {
+        return Err(agent_occupied());
+    }
+    match state.terminal_sessions.broker_state(agent_id).await {
+        Err(crate::state::terminal_session::TerminalBrokerError::SessionNotFound) => {}
+        Ok(_) => return Err(agent_occupied()),
+        Err(_) => return Err(evidence_unavailable()),
+    }
+    tokio::task::spawn_blocking(move || {
+        let operation = &plan.plan.operation;
+        let agent_id = &operation.agent_id;
+        if roster
+            .has_pending_replacement_for(agent_id)
+            .map_err(|_| evidence_unavailable())?
+        {
+            return Err(Blocker::new(
+                "spawn_recovery_replacement_pending",
+                "A replacement journal still owns this agent.",
+            ));
+        }
+        let saved = persisted_roster().map_err(|_| saved_unverified())?;
+        if saved.iter().any(|config| {
+            config.session_id == *agent_id
+                || config
+                    .session_name
+                    .eq_ignore_ascii_case(&operation.agent_name)
+        }) {
+            return Err(agent_occupied());
+        }
+        let home = crate::utils::fs::get_wardian_home().ok_or_else(evidence_unavailable)?;
+        match std::fs::symlink_metadata(home.join("agents").join(agent_id)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(agent_occupied()),
+            Err(_) => return Err(evidence_unavailable()),
+        }
+        let lease = agent::acquire_agent_lifecycle_transition_lease_for_identity(
+            agent_id,
+            &operation.agent_name,
+            "codex",
+            "",
+            "spawn-recovery",
+        )
+        .map_err(|_| {
+            Blocker::new(
+                "spawn_recovery_lease_conflict",
+                "The vacant-agent conversation lease could not be acquired.",
+            )
+        })?;
+        if !crate::utils::process::find_wardian_provider_process_candidates(
+            agent_id,
+            "codex",
+            Some(std::process::id()),
+        )
+        .is_empty()
+        {
+            return Err(agent_occupied());
+        }
+        let prepared =
+            agent::prepare_recovery_launch(&plan, &request.expected_model).map_err(|_| {
+                Blocker::new(
+                    "spawn_recovery_preparation_changed",
+                    "The captured Codex launch inputs could not be verified.",
+                )
+            })?;
+        let reply = recovery::claim_recovery_launch(&request, &plan, &lease)?;
+        Ok((
+            reply,
+            prepared,
+            RecoveryBootstrap {
+                lease,
+                roster,
+                lifecycle,
+            },
+        ))
+    })
+    .await
+    .map_err(|_| evidence_unavailable())?
+}
+
+fn agent_occupied() -> Blocker {
+    Blocker::new(
+        "spawn_recovery_agent_occupied",
+        "The planned agent has existing roster, runtime, process, or profile evidence.",
+    )
 }
 
 async fn live_registration(

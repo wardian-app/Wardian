@@ -54,7 +54,7 @@ use agent_naming::{
     validate_agent_name,
 };
 use codex_onboarding::register_new_agent;
-pub(crate) use codex_onboarding::rollback_provisional_codex;
+pub(crate) use codex_onboarding::{rollback_provisional_codex, RegisteredAgentSpawn};
 use name_claims::{
     abort_failed_rename, existing_spawn_session_names, release_spawn_name_reservation,
     reserve_rename_session_name, reserve_spawn_session_name, LegacyNameClaimGuard,
@@ -62,8 +62,11 @@ use name_claims::{
 };
 pub(crate) use removal::recover_bound_removals;
 use removal::remove_agent;
+#[cfg(test)]
+pub(crate) use spawn::bootstrap_prepared_agent_spawn;
 pub(crate) use spawn::{
     launch_prepared_agent_spawn, planned_provider_session_id, prepare_durable_agent_spawn,
+    prepare_recovery_launch, PreparedAgentSpawn, RecoveryBootstrap,
 };
 use spawn::{new_agent_identity_plan, prepare_agent_spawn};
 use worktree_enable::resolve_agent_worktree_source;
@@ -423,7 +426,7 @@ fn acquire_agent_lifecycle_transition_lease(
 
 /// Metadata deletion retries acquire the existing lifecycle authority directly
 /// from a sealed identity, without reconstructing a roster or provider config.
-fn acquire_agent_lifecycle_transition_lease_for_identity(
+pub(crate) fn acquire_agent_lifecycle_transition_lease_for_identity(
     agent_id: &str,
     name: &str,
     provider: &str,
@@ -2329,6 +2332,7 @@ pub async fn spawn_agent(
         &app,
         Some(name_reservation.owner_id.clone()),
         None,
+        None,
     )
     .await
     .map(|registered| registered.config);
@@ -2506,6 +2510,7 @@ pub async fn clone_agent(
             placement: AgentOrderPlacement::After(&source_session_id),
             emit_roster_update: false,
         },
+        None,
         None,
     )
     .await

@@ -466,7 +466,7 @@ pub fn agent_spawn_wait(
 
 pub fn agent_spawn_recover(
     request: wardian_core::agent_spawn::recovery::Request,
-) -> io::Result<wardian_core::agent_spawn::recovery::Finalized> {
+) -> io::Result<wardian_core::agent_spawn::recovery::Response> {
     let runtime = build_runtime()?;
     let value = timeout_block(
         &runtime,

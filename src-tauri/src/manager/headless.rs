@@ -1342,7 +1342,7 @@ pub async fn obtain_session_id(
     agent_class: Option<&str>,
     config: Option<&AgentConfig>,
 ) -> Result<String, String> {
-    obtain_session_id_inner(cwd, agent_class, config, None, None).await
+    obtain_session_id_inner(cwd, agent_class, config, None, None, false).await
 }
 
 pub(crate) async fn obtain_session_id_with_codex_context(
@@ -1351,6 +1351,7 @@ pub(crate) async fn obtain_session_id_with_codex_context(
     config: Option<&AgentConfig>,
     codex_launch_context: &crate::utils::codex_home::CodexLaunchContext,
     operation: Option<(&str, &str)>,
+    materialize_only: bool,
 ) -> Result<String, String> {
     obtain_session_id_inner(
         cwd,
@@ -1358,6 +1359,7 @@ pub(crate) async fn obtain_session_id_with_codex_context(
         config,
         Some(codex_launch_context),
         operation,
+        materialize_only,
     )
     .await
 }
@@ -1368,6 +1370,7 @@ async fn obtain_session_id_inner(
     config: Option<&AgentConfig>,
     codex_launch_context: Option<&crate::utils::codex_home::CodexLaunchContext>,
     operation: Option<(&str, &str)>,
+    materialize_only: bool,
 ) -> Result<String, String> {
     let provider_name = config.map(|c| c.provider.as_str()).unwrap_or("claude");
     let provider = ProviderFactory::resolve(provider_name)?;
@@ -1422,10 +1425,14 @@ async fn obtain_session_id_inner(
                     log_debug("[WARDIAN-DEBUG] Materialized a fresh local Codex session rollout.");
                     return Ok(session_id);
                 }
+                Err(error) if materialize_only => return Err(error),
                 Err(error) => log_debug(&format!(
                     "[WARDIAN-DEBUG] Codex session rollout materialization unavailable; using legacy bootstrap: {error}"
                 )),
             }
+    }
+    if materialize_only {
+        return Err("Guarded recovery requires local Codex rollout materialization".into());
     }
     let codex_bootstrap = if provider_name == "codex" {
         let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;

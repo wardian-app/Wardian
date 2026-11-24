@@ -65,6 +65,7 @@ pub(super) async fn register_new_agent(
     app: &AppHandle,
     options: super::AgentRegistrationOptions<'_>,
     codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+    inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
 ) -> Result<RegisteredAgentSpawn, String> {
     let session_id = config.session_id.clone();
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
@@ -80,6 +81,7 @@ pub(super) async fn register_new_agent(
         &config,
         publication.0.clone(),
         codex_launch_context,
+        inherited_lease,
     )
     .await?;
     let registered_config = active_agent.config.clone();
@@ -259,6 +261,7 @@ pub(super) async fn spawn_for_registration(
     config: &AgentConfig,
     publication: Arc<manager::RegistrationPublicationState>,
     codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+    inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
 ) -> Result<(PendingRuntime, Option<manager::CodexAttachmentCompletion>), String> {
     if manager::should_publish_provisionally(&config.provider, false) {
         let spawned = manager::spawn::spawn_agent_provisionally_with_codex_context(
@@ -268,10 +271,14 @@ pub(super) async fn spawn_for_registration(
             None,
             publication,
             codex_launch_context,
+            inherited_lease,
         )
         .await?;
         Ok((pending.attach(spawned.active), spawned.completion))
     } else {
+        if inherited_lease.is_some() {
+            return Err("A recovery lease requires provisional Codex registration".into());
+        }
         let active = manager::spawn::spawn_agent_for_registration_with_codex_context(
             app.clone(),
             config.clone(),

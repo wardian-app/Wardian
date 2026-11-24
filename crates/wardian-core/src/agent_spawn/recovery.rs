@@ -31,6 +31,24 @@ pub struct Finalized {
     pub confirmed_model: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchAccepted {
+    pub schema: u8,
+    pub operation_id: String,
+    pub original_attempt_id: String,
+    pub accepted_attempt_id: String,
+    pub agent_id: String,
+    pub action: Action,
+    pub effective_model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Response {
+    Finalized(Finalized),
+    LaunchAccepted(LaunchAccepted),
+}
+
 pub enum Admission {
     Committed(Finalized),
     NeedsLiveProof(Box<AgentSpawnPlan>),
@@ -85,6 +103,16 @@ pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             launch_context_json TEXT NOT NULL,
             preparing_updated_at TEXT NOT NULL,
             witnessed_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS agent_spawn_codex_launch_audit (
+            operation_id TEXT PRIMARY KEY,
+            original_attempt_id TEXT NOT NULL,
+            accepted_attempt_id TEXT NOT NULL UNIQUE,
+            effective_model TEXT NOT NULL,
+            lease_acquisition_id TEXT NOT NULL,
+            original_error_code TEXT,
+            original_error_message TEXT,
+            accepted_at TEXT NOT NULL
         )",
     )
 }
@@ -111,9 +139,9 @@ pub(super) fn record_pre_effect_witnesses(conn: &Connection, now: &str) -> rusql
     Ok(())
 }
 
-fn unavailable_launch(conn: &Connection, operation_id: &str) -> Result<Blocker, Blocker> {
-    let witnessed: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_spawn_codex_pre_effect_witnesses w
+fn witnessed_launch(conn: &Connection, operation_id: &str) -> Result<String, Blocker> {
+    conn.query_row(
+        "SELECT w.launch_context_json FROM agent_spawn_codex_pre_effect_witnesses w
          JOIN agent_spawn_operations o ON o.operation_id = w.operation_id
          WHERE o.operation_id = ?1 AND o.attempt_id = w.original_attempt_id
            AND o.updated_at = w.witnessed_at AND o.error_code = 'interrupted_after_claim'
@@ -121,16 +149,10 @@ fn unavailable_launch(conn: &Connection, operation_id: &str) -> Result<Blocker, 
            AND o.payload_hash = w.payload_hash AND o.session_name = w.session_name
            AND o.class = w.class AND o.prepared_workspace = w.prepared_workspace
            AND o.launch_context_json = w.launch_context_json AND o.provider_session_id IS NULL
-           AND o.bootstrap_receipt_json IS NULL AND o.first_native_session_id IS NULL)",
+           AND o.bootstrap_receipt_json IS NULL AND o.first_native_session_id IS NULL",
         [operation_id],
         |row| row.get(0),
-    )?;
-    Ok(if witnessed {
-        Blocker::new(
-            "spawn_recovery_launch_boundary_unavailable",
-            "The original attempt stopped before launch authorization. Recovery has no reservation covering both bootstrap and native registration.",
-        )
-    } else {
+    ).optional()?.ok_or_else(|| {
         Blocker::new(
             "spawn_recovery_launch_absence_unverified",
             "The original attempt has no authoritative pre-effect proof. An unrecorded Codex provider effect cannot be excluded.",
@@ -234,7 +256,7 @@ fn read_receipt(conn: &Connection, request: &Request) -> Result<Option<Finalized
     }))
 }
 
-fn read_plan(conn: &Connection, request: &Request) -> Result<AgentSpawnPlan, Blocker> {
+fn read_uncertain(conn: &Connection, request: &Request) -> Result<AgentSpawnPlan, Blocker> {
     let plan = load_plan_with_conn(conn, &request.operation_id)?.ok_or_else(|| {
         Blocker::new(
             "spawn_recovery_operation_missing",
@@ -282,9 +304,17 @@ fn read_plan(conn: &Connection, request: &Request) -> Result<AgentSpawnPlan, Blo
             "The operation no longer owns the exact agent name claim.",
         ));
     }
-    if request.action == Action::LaunchIfAbsent {
-        return Err(unavailable_launch(conn, &request.operation_id)?);
+    Ok(plan)
+}
+
+fn read_plan(conn: &Connection, request: &Request) -> Result<AgentSpawnPlan, Blocker> {
+    if request.action != Action::FinalizeRegistered {
+        return Err(Blocker::new(
+            "spawn_recovery_invalid_action",
+            "This route requires finalize-registered.",
+        ));
     }
+    let plan = read_uncertain(conn, request)?;
     let summary = crate::db::get_agent_by_session_id_with_conn(conn, &plan.operation.agent_id)?;
     if plan.prepared_workspace.as_deref().is_none_or(str::is_empty)
         || !summary.is_some_and(|row| {
@@ -317,6 +347,171 @@ fn read_plan(conn: &Connection, request: &Request) -> Result<AgentSpawnPlan, Blo
         ));
     }
     Ok(plan)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct WitnessedLaunch {
+    pub plan: AgentSpawnPlan,
+    pub launch_context_json: String,
+}
+
+fn read_launch(conn: &Connection, request: &Request) -> Result<WitnessedLaunch, Blocker> {
+    if request.action != Action::LaunchIfAbsent {
+        return Err(Blocker::new(
+            "spawn_recovery_invalid_action",
+            "This route requires launch-if-absent.",
+        ));
+    }
+    if read_receipt(conn, request)?.is_some()
+        || conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_spawn_codex_launch_audit WHERE operation_id=?1)",
+            [&request.operation_id],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Err(Blocker::new(
+            "spawn_recovery_witness_used",
+            "The operation already has a committed recovery action.",
+        ));
+    }
+    let plan = read_uncertain(conn, request)?;
+    let launch_context_json = witnessed_launch(conn, &request.operation_id)?;
+    if canonical_uuid(&plan.operation.agent_id, "agent id").as_ref() != Ok(&plan.operation.agent_id)
+    {
+        return Err(Blocker::new(
+            "spawn_recovery_invalid_identity",
+            "The planned agent identity is unavailable.",
+        ));
+    }
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE session_id=?1 OR session_name=?2 COLLATE NOCASE)
+             OR EXISTS(SELECT 1 FROM native_session_bindings WHERE target_agent_id=?1)",
+        params![plan.operation.agent_id, plan.operation.agent_name],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Err(Blocker::new(
+            "spawn_recovery_agent_occupied",
+            "The planned agent has existing durable roster or native ownership evidence.",
+        ));
+    }
+    Ok(WitnessedLaunch {
+        plan,
+        launch_context_json,
+    })
+}
+
+/// Read the pre-effect proof and durable vacancy from one storage snapshot.
+pub fn plan_launch(request: &Request) -> Result<WitnessedLaunch, Blocker> {
+    validate_request(request)?;
+    crate::db::get_db_conn(|conn| {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
+        Ok(read_launch(&tx, request))
+    })
+    .map_err(|_| storage_unavailable())?
+}
+
+/// Consume the witness and claim an unqueued attempt while the caller owns the
+/// local lifecycle and roster barriers plus the exact empty-scope acquisition.
+pub fn claim_recovery_launch(
+    request: &Request,
+    expected: &WitnessedLaunch,
+    guard: &crate::conversation_lease::PersistedConversationLeaseGuard,
+) -> Result<LaunchAccepted, Blocker> {
+    validate_request(request)?;
+    crate::conversation_lease::inspect_leases_locked(|leases| {
+        let now = chrono::Utc::now();
+        let agent = &expected.plan.operation.agent_id;
+        let exact_lease = leases
+            .iter()
+            .filter(|lease| &lease.agent_id == agent)
+            .all(|lease| {
+                lease.owner() == *guard.owner()
+                    || (lease.mode != "uncertain_previous_provider"
+                        && chrono::DateTime::parse_from_rfc3339(&lease.expires_at)
+                            .is_ok_and(|expiry| expiry <= now))
+            })
+            && leases.iter().any(|lease| {
+                lease.owner() == *guard.owner()
+                    && &lease.agent_id == agent
+                    && lease.owner_kind == "agent_lifecycle"
+                    && lease.provider == "codex"
+                    && lease.mode == "lifecycle_transition"
+                    && lease.resume_session.is_empty()
+                    && chrono::DateTime::parse_from_rfc3339(&lease.expires_at)
+                        .is_ok_and(|expiry| expiry > now)
+            });
+        if !exact_lease {
+            return Err(Blocker::new(
+                "spawn_recovery_lease_conflict",
+                "The exact vacant-agent lease is unavailable or conflicts.",
+            ));
+        }
+        crate::db::get_db_conn(|conn| {
+            Ok(claim_launch_with_conn(
+                conn,
+                request,
+                expected,
+                &guard.owner().acquisition_id,
+                &now.to_rfc3339(),
+            ))
+        })
+        .map_err(|_| storage_unavailable())?
+    })
+    .map_err(|_| storage_unavailable())?
+}
+
+fn claim_launch_with_conn(
+    conn: &Connection,
+    request: &Request,
+    expected: &WitnessedLaunch,
+    lease_id: &str,
+    now: &str,
+) -> Result<LaunchAccepted, Blocker> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    if read_launch(&tx, request)? != *expected {
+        return Err(Blocker::new(
+            "spawn_recovery_intent_changed",
+            "The pre-effect operation changed during admission.",
+        ));
+    }
+    let attempt = super::new_operation_id();
+    tx.execute(
+        "INSERT INTO agent_spawn_codex_launch_audit VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            request.operation_id,
+            request.expected_attempt_id,
+            attempt,
+            request.expected_model,
+            lease_id,
+            expected.plan.operation.error_code,
+            expected.plan.operation.error_message,
+            now
+        ],
+    )?;
+    let changed = tx.execute(
+        "UPDATE agent_spawn_operations SET state='preparing', attempt_id=?3, updated_at=?4,
+            error_code=NULL,error_message=NULL,codex_pre_effect_fence_version=NULL
+         WHERE operation_id=?1 AND attempt_id=?2 AND state='outcome_unknown'",
+        params![
+            request.operation_id,
+            request.expected_attempt_id,
+            attempt,
+            now
+        ],
+    )?;
+    if changed != 1 {
+        return Err(storage_unavailable());
+    }
+    tx.commit()?;
+    Ok(LaunchAccepted {
+        schema: crate::control::CONTROL_SCHEMA,
+        operation_id: request.operation_id.clone(),
+        original_attempt_id: request.expected_attempt_id.clone(),
+        agent_id: expected.plan.operation.agent_id.clone(),
+        action: request.action,
+        effective_model: request.expected_model.clone(),
+        accepted_attempt_id: attempt,
+    })
 }
 
 /// Commit only after the caller pins the same live registration under the
