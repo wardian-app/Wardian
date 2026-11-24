@@ -859,6 +859,80 @@ fn claude_trust_reader_should_mark_action_needed(trust_state: u8, assigned_promp
     assigned_prompt && !claude_trust_flow_blocks_readiness(trust_state)
 }
 
+fn claude_assigned_trust_prompt_for_reader(
+    provider: &str,
+    auto_confirm: bool,
+    display_path: Option<&str>,
+    startup_screen: Option<&str>,
+) -> bool {
+    let (Some(display_path), Some(startup_screen)) = (display_path, startup_screen) else {
+        return false;
+    };
+    provider == "claude"
+        && auto_confirm
+        && claude_trust_screen_displays_workspace(startup_screen, display_path)
+}
+
+#[derive(Default)]
+struct ClaudeTrustActionIntent {
+    revision: Option<u64>,
+    invalidated: bool,
+}
+
+fn claude_trust_action_intent_is_current<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    revision: u64,
+) -> bool {
+    let state = app.state::<AppState>();
+    current_status
+        .lock()
+        .is_ok_and(|status| status.eq_ignore_ascii_case("Action Needed"))
+        && state.status_intent_revision(session_id, current_status) == revision
+        && state
+            .status_intent_status(session_id, current_status)
+            .is_some_and(|intent| intent.eq_ignore_ascii_case("Action Needed"))
+}
+
+impl ClaudeTrustActionIntent {
+    fn observe_assigned_paint<R: tauri::Runtime>(
+        &mut self,
+        app: &AppHandle<R>,
+        session_id: &str,
+        current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+        assigned_prompt: bool,
+    ) -> Option<u64> {
+        if !assigned_prompt || self.invalidated {
+            return None;
+        }
+        if let Some(revision) = self.revision {
+            if claude_trust_action_intent_is_current(app, session_id, current_status, revision) {
+                return Some(revision);
+            }
+            self.revision = None;
+            self.invalidated = true;
+            return None;
+        }
+
+        let Some(revision) = crate::manager::set_agent_status_and_get_intent(
+            app,
+            session_id,
+            current_status,
+            "Action Needed",
+        ) else {
+            self.invalidated = true;
+            return None;
+        };
+        if !claude_trust_action_intent_is_current(app, session_id, current_status, revision) {
+            self.invalidated = true;
+            return None;
+        }
+        self.revision = Some(revision);
+        Some(revision)
+    }
+}
+
 fn startup_prompt_ready_for_reader(
     provider: &str,
     startup_prompt_pending: bool,
@@ -1333,9 +1407,18 @@ async fn send_claude_trust_key(
     terminal_sessions: std::sync::Arc<crate::state::terminal_session::TerminalSessionBroker>,
     expected: crate::state::terminal_session::TerminalReadinessObservation,
     key: &'static [u8],
+    owner_is_current: &std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> Result<crate::state::terminal_session::TerminalReadinessObservation, String> {
+    if !owner_is_current() {
+        return Err("Claude trust status intent changed before input".to_string());
+    }
+    let owner_is_current = owner_is_current.clone();
     terminal_sessions
-        .send_privileged_input_if_readiness_current(expected, key.to_vec())
+        .send_privileged_input_if_readiness_current(
+            expected,
+            key.to_vec(),
+            Box::new(move || owner_is_current()),
+        )
         .await
         .map_err(|error| format!("Claude trust input rejected: {error}"))
 }
@@ -1442,6 +1525,7 @@ async fn confirm_claude_workspace_trust(
     session_id: String,
     runtime_generation: u64,
     display_path: String,
+    owner_is_current: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> Result<crate::state::terminal_session::TerminalReadinessObservation, String> {
     let no_selection = wait_for_claude_trust_selection(
         &terminal_sessions,
@@ -1454,8 +1538,13 @@ async fn confirm_claude_workspace_trust(
         None,
     )
     .await?;
-    let selected_yes =
-        send_claude_trust_key(terminal_sessions.clone(), no_selection, b"\x1b[B").await?;
+    let selected_yes = send_claude_trust_key(
+        terminal_sessions.clone(),
+        no_selection,
+        b"\x1b[B",
+        &owner_is_current,
+    )
+    .await?;
     let selected_yes = wait_for_claude_trust_selection(
         &terminal_sessions,
         &session_id,
@@ -1467,7 +1556,13 @@ async fn confirm_claude_workspace_trust(
         Some(selected_yes.input_sequence),
     )
     .await?;
-    let after_enter = send_claude_trust_key(terminal_sessions.clone(), selected_yes, b"\r").await?;
+    let after_enter = send_claude_trust_key(
+        terminal_sessions.clone(),
+        selected_yes,
+        b"\r",
+        &owner_is_current,
+    )
+    .await?;
     wait_for_claude_startup_ready_prompt(
         &terminal_sessions,
         &session_id,
@@ -3538,6 +3633,7 @@ async fn spawn_agent_inner(
         let mut antigravity_workspace_trust_confirmed = false;
         let mut claude_bypass_permissions_confirmed = false;
         let mut claude_workspace_trust_started = false;
+        let mut claude_trust_action_intent = ClaudeTrustActionIntent::default();
         let mut pty_decoder = PtyUtf8Decoder::new();
         let output_ready_emit_gate =
             std::sync::Arc::new(std::sync::Mutex::new(OutputReadyEmitGate::default()));
@@ -3780,14 +3876,12 @@ async fn spawn_agent_inner(
                             }
                         });
                     }
-                    let assigned_claude_trust_prompt =
-                        startup_screen.as_deref().is_some_and(|output| {
-                            provider_name_for_pty == "claude"
-                                && auto_confirm_claude_workspace_trust
-                                && claude_workspace_trust_display_path.as_deref().is_some_and(
-                                    |path| claude_trust_screen_displays_workspace(output, path),
-                                )
-                        });
+                    let assigned_claude_trust_prompt = claude_assigned_trust_prompt_for_reader(
+                        &provider_name_for_pty,
+                        auto_confirm_claude_workspace_trust,
+                        claude_workspace_trust_display_path.as_deref(),
+                        startup_screen.as_deref(),
+                    );
                     if startup_ready {
                         let claimed = !defer_codex_startup_readiness
                             && claim_startup_readiness(&startup_readiness_claimed);
@@ -3931,14 +4025,15 @@ async fn spawn_agent_inner(
                         trust_state,
                         assigned_claude_trust_prompt,
                     ) {
-                        let trust_action_intent_revision =
-                            crate::manager::set_agent_status_and_get_intent(
+                        let trust_action_intent_revision = claude_trust_action_intent
+                            .observe_assigned_paint(
                                 &pty_app,
                                 &sid_for_pty,
                                 &current_status_clone,
-                                "Action Needed",
+                                assigned_claude_trust_prompt,
                             );
                         if !claude_workspace_trust_started
+                            && trust_action_intent_revision.is_some()
                             && startup_screen.as_deref().is_some_and(|output| {
                                 crate::control::startup_readiness::
                                     claude_workspace_trust_prompt_selects_no(output)
@@ -3958,6 +4053,21 @@ async fn spawn_agent_inner(
                                 let mut trust_observation = startup_observation.clone();
                                 trust_observation.startup_action_intent_revision =
                                     trust_action_intent_revision;
+                                let trust_intent_app = pty_app.clone();
+                                let trust_intent_session = sid_for_pty.clone();
+                                let trust_intent_status = current_status_clone.clone();
+                                let trust_intent_revision =
+                                    trust_action_intent_revision.expect("checked above");
+                                let trust_intent_is_current: std::sync::Arc<
+                                    dyn Fn() -> bool + Send + Sync,
+                                > = std::sync::Arc::new(move || {
+                                    claude_trust_action_intent_is_current(
+                                        &trust_intent_app,
+                                        &trust_intent_session,
+                                        &trust_intent_status,
+                                        trust_intent_revision,
+                                    )
+                                });
                                 let trust_memory_injection = pending_memory_injection.clone();
                                 let trust_readiness_claimed = startup_readiness_claimed.clone();
                                 let trust_readiness_wake = claude_trust_readiness_wake.clone();
@@ -3967,6 +4077,7 @@ async fn spawn_agent_inner(
                                         trust_session.clone(),
                                         reader_runtime_generation,
                                         display_path,
+                                        trust_intent_is_current,
                                     )
                                     .await
                                     {
@@ -5523,6 +5634,23 @@ mod tests {
     use super::*;
     use crate::providers::pi::PiProvider;
     use wardian_core::models::{AgentProvider, CodexProviderConfig, ProviderConfig};
+
+    async fn render_test_terminal_screen(
+        broker: &std::sync::Arc<crate::state::terminal_session::TerminalSessionBroker>,
+        session_id: &str,
+        runtime_generation: u64,
+        screen: &str,
+    ) {
+        let broker = broker.clone();
+        let session_id = session_id.to_string();
+        let output = format!("\x1b[2J\x1b[H{}", screen.replace('\n', "\r\n")).into_bytes();
+        tokio::task::spawn_blocking(move || {
+            broker.process_output_blocking(&session_id, runtime_generation, output)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
 
     fn pi_log_baseline(
         session_dir: &std::path::Path,
@@ -7625,6 +7753,349 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claude_trust_reader_carries_its_status_proof_across_header_and_options_paints() {
+        use crate::control::test_support::TestWardianHome;
+        use crate::state::terminal_session::TerminalRuntimeHandles;
+        use wardian_core::control::ProviderInputReadiness;
+
+        let _home = TestWardianHome::new_async().await;
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let session_id = "claude-trust-two-paints";
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(4);
+        let runtime_generation = state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                session_id,
+                TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    rows: 24,
+                    cols: 120,
+                },
+            )
+            .await
+            .unwrap();
+        let input_generation = state
+            .interactions
+            .start_provider_input_generation(session_id, ProviderInputReadiness::Booting, None)
+            .await
+            .generation;
+        let current_status = {
+            let mut agent = agent_without_pty();
+            agent.runtime_generation = Some(runtime_generation);
+            agent.config.lock().unwrap().provider = "claude".to_string();
+            *agent.current_status.lock().unwrap() = "Starting".to_string();
+            let status = agent.current_status.clone();
+            state
+                .agents
+                .lock()
+                .await
+                .insert(session_id.to_string(), agent);
+            status
+        };
+        let display_path = r"C:\Wardian\agents\test-agent\habitat\workspace";
+        let header_only = format!(
+            "Accessing workspace: {display_path}\n\nQuick safety check: Is this a project you created or one you trust?"
+        );
+        render_test_terminal_screen(
+            &state.terminal_sessions,
+            session_id,
+            runtime_generation,
+            &header_only,
+        )
+        .await;
+        let header = state
+            .terminal_sessions
+            .snapshot(session_id)
+            .await
+            .unwrap()
+            .visible_grid;
+        assert!(claude_assigned_trust_prompt_for_reader(
+            "claude",
+            true,
+            Some(display_path),
+            Some(&header),
+        ));
+        assert!(
+            !crate::control::startup_readiness::claude_workspace_trust_prompt_selects_no(&header)
+        );
+
+        let mut intent = ClaudeTrustActionIntent::default();
+        let first_revision = intent
+            .observe_assigned_paint(&app.handle().clone(), session_id, &current_status, true)
+            .expect("the first assigned trust paint owns Action Needed");
+        assert!(claude_trust_action_intent_is_current(
+            &app.handle().clone(),
+            session_id,
+            &current_status,
+            first_revision,
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if state
+                    .interactions
+                    .provider_input_state(session_id)
+                    .await
+                    .is_some_and(|input| input.state == ProviderInputReadiness::ActionRequired)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the committed Action Needed observation should reach provider input state");
+
+        let trust_menu = format!(
+            "Accessing workspace: {display_path}\n\nQuick safety check: Is this a project you created or one you trust?\n❯ No, exit\n  Yes, I trust this folder"
+        );
+        render_test_terminal_screen(
+            &state.terminal_sessions,
+            session_id,
+            runtime_generation,
+            &trust_menu,
+        )
+        .await;
+        let complete_menu = state
+            .terminal_sessions
+            .snapshot(session_id)
+            .await
+            .unwrap()
+            .visible_grid;
+        assert!(claude_assigned_trust_prompt_for_reader(
+            "claude",
+            true,
+            Some(display_path),
+            Some(&complete_menu),
+        ));
+        assert!(
+            crate::control::startup_readiness::claude_workspace_trust_prompt_selects_no(
+                &complete_menu
+            )
+        );
+
+        let second_revision = intent
+            .observe_assigned_paint(&app.handle().clone(), session_id, &current_status, true)
+            .expect("the options paint must retain the first paint's trust proof");
+        assert_eq!(second_revision, first_revision);
+        assert_eq!(
+            state.status_intent_revision(session_id, &current_status),
+            first_revision,
+            "the repeated paint must not reserve a new status intent"
+        );
+
+        let owner_app = app.handle().clone();
+        let owner_session = session_id.to_string();
+        let owner_status = current_status.clone();
+        let owner_is_current: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
+            std::sync::Arc::new(move || {
+                claude_trust_action_intent_is_current(
+                    &owner_app,
+                    &owner_session,
+                    &owner_status,
+                    first_revision,
+                )
+            });
+        let confirmation_broker = state.terminal_sessions.clone();
+        let confirmation_session = session_id.to_string();
+        let confirmation_path = display_path.to_string();
+        let confirmation_owner = owner_is_current.clone();
+        let confirmation = tokio::spawn(async move {
+            confirm_claude_workspace_trust(
+                confirmation_broker,
+                confirmation_session,
+                runtime_generation,
+                confirmation_path,
+                confirmation_owner,
+            )
+            .await
+        });
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), input_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            b"\x1b[B".to_vec()
+        );
+
+        let yes_screen = complete_menu
+            .replace("❯ No, exit", "No, exit")
+            .replace("  Yes, I trust this folder", "❯ Yes, I trust this folder");
+        render_test_terminal_screen(
+            &state.terminal_sessions,
+            session_id,
+            runtime_generation,
+            &yes_screen,
+        )
+        .await;
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), input_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            b"\r".to_vec()
+        );
+
+        let composer = "Claude Code v2.1.283\n❯ Try ask Claude\n────────\nHaiku 4.5 | workspace | /rc\n⏵⏵ bypass permissions on (shift+tab to cycle)";
+        render_test_terminal_screen(
+            &state.terminal_sessions,
+            session_id,
+            runtime_generation,
+            composer,
+        )
+        .await;
+        let ready_snapshot = tokio::time::timeout(std::time::Duration::from_secs(3), confirmation)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(input_rx.try_recv().is_err(), "trust keys must be sent once");
+
+        let observation = crate::control::startup_readiness::ProviderStartupObservation {
+            input_generation,
+            runtime_generation,
+            current_status: current_status.clone(),
+            startup_action_intent_revision: Some(second_revision),
+        };
+        crate::control::startup_readiness::publish_startup_readiness_from_action_needed(
+            &app.handle().clone(),
+            state.inner(),
+            session_id,
+            &observation,
+            ready_snapshot,
+            owner_is_current,
+            std::sync::Arc::new(|| {}),
+        )
+        .await
+        .expect("the production handoff should publish the confirmed current prompt");
+        assert_eq!(*current_status.lock().unwrap(), "Idle");
+        assert_eq!(
+            state
+                .interactions
+                .provider_input_state(session_id)
+                .await
+                .unwrap()
+                .state,
+            ProviderInputReadiness::Ready
+        );
+        assert!(state.status_intent_revision(session_id, &current_status) > first_revision);
+        assert!(state
+            .status_intent_status(session_id, &current_status)
+            .is_some_and(|status| status.eq_ignore_ascii_case("Idle")));
+    }
+
+    #[tokio::test]
+    async fn claude_trust_reader_rejects_a_later_status_intent_replacing_its_proof() {
+        use crate::control::test_support::TestWardianHome;
+        use crate::state::terminal_session::TerminalRuntimeHandles;
+
+        let _home = TestWardianHome::new_async().await;
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let session_id = "claude-trust-replaced-intent";
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(2);
+        let runtime_generation = state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                session_id,
+                TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    rows: 24,
+                    cols: 120,
+                },
+            )
+            .await
+            .unwrap();
+        let mut agent = agent_without_pty();
+        agent.runtime_generation = Some(runtime_generation);
+        agent.config.lock().unwrap().provider = "claude".to_string();
+        *agent.current_status.lock().unwrap() = "Starting".to_string();
+        let current_status = agent.current_status.clone();
+        state
+            .agents
+            .lock()
+            .await
+            .insert(session_id.to_string(), agent);
+
+        let mut intent = ClaudeTrustActionIntent::default();
+        let revision = intent
+            .observe_assigned_paint(&app.handle().clone(), session_id, &current_status, true)
+            .expect("first trust paint establishes the proof");
+
+        let display_path = r"C:\Wardian\agents\test-agent\habitat\workspace";
+        let trust_menu = format!(
+            "Accessing workspace: {display_path}\n\nQuick safety check: Is this a project you created or one you trust?\n❯ No, exit\n  Yes, I trust this folder"
+        );
+        render_test_terminal_screen(
+            &state.terminal_sessions,
+            session_id,
+            runtime_generation,
+            &trust_menu,
+        )
+        .await;
+
+        let owner_app = app.handle().clone();
+        let owner_session = session_id.to_string();
+        let owner_status = current_status.clone();
+        let owner_is_current: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
+            std::sync::Arc::new(move || {
+                claude_trust_action_intent_is_current(
+                    &owner_app,
+                    &owner_session,
+                    &owner_status,
+                    revision,
+                )
+            });
+        let confirmation_broker = state.terminal_sessions.clone();
+        let confirmation_session = session_id.to_string();
+        let confirmation_path = display_path.to_string();
+        let confirmation_owner = owner_is_current.clone();
+        let confirmation = tokio::spawn(async move {
+            confirm_claude_workspace_trust(
+                confirmation_broker,
+                confirmation_session,
+                runtime_generation,
+                confirmation_path,
+                confirmation_owner,
+            )
+            .await
+        });
+
+        {
+            let _status = current_status.lock().unwrap();
+            state.reserve_status_intent(session_id, &current_status, "Action Needed");
+        }
+        assert_ne!(
+            state.status_intent_revision(session_id, &current_status),
+            revision
+        );
+        assert!(intent
+            .observe_assigned_paint(&app.handle().clone(), session_id, &current_status, true)
+            .is_none());
+        assert!(!claude_trust_action_intent_is_current(
+            &app.handle().clone(),
+            session_id,
+            &current_status,
+            revision,
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(4), confirmation)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err()
+                .contains("status intent changed before input")
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "stale proof admits no trust keys"
+        );
+    }
+
+    #[tokio::test]
     async fn claude_trust_confirmation_sends_each_key_once_before_ready() {
         let broker =
             std::sync::Arc::new(crate::state::terminal_session::TerminalSessionBroker::default());
@@ -7667,6 +8138,7 @@ mod tests {
                 confirmation_session,
                 generation,
                 confirmation_path,
+                std::sync::Arc::new(|| true),
             )
             .await
         });

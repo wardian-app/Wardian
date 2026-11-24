@@ -1503,18 +1503,20 @@ impl TerminalSessionBroker {
         .await
     }
 
-    /// Sends one privileged startup key only while the exact screen and input
-    /// revision used to validate that key remain current.
+    /// Sends one privileged startup key only while the exact screen, input
+    /// revision, and caller-owned action proof remain current at actor admission.
     pub(crate) async fn send_privileged_input_if_readiness_current(
         &self,
         expected: TerminalReadinessObservation,
         bytes: Vec<u8>,
+        owner_is_current: Box<dyn FnOnce() -> bool + Send>,
     ) -> Result<TerminalReadinessObservation, TerminalBrokerError> {
         let session_id = expected.snapshot.session_id.clone();
         self.request(&session_id, move |reply| {
             TerminalSessionMessage::PrivilegedInputIfReadinessCurrent {
                 expected,
                 bytes,
+                owner_is_current,
                 reply,
             }
         })
@@ -1989,6 +1991,7 @@ enum TerminalSessionMessage {
     PrivilegedInputIfReadinessCurrent {
         expected: TerminalReadinessObservation,
         bytes: Vec<u8>,
+        owner_is_current: Box<dyn FnOnce() -> bool + Send>,
         reply: BrokerReply<TerminalReadinessObservation>,
     },
     Pause {
@@ -2398,23 +2401,29 @@ impl TerminalSessionActor {
             TerminalSessionMessage::PrivilegedInputIfReadinessCurrent {
                 expected,
                 bytes,
+                owner_is_current,
                 reply,
             } => {
                 if reply.is_closed() {
                     return;
                 }
-                let result = match self.ensure_generation(expected.snapshot.runtime_generation) {
-                    Err(error) => Err(error),
-                    Ok(()) if self.input_sequence != expected.input_sequence => {
-                        Err(TerminalBrokerError::InvalidRequest("opposing_input"))
-                    }
-                    Ok(()) if self.readiness_observation().snapshot != expected.snapshot => Err(
-                        TerminalBrokerError::InvalidRequest("startup_screen_changed"),
-                    ),
-                    Ok(()) => self
-                        .send_privileged_input(bytes)
+                // Recheck caller ownership after queueing, at this serialized input boundary.
+                let result = if let Err(error) =
+                    self.ensure_generation(expected.snapshot.runtime_generation)
+                {
+                    Err(error)
+                } else if self.input_sequence != expected.input_sequence {
+                    Err(TerminalBrokerError::InvalidRequest("opposing_input"))
+                } else if self.readiness_observation().snapshot != expected.snapshot {
+                    Err(TerminalBrokerError::InvalidRequest(
+                        "startup_screen_changed",
+                    ))
+                } else if !owner_is_current() {
+                    Err(TerminalBrokerError::InvalidRequest("startup_owner_changed"))
+                } else {
+                    self.send_privileged_input(bytes)
                         .await
-                        .map(|()| self.readiness_observation()),
+                        .map(|()| self.readiness_observation())
                 };
                 let _ = reply.send(result);
             }

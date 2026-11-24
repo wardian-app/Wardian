@@ -2831,7 +2831,11 @@ async fn abandoned_startup_readiness_commands_have_no_effect() {
     .is_err());
     assert!(tokio::time::timeout(
         Duration::from_millis(25),
-        broker.send_privileged_input_if_readiness_current(expected.clone(), b"trust key".to_vec()),
+        broker.send_privileged_input_if_readiness_current(
+            expected.clone(),
+            b"trust key".to_vec(),
+            Box::new(|| true),
+        ),
     )
     .await
     .is_err());
@@ -2846,6 +2850,37 @@ async fn abandoned_startup_readiness_commands_have_no_effect() {
     assert!(
         input_rx.try_recv().is_err(),
         "no abandoned trust key is sent"
+    );
+}
+
+#[tokio::test]
+async fn privileged_startup_input_requires_current_owner_proof_at_actor_admission() {
+    let broker = Arc::new(TerminalSessionBroker::default());
+    let (runtime, mut input_rx, _) = runtime();
+    broker
+        .start_or_replace_runtime("startup-owner-proof", runtime, geometry(80, 24))
+        .await
+        .expect("start runtime");
+    let expected = broker
+        .readiness_observation("startup-owner-proof")
+        .await
+        .expect("current startup screen and input");
+
+    let result = broker
+        .send_privileged_input_if_readiness_current(
+            expected,
+            b"trust key".to_vec(),
+            Box::new(|| false),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(TerminalBrokerError::InvalidRequest("startup_owner_changed"))
+    ));
+    assert!(
+        input_rx.try_recv().is_err(),
+        "stale owner proof sends no key"
     );
 }
 
