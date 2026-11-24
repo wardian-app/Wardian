@@ -181,6 +181,12 @@ pub(crate) struct RecoveryBootstrap {
     pub lease: wardian_core::conversation_lease::PersistedConversationLeaseGuard,
     pub roster: wardian_core::agent_replacement::AgentRosterBarrier,
     pub lifecycle: tokio::sync::OwnedMutexGuard<()>,
+    pub heartbeat: std::sync::Arc<LifecycleLeaseHeartbeat>,
+}
+
+pub(crate) struct RecoveryRegistrationLease {
+    pub lease: wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+    pub heartbeat: std::sync::Arc<LifecycleLeaseHeartbeat>,
 }
 
 pub(crate) async fn launch_prepared_agent_spawn(
@@ -224,12 +230,14 @@ pub(crate) async fn bootstrap_prepared_agent_spawn(
     prepared: &mut PreparedAgentSpawn,
     durable_operation: Option<&(String, String)>,
     recovery: Option<RecoveryBootstrap>,
-) -> Result<Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>, String> {
+) -> Result<Option<RecoveryRegistrationLease>, String> {
+    use wardian_core::conversation_lease::CodexRecoveryLeaseScope;
     let recovery_only = recovery.is_some();
     let recovery = if let Some(RecoveryBootstrap {
         lease,
         roster,
         lifecycle,
+        heartbeat,
     }) = recovery
     {
         let context = prepared
@@ -237,14 +245,21 @@ pub(crate) async fn bootstrap_prepared_agent_spawn(
             .as_ref()
             .ok_or("The recovery launch context is unavailable")?;
         context.revalidate()?;
-        let mut lease =
-            manager::spawn::provider_spawn_lease_for_startup(&prepared.config, Some(lease))
-                .map_err(|error| error.to_string())?;
+        let mut lease = lease;
+        heartbeat.ensure_codex_recovery_scope(
+            "bootstrap Codex recovery",
+            CodexRecoveryLeaseScope::Exact {
+                agent_id: &prepared.config.session_id,
+                native_id: "",
+            },
+        )?;
+        manager::spawn::check_provider_spawn_candidates(&prepared.config)?;
         lease.retain_on_drop();
         Some(RecoveryBootstrap {
             lease,
             roster,
             lifecycle,
+            heartbeat,
         })
     } else {
         None
@@ -263,7 +278,9 @@ pub(crate) async fn bootstrap_prepared_agent_spawn(
                 context,
                 durable_operation
                     .map(|(operation_id, attempt_id)| (operation_id.as_str(), attempt_id.as_str())),
-                recovery_only,
+                recovery
+                    .as_ref()
+                    .map(|recovery| recovery.heartbeat.as_ref()),
             )
             .await
         } else {
@@ -298,10 +315,11 @@ pub(crate) async fn bootstrap_prepared_agent_spawn(
              lease,
              roster,
              lifecycle,
+             heartbeat,
          }| {
             drop(roster);
             drop(lifecycle);
-            lease
+            RecoveryRegistrationLease { lease, heartbeat }
         },
     ))
 }

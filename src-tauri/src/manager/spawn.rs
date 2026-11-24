@@ -245,6 +245,8 @@ struct SpawnPublicationGate {
     pi_bridge: Option<std::sync::Arc<crate::delivery::pi_bridge::PiBridgeOwner>>,
     codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
     startup_ready_wake: Option<std::sync::Arc<StartupReadinessLeaseWake>>,
+    recovery_heartbeat: Option<std::sync::Arc<crate::commands::agent::LifecycleLeaseHeartbeat>>,
+    recovery_handoff: Option<RecoveryLeaseHandoff>,
 }
 
 struct StartupReadinessLeaseWake {
@@ -253,6 +255,11 @@ struct StartupReadinessLeaseWake {
     lease_released: std::sync::atomic::AtomicBool,
     dispatch_claimed: std::sync::atomic::AtomicBool,
     dispatch: std::sync::Arc<dyn Fn() + Send + Sync>,
+}
+
+struct RecoveryLeaseHandoff {
+    native_id: String,
+    result: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
 /// Registration may put a runtime in the map before its roster and provider
@@ -1928,7 +1935,7 @@ fn acquire_provider_spawn_lease_with_candidate_check_at_typed(
     }
 }
 
-fn check_provider_spawn_candidates(config: &AgentConfig) -> Result<(), String> {
+pub(crate) fn check_provider_spawn_candidates(config: &AgentConfig) -> Result<(), String> {
     let candidates = crate::utils::process::find_wardian_provider_process_candidates(
         &config.session_id,
         &config.provider,
@@ -2110,9 +2117,10 @@ pub(crate) fn persist_restore_retry_config_if_unchanged(
     Ok(true)
 }
 
-async fn prepare_codex_owner_after_reservation<T, F, Fut>(
+pub(crate) async fn prepare_codex_owner_after_reservation<T, F, Fut>(
     config: &AgentConfig,
     inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
+    recovery_heartbeat: Option<&crate::commands::agent::LifecycleLeaseHeartbeat>,
     prepare: F,
 ) -> Result<
     (
@@ -2128,7 +2136,24 @@ where
     // Native owner preparation can start a provider writer before the PTY
     // exists. Reserve and scan first, then retain exclusion through any
     // cancellation or uncertain failure during owner preparation.
-    let mut lease = provider_spawn_lease_for_startup(config, inherited_lease)?;
+    let mut lease = if let Some(heartbeat) = recovery_heartbeat {
+        let lease = inherited_lease
+            .filter(|lease| lease.owner() == heartbeat.owner())
+            .ok_or_else(|| {
+                StartupRestoreSpawnError::Other("Codex recovery lease handoff changed".into())
+            })?;
+        heartbeat.ensure_codex_recovery_scope(
+            "retarget Codex recovery",
+            wardian_core::conversation_lease::CodexRecoveryLeaseScope::Attach {
+                agent_id: &config.session_id,
+                native_id: provider_spawn_session_identity(config),
+            },
+        )?;
+        check_provider_spawn_candidates(config)?;
+        lease
+    } else {
+        provider_spawn_lease_for_startup(config, inherited_lease)?
+    };
     lease.retain_on_drop();
     let owner = prepare().await.map_err(StartupRestoreSpawnError::Other)?;
     Ok((lease, owner))
@@ -2168,7 +2193,34 @@ fn release_provider_spawn_lease_after_readiness<R: tauri::Runtime>(
     }
     tokio::spawn(async move {
         let owner = lease.owner().clone();
-        let mut last_renewal = std::time::Instant::now();
+        use wardian_core::conversation_lease::CodexRecoveryLeaseScope;
+        let recovery_native = match (gate.recovery_heartbeat.take(), gate.recovery_handoff.take()) {
+            (Some(heartbeat), Some(handoff)) => {
+                let result = heartbeat.ensure_codex_recovery_scope(
+                    "hand off Codex recovery",
+                    CodexRecoveryLeaseScope::Exact {
+                        agent_id: &session_id,
+                        native_id: &handoff.native_id,
+                    },
+                );
+                let accepted = result.is_ok();
+                // The first watcher renewal above runs while the preparation
+                // heartbeat still owns renewal. Only now may it stop.
+                drop(heartbeat);
+                let _ = handoff.result.send(result);
+                if !accepted {
+                    lease.retain_until_expiry();
+                    return;
+                }
+                Some(handoff.native_id)
+            }
+            (None, None) => None,
+            _ => {
+                lease.retain_until_expiry();
+                return;
+            }
+        };
+        let mut last_renewal = tokio::time::Instant::now();
         loop {
             if gate
                 .unpublished_failure
@@ -2242,12 +2294,24 @@ fn release_provider_spawn_lease_after_readiness<R: tauri::Runtime>(
 
             if last_renewal.elapsed() >= PROVIDER_SPAWN_LEASE_HEARTBEAT {
                 let now = chrono::Utc::now();
-                match wardian_core::conversation_lease::renew_lease_owner_persisted(
-                    &owner,
-                    &now.to_rfc3339(),
-                    &(now + PROVIDER_SPAWN_LEASE_DURATION).to_rfc3339(),
-                ) {
-                    Ok(true) => last_renewal = std::time::Instant::now(),
+                let renewed = if let Some(native_id) = &recovery_native {
+                    wardian_core::conversation_lease::refresh_codex_recovery_lease_persisted(
+                        &owner,
+                        PROVIDER_SPAWN_LEASE_DURATION,
+                        CodexRecoveryLeaseScope::Exact {
+                            agent_id: &session_id,
+                            native_id,
+                        },
+                    )
+                } else {
+                    wardian_core::conversation_lease::renew_lease_owner_persisted(
+                        &owner,
+                        &now.to_rfc3339(),
+                        &(now + PROVIDER_SPAWN_LEASE_DURATION).to_rfc3339(),
+                    )
+                };
+                match renewed {
+                    Ok(true) => last_renewal = tokio::time::Instant::now(),
                     Ok(false) => {
                         log_debug(&format!(
                             "[Wardian] Provider startup lease expired before readiness for {session_id}"
@@ -2546,19 +2610,23 @@ pub(crate) async fn spawn_agent_provisionally_with_codex_context(
     initial_timestamp: Option<String>,
     registration: std::sync::Arc<RegistrationPublicationState>,
     codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
-    inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
+    inherited_lease: Option<crate::commands::agent::RecoveryRegistrationLease>,
 ) -> Result<SpawnedAgent, String> {
+    let (lease, heartbeat) = inherited_lease
+        .map(|recovery| (Some(recovery.lease), Some(recovery.heartbeat)))
+        .unwrap_or_default();
     spawn_agent_inner(
         app,
         config,
         is_restored,
         initial_timestamp,
         SpawnPublication::Provisional,
-        inherited_lease,
+        lease,
         SpawnPublicationGate {
             unpublished_failure: None,
             registration: Some(registration),
             codex_launch_context,
+            recovery_heartbeat: heartbeat,
             ..Default::default()
         },
     )
@@ -3033,8 +3101,11 @@ async fn spawn_agent_inner(
 
     let attachment_at = std::time::Instant::now();
     let (mut spawn_lease, codex_attachment) = if config.provider == "codex" {
-        let (lease, attachment) =
-            prepare_codex_owner_after_reservation(&config, inherited_lease, || async {
+        let (lease, attachment) = prepare_codex_owner_after_reservation(
+            &config,
+            inherited_lease,
+            gate.recovery_heartbeat.as_deref(),
+            || async {
                 app_state
                     .native_delivery
                     .prepare_codex_tui(
@@ -3046,11 +3117,13 @@ async fn spawn_agent_inner(
                             config: config.clone(),
                         },
                         codex_launch_context.clone(),
+                        gate.recovery_heartbeat.clone(),
                     )
                     .await
                     .map_err(|error| error.to_string())
-            })
-            .await?;
+            },
+        )
+        .await?;
         (lease, Some(attachment))
     } else {
         (
@@ -3305,6 +3378,15 @@ async fn spawn_agent_inner(
     };
     if let Some(context) = codex_launch_context.as_deref() {
         context.revalidate()?;
+    }
+    if let Some(heartbeat) = gate.recovery_heartbeat.as_deref() {
+        heartbeat.ensure_codex_recovery_scope(
+            "start Codex recovery TUI",
+            wardian_core::conversation_lease::CodexRecoveryLeaseScope::Exact {
+                agent_id: &config.session_id,
+                native_id: provider_spawn_session_identity(&config),
+            },
+        )?;
     }
     // Provider records written after this instant belong to this runtime.
     let provider_launched_at_ms = chrono::Utc::now().timestamp_millis();
@@ -5553,6 +5635,29 @@ async fn spawn_agent_inner(
     if let Some(launch) = claude_turn_ended {
         launch.observe(app.clone(), runtime_generation, current_status.clone());
     }
+    gate.pi_bridge = pi_attachment.as_ref().map(|plan| plan.owner());
+    let recovery_handoff = gate.recovery_heartbeat.as_ref().map(|_| {
+        let (handoff, result) = tokio::sync::oneshot::channel();
+        gate.recovery_handoff = Some(RecoveryLeaseHandoff {
+            native_id: provider_spawn_session_identity(&config).to_owned(),
+            result: handoff,
+        });
+        result
+    });
+    release_provider_spawn_lease_after_readiness(
+        spawn_lease,
+        current_status.clone(),
+        config.session_id.clone(),
+        spawn_bootstrap_complete,
+        app.clone(),
+        runtime_generation,
+        gate,
+    );
+    if let Some(result) = recovery_handoff {
+        result
+            .await
+            .map_err(|_| "Codex recovery lease watcher ended before handoff".to_string())??;
+    }
     let active = ActiveAgent {
         config: config_lock.clone(),
         child_process: Some(child.attached()),
@@ -5590,16 +5695,6 @@ async fn spawn_agent_inner(
             })
         });
     }
-    gate.pi_bridge = pi_attachment.as_ref().map(|plan| plan.owner());
-    release_provider_spawn_lease_after_readiness(
-        spawn_lease,
-        current_status,
-        config.session_id.clone(),
-        spawn_bootstrap_complete,
-        app,
-        runtime_generation,
-        gate,
-    );
     Ok(SpawnedAgent {
         active,
         completion: codex_attachment_completion,
@@ -6116,6 +6211,114 @@ mod tests {
         .is_none());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn codex_recovery_lease_renews_while_owner_preparation_is_parked() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let config = AgentConfig {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            session_name: "parked-recovery".into(),
+            provider: "codex".into(),
+            resume_session: Some(uuid::Uuid::new_v4().to_string()),
+            ..Default::default()
+        };
+        let lease = crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+            &config.session_id,
+            &config.session_name,
+            "codex",
+            "",
+            "fixture",
+        )
+        .unwrap();
+        let owner = lease.owner().clone();
+        let heartbeat = std::sync::Arc::new(
+            crate::commands::agent::LifecycleLeaseHeartbeat::start_codex_recovery(owner.clone()),
+        );
+        let read_lease = || {
+            wardian_core::conversation_lease::load_leases_checked()
+                .unwrap()
+                .into_iter()
+                .find(|lease| lease.owner() == owner)
+                .unwrap()
+        };
+        let (entered, parked) = tokio::sync::oneshot::channel();
+        let (release, continue_preparation) = tokio::sync::oneshot::channel();
+        let preparation = prepare_codex_owner_after_reservation(
+            &config,
+            Some(lease),
+            Some(&heartbeat),
+            || async {
+                entered.send(()).unwrap();
+                continue_preparation.await.unwrap();
+                Ok(())
+            },
+        );
+        let observe = async {
+            parked.await.unwrap();
+            let before = read_lease();
+            assert_eq!(
+                Some(before.resume_session.as_str()),
+                config.resume_session.as_deref()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            tokio::time::advance(std::time::Duration::from_secs(61)).await;
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            let after = read_lease();
+            release.send(()).unwrap();
+            (before, after)
+        };
+        let (result, (before, after)) = tokio::join!(preparation, observe);
+        let (lease, ()) = result.unwrap();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&after.expires_at).unwrap()
+                > chrono::DateTime::parse_from_rfc3339(&before.expires_at).unwrap(),
+            "the exact retargeted acquisition must renew while owner preparation waits",
+        );
+        assert_eq!(before.owner(), after.owner());
+        assert_eq!(before.resume_session, after.resume_session);
+
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let registration = std::sync::Arc::new(RegistrationPublicationState::default());
+        let weak_heartbeat = std::sync::Arc::downgrade(&heartbeat);
+        let (handoff, joined) = tokio::sync::oneshot::channel();
+        let watcher = release_provider_spawn_lease_after_readiness(
+            lease,
+            std::sync::Arc::new(std::sync::Mutex::new("Booting".into())),
+            config.session_id,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            app.handle().clone(),
+            1,
+            SpawnPublicationGate {
+                registration: Some(registration.clone()),
+                recovery_heartbeat: Some(heartbeat),
+                recovery_handoff: Some(RecoveryLeaseHandoff {
+                    native_id: config.resume_session.unwrap(),
+                    result: handoff,
+                }),
+                ..Default::default()
+            },
+        );
+        joined.await.unwrap().unwrap();
+        assert!(weak_heartbeat.upgrade().is_none());
+        let handoff_lease = read_lease();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        let watcher_lease = read_lease();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&watcher_lease.expires_at).unwrap()
+                > chrono::DateTime::parse_from_rfc3339(&handoff_lease.expires_at).unwrap()
+        );
+        assert_eq!(watcher_lease.owner(), owner);
+        assert_eq!(watcher_lease.resume_session, before.resume_session);
+        registration.fail();
+        watcher.await.unwrap();
+    }
+
     #[tokio::test]
     async fn codex_native_owner_preparation_runs_only_after_spawn_reservation() {
         let _home = crate::control::test_support::TestWardianHome::new_async().await;
@@ -6125,15 +6328,16 @@ mod tests {
             resume_session: Some(uuid::Uuid::new_v4().to_string()),
             ..Default::default()
         };
-        let (mut lease, owner) = prepare_codex_owner_after_reservation(&config, None, || async {
-            let leases = wardian_core::conversation_lease::load_leases_checked()?;
-            assert!(leases.iter().any(|entry| {
-                entry.agent_id == config.session_id && entry.mode == "lifecycle_transition"
-            }));
-            Ok("prepared")
-        })
-        .await
-        .expect("prepare after reservation");
+        let (mut lease, owner) =
+            prepare_codex_owner_after_reservation(&config, None, None, || async {
+                let leases = wardian_core::conversation_lease::load_leases_checked()?;
+                assert!(leases.iter().any(|entry| {
+                    entry.agent_id == config.session_id && entry.mode == "lifecycle_transition"
+                }));
+                Ok("prepared")
+            })
+            .await
+            .expect("prepare after reservation");
         assert_eq!(owner, "prepared");
         lease.release().expect("release test reservation");
 
@@ -6157,7 +6361,7 @@ mod tests {
             wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Acquired
         ));
         let prepared = std::sync::atomic::AtomicBool::new(false);
-        let result = prepare_codex_owner_after_reservation(&config, None, || async {
+        let result = prepare_codex_owner_after_reservation(&config, None, None, || async {
             prepared.store(true, std::sync::atomic::Ordering::Release);
             Ok(())
         })
@@ -6173,7 +6377,7 @@ mod tests {
         };
         let cancelled = tokio::time::timeout(
             std::time::Duration::from_millis(20),
-            prepare_codex_owner_after_reservation(&cancelled_config, None, || async {
+            prepare_codex_owner_after_reservation(&cancelled_config, None, None, || async {
                 std::future::pending::<Result<(), String>>().await
             }),
         )

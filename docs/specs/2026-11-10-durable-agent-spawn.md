@@ -138,8 +138,11 @@ ownership evidence spanning bootstrap and registration. Explicit recovery
 claims one new unqueued attempt and records the effective model and original
 attempt in the same transaction. The same lifecycle acquisition covers local
 rollout materialization and is retargeted by provisional registration. Recovery
-bootstrap uses local materialization only. Startup never queues work from a
-witness or replays an interrupted recovery attempt.
+renews the exact acquisition through detached owner preparation and verifies it
+at rollout materialization and provider start. The readiness watcher renews the
+acquisition before acknowledging handoff. Recovery bootstrap uses local
+materialization only. Startup never queues work from a witness or replays an
+interrupted recovery attempt.
 
 ## Codex launch authority
 

@@ -508,6 +508,80 @@ pub fn renew_lease_owner_persisted(
     Ok(true)
 }
 
+/// The witnessed launch can change native scope once, from empty to its new
+/// rollout. Clock and conflict checks share the file-locked renewal.
+pub enum CodexRecoveryLeaseScope<'a> {
+    Current,
+    Exact {
+        agent_id: &'a str,
+        native_id: &'a str,
+    },
+    Attach {
+        agent_id: &'a str,
+        native_id: &'a str,
+    },
+}
+
+pub fn refresh_codex_recovery_lease_persisted(
+    owner: &ConversationLeaseOwner,
+    duration: chrono::Duration,
+    scope: CodexRecoveryLeaseScope<'_>,
+) -> Result<bool, String> {
+    let _process_guard = LEASE_FILE_LOCK
+        .lock()
+        .map_err(|_| "conversation lease lock poisoned".to_string())?;
+    let _file_guard = acquire_lease_file_lock()?;
+    let mut leases = load_leases_checked()?;
+    let now = chrono::Utc::now();
+    let Some(index) = leases
+        .iter()
+        .position(|lease| lease_matches_owner(lease, owner))
+    else {
+        return Ok(false);
+    };
+    let current = &leases[index];
+    if current.owner_kind != "agent_lifecycle"
+        || current.mode != "lifecycle_transition"
+        || current.provider != "codex"
+        || !parse_rfc3339_utc(&current.expires_at).is_some_and(|expiry| expiry > now)
+    {
+        return Ok(false);
+    }
+    let target = match scope {
+        CodexRecoveryLeaseScope::Current => current.resume_session.as_str(),
+        CodexRecoveryLeaseScope::Exact {
+            agent_id,
+            native_id,
+        } if current.agent_id == agent_id && current.resume_session == native_id => native_id,
+        CodexRecoveryLeaseScope::Attach {
+            agent_id,
+            native_id,
+        } if current.agent_id == agent_id
+            && current.resume_session.is_empty()
+            && !native_id.is_empty() =>
+        {
+            native_id
+        }
+        _ => return Ok(false),
+    };
+    if leases.iter().enumerate().any(|(other_index, other)| {
+        other_index != index
+            && (lease_conflicts(other, &current.agent_id, target, now)
+                || (other.mode == "uncertain_previous_provider"
+                    && other.agent_id == current.agent_id))
+    }) {
+        return Ok(false);
+    }
+    let target = target.to_owned();
+    let lease = &mut leases[index];
+    lease.resume_session = target;
+    lease.heartbeat_at = now.to_rfc3339();
+    lease.expires_at = (now + duration).to_rfc3339();
+    save_leases(&leases)
+        .map_err(|error| format!("failed to save Codex recovery lease refresh: {error}"))?;
+    Ok(true)
+}
+
 /// Atomically retarget an exact active lifecycle acquisition to the provider
 /// identity selected at spawn. A different active owner of either the agent or
 /// the new session excludes the retarget, even when the session rotated after

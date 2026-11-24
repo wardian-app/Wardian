@@ -301,13 +301,15 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         spec: NativeSessionSpec,
     ) -> Result<Arc<CodexSharedOwner>, CodexSharedError> {
-        self.create_shared_codex_with_context(spec, None).await
+        self.create_shared_codex_with_context(spec, None, None)
+            .await
     }
 
     async fn create_shared_codex_with_context(
         self: &Arc<Self>,
         spec: NativeSessionSpec,
         codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+        recovery_heartbeat: Option<Arc<crate::commands::agent::LifecycleLeaseHeartbeat>>,
     ) -> Result<Arc<CodexSharedOwner>, CodexSharedError> {
         // Capture disposal revisions before the first await or detached spawn.
         let request = self
@@ -323,7 +325,13 @@ impl NativeDeliveryBroker {
             let agent_id = spec.target_agent_id.clone();
             let generation = spec.generation;
             let started = broker
-                .create_shared_codex_inner(spec, codex_launch_context, reply.closed(), request)
+                .create_shared_codex_inner(
+                    spec,
+                    codex_launch_context,
+                    recovery_heartbeat.as_deref(),
+                    reply.closed(),
+                    request,
+                )
                 .await;
             let created = started.as_ref().is_ok_and(|(_, created)| *created);
             if reply.send(started.map(|(owner, _)| owner)).is_err() && created {
@@ -339,6 +347,7 @@ impl NativeDeliveryBroker {
         &self,
         spec: NativeSessionSpec,
         codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+        recovery_heartbeat: Option<&crate::commands::agent::LifecycleLeaseHeartbeat>,
         cancelled: impl std::future::Future<Output = ()>,
         request: CodexCreationRequest,
     ) -> Result<(Arc<CodexSharedOwner>, bool), CodexSharedError> {
@@ -432,12 +441,25 @@ impl NativeDeliveryBroker {
                 .reject_start
                 .load(std::sync::atomic::Ordering::Acquire)
             {
-                self.codex_creation_test
-                    .start_attempts
-                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                return Err(CodexSharedError::unsupported("test owner-start sentinel"));
+                return crate::delivery::codex_shared::spawn_codex_owner_at_lease_boundary(
+                    &spec,
+                    recovery_heartbeat,
+                    || {
+                        self.codex_creation_test
+                            .start_attempts
+                            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        Err("test owner-start sentinel".into())
+                    },
+                )
+                .map_err(CodexSharedError::unsupported);
             }
-            CodexSharedOwner::start(&spec, codex_launch_context, cancellation).await
+            CodexSharedOwner::start(
+                &spec,
+                codex_launch_context,
+                recovery_heartbeat,
+                cancellation,
+            )
+            .await
         };
         let owner = match start.await {
             Ok(owner) => owner,
@@ -507,9 +529,10 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         spec: NativeSessionSpec,
         codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+        recovery_heartbeat: Option<Arc<crate::commands::agent::LifecycleLeaseHeartbeat>>,
     ) -> Result<CodexTuiAttachment, CodexSharedError> {
         Ok(self
-            .create_shared_codex_with_context(spec, codex_launch_context)
+            .create_shared_codex_with_context(spec, codex_launch_context, recovery_heartbeat)
             .await?
             .attachment
             .clone())
@@ -1119,6 +1142,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_recovery_lease_gates_parked_detached_first_start() {
+        use std::sync::atomic::Ordering;
+        use wardian_core::conversation_lease::{self, CodexRecoveryLeaseScope};
+
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        for phase in ["live", "expired", "replaced"] {
+            let broker = Arc::new(NativeDeliveryBroker::new());
+            let config = AgentConfig {
+                session_id: uuid::Uuid::new_v4().to_string(),
+                session_name: format!("parked-{phase}"),
+                provider: "codex".into(),
+                resume_session: Some(uuid::Uuid::new_v4().to_string()),
+                ..Default::default()
+            };
+            let mut lease =
+                crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+                    &config.session_id,
+                    &config.session_name,
+                    "codex",
+                    "",
+                    "fixture",
+                )
+                .unwrap();
+            let original_owner = lease.owner().clone();
+            lease.retain_on_drop();
+            let heartbeat = Arc::new(
+                crate::commands::agent::LifecycleLeaseHeartbeat::start_codex_recovery(
+                    original_owner.clone(),
+                ),
+            );
+            heartbeat
+                .ensure_codex_recovery_scope(
+                    "retarget fixture",
+                    CodexRecoveryLeaseScope::Attach {
+                        agent_id: &config.session_id,
+                        native_id: config.resume_session.as_deref().unwrap(),
+                    },
+                )
+                .unwrap();
+            let parked = Arc::new(CodexCreationTestBarrier::default());
+            broker
+                .codex_creation_test
+                .before_gate
+                .lock()
+                .unwrap()
+                .insert(1, parked.clone());
+            broker
+                .codex_creation_test
+                .reject_start
+                .store(true, Ordering::Release);
+            let agent_id = config.session_id.clone();
+            let weak = Arc::downgrade(&heartbeat);
+            let pending = {
+                let broker = broker.clone();
+                tokio::spawn(async move {
+                    broker
+                        .prepare_codex_tui(
+                            NativeSessionSpec {
+                                target_agent_id: config.session_id.clone(),
+                                provider: "codex".into(),
+                                generation: 1,
+                                workspace: PathBuf::new(),
+                                config,
+                            },
+                            None,
+                            Some(heartbeat),
+                        )
+                        .await
+                })
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), parked.reached.notified())
+                .await
+                .unwrap();
+            assert!(weak.upgrade().is_some());
+            let mut leases = conversation_lease::load_leases_checked().unwrap();
+            let entry = leases
+                .iter_mut()
+                .find(|entry| entry.owner() == original_owner)
+                .unwrap();
+            if phase == "expired" {
+                entry.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+            } else if phase == "replaced" {
+                entry.acquisition_id = uuid::Uuid::new_v4().to_string();
+            }
+            let expected = entry.clone();
+            conversation_lease::save_leases(&leases).unwrap();
+            parked.release.notify_one();
+            let error = pending.await.unwrap().err().unwrap();
+            assert!(!error.provider_boundary_crossed);
+            assert!(!broker.has_agent_owner(&agent_id).await.unwrap());
+            if phase == "live" {
+                assert!(error.message.contains("owner-start sentinel"));
+                assert_eq!(
+                    broker
+                        .codex_creation_test
+                        .start_attempts
+                        .load(Ordering::Acquire),
+                    1
+                );
+                lease.release().unwrap();
+            } else {
+                assert!(error
+                    .message
+                    .contains("lifecycle conversation lease was lost"));
+                assert_eq!(
+                    broker
+                        .codex_creation_test
+                        .start_attempts
+                        .load(Ordering::Acquire),
+                    0
+                );
+                assert!(conversation_lease::load_leases_checked()
+                    .unwrap()
+                    .contains(&expected));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn app_shutdown_fences_startup_still_waiting_to_register() {
         let broker = Arc::new(NativeDeliveryBroker::new());
         let gate = broker.owner_gate("late").await.lock_owned().await;
@@ -1137,6 +1279,7 @@ mod tests {
                                 ..Default::default()
                             },
                         },
+                        None,
                         None,
                         std::future::pending(),
                         broker.codex_creations.register("late", 1).unwrap(),

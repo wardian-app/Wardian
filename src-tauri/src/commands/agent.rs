@@ -66,7 +66,7 @@ use removal::remove_agent;
 pub(crate) use spawn::bootstrap_prepared_agent_spawn;
 pub(crate) use spawn::{
     launch_prepared_agent_spawn, planned_provider_session_id, prepare_durable_agent_spawn,
-    prepare_recovery_launch, PreparedAgentSpawn, RecoveryBootstrap,
+    prepare_recovery_launch, PreparedAgentSpawn, RecoveryBootstrap, RecoveryRegistrationLease,
 };
 use spawn::{new_agent_identity_plan, prepare_agent_spawn};
 use worktree_enable::resolve_agent_worktree_source;
@@ -251,31 +251,61 @@ const LIFECYCLE_LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 /// Keeps a long lifecycle operation from outliving the persisted exclusion
 /// lease that protects it. If renewal fails, callers must stop before the next
 /// destructive or replacement step rather than continuing without ownership.
-struct LifecycleLeaseHeartbeat {
+type LifecycleLeaseRenewal =
+    fn(&wardian_core::conversation_lease::ConversationLeaseOwner) -> Result<bool, String>;
+
+pub(crate) struct LifecycleLeaseHeartbeat {
     owner: wardian_core::conversation_lease::ConversationLeaseOwner,
     active: Arc<AtomicBool>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
+    renew: LifecycleLeaseRenewal,
 }
 
 impl LifecycleLeaseHeartbeat {
+    pub(crate) fn owner(&self) -> &wardian_core::conversation_lease::ConversationLeaseOwner {
+        &self.owner
+    }
+
     fn start(owner: wardian_core::conversation_lease::ConversationLeaseOwner) -> Self {
+        Self::start_with(owner, |owner| {
+            renew_agent_lifecycle_transition_lease(owner, chrono::Utc::now())
+        })
+    }
+
+    pub(crate) fn start_codex_recovery(
+        owner: wardian_core::conversation_lease::ConversationLeaseOwner,
+    ) -> Self {
+        Self::start_with(owner, |owner| {
+            use wardian_core::conversation_lease::{
+                refresh_codex_recovery_lease_persisted, CodexRecoveryLeaseScope,
+            };
+            refresh_codex_recovery_lease_persisted(
+                owner,
+                LIFECYCLE_LEASE_DURATION,
+                CodexRecoveryLeaseScope::Current,
+            )
+        })
+    }
+
+    fn start_with(
+        owner: wardian_core::conversation_lease::ConversationLeaseOwner,
+        renew: LifecycleLeaseRenewal,
+    ) -> Self {
         let active = Arc::new(AtomicBool::new(true));
         let active_for_task = Arc::clone(&active);
         let owner_for_task = owner.clone();
         let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let first_heartbeat = tokio::time::Instant::now() + LIFECYCLE_LEASE_HEARTBEAT_INTERVAL;
         let task = tokio::spawn(async move {
-            let mut heartbeat = tokio::time::interval_at(
-                tokio::time::Instant::now() + LIFECYCLE_LEASE_HEARTBEAT_INTERVAL,
-                LIFECYCLE_LEASE_HEARTBEAT_INTERVAL,
-            );
+            let mut heartbeat =
+                tokio::time::interval_at(first_heartbeat, LIFECYCLE_LEASE_HEARTBEAT_INTERVAL);
 
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     _ = heartbeat.tick() => {
-                        let now = chrono::Utc::now();
-                        match renew_agent_lifecycle_transition_lease(&owner_for_task, now) {
+                        match renew(&owner_for_task) {
                             Ok(true) => {}
                             Ok(false) => {
                                 active_for_task.store(false, Ordering::Release);
@@ -304,10 +334,33 @@ impl LifecycleLeaseHeartbeat {
             active,
             shutdown: Some(shutdown),
             task,
+            renew,
         }
     }
 
     fn ensure_active(&self, operation: &str) -> Result<(), String> {
+        self.ensure_active_with(operation, || (self.renew)(&self.owner))
+    }
+
+    pub(crate) fn ensure_codex_recovery_scope(
+        &self,
+        operation: &str,
+        scope: wardian_core::conversation_lease::CodexRecoveryLeaseScope<'_>,
+    ) -> Result<(), String> {
+        self.ensure_active_with(operation, || {
+            wardian_core::conversation_lease::refresh_codex_recovery_lease_persisted(
+                &self.owner,
+                LIFECYCLE_LEASE_DURATION,
+                scope,
+            )
+        })
+    }
+
+    fn ensure_active_with(
+        &self,
+        operation: &str,
+        renew: impl FnOnce() -> Result<bool, String>,
+    ) -> Result<(), String> {
         if !self.active.load(Ordering::Acquire) {
             return Err(format!(
                 "cannot {operation} agent because its lifecycle conversation lease was lost"
@@ -317,7 +370,7 @@ impl LifecycleLeaseHeartbeat {
         // A periodic heartbeat is not enough at a destructive boundary: renew
         // synchronously so this exact acquisition remains fenced for the next
         // lifecycle mutation even if a background renewal failed moments ago.
-        match renew_agent_lifecycle_transition_lease(&self.owner, chrono::Utc::now()) {
+        match renew() {
             Ok(true) => Ok(()),
             Ok(false) | Err(_) => {
                 self.active.store(false, Ordering::Release);

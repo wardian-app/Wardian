@@ -387,11 +387,35 @@ impl std::fmt::Debug for CodexSharedOwner {
     }
 }
 
+pub(crate) fn spawn_codex_owner_at_lease_boundary<T>(
+    spec: &NativeSessionSpec,
+    heartbeat: Option<&crate::commands::agent::LifecycleLeaseHeartbeat>,
+    spawn: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if let Some(heartbeat) = heartbeat {
+        let native_id = spec
+            .config
+            .resume_session
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or("Codex recovery has no retargeted native identity")?;
+        heartbeat.ensure_codex_recovery_scope(
+            "start Codex recovery owner",
+            wardian_core::conversation_lease::CodexRecoveryLeaseScope::Exact {
+                agent_id: &spec.target_agent_id,
+                native_id,
+            },
+        )?;
+    }
+    spawn()
+}
+
 impl CodexSharedOwner {
     /// Caller holds the agent lifecycle/ownership gate. No process is started by push.
     pub(crate) async fn start(
         spec: &NativeSessionSpec,
         codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+        recovery_heartbeat: Option<&crate::commands::agent::LifecycleLeaseHeartbeat>,
         cancelled: impl std::future::Future<Output = ()>,
     ) -> Result<Arc<Self>, CodexSharedError> {
         if spec.provider != "codex" || spec.target_agent_id != spec.config.session_id {
@@ -520,11 +544,16 @@ impl CodexSharedOwner {
         let backfill_home =
             startup_backfill::cold_home(&wardian_home, &spec.target_agent_id, &codex_home);
         let child_spawn_at = std::time::Instant::now();
-        #[cfg(windows)]
-        let spawned =
-            crate::utils::process::OwnedBootstrapChild::spawn_contained_runtime(&mut command);
-        #[cfg(not(windows))]
-        let spawned = command.spawn().map_err(|error| error.to_string());
+        let spawned = spawn_codex_owner_at_lease_boundary(spec, recovery_heartbeat, || {
+            #[cfg(windows)]
+            {
+                crate::utils::process::OwnedBootstrapChild::spawn_contained_runtime(&mut command)
+            }
+            #[cfg(not(windows))]
+            {
+                command.spawn().map_err(|error| error.to_string())
+            }
+        });
         let spawned = match spawned {
             Ok(child) => child,
             Err(error) => {

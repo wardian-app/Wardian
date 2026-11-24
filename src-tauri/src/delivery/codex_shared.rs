@@ -35,6 +35,8 @@ mod task_receipts;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod version;
+#[cfg(test)]
+pub(crate) use owner::spawn_codex_owner_at_lease_boundary;
 pub use owner::{CodexSharedOwner, CodexThreadExit, CodexTuiAttachment};
 
 // Erase only the split writer, preserving each transport's handshake buffers.

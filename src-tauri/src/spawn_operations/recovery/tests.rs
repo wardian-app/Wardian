@@ -242,6 +242,7 @@ async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acqu
     };
     let (request, initial_config) = create_witness("guarded-materialization");
     let (crash_request, _) = create_witness("guarded-crash");
+    let (expired_request, expired_config) = create_witness("guarded-expired");
     agent_spawn::recover_after_owner_acquired().unwrap();
     let state = AppState::new();
     state.agent_roster_restored.store(true, Ordering::Release);
@@ -369,7 +370,7 @@ async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acqu
             .await
             .expect("registration must be able to reacquire local exclusion");
             drop(reentered);
-            assert_eq!(inherited.owner(), lease_owner);
+            assert_eq!(inherited.lease.owner(), lease_owner);
             let native_id = prepared.config.resume_session.as_deref().unwrap();
             assert_eq!(
                 prepared.config.fresh_provider_session_id.as_deref(),
@@ -388,11 +389,15 @@ async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acqu
                     .as_deref(),
                 Some(native_id)
             );
-            let mut registration_lease = crate::manager::spawn::provider_spawn_lease_for_startup(
-                &prepared.config,
-                Some(inherited),
-            )
-            .unwrap();
+            let (mut registration_lease, ()) =
+                crate::manager::spawn::prepare_codex_owner_after_reservation(
+                    &prepared.config,
+                    Some(inherited.lease),
+                    Some(&inherited.heartbeat),
+                    || async { Ok(()) },
+                )
+                .await
+                .unwrap();
             assert_eq!(registration_lease.owner(), lease_owner);
             assert!(wardian_core::conversation_lease::load_leases_checked()
                 .unwrap()
@@ -452,6 +457,52 @@ async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acqu
     assert_eq!(
         agent_spawn::plan(&keys.0).unwrap().unwrap().request,
         exact_identity.plan.request
+    );
+
+    let (expired, prepared, bootstrap) =
+        admit_launch(&state, expired_request.clone()).await.unwrap();
+    let mut leases = wardian_core::conversation_lease::load_leases_checked().unwrap();
+    leases
+        .iter_mut()
+        .find(|entry| entry.owner() == *bootstrap.lease.owner())
+        .unwrap()
+        .expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+    wardian_core::conversation_lease::save_leases(&leases).unwrap();
+    finish_prepared_operation(
+        &state,
+        WorkerOutcomeGuard {
+            operation_id: expired.operation_id.clone(),
+            attempt_id: expired.accepted_attempt_id.clone(),
+            terminal: false,
+        },
+        prepared,
+        Some(bootstrap),
+        |mut prepared, recovery, keys| async move {
+            bootstrap_prepared_agent_spawn(&mut prepared, Some(&keys), recovery).await?;
+            panic!("an expired acquisition cannot create a recovery rollout");
+        },
+    )
+    .await;
+    assert!(!home
+        .path()
+        .join("agents")
+        .join(expired_config.session_id)
+        .exists());
+    assert_eq!(
+        agent_spawn::get(&expired.operation_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        AgentSpawnState::OutcomeUnknown
+    );
+    assert!(agent_spawn::queued_operation_ids().unwrap().is_empty());
+    assert_eq!(
+        admit_launch(&state, expired_request)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "spawn_recovery_witness_used"
     );
 
     let (crash, _, mut lease) = admit_launch(&state, crash_request.clone()).await.unwrap();

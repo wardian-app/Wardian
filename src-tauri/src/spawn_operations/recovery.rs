@@ -153,7 +153,7 @@ pub(super) async fn admit_launch(
         Ok(_) => return Err(agent_occupied()),
         Err(_) => return Err(evidence_unavailable()),
     }
-    tokio::task::spawn_blocking(move || {
+    let (reply, prepared, lease, roster, lifecycle) = tokio::task::spawn_blocking(move || {
         let operation = &plan.plan.operation;
         let agent_id = &operation.agent_id;
         if roster
@@ -210,18 +210,23 @@ pub(super) async fn admit_launch(
                 )
             })?;
         let reply = recovery::claim_recovery_launch(&request, &plan, &lease)?;
-        Ok((
-            reply,
-            prepared,
-            RecoveryBootstrap {
-                lease,
-                roster,
-                lifecycle,
-            },
-        ))
+        Ok((reply, prepared, lease, roster, lifecycle))
     })
     .await
-    .map_err(|_| evidence_unavailable())?
+    .map_err(|_| evidence_unavailable())??;
+    let heartbeat = std::sync::Arc::new(agent::LifecycleLeaseHeartbeat::start_codex_recovery(
+        lease.owner().clone(),
+    ));
+    Ok((
+        reply,
+        prepared,
+        RecoveryBootstrap {
+            lease,
+            roster,
+            lifecycle,
+            heartbeat,
+        },
+    ))
 }
 
 fn agent_occupied() -> Blocker {

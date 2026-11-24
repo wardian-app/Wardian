@@ -593,6 +593,7 @@ async fn native_session_reset_first_task_excludes_old_context_and_closes_pending
                 },
             },
             None,
+            None,
         )
         .await
         .unwrap();
