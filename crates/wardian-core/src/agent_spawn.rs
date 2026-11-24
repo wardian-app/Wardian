@@ -162,6 +162,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     ensure_spawn_column(conn, "first_native_generation", "INTEGER")?;
     ensure_spawn_column(conn, "first_native_allowed_generation", "INTEGER")?;
     ensure_spawn_column(conn, "first_native_published", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_spawn_column(conn, "codex_pre_effect_fence_version", "INTEGER")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_spawn_queue
          ON agent_spawn_operations(state, created_at, operation_id)",
@@ -342,6 +343,7 @@ pub fn recover_after_owner_acquired() -> Result<Vec<String>, String> {
         // unconsumed old-owner permission before restore can allocate one again.
         tx.execute("UPDATE agent_spawn_operations SET first_native_allowed_generation = NULL
             WHERE first_native_session_id IS NULL", [])?;
+        recovery::record_pre_effect_witnesses(&tx, &now)?;
         tx.execute(
             "UPDATE agent_spawn_operations
              SET state = 'outcome_unknown', updated_at = ?1,
@@ -431,8 +433,14 @@ pub fn record_launch_context(
 ) -> Result<bool, String> {
     crate::db::get_db_conn(|conn| {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        // Codex has only captured launch inputs here. The worker must still
+        // win mark_launching before materializing a thread or starting Codex.
         let changed = conn.execute(
-            "UPDATE agent_spawn_operations SET launch_context_json = ?3, updated_at = ?4
+            "UPDATE agent_spawn_operations SET launch_context_json = ?3, updated_at = ?4,
+                 codex_pre_effect_fence_version = CASE
+                     WHEN provider = 'codex' AND length(prepared_workspace) > 0
+                         AND provider_session_id IS NULL THEN 1
+                 END
              WHERE operation_id = ?1 AND attempt_id = ?2 AND state = 'preparing'",
             params![operation_id, attempt_id, descriptor_json, now],
         )?;

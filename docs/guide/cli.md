@@ -609,6 +609,11 @@ registration from its saved row. An exact retry of a completed finalization
 returns its audit receipt, including the confirmed model, even after a restart.
 The command preserves the original request and attempt evidence.
 
+`launch-if-absent` remains blocked. For a fully prepared Codex attempt
+interrupted before launch authorization, startup can preserve evidence of
+that boundary. `spawn_recovery_launch_boundary_unavailable` reports that
+evidence while leaving the original operation quarantined.
+
 `--action launch-if-absent` returns a typed blocker for these legacy uncertain
 attempts because their records cannot establish that the provider never took
 effect. Recovery uses the matching CLI and desktop control endpoint.

@@ -129,6 +129,14 @@ check the ledger. Queued, preparing, launching, and unknown planned Wardian
 IDs are excluded. A registered ledger row does not create a roster entry if the
 saved roster is absent or incompatible.
 
+The worker marks a fully prepared Codex attempt when it persists its launch
+descriptor. Exclusive startup can seal an exact preparation witness while
+that attempt is still `preparing`. Startup writes the witness and quarantines
+the operation in the same transaction. The witness establishes the old
+attempt's pre-effect boundary. Launch still requires separate vacancy and
+ownership evidence spanning bootstrap and registration. Startup never queues
+work from a witness.
+
 ## Codex launch authority
 
 The worker selects current Codex policy and provider source during `preparing`,

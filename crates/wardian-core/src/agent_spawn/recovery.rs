@@ -1,4 +1,4 @@
-//! Explicit, metadata-only recovery of an exactly registered Codex spawn.
+//! Explicit Codex spawn recovery and evidence from the pre-effect fence.
 
 use super::{canonical_uuid, load_plan_with_conn, AgentSpawnPlan, AgentSpawnState};
 use crate::models::AgentConfig;
@@ -73,8 +73,69 @@ pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             provider_generation INTEGER NOT NULL,
             terminal_generation INTEGER NOT NULL,
             finalized_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS agent_spawn_codex_pre_effect_witnesses (
+            operation_id TEXT PRIMARY KEY,
+            original_attempt_id TEXT NOT NULL,
+            planned_agent_id TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            session_name TEXT NOT NULL,
+            class TEXT NOT NULL,
+            prepared_workspace TEXT NOT NULL,
+            launch_context_json TEXT NOT NULL,
+            preparing_updated_at TEXT NOT NULL,
+            witnessed_at TEXT NOT NULL
         )",
     )
+}
+
+/// Seal the exact preparation snapshot while the exclusive owner still sees
+/// the old attempt before its launch fence. Quarantine uses the same transaction.
+pub(super) fn record_pre_effect_witnesses(conn: &Connection, now: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO agent_spawn_codex_pre_effect_witnesses (
+            operation_id, original_attempt_id, planned_agent_id, payload_hash, session_name,
+            class, prepared_workspace, launch_context_json, preparing_updated_at, witnessed_at
+         ) SELECT o.operation_id, o.attempt_id, o.planned_agent_id, o.payload_hash, o.session_name,
+                  o.class, o.prepared_workspace, o.launch_context_json, o.updated_at, ?1
+           FROM agent_spawn_operations o JOIN agent_name_claims c ON c.session_name = o.session_name
+           WHERE o.state = 'preparing' AND o.provider = 'codex'
+             AND o.codex_pre_effect_fence_version = 1 AND o.attempt_id IS NOT NULL
+             AND length(o.prepared_workspace) > 0 AND length(o.launch_context_json) > 0
+             AND o.provider_session_id IS NULL AND o.bootstrap_receipt_json IS NULL
+             AND o.first_native_session_id IS NULL
+             AND c.owner_kind = 'operation' AND c.owner_id = o.operation_id
+           ON CONFLICT(operation_id) DO NOTHING",
+        [now],
+    )?;
+    Ok(())
+}
+
+fn unavailable_launch(conn: &Connection, operation_id: &str) -> Result<Blocker, Blocker> {
+    let witnessed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_spawn_codex_pre_effect_witnesses w
+         JOIN agent_spawn_operations o ON o.operation_id = w.operation_id
+         WHERE o.operation_id = ?1 AND o.attempt_id = w.original_attempt_id
+           AND o.updated_at = w.witnessed_at AND o.error_code = 'interrupted_after_claim'
+           AND o.codex_pre_effect_fence_version = 1 AND o.planned_agent_id = w.planned_agent_id
+           AND o.payload_hash = w.payload_hash AND o.session_name = w.session_name
+           AND o.class = w.class AND o.prepared_workspace = w.prepared_workspace
+           AND o.launch_context_json = w.launch_context_json AND o.provider_session_id IS NULL
+           AND o.bootstrap_receipt_json IS NULL AND o.first_native_session_id IS NULL)",
+        [operation_id],
+        |row| row.get(0),
+    )?;
+    Ok(if witnessed {
+        Blocker::new(
+            "spawn_recovery_launch_boundary_unavailable",
+            "The original attempt stopped before launch authorization. Recovery has no reservation covering both bootstrap and native registration.",
+        )
+    } else {
+        Blocker::new(
+            "spawn_recovery_launch_absence_unverified",
+            "The original attempt has no authoritative pre-effect proof. An unrecorded Codex provider effect cannot be excluded.",
+        )
+    })
 }
 
 /// Only the application owner can supply current broker and roster evidence.
@@ -221,6 +282,9 @@ fn read_plan(conn: &Connection, request: &Request) -> Result<AgentSpawnPlan, Blo
             "The operation no longer owns the exact agent name claim.",
         ));
     }
+    if request.action == Action::LaunchIfAbsent {
+        return Err(unavailable_launch(conn, &request.operation_id)?);
+    }
     let summary = crate::db::get_agent_by_session_id_with_conn(conn, &plan.operation.agent_id)?;
     if plan.prepared_workspace.as_deref().is_none_or(str::is_empty)
         || !summary.is_some_and(|row| {
@@ -235,9 +299,6 @@ fn read_plan(conn: &Connection, request: &Request) -> Result<AgentSpawnPlan, Blo
             "spawn_recovery_summary_unverified",
             "The prepared workspace and enabled SQLite agent identity do not agree.",
         ));
-    }
-    if request.action == Action::LaunchIfAbsent {
-        return Err(Blocker::new("spawn_recovery_launch_absence_unverified", "The original attempt has no authoritative pre-effect proof. An unrecorded Codex provider effect cannot be excluded."));
     }
     if plan.request.model.as_deref() != Some(&request.expected_model) {
         return Err(Blocker::new(

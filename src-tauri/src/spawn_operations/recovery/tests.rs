@@ -8,6 +8,173 @@ use wardian_core::native_transport::{NativeSessionBinding, NativeTransportCapabi
 const ORIGINAL_MODEL: &str = "fixture-original-model";
 const CORRECTED_MODEL: &str = "fixture-corrected-model";
 
+fn preparing_operation(home: &TestWardianHome, name: &str, arm_fence: bool) -> (Request, String) {
+    let agent_id = agent_spawn::new_operation_id();
+    let operation_id = agent_spawn::new_operation_id();
+    let workspace = home.path().to_string_lossy().replace('\\', "/");
+    agent_spawn::admit(
+        &operation_id,
+        &AgentSpawnRequest {
+            provider: "codex".into(),
+            class: "fixture-class".into(),
+            name: Some(name.into()),
+            workspace: Some(workspace.clone()),
+            model: Some(ORIGINAL_MODEL.into()),
+            reasoning_effort: None,
+        },
+        &agent_id,
+        None,
+    )
+    .unwrap();
+    let attempt = agent_spawn::claim_queued(&operation_id)
+        .unwrap()
+        .unwrap()
+        .attempt_id
+        .unwrap();
+    assert!(agent_spawn::set_prepared_identity(
+        &operation_id,
+        &attempt,
+        "fixture-class",
+        &workspace
+    )
+    .unwrap());
+    if arm_fence {
+        assert!(agent_spawn::record_launch_context(
+            &operation_id,
+            &attempt,
+            r#"{"source":"fixture"}"#
+        )
+        .unwrap());
+    }
+    (
+        Request {
+            operation_id,
+            expected_attempt_id: attempt,
+            expected_model: CORRECTED_MODEL.into(),
+            action: Action::LaunchIfAbsent,
+        },
+        agent_id,
+    )
+}
+
+#[tokio::test]
+async fn spawn_recovery_seals_only_a_proved_startup_pre_effect_cut() {
+    let home = TestWardianHome::new_async().await;
+    let (pre_effect, agent_id) = preparing_operation(&home, "before-fence", true);
+    let (post_effect, _) = preparing_operation(&home, "after-fence", true);
+    let (unwitnessed, _) = preparing_operation(&home, "legacy-preparing", false);
+    let (unknown, _) = preparing_operation(&home, "already-unknown", true);
+    let (changed_owner, _) = preparing_operation(&home, "changed-owner", true);
+    assert!(agent_spawn::mark_launching(
+        &post_effect.operation_id,
+        &post_effect.expected_attempt_id
+    )
+    .unwrap());
+    assert!(
+        agent_spawn::mark_outcome_unknown(&unknown.operation_id, &unknown.expected_attempt_id)
+            .unwrap()
+    );
+    let start_plan = agent_spawn::plan(&pre_effect.operation_id)
+        .unwrap()
+        .unwrap();
+    let proof = || {
+        db::get_db_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM agent_spawn_codex_pre_effect_witnesses",
+                [],
+                |row| row.get::<_, u32>(0),
+            )?)
+        })
+        .unwrap()
+    };
+    db::get_db_conn(|conn| {
+        conn.execute(
+            "UPDATE agent_spawn_operations SET launch_context_json = ?2 WHERE operation_id = ?1",
+            rusqlite::params![unwitnessed.operation_id, r#"{"source":"legacy-fixture"}"#],
+        )?;
+        conn.execute(
+            "UPDATE agent_name_claims SET owner_id = 'foreign' WHERE owner_id = ?1",
+            [&changed_owner.operation_id],
+        )?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_quarantine BEFORE UPDATE OF state ON agent_spawn_operations
+             WHEN NEW.state = 'outcome_unknown' BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(agent_spawn::recover_after_owner_acquired().is_err());
+    assert_eq!(proof(), 0);
+    assert_eq!(
+        agent_spawn::plan(&pre_effect.operation_id).unwrap(),
+        Some(start_plan.clone())
+    );
+    db::get_db_conn(|conn| Ok(conn.execute_batch("DROP TRIGGER fail_quarantine")?)).unwrap();
+
+    assert!(agent_spawn::recover_after_owner_acquired()
+        .unwrap()
+        .is_empty());
+    assert!(agent_spawn::recover_after_owner_acquired()
+        .unwrap()
+        .is_empty());
+    assert_eq!(proof(), 1);
+    let state = AppState::new();
+    let (one, two) = tokio::join!(
+        recover(&state, pre_effect.clone()),
+        recover(&state, pre_effect.clone()),
+    );
+    assert_eq!(one, two);
+    assert_eq!(
+        one.unwrap_err().code,
+        "spawn_recovery_launch_boundary_unavailable"
+    );
+    for (request, code) in [
+        (&post_effect, "spawn_recovery_launch_absence_unverified"),
+        (&unwitnessed, "spawn_recovery_launch_absence_unverified"),
+        (&unknown, "spawn_recovery_launch_absence_unverified"),
+        (&changed_owner, "spawn_recovery_claim_changed"),
+    ] {
+        for model in [CORRECTED_MODEL, CORRECTED_MODEL, "fixture-other-model"] {
+            let mut request = request.clone();
+            request.expected_model = model.into();
+            assert_eq!(recover(&state, request).await.unwrap_err().code, code);
+        }
+    }
+    let retained = agent_spawn::plan(&pre_effect.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.operation.state, AgentSpawnState::OutcomeUnknown);
+    assert_eq!(retained.operation.agent_id, agent_id);
+    assert_eq!(retained.attempt_id, start_plan.attempt_id);
+    assert_eq!(retained.request, start_plan.request);
+    assert!(agent_spawn::restore_is_excluded(&agent_id).unwrap());
+    assert!(!agent_spawn::mark_launching(
+        &pre_effect.operation_id,
+        &pre_effect.expected_attempt_id
+    )
+    .unwrap());
+    assert!(agent_spawn::claim_queued(&pre_effect.operation_id)
+        .unwrap()
+        .is_none());
+    assert!(state.agents.lock().await.is_empty());
+
+    // A matching old attempt ID alone cannot reuse the witness after its
+    // captured preparation changes.
+    db::get_db_conn(|conn| {
+        conn.execute(
+            "UPDATE agent_spawn_operations SET launch_context_json = ?2 WHERE operation_id = ?1",
+            rusqlite::params![pre_effect.operation_id, r#"{"source":"changed"}"#],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        recover(&state, pre_effect).await.unwrap_err().code,
+        "spawn_recovery_launch_absence_unverified"
+    );
+    assert_eq!(proof(), 1);
+}
+
 struct Fixture {
     request: Request,
     config: AgentConfig,
