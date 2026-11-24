@@ -156,6 +156,17 @@ pub enum PendingReplacementStatus {
 
 pub struct AgentRosterBarrier(File);
 
+impl AgentRosterBarrier {
+    /// Checks for an unresolved replacement while roster changes are excluded.
+    pub fn has_pending_replacement_for(&self, session_id: &str) -> io::Result<bool> {
+        match fs::symlink_metadata(journal_path(session_id)?) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 impl Drop for AgentRosterBarrier {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.0);
@@ -406,7 +417,6 @@ fn journal_dir() -> io::Result<PathBuf> {
 
 fn journal_path(session_id: &str) -> io::Result<PathBuf> {
     let directory = journal_dir()?;
-    fs::create_dir_all(&directory)?;
     let digest = Sha256::digest(session_id.as_bytes());
     Ok(directory.join(format!("{:x}.json", digest)))
 }

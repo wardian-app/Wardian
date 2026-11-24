@@ -60,6 +60,19 @@ impl ConversationLease {
             acquisition_id: self.acquisition_id.clone(),
         }
     }
+
+    /// Matches immutable lifecycle ownership. Heartbeats may change the expiry.
+    pub fn same_lifecycle_transition_acquisition(&self, expected: &Self) -> bool {
+        self.mode == "lifecycle_transition"
+            && self.owner_kind == expected.owner_kind
+            && self.owner_id == expected.owner_id
+            && self.acquisition_id == expected.acquisition_id
+            && self.started_at == expected.started_at
+            && self.agent_id == expected.agent_id
+            && self.provider == expected.provider
+            && self.resume_session == expected.resume_session
+            && self.owner_node_id == expected.owner_node_id
+    }
 }
 
 /// Releases a persisted lease when its owning operation ends or is cancelled.
@@ -400,6 +413,36 @@ pub fn try_acquire_lease(
     lease: ConversationLease,
     now_rfc3339: &str,
 ) -> Result<ConversationLeaseAcquireOutcome, String> {
+    try_acquire_lease_inner(lease, now_rfc3339, None)
+}
+
+/// Rejects a retargeted or replaced transition even if it expired between the
+/// last wait poll and this locked acquisition. Active conflicts still apply.
+pub fn try_acquire_lease_after_lifecycle_transition(
+    lease: ConversationLease,
+    now_rfc3339: &str,
+    expected: &ConversationLease,
+) -> Result<ConversationLeaseAcquireOutcome, String> {
+    try_acquire_lease_inner(lease, now_rfc3339, Some(expected))
+}
+
+/// Finds evidence that the observed transition changed ownership or intent.
+pub fn find_changed_lifecycle_acquisition<'a>(
+    leases: &'a [ConversationLease],
+    expected: &ConversationLease,
+) -> Option<&'a ConversationLease> {
+    leases.iter().find(|lease| {
+        lease.owner_kind == expected.owner_kind
+            && lease.owner_id == expected.owner_id
+            && !lease.same_lifecycle_transition_acquisition(expected)
+    })
+}
+
+fn try_acquire_lease_inner(
+    lease: ConversationLease,
+    now_rfc3339: &str,
+    expected_transition: Option<&ConversationLease>,
+) -> Result<ConversationLeaseAcquireOutcome, String> {
     if lease.acquisition_id.trim().is_empty() {
         return Err("conversation lease acquisition id is required".to_string());
     }
@@ -409,8 +452,11 @@ pub fn try_acquire_lease(
         .map_err(|_| "conversation lease lock poisoned".to_string())?;
     let _file_guard = acquire_lease_file_lock()?;
     let mut leases = load_leases_checked()?;
-    if let Some(conflict) =
-        find_active_conflict(&leases, &lease.agent_id, &lease.resume_session, now_rfc3339)
+    if let Some(conflict) = expected_transition
+        .and_then(|expected| find_changed_lifecycle_acquisition(&leases, expected))
+        .or_else(|| {
+            find_active_conflict(&leases, &lease.agent_id, &lease.resume_session, now_rfc3339)
+        })
     {
         return Ok(ConversationLeaseAcquireOutcome::Conflict(Box::new(
             conflict.clone(),

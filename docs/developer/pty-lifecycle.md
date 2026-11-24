@@ -164,6 +164,13 @@ At startup, Wardian restores an agent as headless only while an unexpired backgr
 
 The transition lease remains active through provider startup and publication. Before stopping an owned runtime for clear or fresh resume, Wardian persists an exact-owner hold on its previous provider session. This hold conflicts by old session only, does not set `Headless`, and survives retarget and restart. An unconfirmed stop cannot free that identity; a restart cannot silently expire the hold. Resume and clear transfer their exact lifecycle lease to the spawn watcher. Under the cross-process file lock, spawn retargets that acquisition to the selected provider session, including `fresh_provider_session_id` when `resume_session` is empty, and rejects another active owner of that session; the candidate scan still runs at the spawn boundary. Reusing a held old session is withheld. The mock provider's identity-confirmed `Init` is its bootstrap evidence because it has no later prompt signal. For every provider, release waits until the exact runtime generation and status incarnation are published. Other providers release on `Idle`, `Error`, or `Off` after that publication. A rejected or uncertain initialization event cannot signal bootstrap. A terminal status before publication retains exclusion because provider liveness is uncertain. New-agent registration also waits for roster commit and any provisional Codex attachment; failure or cancellation stops renewal and retains its startup lease until finite expiry. If resume or clear aborts after spawn but before publication, the attempted process stop does not prove exit. The watcher stops renewal but leaves the exact lease persisted until its finite expiry. An explicit failure publishes `Error`; cancellation can leave the existing placeholder until recovery. Retry must wait for expiry and any provider candidate must be inspected. Release uses the exact acquisition identity so a late event cannot remove a replacement lease.
 
+Ordinary app startup can retry once after a clear transition that matches the
+enabled saved agent, provider, and concrete provider conversation. The retry
+waits for release or expiry of the exact acquisition, including any renewals.
+A changed acquisition, changed saved intent, or pending replacement fences the
+retry. Restore still requires the ordinary provider startup lease and candidate
+scan. It uses the saved conversation selected by replacement recovery.
+
 For a legacy hold without retained exit evidence, use the supported operator
 command with a running desktop that implements it. This preserves the configured
 provider conversation and its archive; it does not finish a pending close.

@@ -79,14 +79,11 @@ fn schedule_startup_conflict_restore_retry(
     retry: StartupConflictRestoreRetry,
     restore_slots: std::sync::Arc<tokio::sync::Semaphore>,
 ) {
-    let StartupConflictRestoreRetry {
-        expected_lease,
-        kind: retry_kind,
-    } = retry;
     tauri::async_runtime::spawn(async move {
         let state = app_handle.state::<AppState>();
         let wait_config = config.clone();
-        let wait_lease = expected_lease.clone();
+        let wait_lease = retry.expected_lease.clone();
+        let retry_kind = retry.kind;
         let retry_slots = restore_slots.clone();
         let retry_app_handle = app_handle.clone();
         let retry_saved_configs = expected_saved_configs.clone();
@@ -109,7 +106,7 @@ fn schedule_startup_conflict_restore_retry(
                             retry_saved_configs,
                             retry_config,
                             retry_timestamp,
-                            retry_kind,
+                            retry,
                             publication,
                         )
                         .await;
@@ -132,7 +129,7 @@ fn schedule_startup_conflict_restore_retry(
                             retry_saved_configs,
                             retry_config,
                             retry_timestamp,
-                            retry_kind,
+                            retry,
                             publication,
                         )
                         .await;
@@ -186,16 +183,19 @@ async fn retry_startup_conflict_restore(
     expected_saved_configs: Vec<AgentConfig>,
     config: AgentConfig,
     initial_timestamp: Option<String>,
-    retry_kind: startup_restore::StartupRestoreRetryKind,
+    retry: StartupConflictRestoreRetry,
     publication: startup_restore::RestorePublication,
 ) {
     let mut publication_disposition = manager::SpawnPublicationDisposition::new();
     let saved_configs_for_check = expected_saved_configs.clone();
     let launch_config_for_check = config.clone();
+    let retry_kind = retry.kind;
+    let follows_clear = startup_restore::is_clear_restore_owner(&retry.expected_lease);
     let spawn_lease = match tokio::task::spawn_blocking(move || {
         manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
             &saved_configs_for_check,
             &launch_config_for_check,
+            follows_clear.then_some(&retry.expected_lease),
         )
     })
     .await
@@ -203,7 +203,7 @@ async fn retry_startup_conflict_restore(
         Ok(Ok(Some(lease))) => Ok(lease),
         Ok(Ok(None)) => {
             manager::log_debug(&format!(
-                "[Wardian] Automatic restore retry cancelled because the saved configuration changed or was removed for {}",
+                "[Wardian] Automatic restore retry cancelled because the saved intent could not be confirmed for {}",
                 config.session_id
             ));
             drop(publication);
@@ -217,11 +217,12 @@ async fn retry_startup_conflict_restore(
     let lease = match spawn_lease {
         Ok(lease) => Ok(lease),
         Err(error) => {
-            if retry_kind == startup_restore::StartupRestoreRetryKind::HeadlessExecutionLease
+            if (follows_clear
+                || retry_kind == startup_restore::StartupRestoreRetryKind::HeadlessExecutionLease)
                 && error.conflict_lease().is_some()
             {
                 manager::log_debug(&format!(
-                    "[Wardian] Headless restore retry stopped because a new conversation owner appeared for {}",
+                    "[Wardian] Automatic restore retry stopped because conversation ownership changed for {}",
                     config.session_id
                 ));
                 publication_disposition.fail();
@@ -949,6 +950,14 @@ pub fn run() {
                                                 )
                                             });
                                             let lifecycle_retry = conflict.as_ref().and_then(|lease| {
+                                                if startup_restore::is_clear_restore_owner(lease)
+                                                    && !startup_restore::matching_clear_restore_lease(
+                                                        &expected_saved_config,
+                                                        lease,
+                                                    )
+                                                {
+                                                    return None;
+                                                }
                                                 startup_restore::retryable_lifecycle_restore_lease(
                                                     &config,
                                                     lease,
