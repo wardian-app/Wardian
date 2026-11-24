@@ -1037,13 +1037,33 @@ mod tests {
             let agent = agents.get_mut(SESSION_ID).unwrap();
             agent.runtime_generation = Some(runtime_generation);
             agent.config.lock().unwrap().provider = "claude".to_string();
-            *agent.current_status.lock().unwrap() = "Action Needed".to_string();
+            *agent.current_status.lock().unwrap() = "Starting".to_string();
             agent.current_status.clone()
         };
-        let startup_action_intent_revision = {
-            let _status = current_status.lock().unwrap();
-            state.reserve_status_intent(SESSION_ID, &current_status, "Action Needed")
-        };
+        let startup_action_intent_revision = crate::manager::set_agent_status_and_get_intent(
+            &app.handle().clone(),
+            SESSION_ID,
+            &current_status,
+            "Action Needed",
+        )
+        .expect("the production status helper should admit the Claude trust action");
+        assert_eq!(
+            state.status_intent_revision(SESSION_ID, &current_status),
+            startup_action_intent_revision,
+            "the trust handoff token must match the committed Action Needed revision"
+        );
+        assert!(crate::manager::set_agent_status_and_get_intent(
+            &app.handle().clone(),
+            SESSION_ID,
+            &current_status,
+            "Action Needed",
+        )
+        .is_none());
+        assert_eq!(
+            state.status_intent_revision(SESSION_ID, &current_status),
+            startup_action_intent_revision,
+            "a repeated trust status cannot replace the original handoff token"
+        );
         let observation = ProviderStartupObservation {
             input_generation,
             runtime_generation,

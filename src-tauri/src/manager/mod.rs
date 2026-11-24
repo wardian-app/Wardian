@@ -307,25 +307,61 @@ pub(crate) fn set_agent_status(
     );
 }
 
-/// Applies a status transition and returns the exact admitted intent revision.
-/// Startup handoffs retain this token so a later intent with the same text
-/// cannot be mistaken for the transition that assigned the startup action.
-pub(crate) fn set_agent_status_and_get_intent(
-    app: &AppHandle,
+/// Applies the Claude trust action status and returns its committed revision.
+/// The readiness handoff retains this token so a later intent with the same
+/// text cannot be mistaken for the transition that assigned the startup action.
+pub(crate) fn set_agent_status_and_get_intent<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     session_id: &str,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
     next_status: &str,
 ) -> Option<u64> {
+    if next_status != "Action Needed" {
+        return None;
+    }
     let Ok(expected_status) = current_status.lock().map(|status| status.clone()) else {
         return None;
     };
-    set_agent_status_if_current_with_intent(
-        app,
+    if expected_status.eq_ignore_ascii_case(next_status) {
+        return None;
+    }
+    let admission =
+        codex_onboarding::status_admission(app, session_id, current_status, next_status);
+    if admission != codex_onboarding::CodexStatusAdmission::Allowed {
+        return None;
+    }
+    let state = app.state::<AppState>();
+    let Some(intent_revision) = reserve_agent_status_intent(
+        state.inner(),
+        admission,
         session_id,
         current_status,
         &expected_status,
         next_status,
-    )
+    ) else {
+        return None;
+    };
+    let Some((status_sequence, status_revision)) = apply_admitted_status_transition(
+        state.inner(),
+        session_id,
+        current_status,
+        &expected_status,
+        intent_revision,
+        next_status,
+    ) else {
+        return None;
+    };
+    schedule_agent_status_observation_inner(
+        app,
+        session_id,
+        current_status,
+        next_status.to_string(),
+        status_sequence,
+        status_revision,
+        None,
+        None,
+    );
+    Some(status_revision)
 }
 
 /// Applies a status transition only while the caller's expected state remains

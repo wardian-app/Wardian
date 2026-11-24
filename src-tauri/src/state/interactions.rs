@@ -1508,12 +1508,14 @@ mod tests {
             .prepare_provider_ready_after_startup_action("agent-1", startup.generation)
             .await
             .is_none());
-        assert!(!state
-            .prepare_provider_ready_after_startup_action("agent-1", next.generation)
-            .await
-            .expect("current Busy input generation")
-            .commit()
-            .is_err());
+        assert_eq!(
+            state
+                .prepare_provider_ready_after_startup_action("agent-1", next.generation)
+                .await
+                .expect("current Busy input generation")
+                .commit(),
+            Err(StartupPromptReadinessCommitError::Rejected)
+        );
         assert_eq!(
             state.provider_input_state("agent-1").await.unwrap(),
             next,
