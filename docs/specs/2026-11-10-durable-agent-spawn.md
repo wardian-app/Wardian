@@ -145,10 +145,13 @@ materialization only. Startup never queues work from a witness or replays an
 interrupted recovery attempt.
 
 After handoff the watcher signals lease loss to provisional attachment. The
-ledger verifies the same acquisition and native identity under the lease-file
-lock through the registration and name-claim commit. Only durable success
-permits the readiness watcher to release. On loss the accepted attempt remains
-consumed and recovery tears down the captured generation.
+broker checks the exact acquisition under the lease-file lock before publishing
+the verified native binding and capabilities. The ledger verifies the same
+acquisition and native identity through the registration and name-claim commit.
+Successful durable registration permits input and Idle publication for the
+still-current captured runtime and input owner, and allows the readiness watcher
+to release. On loss the accepted attempt remains consumed and recovery tears
+down the captured generation.
 
 ## Codex launch authority
 

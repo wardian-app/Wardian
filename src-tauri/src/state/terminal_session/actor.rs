@@ -96,6 +96,7 @@ enum TerminalRuntimeInput {
 #[derive(Clone)]
 pub struct TerminalRuntimeHandles {
     input_tx: TerminalRuntimeInput,
+    external_input_ready: Option<Arc<AtomicBool>>,
     resize: Arc<ResizeHandler>,
     ignore_scrollback_erase: bool,
     reset_parser_on_scrollback_erase: bool,
@@ -227,6 +228,7 @@ impl TerminalRuntimeHandles {
     {
         Self {
             input_tx: TerminalRuntimeInput::Legacy(input_tx),
+            external_input_ready: None,
             resize: Arc::new(resize),
             ignore_scrollback_erase: false,
             reset_parser_on_scrollback_erase: false,
@@ -244,6 +246,7 @@ impl TerminalRuntimeHandles {
     {
         Self {
             input_tx: TerminalRuntimeInput::Acknowledged(input_tx),
+            external_input_ready: None,
             resize: Arc::new(resize),
             ignore_scrollback_erase: false,
             reset_parser_on_scrollback_erase: false,
@@ -252,6 +255,13 @@ impl TerminalRuntimeHandles {
 
     fn acknowledges_native_writes(&self) -> bool {
         matches!(&self.input_tx, TerminalRuntimeInput::Acknowledged(_))
+    }
+
+    /// Block external writes to this provisional runtime while allowing its
+    /// generation-scoped terminal handshake responses.
+    pub(crate) fn gate_external_input(mut self, ready: Arc<AtomicBool>) -> Self {
+        self.external_input_ready = Some(ready);
+        self
     }
 
     /// Keeps the broker's canonical history when a provider emits ED3.
@@ -1100,6 +1110,7 @@ impl TerminalSessionBroker {
             .tx
             .blocking_send(TerminalSessionMessage::PrivilegedInput {
                 bytes,
+                runtime_generation: Some(runtime_generation),
                 reply: reply_tx,
             })
             .map_err(|_| TerminalBrokerError::RuntimeTerminated)?;
@@ -1272,7 +1283,11 @@ impl TerminalSessionBroker {
         bytes: Vec<u8>,
     ) -> Result<(), TerminalBrokerError> {
         self.request(session_id, move |reply| {
-            TerminalSessionMessage::PrivilegedInput { bytes, reply }
+            TerminalSessionMessage::PrivilegedInput {
+                bytes,
+                runtime_generation: None,
+                reply,
+            }
         })
         .await
     }
@@ -1942,6 +1957,7 @@ enum TerminalSessionMessage {
     },
     PrivilegedInput {
         bytes: Vec<u8>,
+        runtime_generation: Option<u64>,
         reply: BrokerReply<()>,
     },
     ComposerInput {
@@ -2279,8 +2295,12 @@ impl TerminalSessionActor {
                 let result = self.resize_compatibility(geometry).await;
                 let _ = reply.send(result);
             }
-            TerminalSessionMessage::PrivilegedInput { bytes, reply } => {
-                let result = self.send_privileged_input(bytes).await;
+            TerminalSessionMessage::PrivilegedInput {
+                bytes,
+                runtime_generation,
+                reply,
+            } => {
+                let result = self.send_privileged_input(bytes, runtime_generation).await;
                 let _ = reply.send(result);
             }
             TerminalSessionMessage::ComposerInput {
@@ -2991,7 +3011,7 @@ impl TerminalSessionActor {
         if let Some(reason) = self.validate_active_lease(&request.lease) {
             return Ok(self.rejected_decision(reason));
         }
-        if self.input_sender_paused {
+        if self.input_sender_paused || self.external_input_blocked() {
             return Ok(self.rejected_decision(TerminalLeaseRejectionReason::RuntimeUnavailable));
         }
         if !request.bytes.is_empty() {
@@ -3066,15 +3086,26 @@ impl TerminalSessionActor {
         if let Some(reason) = self.compatibility_rejection() {
             return Ok(self.rejected_decision(reason));
         }
+        if self.external_input_blocked() {
+            return Ok(self.rejected_decision(TerminalLeaseRejectionReason::RuntimeUnavailable));
+        }
         if !bytes.is_empty() {
             self.send_runtime_input(bytes).await?;
         }
         Ok(self.accepted_decision())
     }
 
-    async fn send_privileged_input(&mut self, bytes: Vec<u8>) -> Result<(), TerminalBrokerError> {
+    async fn send_privileged_input(
+        &mut self,
+        bytes: Vec<u8>,
+        runtime_generation: Option<u64>,
+    ) -> Result<(), TerminalBrokerError> {
         if self.runtime_state != TerminalRuntimeState::Live {
             return Err(TerminalBrokerError::RuntimeUnavailable);
+        }
+        if self.external_input_blocked() {
+            let generation = runtime_generation.ok_or(TerminalBrokerError::RuntimeUnavailable)?;
+            self.ensure_generation(generation)?;
         }
         if !bytes.is_empty() {
             self.send_runtime_input(bytes).await?;
@@ -3120,10 +3151,18 @@ impl TerminalSessionActor {
         if self.runtime_state != TerminalRuntimeState::Live
             || self.runtime.is_none()
             || self.input_sender_paused
+            || self.external_input_blocked()
         {
             return Err(TerminalBrokerError::RuntimeUnavailable);
         }
         Ok(())
+    }
+
+    fn external_input_blocked(&self) -> bool {
+        self.runtime
+            .as_ref()
+            .and_then(|runtime| runtime.external_input_ready.as_ref())
+            .is_some_and(|ready| !ready.load(Ordering::Acquire))
     }
 
     async fn send_runtime_input(&mut self, bytes: Vec<u8>) -> Result<(), TerminalBrokerError> {

@@ -6,6 +6,47 @@ use crate::delivery::codex_shared::{
 };
 use std::time::Duration;
 
+fn publish_codex_tui_binding(
+    client: &super::super::codex_shared::CodexSharedClient,
+    observed_version: &str,
+    capabilities: &mut NativeTransportCapabilities,
+    response: &serde_json::Value,
+    publish_identity: impl FnOnce(&str) -> Result<(), CodexSharedError>,
+    publication: Option<&crate::manager::RegistrationPublicationState>,
+) -> Result<CodexSharedReceipt, CodexSharedError> {
+    let id = response["thread"]["id"]
+        .as_str()
+        .ok_or_else(|| CodexSharedError::unsupported("attachment identity absent"))?;
+    let (agent_id, generation) = client.identity();
+    let publish = || {
+        publish_identity(id)?;
+        // Hold the exact startup lease across this synchronous boundary.
+        let recovery = publication.is_some_and(|state| state.is_recovery());
+        client.bind_with_input_gate(response, recovery)?;
+        let negotiated = NativeProviderProtocol::CodexAppServer.capabilities(observed_version);
+        let binding = NativeSessionBinding {
+            target_agent_id: agent_id.to_owned(),
+            generation,
+            provider: "codex".into(),
+            transport: "codex_app_server_ws".into(),
+            provider_session_id: Some(id.to_owned()),
+            capabilities: negotiated.clone(),
+            observed_at: now(),
+        };
+        wardian_core::db::upsert_native_session_binding(&binding).map_err(|_| {
+            CodexSharedError::unsupported("cannot persist attached native owner binding")
+        })?;
+        *capabilities = negotiated;
+        client.attached_receipt()
+    };
+    match publication {
+        Some(publication) => publication
+            .with_recovery_attachment(agent_id, id, publish)
+            .map_err(CodexSharedError::unsupported)?,
+        None => publish(),
+    }
+}
+
 /// Retain the exact owner and its creation gate through captured TUI shutdown.
 /// Dropping before runtime capture merely releases the gate; the registry still
 /// owns the live process. After capture the retained stop worker owns this token.
@@ -546,6 +587,7 @@ impl NativeDeliveryBroker {
         generation: u64,
         tui_alive: F,
         publish_identity: impl FnOnce(&str) -> Result<(), CodexSharedError>,
+        publication: Option<&crate::manager::RegistrationPublicationState>,
     ) -> Result<CodexSharedReceipt, CodexSharedError>
     where
         F: FnMut() -> Fut,
@@ -555,10 +597,14 @@ impl NativeDeliveryBroker {
         let _gate = gate.lock().await;
         let owner = self.shared_codex(agent_id, generation).await?;
         let result = async {
+            if publication.is_some_and(|state| state.is_recovery())
+                && owner.client.attached_receipt().is_ok()
+            {
+                return Err(CodexSharedError::unsupported(
+                    "interactive attachment requires an unbound fresh owner",
+                ));
+            }
             let response = owner.finalize_interactive(tui_alive).await?;
-            let id = response["thread"]["id"]
-                .as_str()
-                .ok_or_else(|| CodexSharedError::unsupported("attachment identity absent"))?;
             let mut sessions = self.sessions.lock().await;
             let handle = sessions
                 .get_mut(agent_id)
@@ -570,25 +616,14 @@ impl NativeDeliveryBroker {
                             .is_some_and(|current| Arc::ptr_eq(current, &owner))
                 })
                 .ok_or_else(|| CodexSharedError::unsupported("attachment owner changed"))?;
-            publish_identity(id)?;
-            // No await between binding, persistence and capability publication.
-            owner.client.bind(&response)?;
-            let capabilities =
-                NativeProviderProtocol::CodexAppServer.capabilities(&owner.observed_version);
-            let binding = NativeSessionBinding {
-                target_agent_id: agent_id.to_owned(),
-                generation,
-                provider: "codex".into(),
-                transport: "codex_app_server_ws".into(),
-                provider_session_id: Some(id.to_owned()),
-                capabilities: capabilities.clone(),
-                observed_at: now(),
-            };
-            wardian_core::db::upsert_native_session_binding(&binding).map_err(|_| {
-                CodexSharedError::unsupported("cannot persist attached native owner binding")
-            })?;
-            handle.capabilities = capabilities;
-            owner.client.receipt("owner_ready")
+            publish_codex_tui_binding(
+                &owner.client,
+                &owner.observed_version,
+                &mut handle.capabilities,
+                &response,
+                publish_identity,
+                publication,
+            )
         }
         .await;
         if result.is_err() {
@@ -597,6 +632,43 @@ impl NativeDeliveryBroker {
             owner.client.close().await;
         }
         result
+    }
+
+    /// Pin the still-current native binding while the captured TUI and input
+    /// generation publish readiness after durable recovery registration.
+    pub(crate) async fn lock_recovery_codex_input(
+        &self,
+        agent_id: &str,
+        provider_generation: u64,
+        runtime_generation: u64,
+        native_id: &str,
+    ) -> Result<
+        (
+            tokio::sync::OwnedMutexGuard<()>,
+            Arc<crate::delivery::codex_shared::CodexSharedClient>,
+        ),
+        String,
+    > {
+        let gate = self.owner_gate(agent_id).await.lock_owned().await;
+        let sessions = self.sessions.lock().await;
+        let client = sessions
+            .get(agent_id)
+            .filter(|handle| {
+                handle.generation == provider_generation
+                    && handle.provider == "codex"
+                    && handle.codex_tui_runtime_generation == Some(runtime_generation)
+            })
+            .and_then(|handle| handle.shared_codex.as_ref())
+            .map(|owner| owner.client.clone())
+            .filter(|client| {
+                client.attached_receipt().is_ok_and(|binding| {
+                    binding.wardian_agent_id == agent_id
+                        && binding.generation == provider_generation
+                        && binding.provider_session_id == native_id
+                })
+            })
+            .ok_or("Captured Codex native input owner changed after registration")?;
+        Ok((gate, client))
     }
 
     async fn shared_codex(
@@ -1096,6 +1168,193 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn codex_recovery_attachment_publication_requires_live_exact_lease() {
+        exercise_recovery_attachment_publication(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn codex_recovery_attachment_keeps_native_input_closed_before_commit() {
+        exercise_recovery_attachment_publication(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn codex_recovery_attachment_leaves_superseded_input_closed_after_commit() {
+        exercise_recovery_attachment_publication(false, true).await;
+    }
+
+    async fn exercise_recovery_attachment_publication(expire: bool, supersede: bool) {
+        use crate::manager::codex_onboarding::publish_recovery_readiness;
+        use wardian_core::control::ProviderInputReadiness;
+        use wardian_core::conversation_lease::{self, CodexRecoveryLeaseScope};
+
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        let native_id = uuid::Uuid::new_v4().to_string();
+        let state = crate::state::AppState::new();
+        let input = state
+            .interactions
+            .start_provider_input_generation(&agent_id, ProviderInputReadiness::Booting, None)
+            .await;
+        let lease = crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+            &agent_id,
+            "attachment",
+            "codex",
+            "",
+            "fixture",
+        )
+        .unwrap();
+        assert!(conversation_lease::refresh_codex_recovery_lease_persisted(
+            lease.owner(),
+            chrono::Duration::minutes(20),
+            CodexRecoveryLeaseScope::Attach {
+                agent_id: &agent_id,
+                native_id: &native_id
+            },
+        )
+        .unwrap());
+        let publication = crate::manager::RegistrationPublicationState::for_recovery(
+            lease.owner().clone(),
+            agent_id.clone(),
+            native_id.clone(),
+        );
+        let (client, _peer) =
+            crate::delivery::codex_shared::CodexSharedClient::unbound_input_test_client(
+                &agent_id,
+                input.generation,
+            )
+            .await;
+        let response = serde_json::json!({
+            "thread": {"id": native_id, "canAcceptDirectInput": true, "status": {"type":"idle"}}
+        });
+        let mut capabilities =
+            NativeTransportCapabilities::degraded("codex", "codex_app_server_ws");
+        let before = capabilities.clone();
+        let mut published_identity = None;
+        if expire {
+            let mut leases = conversation_lease::load_leases_checked().unwrap();
+            let exact = leases
+                .iter_mut()
+                .find(|entry| entry.owner() == *lease.owner())
+                .unwrap();
+            exact.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+            conversation_lease::save_leases(&leases).unwrap();
+        }
+        assert!(!publication.recovery_lease_lost());
+        let result = publish_codex_tui_binding(
+            &client,
+            "0.154.0",
+            &mut capabilities,
+            &response,
+            |id| {
+                published_identity = Some(id.to_owned());
+                Ok(())
+            },
+            Some(&publication),
+        );
+        let binding = wardian_core::db::latest_native_session_binding(&agent_id).unwrap();
+        if expire {
+            assert!(
+                result.is_err(),
+                "an unsignaled expiry must prevent binding publication"
+            );
+            assert!(publication.recovery_lease_lost());
+            assert!(binding.is_none());
+            assert!(published_identity.is_none());
+            assert_eq!(capabilities, before);
+        } else {
+            assert_eq!(result.unwrap().provider_session_id, native_id);
+            assert_eq!(
+                binding.unwrap().provider_session_id.as_deref(),
+                Some(native_id.as_str())
+            );
+            assert_eq!(published_identity.as_deref(), Some(native_id.as_str()));
+            assert_ne!(capabilities, before);
+        }
+        assert!(
+            client.receipt("owner_ready").is_err(),
+            "native input must stay gated until the durable commit"
+        );
+        if expire {
+            return;
+        }
+        assert!(client.settings_binding().is_err());
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(500),
+            client.push(serde_json::json!({"fixture":"blocked before send"})),
+        )
+        .await
+        .expect("pending input must fail before the protocol boundary")
+        .unwrap_err();
+        assert!(!blocked.provider_boundary_crossed);
+        let mut status = "Booting";
+        assert!(publish_recovery_readiness(
+            &state,
+            &agent_id,
+            input.generation,
+            &client,
+            &publication,
+            || {
+                status = "Idle";
+                Ok(())
+            },
+        )
+        .await
+        .is_err());
+        assert_eq!(status, "Booting");
+        assert_eq!(
+            state.interactions.provider_input_state(&agent_id).await,
+            Some(input.clone())
+        );
+
+        // Durable commit itself is covered by the worker fixtures. Exercise
+        // only the input step at that established publication state.
+        publication.mark_recovery_committed_for_test();
+        let expected = if supersede {
+            state
+                .interactions
+                .start_provider_input_generation(&agent_id, ProviderInputReadiness::Booting, None)
+                .await
+        } else {
+            input.clone()
+        };
+        let published = publish_recovery_readiness(
+            &state,
+            &agent_id,
+            input.generation,
+            &client,
+            &publication,
+            || {
+                status = "Idle";
+                Ok(())
+            },
+        )
+        .await;
+        if supersede {
+            assert!(published.is_err());
+            assert_eq!(status, "Booting");
+            assert_eq!(
+                state.interactions.provider_input_state(&agent_id).await,
+                Some(expected)
+            );
+            assert!(client.receipt("owner_ready").is_err());
+        } else {
+            published.unwrap();
+            assert_eq!(status, "Idle");
+            let current = state
+                .interactions
+                .provider_input_state(&agent_id)
+                .await
+                .unwrap();
+            assert_eq!(current.generation, input.generation);
+            assert_eq!(current.state, ProviderInputReadiness::Ready);
+            assert_eq!(
+                client.receipt("owner_ready").unwrap().provider_session_id,
+                native_id
+            );
+        }
+    }
 
     #[test]
     fn proven_stale_steer_maps_to_failed_before_submit_only_without_crossed_boundary() {

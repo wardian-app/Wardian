@@ -344,6 +344,7 @@ impl CodexAttachmentCompletion {
                         .map(|_| ())
                         .map_err(crate::delivery::codex_shared::CodexSharedError::unsupported)
                 },
+                Some(publication),
             )
             .await;
         if let Err(error) = finalized {
@@ -359,16 +360,17 @@ impl CodexAttachmentCompletion {
             return Err(failure);
         }
 
-        let observations = match self
-            .native_delivery
-            .codex_observations(&self.session_id, self.provider_generation)
-            .await
-        {
-            Ok(observations) => observations,
-            Err(error) => {
-                let failure = format_codex_attachment_error(error.to_string(), &self.watch_state);
-                return Err(failure);
-            }
+        let observations = if publication.is_recovery() {
+            None
+        } else {
+            Some(
+                self.native_delivery
+                    .codex_observations(&self.session_id, self.provider_generation)
+                    .await
+                    .map_err(|error| {
+                        format_codex_attachment_error(error.to_string(), &self.watch_state)
+                    })?,
+            )
         };
 
         let state_app = self.app.clone();
@@ -377,13 +379,9 @@ impl CodexAttachmentCompletion {
             let failure = format_codex_attachment_error(error, &self.watch_state);
             return Err(failure);
         }
-        super::codex_shared::observe_turn_activity(
-            self.app.clone(),
-            self.session_id.clone(),
-            self.runtime_generation,
-            self.current_status.clone(),
-            observations,
-        );
+        if let Some(observations) = observations {
+            self.observe_turn_activity(observations);
+        }
         Ok(())
     }
 
@@ -412,7 +410,17 @@ impl CodexAttachmentCompletion {
         )
         .await?;
 
-        publication.with_recovery_publication(|| ())?;
+        if !publication.is_recovery() {
+            self.publish_ordinary_input(state).await?;
+        }
+        if let Some(guard) = self.cleanup_guard.as_mut() {
+            guard.attached();
+        }
+        self.cleanup_guard.take();
+        Ok(())
+    }
+
+    async fn publish_ordinary_input(&self, state: &AppState) -> Result<(), String> {
         let readiness = state
             .interactions
             .record_provider_input_state(
@@ -443,20 +451,7 @@ impl CodexAttachmentCompletion {
             &self.config_lock,
         )
         .await?;
-        let mut promotion_generation = Some(self.runtime_generation);
-        let app = self.app.clone();
-        let session_id = self.session_id.clone();
-        let current_status = self.current_status.clone();
-        publication.with_recovery_publication(|| {
-            complete_codex_attachment(
-                &mut promotion_generation,
-                self.runtime_generation,
-                &self.codex_attachment_ready,
-                &self.codex_reader_alive,
-                |_| Ok(()),
-                || super::set_agent_status(&app, &session_id, &current_status, "Idle"),
-            )
-        })??;
+        self.publish_ready_status()?;
         assert_live_codex_incarnation(
             state,
             &self.session_id,
@@ -464,10 +459,67 @@ impl CodexAttachmentCompletion {
             &self.config_lock,
         )
         .await?;
-        if let Some(guard) = self.cleanup_guard.as_mut() {
-            guard.attached();
-        }
-        self.cleanup_guard.take();
+        Ok(())
+    }
+
+    fn publish_ready_status(&self) -> Result<(), String> {
+        let mut generation = Some(self.runtime_generation);
+        complete_codex_attachment(
+            &mut generation,
+            self.runtime_generation,
+            &self.codex_attachment_ready,
+            &self.codex_reader_alive,
+            |_| Ok(()),
+            || super::set_agent_status(&self.app, &self.session_id, &self.current_status, "Idle"),
+        )
+    }
+
+    fn observe_turn_activity(
+        &self,
+        observations: tokio::sync::watch::Receiver<crate::delivery::codex_shared::Observation>,
+    ) {
+        super::codex_shared::observe_turn_activity(
+            self.app.clone(),
+            self.session_id.clone(),
+            self.runtime_generation,
+            self.current_status.clone(),
+            observations,
+        );
+    }
+
+    pub(crate) async fn publish_recovery_input_after_commit(
+        self,
+        publication: &super::RegistrationPublicationState,
+    ) -> Result<(), String> {
+        let native_id = publication.committed_recovery_native_id(&self.session_id)?;
+        let state = self.app.state::<AppState>();
+        let _lifecycle = state.lock_agent_lifecycle(&self.session_id).await;
+        let (_owner, client) = self
+            .native_delivery
+            .lock_recovery_codex_input(
+                &self.session_id,
+                self.provider_generation,
+                self.runtime_generation,
+                native_id,
+            )
+            .await?;
+        assert_live_codex_incarnation(
+            &state,
+            &self.session_id,
+            self.runtime_generation,
+            &self.config_lock,
+        )
+        .await?;
+        publish_recovery_readiness(
+            &state,
+            &self.session_id,
+            self.provider_generation,
+            &client,
+            publication,
+            || self.publish_ready_status(),
+        )
+        .await?;
+        self.observe_turn_activity(client.observations());
         Ok(())
     }
 
@@ -551,6 +603,22 @@ impl CodexAttachmentCompletion {
     }
 }
 
+pub(crate) async fn publish_recovery_readiness(
+    state: &AppState,
+    session_id: &str,
+    generation: u64,
+    client: &crate::delivery::codex_shared::CodexSharedClient,
+    publication: &super::RegistrationPublicationState,
+    publish_status: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    state
+        .interactions
+        .publish_current_provider_input_ready(session_id, generation, || {
+            client.activate_recovery_input(publication, publish_status)
+        })
+        .await
+}
+
 pub(super) struct SynchronousCodexFinalizationContext<'a> {
     pub(super) native_delivery: &'a Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
     pub(super) session_id: &'a str,
@@ -601,6 +669,7 @@ pub(super) async fn finalize_synchronous_codex(
                     .map(|_| ())
                     .map_err(crate::delivery::codex_shared::CodexSharedError::unsupported)
             },
+            None,
         )
         .await;
     if let Err(error) = finalized {

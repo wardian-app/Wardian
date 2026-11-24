@@ -3556,6 +3556,21 @@ async fn spawn_agent_inner(
     let codex_reader_alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let defer_codex_startup_readiness =
         config.provider == "codex" && publication == SpawnPublication::Provisional;
+    let watch_state = std::sync::Arc::new(std::sync::Mutex::new(AgentWatchState::new(
+        config.session_id.clone(),
+        4096,
+        262_144,
+    )));
+    // Share the runtime's attachment gate with status, readiness and terminal
+    // admission before any producer can address the provisional terminal.
+    let codex_attachment_ready = {
+        let mut watch_state = watch_state
+            .lock()
+            .map_err(|_| "Agent watch state lock unavailable".to_string())?;
+        watch_state.bind_live_chat(&live_conversation_started_at);
+        watch_state.set_codex_attachment_ready(!defer_codex_startup_readiness);
+        watch_state.codex_attachment_ready_flag()
+    };
     let pty_master: crate::state::terminal_session::SharedPtyMaster =
         std::sync::Arc::new(std::sync::Mutex::new(pair.master));
     drop(pair.slave);
@@ -3568,6 +3583,15 @@ async fn spawn_agent_inner(
         "codex" => terminal_runtime.ignore_scrollback_erase(),
         "pi" => terminal_runtime.reset_parser_on_scrollback_erase(),
         _ => terminal_runtime,
+    };
+    let terminal_runtime = if gate
+        .registration
+        .as_ref()
+        .is_some_and(|state| state.is_recovery())
+    {
+        terminal_runtime.gate_external_input(codex_attachment_ready.clone())
+    } else {
+        terminal_runtime
     };
     let runtime_generation = app_state
         .terminal_sessions
@@ -3687,24 +3711,6 @@ async fn spawn_agent_inner(
         runtime_generation,
         current_status: current_status.clone(),
         startup_action_intent_revision: None,
-    };
-    let watch_state = std::sync::Arc::new(std::sync::Mutex::new(AgentWatchState::new(
-        config.session_id.clone(),
-        4096,
-        262_144,
-    )));
-    watch_state
-        .lock()
-        .map_err(|_| "Failed to bind live Chat Watch")?
-        .bind_live_chat(&live_conversation_started_at);
-    // Keep the attachment gate on the runtime's existing ActiveAgent-owned
-    // watch-state Arc so every status/readiness/admission path sees it.
-    let codex_attachment_ready = {
-        let watch_state = watch_state
-            .lock()
-            .map_err(|_| "Agent watch state lock unavailable".to_string())?;
-        watch_state.set_codex_attachment_ready(!defer_codex_startup_readiness);
-        watch_state.codex_attachment_ready_flag()
     };
     let reader_alive = codex_reader_alive.clone();
     let reader_attachment_ready = codex_attachment_ready.clone();

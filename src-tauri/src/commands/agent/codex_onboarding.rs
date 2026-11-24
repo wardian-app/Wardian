@@ -31,6 +31,19 @@ impl RecoveryPendingRegistration {
         &self.publication.0
     }
 
+    pub(crate) async fn publish_input_after_commit(self) {
+        if let Some(completion) = self.completion {
+            if let Err(error) = completion
+                .publish_recovery_input_after_commit(&self.publication.0)
+                .await
+            {
+                manager::log_debug(&format!(
+                    "[WARDIAN] Codex recovery input remains unavailable: {error}"
+                ));
+            }
+        }
+    }
+
     pub(crate) async fn cleanup_after_lease_loss(self) {
         let _ = self.publication().with_recovery_publication(|| ());
         if self.publication().recovery_lease_lost() {

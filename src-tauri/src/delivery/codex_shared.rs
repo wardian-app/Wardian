@@ -191,6 +191,7 @@ fn thread_runtime_status(status: &Value) -> Option<ThreadRuntimeStatus> {
 pub(crate) struct Observation {
     provider_version: Option<String>,
     thread_id: Option<String>,
+    recovery_input_pending: bool,
     thread_runtime_status: Option<ThreadRuntimeStatus>,
     active_turn: Option<String>,
     idle_reconciled_turn: Option<String>,
@@ -402,6 +403,28 @@ impl std::fmt::Debug for CodexSharedClient {
 }
 
 impl CodexSharedClient {
+    pub(super) fn identity(&self) -> (&str, u64) {
+        (&self.agent_id, self.generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn unbound_input_test_client(
+        agent_id: &str,
+        generation: u64,
+    ) -> (Arc<Self>, tokio::io::DuplexStream) {
+        let (client, peer) = tokio::io::duplex(4096);
+        let socket = WebSocketStream::from_raw_socket(
+            client,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        (
+            Self::from_connected(agent_id.to_owned(), generation, socket, None),
+            peer,
+        )
+    }
+
     pub(crate) fn observations(&self) -> watch::Receiver<Observation> {
         self.observation.subscribe()
     }
@@ -652,6 +675,14 @@ impl CodexSharedClient {
 
     /// Set binding exclusively from a successful thread/start or thread/resume response.
     pub fn bind(&self, result: &Value) -> Result<String, CodexSharedError> {
+        self.bind_with_input_gate(result, false)
+    }
+
+    pub(super) fn bind_with_input_gate(
+        &self,
+        result: &Value,
+        recovery_input_pending: bool,
+    ) -> Result<String, CodexSharedError> {
         let thread = &result["thread"];
         let id = thread["id"]
             .as_str()
@@ -670,6 +701,7 @@ impl CodexSharedClient {
         }
         self.observation.send_modify(|state| {
             state.thread_id = Some(id.to_owned());
+            state.recovery_input_pending = recovery_input_pending;
             state.completed_turn = None;
             state.thread_runtime_status = None;
             if let Some(status) = thread_runtime_status(&thread["status"]) {
@@ -686,13 +718,17 @@ impl CodexSharedClient {
     }
 
     pub fn settings_binding(&self) -> Result<CodexSettingsBinding, CodexSharedError> {
-        let thread_id = self
-            .observation
-            .borrow()
+        let observation = self.observation.borrow();
+        if observation.recovery_input_pending {
+            return Err(CodexSharedError::unsupported(
+                "Codex recovery registration is pending",
+            ));
+        }
+        let thread_id = observation
             .thread_id
             .clone()
             .ok_or_else(|| CodexSharedError::unsupported("owner thread unbound"))?;
-        if self.observation.borrow().closed {
+        if observation.closed {
             return Err(CodexSharedError::unsupported("owner connection closed"));
         }
         Ok(CodexSettingsBinding {
@@ -959,9 +995,26 @@ impl CodexSharedClient {
     }
 
     pub(crate) fn receipt(&self, state: &str) -> Result<CodexSharedReceipt, CodexSharedError> {
+        self.binding_receipt(state, false)
+    }
+
+    pub(super) fn attached_receipt(&self) -> Result<CodexSharedReceipt, CodexSharedError> {
+        self.binding_receipt("owner_ready", true)
+    }
+
+    fn binding_receipt(
+        &self,
+        state: &str,
+        allow_pending: bool,
+    ) -> Result<CodexSharedReceipt, CodexSharedError> {
         let observation = self.observation.borrow();
         if observation.closed {
             return Err(CodexSharedError::unsupported("owner connection closed"));
+        }
+        if observation.recovery_input_pending && !allow_pending {
+            return Err(CodexSharedError::unsupported(
+                "Codex recovery registration is pending",
+            ));
         }
         Ok(CodexSharedReceipt {
             wardian_agent_id: self.agent_id.clone(),
@@ -977,6 +1030,31 @@ impl CodexSharedClient {
             interruption_confirmed: false,
             message_id: None,
         })
+    }
+
+    pub(crate) fn activate_recovery_input(
+        &self,
+        publication: &crate::manager::RegistrationPublicationState,
+        publish: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let native_id = publication.committed_recovery_native_id(&self.agent_id)?;
+        let mut result = Err("Captured Codex input owner is no longer current".into());
+        self.observation.send_if_modified(|observation| {
+            if observation.closed
+                || !observation.recovery_input_pending
+                || observation.thread_id.as_deref() != Some(native_id)
+            {
+                return false;
+            }
+            result = publish();
+            if result.is_ok() {
+                observation.recovery_input_pending = false;
+                true
+            } else {
+                false
+            }
+        });
+        result
     }
 
     pub(crate) fn recovery_thread_is_idle(&self, session: &str) -> bool {

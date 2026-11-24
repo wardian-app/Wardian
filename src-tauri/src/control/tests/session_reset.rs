@@ -74,7 +74,7 @@ fn clear_codex_replacement_rejects_excluded_identity_publication() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn clear_codex_replacement_rejects_excluded_loaded_thread() {
-    assert_clear_codex_attachment(EXCLUDED_THREAD, false).await;
+    assert_codex_attachment(EXCLUDED_THREAD, false, false).await;
 }
 
 #[test]
@@ -103,14 +103,24 @@ fn clear_codex_replacement_accepts_fresh_identity_publication() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn clear_codex_replacement_accepts_fresh_loaded_thread() {
-    assert_clear_codex_attachment(FRESH_THREAD, true).await;
+    assert_codex_attachment(FRESH_THREAD, true, false).await;
 }
 
-async fn assert_clear_codex_attachment(loaded_thread: &str, allowed: bool) {
+#[tokio::test(flavor = "current_thread")]
+async fn codex_recovery_attachment_expiry_after_ack_blocks_real_finalizer() {
+    assert_codex_attachment(FRESH_THREAD, true, true).await;
+}
+
+async fn assert_codex_attachment(loaded_thread: &str, allowed: bool, expire_recovery: bool) {
+    use crate::commands::agent::{LifecycleLeaseHeartbeat, RecoveryRegistrationLease};
     use crate::delivery::codex_shared::CodexSharedError;
+    use crate::manager::RegistrationPublicationState;
+    use wardian_core::conversation_lease::{self, CodexRecoveryLeaseScope};
 
     let home = TestWardianHome::new_async().await;
-    let state = AppState::new();
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
     let mut original = cleared_codex_original();
     original.folder = home
         .path()
@@ -131,6 +141,7 @@ async fn assert_clear_codex_attachment(loaded_thread: &str, allowed: bool) {
     }
     let mut agent = test_agent(RECIPIENT, RECIPIENT, "Test");
     agent.process_id = None;
+    let status = agent.current_status.clone();
     *agent.config.lock().unwrap() = replacement.clone();
     let config = agent.config.clone();
     state.agents.lock().await.insert(RECIPIENT.into(), agent);
@@ -164,13 +175,54 @@ async fn assert_clear_codex_attachment(loaded_thread: &str, allowed: bool) {
         .install_stop_test_owner(RECIPIENT, generation, None, owner.owner.clone())
         .await;
 
+    let recovery = if expire_recovery {
+        let lease = crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+            RECIPIENT, RECIPIENT, "codex", "", "fixture",
+        ).unwrap();
+        let owner = lease.owner().clone();
+        assert!(conversation_lease::refresh_codex_recovery_lease_persisted(
+            &owner, chrono::Duration::minutes(20),
+            CodexRecoveryLeaseScope::Attach { agent_id: RECIPIENT, native_id: loaded_thread },
+        ).unwrap());
+        let publication = Arc::new(RegistrationPublicationState::for_recovery(
+            owner.clone(), RECIPIENT.into(), loaded_thread.into(),
+        ));
+        let (watcher, handoff) = crate::manager::spawn::start_recovery_registration_watcher_fixture(
+            RecoveryRegistrationLease {
+                lease,
+                heartbeat: Arc::new(LifecycleLeaseHeartbeat::start_codex_recovery(owner.clone())),
+            },
+            &replacement, app.handle().clone(), status, generation, publication.clone(),
+        );
+        handoff.await.unwrap().expect("production watcher must accept the exact acquisition");
+        Some((owner, publication, watcher))
+    } else {
+        None
+    };
+    let expired = std::cell::Cell::new(false);
+    let published_identity = std::cell::Cell::new(false);
     let result = tokio::time::timeout(
         DEADLINE,
         state.native_delivery.finalize_codex_tui(
             RECIPIENT,
             generation,
-            || async { Ok(()) },
+            || async {
+                if let Some((owner, publication, _)) = &recovery {
+                    if !expired.get() && peer.requests.lock().unwrap().iter()
+                        .any(|request| request["method"] == "thread/resume")
+                    {
+                        let mut leases = conversation_lease::load_leases_checked().unwrap();
+                        leases.iter_mut().find(|lease| lease.owner() == *owner).unwrap().expires_at =
+                            (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+                        conversation_lease::save_leases(&leases).unwrap();
+                        expired.set(true);
+                    }
+                    assert!(!publication.recovery_lease_lost());
+                }
+                Ok(())
+            },
             |id| {
+                published_identity.set(true);
                 let mut captured = config.lock().unwrap();
                 // This is the same identity publisher used by synchronous and
                 // deferred production startup, including its existing validation.
@@ -178,12 +230,14 @@ async fn assert_clear_codex_attachment(loaded_thread: &str, allowed: bool) {
                     .map(|_| ())
                     .map_err(CodexSharedError::unsupported)
             },
+            recovery.as_ref().map(|(_, publication, _)| publication.as_ref()),
         ),
     )
     .await
     .expect("bounded production native attachment");
     let published = config.lock().unwrap().resume_session.clone();
     let requests = peer.requests.lock().unwrap().clone();
+    let binding = wardian_core::db::latest_native_session_binding(RECIPIENT).unwrap();
     state
         .native_delivery
         .dispose_agent(RECIPIENT)
@@ -192,6 +246,15 @@ async fn assert_clear_codex_attachment(loaded_thread: &str, allowed: bool) {
     owner.cleanup().await;
     peer.finish().await;
 
+    if let Some((_, publication, watcher)) = recovery {
+        assert!(expired.get(), "the real async proof must reach metadata resume");
+        assert!(result.unwrap_err().message.contains("lost its exact registration lease"));
+        assert!(!published_identity.get());
+        assert!(binding.is_none());
+        assert!(publication.recovery_lease_lost());
+        tokio::time::timeout(DEADLINE, watcher).await.unwrap().unwrap();
+        return;
+    }
     assert!(
         requests
             .iter()

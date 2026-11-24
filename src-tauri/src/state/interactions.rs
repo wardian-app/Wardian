@@ -731,6 +731,42 @@ impl InteractionState {
         self.provider_inputs.lock().await.get(session_id).cloned()
     }
 
+    /// Publish readiness for an existing input generation without advancing it.
+    /// The caller's synchronous publication runs only while this generation
+    /// still owns input and the session has no deletion tombstone.
+    pub(crate) async fn publish_current_provider_input_ready(
+        &self,
+        session_id: &str,
+        generation: u64,
+        publish: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (_mutation, _, current) = self
+            .lock_mutation_and_provider_generation(session_id, false)
+            .await;
+        if current.as_deref().copied().flatten() != Some(generation)
+            || self.deleted_sessions.lock().await.contains(session_id)
+        {
+            return Err("Captured Codex input generation is no longer current".into());
+        }
+        let mut inputs = self.provider_inputs.lock().await;
+        let ready = ProviderInputReadiness::Ready;
+        let existing = inputs
+            .get(session_id)
+            .filter(|input| input.generation == generation)
+            .ok_or("Captured Codex input state is unavailable")?;
+        let keep = keep_existing_provider_input_state(existing, generation, ready, None);
+        if keep && existing.state != ready {
+            return Err("Captured Codex input is no longer eligible for readiness".into());
+        }
+        publish()?;
+        if !keep {
+            let record = provider_input_state_record(session_id, generation, ready, None);
+            inputs.insert(session_id.to_string(), record.clone());
+            let _ = wardian_core::db::upsert_provider_input_state(&record);
+        }
+        Ok(())
+    }
+
     pub async fn start_provider_input_generation(
         &self,
         session_id: &str,

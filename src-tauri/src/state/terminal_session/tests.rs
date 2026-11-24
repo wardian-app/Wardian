@@ -2704,6 +2704,66 @@ async fn terminal_session_input_pause_rejects_composer_input_and_keeps_native_wr
 }
 
 #[tokio::test]
+async fn terminal_session_recovery_input_waits_for_exact_attachment_readiness() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let broker = Arc::new(TerminalSessionBroker::default());
+    let ready = Arc::new(AtomicBool::new(false));
+    let (runtime, mut bytes, _) = runtime();
+    let id = "recovery-input";
+    let generation = broker
+        .start_or_replace_runtime(
+            id,
+            runtime.gate_external_input(ready.clone()),
+            geometry(80, 24),
+        )
+        .await
+        .unwrap();
+    let legacy = broker
+        .send_legacy_input(id, b"legacy".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        legacy.reason,
+        Some(TerminalLeaseRejectionReason::RuntimeUnavailable)
+    );
+    assert_eq!(
+        broker
+            .send_composer_input(id, generation, b"composer".to_vec())
+            .await,
+        Err(TerminalBrokerError::RuntimeUnavailable)
+    );
+    assert_eq!(
+        broker.send_privileged_input(id, b"injected".to_vec()).await,
+        Err(TerminalBrokerError::RuntimeUnavailable)
+    );
+    assert!(bytes.try_recv().is_err());
+    let resized = broker.resize_legacy(id, geometry(96, 28)).await.unwrap();
+    assert_eq!(
+        resized.decision.status,
+        TerminalLeaseDecisionStatus::Accepted
+    );
+    assert_eq!(resized.geometry, geometry(96, 28));
+
+    let responder = broker.clone();
+    tokio::task::spawn_blocking(move || {
+        responder.send_privileged_input_blocking(id, generation, b"handshake".to_vec())
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(bytes.recv().await.as_deref(), Some(b"handshake".as_slice()));
+
+    ready.store(true, Ordering::Release);
+    let legacy = broker
+        .send_legacy_input(id, b"published".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(legacy.status, TerminalLeaseDecisionStatus::Accepted);
+    assert_eq!(bytes.recv().await.as_deref(), Some(b"published".as_slice()));
+}
+
+#[tokio::test]
 async fn terminal_session_composer_input_rejects_stale_generation_before_successor_write() {
     let broker = TerminalSessionBroker::default();
     let (first_runtime, _, _) = runtime();

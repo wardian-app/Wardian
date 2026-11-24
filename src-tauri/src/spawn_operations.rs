@@ -366,6 +366,9 @@ async fn finish_prepared_operation<F>(
         .await
     {
         outcome_guard.terminal = true;
+        if let Some(recovery) = registration.recovery {
+            recovery.publish_input_after_commit().await;
+        }
     } else if let Some(recovery) = registration.recovery {
         // Registration verification releases the lifecycle and roster guards
         // before exact rollback can reacquire them.

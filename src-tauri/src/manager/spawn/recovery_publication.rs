@@ -58,6 +58,33 @@ impl RegistrationPublicationState {
             .is_some_and(|recovery| *recovery.lost.borrow())
     }
 
+    pub(crate) fn with_recovery_attachment<T>(
+        &self,
+        agent_id: &str,
+        native_id: &str,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        if self.recovery.as_ref().is_some_and(|recovery| {
+            recovery.agent_id != agent_id || recovery.native_id != native_id
+        }) {
+            return Err("The recovery attachment identity changed".into());
+        }
+        self.with_recovery_publication(publish)
+    }
+
+    pub(crate) fn committed_recovery_native_id(&self, agent_id: &str) -> Result<&str, String> {
+        self.recovery
+            .as_ref()
+            .filter(|recovery| recovery.agent_id == agent_id && self.state() == Self::COMMITTED)
+            .map(|recovery| recovery.native_id.as_str())
+            .ok_or_else(|| "Exact Codex recovery has not committed registration".into())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_recovery_committed_for_test(&self) {
+        self.set_committed();
+    }
+
     pub(crate) async fn wait_for_recovery_lease_loss(&self) {
         if let Some(recovery) = &self.recovery {
             let _ = recovery.lost.subscribe().wait_for(|lost| *lost).await;
