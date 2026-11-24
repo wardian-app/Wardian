@@ -1,4 +1,5 @@
 use super::{RegistrationPublicationState, PROVIDER_SPAWN_LEASE_DURATION};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use tokio::sync::watch;
 use wardian_core::conversation_lease::{
@@ -7,6 +8,8 @@ use wardian_core::conversation_lease::{
 };
 
 const LEASE_LOST: &str = "Codex recovery lost its exact registration lease";
+const ACTIVATED: u8 = 1;
+const CLEANING_UP: u8 = 2;
 
 pub(super) struct RecoveryPublication {
     owner: ConversationLeaseOwner,
@@ -16,6 +19,7 @@ pub(super) struct RecoveryPublication {
     // only covers synchronous persisted checks and the final SQLite commit.
     transition: Mutex<()>,
     lost: watch::Sender<bool>,
+    runtime_outcome: AtomicU8,
 }
 
 impl RecoveryPublication {
@@ -43,6 +47,7 @@ impl RegistrationPublicationState {
                 native_id,
                 transition: Mutex::new(()),
                 lost: watch::channel(false).0,
+                runtime_outcome: AtomicU8::default(),
             }),
             ..Default::default()
         }
@@ -50,6 +55,33 @@ impl RegistrationPublicationState {
 
     pub(crate) fn is_recovery(&self) -> bool {
         self.recovery.is_some()
+    }
+
+    pub(crate) fn recovery_activated(&self) {
+        if let Some(recovery) = &self.recovery {
+            recovery.runtime_outcome.store(ACTIVATED, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn begin_recovery_cleanup(&self) {
+        if let Some(recovery) = &self.recovery {
+            recovery
+                .runtime_outcome
+                .store(CLEANING_UP, Ordering::Release);
+        }
+        self.fail();
+    }
+
+    pub(super) fn recovery_allows_release(&self) -> bool {
+        self.recovery
+            .as_ref()
+            .is_none_or(|recovery| recovery.runtime_outcome.load(Ordering::Acquire) == ACTIVATED)
+    }
+
+    pub(super) fn recovery_cleaning_up(&self) -> bool {
+        self.recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.runtime_outcome.load(Ordering::Acquire) == CLEANING_UP)
     }
 
     pub(crate) fn recovery_lease_lost(&self) -> bool {

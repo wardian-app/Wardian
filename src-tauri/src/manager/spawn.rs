@@ -2242,10 +2242,10 @@ fn release_provider_spawn_lease_after_readiness<R: tauri::Runtime>(
                 .unpublished_failure
                 .as_ref()
                 .is_some_and(|failed| failed.load(std::sync::atomic::Ordering::Acquire))
-                || gate
-                    .registration
-                    .as_ref()
-                    .is_some_and(|state| state.state() == RegistrationPublicationState::FAILED)
+                || gate.registration.as_ref().is_some_and(|state| {
+                    state.state() == RegistrationPublicationState::FAILED
+                        || state.recovery_cleaning_up()
+                })
             {
                 log_debug(&format!(
                     "[Wardian] Unpublished provider for {session_id} retains conversation exclusion until lease expiry"
@@ -2264,10 +2264,10 @@ fn release_provider_spawn_lease_after_readiness<R: tauri::Runtime>(
                     .published
                     .load(std::sync::atomic::Ordering::Acquire)
             }) || matches!(status.as_str(), "Error" | "Off");
-            let committed = gate
-                .registration
-                .as_ref()
-                .is_none_or(|state| state.state() == RegistrationPublicationState::COMMITTED);
+            let committed = gate.registration.as_ref().is_none_or(|state| {
+                state.state() == RegistrationPublicationState::COMMITTED
+                    && state.recovery_allows_release()
+            });
             if ready && committed && readiness_committed {
                 let state = app.state::<AppState>();
                 let (published_generation, same_status_arc) = {

@@ -143,6 +143,13 @@ impl StopRegistration {
         Ok(self)
     }
 
+    /// Recovery's detached cleanup removes the exact terminal under the
+    /// lifecycle gate before this stop worker joins the captured child.
+    pub(crate) fn without_terminal_cleanup(mut self) -> Self {
+        self.terminal = None;
+        self
+    }
+
     /// Infallible, synchronous handoff immediately after roster removal. This
     /// must precede EVERY fallible operation/await after taking ActiveAgent.
     /// The returned guard starts cleanup on Drop, including broker-await abort.

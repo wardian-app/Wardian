@@ -372,7 +372,7 @@ async fn finish_prepared_operation<F>(
     } else if let Some(recovery) = registration.recovery {
         // Registration verification releases the lifecycle and roster guards
         // before exact rollback can reacquire them.
-        recovery.cleanup_after_lease_loss().await;
+        recovery.cleanup_after_failed_registration().await;
     }
 }
 

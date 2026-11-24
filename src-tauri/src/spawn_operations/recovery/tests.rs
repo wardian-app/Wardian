@@ -192,14 +192,67 @@ async fn spawn_recovery_replaced_after_handoff_signals_loss_and_cannot_commit_re
     exercise_guarded_registration(Some("replaced")).await;
 }
 
-async fn exercise_guarded_registration(lease_loss: Option<&str>) {
+#[tokio::test]
+async fn spawn_recovery_durable_write_failure_cleans_capture_with_live_lease() {
+    exercise_guarded_registration(Some("write-failure")).await;
+}
+
+#[tokio::test]
+async fn spawn_recovery_reader_eof_after_commit_cleans_runtime_and_keeps_registration() {
+    exercise_guarded_registration(Some("reader-eof")).await;
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryFixtureChild(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl portable_pty::ChildKiller for RecoveryFixtureChild {
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.0.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(self.clone())
+    }
+}
+
+impl portable_pty::Child for RecoveryFixtureChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        Ok(self
+            .0
+            .load(Ordering::Acquire)
+            .then(|| portable_pty::ExitStatus::with_exit_code(0)))
+    }
+
+    fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+        portable_pty::Child::try_wait(self)?
+            .ok_or_else(|| std::io::Error::other("fixture child is alive"))
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
+    #[cfg(windows)]
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        None
+    }
+}
+
+async fn exercise_guarded_registration(case: Option<&str>) {
     use crate::commands::agent::{
         bootstrap_prepared_agent_spawn, prepare_durable_agent_spawn, RecoveryPendingRegistration,
         RecoveryRegistrationLease, RegisteredAgentSpawn,
     };
+    use crate::manager::codex_onboarding::RecoveryRuntimeCleanup;
     use crate::spawn_operations::{finish_prepared_operation, WorkerOutcomeGuard};
+    use crate::state::terminal_session::TerminalRuntimeHandles;
     use tauri::Manager;
 
+    let lease_loss = case.filter(|case| matches!(*case, "expired" | "replaced"));
+    let write_failure = case == Some("write-failure");
+    let reader_eof = case == Some("reader-eof");
+    let failed_registration = lease_loss.is_some() || write_failure;
     struct ScopedEnv(&'static str, Option<std::ffi::OsString>);
     impl ScopedEnv {
         fn set(name: &'static str, value: &std::path::Path) -> Self {
@@ -366,6 +419,19 @@ async fn exercise_guarded_registration(lease_loss: Option<&str>) {
     let probe = &handoff_probe;
     let replacement_probe = std::cell::RefCell::new(None);
     let replacement = &replacement_probe;
+    let child_stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let child = &child_stopped;
+    let provider_generation = 7;
+    let (terminal_input, _terminal_input_receiver) = tokio::sync::mpsc::channel(1);
+    let runtime_generation = state
+        .terminal_sessions
+        .start_or_replace_runtime(
+            agent_id,
+            TerminalRuntimeHandles::new(terminal_input, |_| Ok(())),
+            wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+        )
+        .await
+        .unwrap();
     let worker = finish_prepared_operation(
         &state,
         WorkerOutcomeGuard {
@@ -448,12 +514,22 @@ async fn exercise_guarded_registration(lease_loss: Option<&str>) {
             .unwrap();
             let mut active = crate::restored_agent_without_process(
                 prepared.config.clone(),
-                "Idle",
+                if reader_eof { "Off" } else { "Idle" },
                 "fixture".into(),
                 None,
                 None,
             );
-            active.runtime_generation = Some(7);
+            active.runtime_generation = Some(runtime_generation);
+            active.child_process = Some(Box::new(RecoveryFixtureChild(child.clone())));
+            active
+                .watch_state
+                .lock()
+                .unwrap()
+                .set_codex_attachment_ready(false);
+            launch_state
+                .native_delivery
+                .install_recovery_cleanup_fixture(agent_id, provider_generation)
+                .await;
             let publication =
                 std::sync::Arc::new(crate::manager::RegistrationPublicationState::for_recovery(
                     lease_owner.clone(),
@@ -469,22 +545,45 @@ async fn exercise_guarded_registration(lease_loss: Option<&str>) {
                     &prepared.config,
                     app_handle.clone(),
                     active.current_status.clone(),
-                    7,
+                    runtime_generation,
                     publication.clone(),
                 );
             handoff.await.unwrap().unwrap();
             assert!(!publication.recovery_lease_lost());
+            let cleanup = RecoveryRuntimeCleanup::fixture(
+                app_handle.clone(),
+                &active,
+                provider_generation,
+                publication.clone(),
+            );
+            let reader_alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!reader_eof));
             let registered = RegisteredAgentSpawn {
                 config: prepared.config,
                 config_handle: active.config.clone(),
                 runtime_generation: active.runtime_generation,
-                recovery: Some(RecoveryPendingRegistration::fixture(publication.clone())),
+                recovery: Some(
+                    RecoveryPendingRegistration::fixture(publication.clone())
+                        .with_fixture_capture(cleanup, reader_alive),
+                ),
             };
             launch_state
                 .agents
                 .lock()
                 .await
                 .insert(agent_id.clone(), active);
+            if write_failure {
+                assert!(publication.with_recovery_publication(|| ()).is_ok());
+                db::get_db_conn(|conn| {
+                    conn.execute_batch(
+                        "CREATE TRIGGER fixture_reject_registration
+                         BEFORE UPDATE OF state ON agent_spawn_operations
+                         WHEN NEW.state = 'registered'
+                         BEGIN SELECT RAISE(ABORT, 'fixture refused registration'); END;",
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            }
             if let Some(loss) = lease_loss {
                 let mut leases = wardian_core::conversation_lease::load_leases_checked().unwrap();
                 let entry = leases
@@ -521,7 +620,7 @@ async fn exercise_guarded_registration(lease_loss: Option<&str>) {
     assert_eq!(launch_calls.get(), 1);
     assert_eq!(
         agent_spawn::get(&keys.0).unwrap().unwrap().state,
-        if lease_loss.is_some() {
+        if failed_registration {
             AgentSpawnState::OutcomeUnknown
         } else {
             AgentSpawnState::Registered
@@ -545,15 +644,53 @@ async fn exercise_guarded_registration(lease_loss: Option<&str>) {
     if let Some(replacement) = replacement_probe.into_inner() {
         assert!(leases.contains(&replacement));
     }
-    if lease_loss.is_some() {
+    let stopped = failed_registration || reader_eof;
+    assert_eq!(child_stopped.load(Ordering::Acquire), stopped);
+    assert_eq!(
+        state
+            .native_delivery
+            .codex_owner_selected(agent_id, provider_generation)
+            .await,
+        !stopped
+    );
+    assert_eq!(
+        state.terminal_sessions.broker_state(agent_id).await.is_ok(),
+        !stopped
+    );
+    if failed_registration {
         assert!(agent_spawn::restore_is_excluded(agent_id).unwrap());
         assert!(agent_spawn::queued_operation_ids().unwrap().is_empty());
         assert_eq!(
             admit_launch(&state, request).await.err().unwrap().code,
             "spawn_recovery_witness_used"
         );
+        assert!(!state.agents.lock().await.contains_key(agent_id));
+        if write_failure {
+            assert!(leases.iter().any(|lease| lease.owner() == owner));
+        }
         return;
     }
+    if reader_eof {
+        let agents = state.agents.lock().await;
+        let shell = agents.get(agent_id).expect("durable registered identity");
+        assert!(shell.child_process.is_none() && shell.runtime_generation.is_none());
+        assert_eq!(*shell.current_status.lock().unwrap(), "Error");
+        let config = shell.config.lock().unwrap().clone();
+        assert!(persisted_roster().unwrap().iter().any(|saved| {
+            saved.session_id == *agent_id
+                && saved.resume_session == config.resume_session
+                && saved.model.as_deref() == Some(CORRECTED_MODEL)
+        }));
+        assert!(agent_spawn::queued_operation_ids().unwrap().is_empty());
+        assert!(leases.iter().any(|lease| lease.owner() == owner));
+        return;
+    }
+    assert!(state.agents.lock().await[agent_id].child_process.is_some());
+    state
+        .native_delivery
+        .dispose_codex_generation(agent_id, provider_generation)
+        .await
+        .unwrap();
     assert!(!leases.iter().any(|lease| lease.owner() == owner));
     publication.renew_recovery_lease().unwrap();
     assert!(!publication.recovery_lease_lost());

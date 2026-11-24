@@ -118,6 +118,31 @@ impl CapturedCodexStop {
 }
 
 impl NativeDeliveryBroker {
+    #[cfg(test)]
+    pub(crate) async fn install_recovery_cleanup_fixture(&self, id: &str, generation: u64) {
+        let (tx, mut incoming) = mpsc::channel(1);
+        let (stopped, observed) = tokio::sync::watch::channel(false);
+        self.sessions.lock().await.insert(
+            id.to_owned(),
+            NativeSessionHandle {
+                generation,
+                provider: "codex".into(),
+                capabilities: NativeTransportCapabilities::degraded("codex", "codex_app_server_ws"),
+                tx,
+                shared_codex: None,
+                codex_tui_runtime_generation: None,
+                stopped: Some(observed),
+            },
+        );
+        tokio::spawn(async move {
+            assert!(matches!(
+                incoming.recv().await,
+                Some(SessionCommand::Shutdown)
+            ));
+            stopped.send_replace(true);
+        });
+    }
+
     /// Bind a newly registered terminal to its exact prepared owner. Provider
     /// input can advance without a terminal, so these counters are not equal.
     pub(crate) async fn bind_codex_tui_runtime(

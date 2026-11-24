@@ -1,9 +1,10 @@
 use super::agent_lifecycle::PendingRuntime;
 use crate::manager;
+use crate::manager::codex_onboarding::CapturedRecoveryRuntime;
 use crate::state::{ActiveAgent, AppState};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use wardian_core::models::AgentConfig;
 
 #[cfg(test)]
@@ -24,6 +25,11 @@ pub(crate) struct RegisteredAgentSpawn {
 pub(crate) struct RecoveryPendingRegistration {
     publication: RegistrationPublicationAttempt,
     completion: Option<manager::CodexAttachmentCompletion>,
+    #[cfg(test)]
+    fixture_capture: Option<(
+        manager::codex_onboarding::RecoveryRuntimeCleanup<tauri::test::MockRuntime>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
 }
 
 impl RecoveryPendingRegistration {
@@ -32,30 +38,43 @@ impl RecoveryPendingRegistration {
     }
 
     pub(crate) async fn publish_input_after_commit(self) {
-        if let Some(completion) = self.completion {
+        if let Some(mut completion) = self.completion {
             if let Err(error) = completion
                 .publish_recovery_input_after_commit(&self.publication.0)
                 .await
             {
+                let error = completion.rollback_after_failure(error, true).await;
                 manager::log_debug(&format!(
-                    "[WARDIAN] Codex recovery input remains unavailable: {error}"
+                    "[WARDIAN] Codex recovery input activation failed: {error}"
                 ));
+            }
+        }
+        #[cfg(test)]
+        if let Some((cleanup, reader_alive)) = self.fixture_capture {
+            match manager::codex_onboarding::require_recovery_reader_alive(&reader_alive) {
+                Ok(()) => cleanup.disarm(),
+                Err(error) => {
+                    cleanup.finish(error).await;
+                }
             }
         }
     }
 
-    pub(crate) async fn cleanup_after_lease_loss(self) {
-        let _ = self.publication().with_recovery_publication(|| ());
-        if self.publication().recovery_lease_lost() {
-            if let Some(completion) = self.completion {
-                let error = completion
-                    .rollback_after_failure(
-                        "Codex recovery lost its exact registration lease".into(),
-                        true,
-                    )
-                    .await;
-                manager::log_debug(&format!("[WARDIAN] {error}"));
-            }
+    pub(crate) async fn cleanup_after_failed_registration(self) {
+        let failure = if self.publication().recovery_lease_lost() {
+            "Codex recovery lost its exact registration lease"
+        } else {
+            "Codex recovery did not commit durable registration"
+        };
+        if let Some(completion) = self.completion {
+            let error = completion
+                .rollback_after_failure(failure.into(), true)
+                .await;
+            manager::log_debug(&format!("[WARDIAN] {error}"));
+        }
+        #[cfg(test)]
+        if let Some((cleanup, _)) = self.fixture_capture {
+            cleanup.finish(failure.into()).await;
         }
     }
 
@@ -64,7 +83,18 @@ impl RecoveryPendingRegistration {
         Self {
             publication: RegistrationPublicationAttempt(publication),
             completion: None,
+            fixture_capture: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_fixture_capture(
+        mut self,
+        cleanup: manager::codex_onboarding::RecoveryRuntimeCleanup<tauri::test::MockRuntime>,
+        reader_alive: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.fixture_capture = Some((cleanup, reader_alive));
+        self
     }
 }
 
@@ -145,6 +175,18 @@ pub(super) async fn register_new_agent(
         inherited_lease,
     )
     .await?;
+    if publication.0.is_recovery() {
+        let Some(completion) = completion.as_mut() else {
+            publication.0.fail();
+            return Err(stop_uncommitted_agent(
+                None,
+                active_agent,
+                "Codex recovery has no captured attachment".into(),
+            )
+            .await);
+        };
+        completion.retain_recovery_publication(publication.0.clone());
+    }
     let registered_config = active_agent.config.clone();
     let registered_generation = active_agent.runtime_generation;
     // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
@@ -250,6 +292,8 @@ pub(super) async fn register_new_agent(
         Some(RecoveryPendingRegistration {
             publication,
             completion,
+            #[cfg(test)]
+            fixture_capture: None,
         })
     } else {
         publication.0.commit();
@@ -692,6 +736,17 @@ async fn detach_provisional_codex(
     runtime_generation: u64,
     registration: crate::manager::codex_stop::StopRegistration,
 ) -> Result<Option<DetachedProvisionalCodex>, DetachProvisionalError> {
+    detach_matching_codex(state, session_id, runtime_generation, registration, None).await
+}
+
+#[allow(clippy::result_large_err)]
+async fn detach_matching_codex(
+    state: &AppState,
+    session_id: &str,
+    runtime_generation: u64,
+    registration: crate::manager::codex_stop::StopRegistration,
+    recovery: Option<&CapturedRecoveryRuntime>,
+) -> Result<Option<DetachedProvisionalCodex>, DetachProvisionalError> {
     let mut registration = Some(registration);
     loop {
         let lifecycle = state.lock_agent_lifecycle(session_id).await;
@@ -716,10 +771,39 @@ async fn detach_provisional_codex(
                         manager::codex_onboarding::exact_runtime_generation_matches(
                             agent.runtime_generation,
                             runtime_generation,
-                        )
+                        ) && recovery
+                            .is_none_or(|capture| Arc::ptr_eq(&agent.config, &capture.config))
                     });
                     if !current {
                         (false, Ok(None))
+                    } else if recovery.is_some_and(|capture| {
+                        capture
+                            .publication
+                            .committed_recovery_native_id(session_id)
+                            .is_ok()
+                    }) {
+                        // The operation and saved identity are already durable.
+                        // Retain that identity and fence late status from the
+                        // stopped runtime by replacing its status incarnation.
+                        let mut agents = agents;
+                        let agent = agents
+                            .get_mut(session_id)
+                            .expect("checked captured recovery");
+                        let runtime = super::take_agent_runtime_for_termination(agent);
+                        super::replace_agent_status_incarnation(agent, "Error");
+                        let generation = runtime.runtime_generation;
+                        (
+                            false,
+                            Ok(Some(DetachedProvisionalCodex {
+                                shell: None,
+                                stop_guard: registration
+                                    .take()
+                                    .expect("retained captured stop")
+                                    .capture(runtime),
+                                generation,
+                                order_index: 0,
+                            })),
+                        )
                     } else {
                         let mut agents = agents;
                         let mut order = order;
@@ -770,6 +854,91 @@ async fn detach_provisional_codex(
                 error,
             });
         }
+    }
+}
+
+pub(crate) async fn rollback_captured_recovery<R: Runtime>(
+    app: &AppHandle<R>,
+    capture: &CapturedRecoveryRuntime,
+    registration: crate::manager::codex_stop::StopRegistration,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let id = &capture.session_id;
+    let (stop, roster_error) = match detach_matching_codex(
+        &state,
+        id,
+        capture.runtime_generation,
+        registration.without_terminal_cleanup(),
+        Some(capture),
+    )
+    .await
+    {
+        Ok(detached) => (detached.map(|detached| detached.stop_guard), None),
+        Err(DetachProvisionalError::Persistence {
+            mut detached,
+            error,
+        }) => {
+            if let Some(shell) = detached.shell.as_mut() {
+                super::replace_agent_status_incarnation(shell, "Error");
+            }
+            let retained = retain_failed_detached_roster(&state, id, &mut detached)
+                .await
+                .err();
+            let error = retained.map_or(error.clone(), |retained| format!("{error}; {retained}"));
+            (Some(detached.stop_guard), Some(error))
+        }
+        Err(DetachProvisionalError::Infrastructure {
+            registration,
+            error,
+        }) => {
+            let _lifecycle = state.lock_agent_lifecycle(id).await;
+            let mut agents = state.agents.lock().await;
+            let stop = agents
+                .get_mut(id)
+                .filter(|agent| {
+                    agent.runtime_generation == Some(capture.runtime_generation)
+                        && Arc::ptr_eq(&agent.config, &capture.config)
+                })
+                .map(|agent| {
+                    let runtime = super::take_agent_runtime_for_termination(agent);
+                    super::replace_agent_status_incarnation(agent, "Error");
+                    registration.capture(runtime)
+                });
+            (stop, Some(error))
+        }
+    };
+    use crate::state::terminal_session::TerminalBrokerError;
+    let terminal_error = {
+        let _lifecycle = state.lock_agent_lifecycle(id).await;
+        match state
+            .terminal_sessions
+            .terminate_and_remove_runtime(id, capture.runtime_generation)
+            .await
+        {
+            Ok(())
+            | Err(
+                TerminalBrokerError::SessionNotFound
+                | TerminalBrokerError::StaleRuntimeGeneration { .. },
+            ) => None,
+            Err(error) => Some(error.to_string()),
+        }
+    };
+    let stop_error = if let Some(stop) = stop {
+        let result = stop.begin_stop().wait().await.err();
+        let _ = app.emit("agents-updated", ());
+        result
+    } else {
+        None
+    };
+    if roster_error.is_none() && terminal_error.is_none() && stop_error.is_none() {
+        Ok(())
+    } else {
+        Err(manager::codex_onboarding::format_cleanup_errors(
+            "Codex recovery runtime cleanup",
+            roster_error,
+            terminal_error,
+            stop_error,
+        ))
     }
 }
 

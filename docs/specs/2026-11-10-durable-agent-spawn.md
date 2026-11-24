@@ -149,9 +149,12 @@ broker checks the exact acquisition under the lease-file lock before publishing
 the verified native binding and capabilities. The ledger verifies the same
 acquisition and native identity through the registration and name-claim commit.
 Successful durable registration permits input and Idle publication for the
-still-current captured runtime and input owner, and allows the readiness watcher
-to release. On loss the accepted attempt remains consumed and recovery tears
-down the captured generation.
+still-current captured runtime and input owner. That activation disarms captured
+cleanup and permits the readiness watcher to release. Before commit, failed
+registration leaves the accepted attempt consumed and quarantined. Failed
+activation after commit preserves the registered operation and saved identity.
+Both failures tear down only the captured runtime and retain the acquisition
+until expiry.
 
 ## Codex launch authority
 

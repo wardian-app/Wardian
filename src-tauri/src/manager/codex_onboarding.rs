@@ -9,6 +9,10 @@ use wardian_core::models::AgentConfig;
 
 use super::codex_shared::CodexAttachGuard;
 
+#[path = "codex_onboarding/recovery_cleanup.rs"]
+mod recovery_cleanup;
+pub(crate) use recovery_cleanup::{CapturedRecoveryRuntime, RecoveryRuntimeCleanup};
+
 #[cfg(test)]
 #[path = "codex_onboarding_tests.rs"]
 mod tests;
@@ -220,6 +224,8 @@ pub(crate) struct CodexAttachmentCompletion {
     codex_reader_alive: Arc<AtomicBool>,
     cleanup_guard: Option<CodexAttachGuard>,
     stop_registration: Option<crate::manager::codex_stop::StopRegistration>,
+    recovery_publication: Option<Arc<super::RegistrationPublicationState>>,
+    recovery_cleanup: Option<RecoveryRuntimeCleanup>,
 }
 
 impl SpawnedAgent {
@@ -246,14 +252,34 @@ impl CodexAttachmentCompletion {
             codex_reader_alive: context.codex_reader_alive,
             cleanup_guard: context.cleanup_guard,
             stop_registration: None,
+            recovery_publication: None,
+            recovery_cleanup: None,
         }
+    }
+
+    pub(crate) fn retain_recovery_publication(
+        &mut self,
+        publication: Arc<super::RegistrationPublicationState>,
+    ) {
+        self.recovery_publication = Some(publication);
     }
 
     pub(crate) fn set_stop_registration(
         &mut self,
         registration: Option<crate::manager::codex_stop::StopRegistration>,
     ) {
-        self.stop_registration = registration;
+        match (self.recovery_publication.take(), registration) {
+            (Some(publication), Some(registration)) => {
+                let identity = CapturedRecoveryRuntime::from_completion(self, publication);
+                self.recovery_cleanup = Some(RecoveryRuntimeCleanup::new(
+                    self.app.clone(),
+                    identity,
+                    registration,
+                    self.cleanup_guard.take(),
+                ));
+            }
+            (_, registration) => self.stop_registration = registration,
+        }
     }
 
     pub(crate) async fn run(
@@ -412,11 +438,13 @@ impl CodexAttachmentCompletion {
 
         if !publication.is_recovery() {
             self.publish_ordinary_input(state).await?;
+            if let Some(guard) = self.cleanup_guard.as_mut() {
+                guard.attached();
+            }
+            self.cleanup_guard.take();
+        } else if self.recovery_cleanup.is_none() {
+            return Err("Codex recovery lost its captured cleanup token".into());
         }
-        if let Some(guard) = self.cleanup_guard.as_mut() {
-            guard.attached();
-        }
-        self.cleanup_guard.take();
         Ok(())
     }
 
@@ -488,9 +516,13 @@ impl CodexAttachmentCompletion {
     }
 
     pub(crate) async fn publish_recovery_input_after_commit(
-        self,
+        &mut self,
         publication: &super::RegistrationPublicationState,
     ) -> Result<(), String> {
+        require_recovery_reader_alive(&self.codex_reader_alive)?;
+        if self.recovery_cleanup.is_none() {
+            return Err("Codex recovery lost its captured cleanup token".into());
+        }
         let native_id = publication.committed_recovery_native_id(&self.session_id)?;
         let state = self.app.state::<AppState>();
         let _lifecycle = state.lock_agent_lifecycle(&self.session_id).await;
@@ -520,6 +552,10 @@ impl CodexAttachmentCompletion {
         )
         .await?;
         self.observe_turn_activity(client.observations());
+        self.recovery_cleanup
+            .take()
+            .expect("captured through activation")
+            .disarm();
         Ok(())
     }
 
@@ -528,6 +564,9 @@ impl CodexAttachmentCompletion {
         error: String,
         captured_only: bool,
     ) -> String {
+        if let Some(recovery) = self.recovery_cleanup.take() {
+            return recovery.finish(error).await;
+        }
         self.codex_attachment_ready.store(false, Ordering::Release);
         let owner_cleanup = self.dispose_owner().await.err();
         let registration = self.stop_registration.take();
@@ -600,6 +639,14 @@ impl CodexAttachmentCompletion {
                 Err(message)
             }
         }
+    }
+}
+
+pub(crate) fn require_recovery_reader_alive(reader_alive: &AtomicBool) -> Result<(), String> {
+    if reader_alive.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        Err("Captured Codex PTY reader exited before recovery activation".into())
     }
 }
 

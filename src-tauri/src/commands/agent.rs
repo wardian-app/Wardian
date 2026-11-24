@@ -56,7 +56,9 @@ use agent_naming::{
 use codex_onboarding::register_new_agent;
 #[cfg(test)]
 pub(crate) use codex_onboarding::RecoveryPendingRegistration;
-pub(crate) use codex_onboarding::{rollback_provisional_codex, RegisteredAgentSpawn};
+pub(crate) use codex_onboarding::{
+    rollback_captured_recovery, rollback_provisional_codex, RegisteredAgentSpawn,
+};
 use name_claims::{
     abort_failed_rename, existing_spawn_session_names, release_spawn_name_reservation,
     reserve_rename_session_name, reserve_spawn_session_name, LegacyNameClaimGuard,
