@@ -1,6 +1,9 @@
 //! A cold, private Codex state index can gate the listener before any RPC.
 
-use super::{observe_socket_wait, ChildLiveness, SocketWaitDiagnostic, SocketWaitOutcome};
+use super::{
+    observe_socket_wait, ChildLiveness, SocketWaitDiagnostic, SocketWaitOutcome,
+    MAX_BACKFILL_EXTENSION,
+};
 use std::cmp::Ordering;
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;
@@ -149,17 +152,18 @@ impl BackfillProbe {
         if let Some(pending) = self.pending.take() {
             pending.abort();
             let _ = pending.await;
-            if diagnostic.outcome == SocketWaitOutcome::Ready {
-                diagnostic.child_liveness = child_liveness();
-                diagnostic.outcome = if cancelled.now_or_never().is_some() {
-                    SocketWaitOutcome::Cancelled
-                } else {
-                    diagnostic
-                        .child_liveness
-                        .failure()
-                        .unwrap_or(diagnostic.outcome)
-                };
-            }
+        }
+        if diagnostic.outcome == SocketWaitOutcome::Ready {
+            diagnostic.child_liveness = child_liveness();
+            diagnostic.outcome = if cancelled.now_or_never().is_some() {
+                SocketWaitOutcome::Cancelled
+            } else if let Some(failure) = diagnostic.child_liveness.failure() {
+                failure
+            } else if Instant::now() >= deadline + MAX_BACKFILL_EXTENSION {
+                SocketWaitOutcome::TimedOut
+            } else {
+                SocketWaitOutcome::Ready
+            };
         }
         (diagnostic, self.progress.advances)
     }
@@ -309,26 +313,32 @@ mod tests {
         assert_eq!(progress.advances, 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn parked_probe_stays_in_owner_gate_until_joined_for_every_outcome() {
+        use std::cell::Cell;
         use std::task::Poll;
         use tokio::sync::{oneshot, Mutex};
+        use SocketWaitOutcome::{Cancelled, Ready, TimedOut};
 
-        for expected in [
-            SocketWaitOutcome::Ready,
-            SocketWaitOutcome::TimedOut,
-            SocketWaitOutcome::Cancelled,
+        for (selected, cross_hard_cap, expected) in [
+            (Ready, false, Ready),
+            (TimedOut, false, TimedOut),
+            (Cancelled, false, Cancelled),
+            (Ready, true, TimedOut),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let socket = directory.path().join("control.sock");
             let database = directory.path().join(DATABASE);
             fs::write(&database, b"first owner").unwrap();
-            let deadline = if expected == SocketWaitOutcome::TimedOut {
-                Instant::now()
+            let now = Instant::now();
+            let deadline = if cross_hard_cap {
+                now + Duration::from_secs(1) - MAX_BACKFILL_EXTENSION
+            } else if selected == TimedOut {
+                now
             } else {
-                Instant::now() + Duration::from_secs(60)
+                now + Duration::from_secs(60)
             };
-            if expected == SocketWaitOutcome::Ready {
+            if selected == Ready {
                 fs::write(&socket, b"presence fixture").unwrap();
             }
             let (started_tx, started) = oneshot::channel();
@@ -344,9 +354,15 @@ mod tests {
             });
             started.await.unwrap();
             let probe = BackfillProbe {
+                home: cross_hard_cap.then(|| directory.path().to_path_buf()),
                 pending: Some(pending),
-                ..BackfillProbe::default()
+                sampled_at: Some(now),
+                progress: Progress {
+                    last_advance: cross_hard_cap.then_some(now),
+                    ..Progress::default()
+                },
             };
+            let liveness_checks = Cell::new(0);
             let gate = Mutex::new(());
             let held = gate.lock().await;
             let startup = async {
@@ -356,11 +372,14 @@ mod tests {
                         &socket,
                         deadline,
                         async {
-                            if expected != SocketWaitOutcome::Cancelled {
+                            if selected != Cancelled {
                                 std::future::pending::<()>().await;
                             }
                         },
-                        || ChildLiveness::Alive,
+                        || {
+                            liveness_checks.set(liveness_checks.get() + 1);
+                            ChildLiveness::Alive
+                        },
                     )
                     .await
             };
@@ -369,12 +388,21 @@ mod tests {
                 std::future::poll_fn(|cx| Poll::Ready(startup.as_mut().poll(cx)))
                     .await
                     .is_pending(),
-                "owner left a probe running after {expected:?}"
+                "owner left a probe running after {selected:?}"
             );
             assert!(gate.try_lock().is_err());
+            if cross_hard_cap {
+                // The second liveness check confirms Ready reached the drain.
+                assert_eq!(liveness_checks.get(), 2);
+                tokio::time::advance(Duration::from_secs(2)).await;
+                assert!(gate.try_lock().is_err());
+            }
             release.send(()).unwrap();
             let (observed, _) = startup.await;
-            assert_eq!(observed.outcome, expected);
+            assert_eq!(
+                observed.outcome, expected,
+                "after {selected:?}, cap crossed: {cross_hard_cap}"
+            );
             let _replacement = gate.try_lock().unwrap();
             fs::write(&database, b"replacement owner").unwrap();
             assert_eq!(read.await.unwrap(), b"first owner");
