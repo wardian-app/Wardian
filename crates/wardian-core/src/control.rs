@@ -102,6 +102,9 @@ pub enum ControlRequest {
         operation_id: String,
         timeout_ms: u64,
     },
+    AgentSpawnRecover {
+        request: crate::agent_spawn::recovery::Request,
+    },
     AgentUpdate {
         target: String,
         class: Option<String>,

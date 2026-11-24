@@ -1,6 +1,8 @@
 use crate::state::AppState;
 use tauri::{AppHandle, Manager};
 
+pub(crate) mod recovery;
+
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub(crate) fn recover_after_owner_acquired() -> Result<(), String> {

@@ -147,6 +147,31 @@ fn canonical_spawn_operation_id(operation_id: &str) -> Result<String, CliError> 
     wardian_core::agent_spawn::canonical_operation_id(operation_id).map_err(CliError::generic)
 }
 
+pub(super) fn handle_agent_spawn_recover(
+    operation_id: &str,
+    expected_attempt_id: &str,
+    expected_model: &str,
+    action: crate::args::SpawnRecoveryAction,
+) -> Result<String, CliError> {
+    use crate::args::SpawnRecoveryAction;
+    use wardian_core::agent_spawn::recovery::{self, Action, Request};
+    let request = Request {
+        operation_id: operation_id.to_owned(),
+        expected_attempt_id: expected_attempt_id.to_owned(),
+        expected_model: expected_model.to_owned(),
+        action: match action {
+            SpawnRecoveryAction::FinalizeRegistered => Action::FinalizeRegistered,
+            SpawnRecoveryAction::LaunchIfAbsent => Action::LaunchIfAbsent,
+        },
+    };
+    recovery::validate_request(&request)
+        .map_err(|error| CliError::backend(ExitCode::Generic, error.code, error.message))?;
+    let response = live::agent_spawn_recover(request).map_err(control_error)?;
+    serde_json::to_string(&response)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| CliError::generic(error.to_string()))
+}
+
 fn spawn_operation_error(error: std::io::Error, operation_id: &str) -> CliError {
     let mut mapped = control_error(error);
     let lower = mapped.message.to_ascii_lowercase();

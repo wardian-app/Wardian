@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 mod legacy_names;
+pub mod recovery;
 mod removal;
 pub(crate) use legacy_names::delete_removed_agent_claims;
 pub use legacy_names::{
@@ -186,6 +187,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
     legacy_names::migrate(conn)?;
+    recovery::migrate(conn)?;
     Ok(())
 }
 

@@ -55,6 +55,7 @@ enum ControlOperation {
     AgentResume,
     AgentModels,
     AgentSpawnAsync,
+    AgentSpawnRecover,
     AgentSpawnGet,
     AgentSpawnWait {
         requested: Duration,
@@ -459,6 +460,18 @@ pub fn agent_spawn_wait(
             operation_id: operation_id.to_string(),
             timeout_ms,
         }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+pub fn agent_spawn_recover(
+    request: wardian_core::agent_spawn::recovery::Request,
+) -> io::Result<wardian_core::agent_spawn::recovery::Finalized> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentSpawnRecover,
+        send_request(ControlRequest::AgentSpawnRecover { request }),
     )?;
     serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
 }
@@ -955,6 +968,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentResume
         | ControlOperation::AgentModels
         | ControlOperation::AgentSpawnAsync
+        | ControlOperation::AgentSpawnRecover
         | ControlOperation::AgentUpdate
         | ControlOperation::AgentClone
         | ControlOperation::AgentWorktreeEnable

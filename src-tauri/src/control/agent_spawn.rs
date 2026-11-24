@@ -154,6 +154,14 @@ pub(super) async fn dispatch(
             ok_json(&operation_response(operation, timed_out, deadline, app).await?)
         }
 
+        ControlRequest::AgentSpawnRecover { request } => {
+            let state = app.state::<AppState>();
+            let recovered = crate::spawn_operations::recovery::recover(&state, request)
+                .await
+                .map_err(|error| ControlError::coded(error.code, error.message))?;
+            ok_json(&recovered)
+        }
+
         _ => unreachable!("spawn dispatch receives only spawn requests"),
     }
 }

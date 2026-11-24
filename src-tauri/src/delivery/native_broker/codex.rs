@@ -617,6 +617,38 @@ impl NativeDeliveryBroker {
             .map_err(shared_error)
     }
 
+    /// Pins the exact already-bound idle owner for metadata finalization. Uses
+    /// retained observations only and sends no command to Codex.
+    pub(crate) async fn lock_codex_registration_for_recovery(
+        &self,
+        agent_id: &str,
+        terminal_generation: u64,
+        session: &str,
+        model: &str,
+    ) -> Option<(
+        tokio::sync::OwnedMutexGuard<()>,
+        Arc<crate::delivery::codex_shared::CodexSharedClient>,
+        u64,
+    )> {
+        // Recovery already owns the roster barrier. A busy native owner may
+        // be publishing into that roster, so fail closed without waiting.
+        let gate = self.owner_gate(agent_id).await.try_lock_owned().ok()?;
+        let handle = self.sessions.lock().await.get(agent_id)?.clone();
+        let owner = handle.shared_codex?;
+        let receipt = owner.client.receipt("owner_ready").ok()?;
+        if handle.provider != "codex"
+            || handle.codex_tui_runtime_generation != Some(terminal_generation)
+            || receipt.wardian_agent_id != agent_id
+            || receipt.generation != handle.generation
+            || receipt.provider_session_id != session
+            || owner.attachment.model_override.as_deref() != Some(model)
+            || !owner.client.recovery_thread_is_idle(session)
+        {
+            return None;
+        }
+        Some((gate, owner.client.clone(), handle.generation))
+    }
+
     /// Clone the current generation's exact client without retaining AppState or
     /// a registry lock while waiting for the admitted turn's final result.
     /// This never creates an owner or follows a replacement generation.

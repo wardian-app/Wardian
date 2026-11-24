@@ -977,6 +977,15 @@ impl CodexSharedClient {
         })
     }
 
+    pub(crate) fn recovery_thread_is_idle(&self, session: &str) -> bool {
+        let observation = self.observation.borrow();
+        observation.thread_id.as_deref() == Some(session)
+            && matches!(
+                observation.activity(),
+                CodexTurnActivity::Idle(_) | CodexTurnActivity::IdleWithoutTurn
+            )
+    }
+
     /// Append genuine host-delivered peer context with no fabricated model tool call.
     pub async fn push(&self, context: Value) -> Result<CodexSharedReceipt, CodexSharedError> {
         let mut receipt = self.receipt("provider_accepted")?;

@@ -378,6 +378,18 @@ pub fn load_leases_checked() -> Result<Vec<ConversationLease>, String> {
     Ok(file.leases)
 }
 
+/// Run a read-only inspection while the ordinary cross-process lease writers
+/// are excluded. The callback must not acquire a conversation lease.
+pub(crate) fn inspect_leases_locked<T>(
+    inspect: impl FnOnce(&[ConversationLease]) -> T,
+) -> Result<T, String> {
+    let _process_guard = LEASE_FILE_LOCK
+        .lock()
+        .map_err(|_| "conversation lease lock poisoned".to_string())?;
+    let _file_guard = acquire_lease_file_lock()?;
+    Ok(inspect(&load_leases_checked()?))
+}
+
 pub fn save_leases(leases: &[ConversationLease]) -> std::io::Result<()> {
     let path = lease_path()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no wardian home"))?;

@@ -439,9 +439,8 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
         request @ (ControlRequest::AgentSpawn { .. }
         | ControlRequest::AgentSpawnAsync { .. }
         | ControlRequest::AgentSpawnOperationGet { .. }
-        | ControlRequest::AgentSpawnOperationWait { .. }) => {
-            agent_spawn::dispatch(request, app).await
-        }
+        | ControlRequest::AgentSpawnOperationWait { .. }
+        | ControlRequest::AgentSpawnRecover { .. }) => agent_spawn::dispatch(request, app).await,
 
         ControlRequest::AgentUpdate {
             target,

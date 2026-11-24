@@ -593,6 +593,21 @@ roster discrepancy; it does not promise provider input readiness.
 the roster and operation status before taking further action; a new key would
 create a separate spawn.
 
+For a Codex attempt that already reached live registration, the local desktop
+owner can finalize the durable metadata. Supply the exact operation, attempt,
+and configured model from the original operation evidence.
+
+```bash
+wardian agent spawn-recover <operation-id> --expected-attempt <attempt-id> --expected-model <model> --action finalize-registered
+```
+
+The desktop must still own the same idle native runtime and have a matching
+saved roster, SQLite summary, and name claim. The command preserves the
+original request and attempt evidence. `--action launch-if-absent` returns a
+typed blocker for these legacy uncertain attempts because their records
+cannot establish that the provider never took effect. Recovery uses the
+matching CLI and desktop control endpoint.
+
 Legacy spawn, clone, or rename can report `[agent-name-ownership-pending]`
 after publication. The error includes the stable agent and attempt IDs. Keep
 those IDs for metadata repair. The published agent and its reserved name stay
