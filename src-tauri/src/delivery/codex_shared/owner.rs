@@ -917,7 +917,6 @@ async fn wait_for_socket(
     mut observe_backfill: impl FnMut(tokio::time::Instant) -> bool,
 ) -> SocketWaitOutcome {
     let hard_deadline = deadline + MAX_BACKFILL_EXTENSION;
-    let mut extended = false;
     loop {
         match child_liveness() {
             ChildLiveness::Alive => {}
@@ -925,20 +924,22 @@ async fn wait_for_socket(
             ChildLiveness::Unavailable => return SocketWaitOutcome::ChildStatusUnavailable,
         }
         let now = tokio::time::Instant::now();
-        if extended && now >= hard_deadline {
+        if now >= hard_deadline {
             return SocketWaitOutcome::TimedOut;
         }
         if socket_presence(socket) == SocketPresence::Present {
             return SocketWaitOutcome::Ready;
         }
         let progressing = observe_backfill(now);
-        if now >= deadline {
-            if now >= hard_deadline || !progressing {
-                return SocketWaitOutcome::TimedOut;
-            }
-            extended = true;
+        if now >= deadline && !progressing {
+            return SocketWaitOutcome::TimedOut;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let next_deadline = if now < deadline {
+            deadline
+        } else {
+            hard_deadline
+        };
+        tokio::time::sleep_until((now + Duration::from_millis(50)).min(next_deadline)).await;
     }
 }
 

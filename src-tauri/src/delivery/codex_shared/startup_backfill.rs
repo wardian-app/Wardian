@@ -38,15 +38,32 @@ enum BackfillRow {
     Complete(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DatabaseIdentity {
+    volume: u32,
+    file_index: u64,
+}
+
+struct Checkpoint {
+    database: DatabaseIdentity,
+    row: BackfillRow,
+}
+
 #[derive(Default)]
 struct Progress {
+    database: Option<DatabaseIdentity>,
     baseline: Option<String>,
     last_advance: Option<Instant>,
     advances: u32,
 }
 
 impl Progress {
-    fn observe(&mut self, row: Option<BackfillRow>, sampled_at: Instant) {
+    fn observe(&mut self, checkpoint: Option<Checkpoint>, sampled_at: Instant) {
+        // A new file at the same path cannot continue this launch's evidence.
+        let row = checkpoint.and_then(|checkpoint| {
+            let database = self.database.get_or_insert(checkpoint.database);
+            (*database == checkpoint.database).then_some(checkpoint.row)
+        });
         match (row, self.baseline.as_ref()) {
             (Some(BackfillRow::Running(cursor)), None) => self.baseline = Some(cursor),
             (Some(BackfillRow::Running(cursor)), Some(previous)) if &cursor > previous => {
@@ -71,7 +88,7 @@ impl Progress {
 #[derive(Default)]
 pub(super) struct BackfillProbe {
     home: Option<PathBuf>,
-    pending: Option<JoinHandle<Option<BackfillRow>>>,
+    pending: Option<JoinHandle<Option<Checkpoint>>>,
     sampled_at: Option<Instant>,
     progress: Progress,
 }
@@ -116,11 +133,11 @@ impl BackfillProbe {
     }
 }
 
-fn read_checkpoint(home: &Path) -> Option<BackfillRow> {
+fn read_checkpoint(home: &Path) -> Option<Checkpoint> {
     // Hold the direct, single-link files through the read. In particular, never
     // follow a substituted file or let SQLite create missing WAL sidecars.
     let path = home.join(DATABASE);
-    let _database = private_file(&path)?;
+    let (_database_file, database) = private_file(&path)?;
     let _wal = private_file(&home.join(WAL))?;
     let _shm = private_file(&home.join(SHM))?;
     let connection = Connection::open_with_flags(
@@ -137,14 +154,15 @@ fn read_checkpoint(home: &Path) -> Option<BackfillRow> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok()?;
-    match status.as_str() {
-        "running" => Some(BackfillRow::Running(cursor)),
-        "complete" => Some(BackfillRow::Complete(cursor)),
-        _ => None,
-    }
+    let row = match status.as_str() {
+        "running" => BackfillRow::Running(cursor),
+        "complete" => BackfillRow::Complete(cursor),
+        _ => return None,
+    };
+    Some(Checkpoint { database, row })
 }
 
-fn private_file(path: &Path) -> Option<File> {
+fn private_file(path: &Path) -> Option<(File, DatabaseIdentity)> {
     let file = OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
@@ -157,27 +175,57 @@ fn private_file(path: &Path) -> Option<File> {
         return None;
     }
     let info = unsafe { info.assume_init() };
-    (info.nNumberOfLinks == 1
-        && info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) == 0)
-        .then_some(file)
+    if info.nNumberOfLinks != 1
+        || info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0
+    {
+        return None;
+    }
+    let identity = DatabaseIdentity {
+        volume: info.dwVolumeSerialNumber,
+        file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    };
+    Some((file, identity))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn open_fixture(path: &Path, cursor: &str) -> Connection {
+        let writer = Connection::open(path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE backfill_state
+                   (id INTEGER PRIMARY KEY, status TEXT, last_watermark TEXT);",
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO backfill_state VALUES (1, 'running', ?1)",
+                [cursor],
+            )
+            .unwrap();
+        writer
+    }
+
     #[test]
     fn only_strictly_advancing_running_checkpoints_renew_grace() {
         let now = Instant::now();
         let mut progress = Progress::default();
-        let running = |cursor: &str| Some(BackfillRow::Running(cursor.into()));
+        let database = DatabaseIdentity {
+            volume: 0,
+            file_index: 0,
+        };
+        let sample = |row| Some(Checkpoint { database, row });
+        let running = |cursor: &str| sample(BackfillRow::Running(cursor.into()));
         progress.observe(running("a"), now);
         assert!(!progress.recent(now));
         progress.observe(running("b"), now);
         assert!(progress.recent(now));
         let expired = now + PROGRESS_WINDOW;
         progress.observe(running("b"), expired);
-        progress.observe(Some(BackfillRow::Complete("c".into())), expired);
+        progress.observe(sample(BackfillRow::Complete("c".into())), expired);
         assert!(!progress.recent(expired));
         progress.observe(running("c"), expired);
         assert!(progress.recent(expired));
@@ -211,7 +259,7 @@ mod tests {
         ).unwrap();
         assert!(matches!(
             read_checkpoint(home),
-            Some(BackfillRow::Running(cursor)) if cursor == "sessions/synthetic"
+            Some(Checkpoint { row: BackfillRow::Running(cursor), .. }) if cursor == "sessions/synthetic"
         ));
         let other_link = home.join("other-link");
         fs::hard_link(&database, &other_link).unwrap();
@@ -219,5 +267,77 @@ mod tests {
         fs::remove_file(other_link).unwrap();
         drop(writer);
         assert!(read_checkpoint(home).is_none());
+    }
+
+    #[test]
+    fn replacement_database_cannot_inherit_progress_from_the_original() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let database = home.join(DATABASE);
+        let now = Instant::now();
+        let mut progress = Progress::default();
+        let writer = open_fixture(&database, "a");
+        progress.observe(read_checkpoint(home), now);
+        writer
+            .execute("UPDATE backfill_state SET last_watermark = 'b'", [])
+            .unwrap();
+        progress.observe(read_checkpoint(home), now);
+        assert!(progress.recent(now));
+        drop(writer);
+        fs::rename(&database, home.join("previous.sqlite")).unwrap();
+        let _replacement = open_fixture(&database, "c");
+        progress.observe(read_checkpoint(home), now);
+        assert!(!progress.recent(now));
+        assert_eq!(progress.advances, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_socket_requires_fresh_progress_in_the_private_index() {
+        use super::super::{observe_socket_wait, ChildLiveness, SocketWaitOutcome};
+
+        for (advance_at, expected) in [
+            (None, SocketWaitOutcome::TimedOut),
+            (Some(2), SocketWaitOutcome::TimedOut),
+            (Some(20), SocketWaitOutcome::Ready),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let home = home.path();
+            let writer = open_fixture(&home.join(DATABASE), "a");
+            let socket = home.join("control.sock");
+            let started = Instant::now();
+            let deadline = started + Duration::from_secs(25);
+            let mut next_sample = started;
+            let mut progress = Progress::default();
+            let (_, observed) = tokio::join!(
+                async {
+                    if let Some(at) = advance_at {
+                        tokio::time::sleep_until(started + Duration::from_secs(at)).await;
+                        writer
+                            .execute("UPDATE backfill_state SET last_watermark = 'b'", [])
+                            .unwrap();
+                    }
+                    tokio::time::sleep_until(deadline + Duration::from_secs(1)).await;
+                    writer
+                        .execute("UPDATE backfill_state SET status = 'complete'", [])
+                        .unwrap();
+                    tokio::time::sleep_until(deadline + Duration::from_secs(2)).await;
+                    fs::write(&socket, b"presence fixture").unwrap();
+                },
+                observe_socket_wait(
+                    &socket,
+                    deadline,
+                    std::future::pending(),
+                    || ChildLiveness::Alive,
+                    |now| {
+                        if now >= next_sample {
+                            progress.observe(read_checkpoint(home), now);
+                            next_sample = now + Duration::from_secs(1);
+                        }
+                        progress.recent(now)
+                    },
+                )
+            );
+            assert_eq!(observed.outcome, expected, "advance at {advance_at:?}");
+        }
     }
 }

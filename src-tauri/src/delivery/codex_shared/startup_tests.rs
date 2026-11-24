@@ -185,6 +185,82 @@ async fn loss_of_backfill_progress_ends_grace_before_the_hard_limit() {
     assert!(tokio::time::Instant::now() < loss + Duration::from_secs(1));
 }
 
+#[tokio::test(start_paused = true)]
+async fn socket_present_after_hard_limit_is_rejected_even_if_wait_was_not_polled() {
+    use std::future::Future;
+    use std::task::Poll;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("control.sock");
+    let waiting = owner::observe_socket_wait(
+        &socket,
+        tokio::time::Instant::now() + STARTUP_TIMEOUT,
+        std::future::pending(),
+        || owner::ChildLiveness::Alive,
+        |_| true,
+    );
+    tokio::pin!(waiting);
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    // Suspend the wait future across both deadlines before the path appears.
+    tokio::time::advance(STARTUP_TIMEOUT + Duration::from_secs(61)).await;
+    std::fs::write(&socket, b"late presence fixture").unwrap();
+    let observed = waiting.await;
+    assert_eq!(observed.socket_presence, owner::SocketPresence::Present);
+    assert_eq!(observed.outcome, owner::SocketWaitOutcome::TimedOut);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_and_child_exit_preempt_socket_readiness_during_grace() {
+    use std::cell::Cell;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("control.sock");
+    for (cancel_attempt, expected) in [
+        (true, owner::SocketWaitOutcome::Cancelled),
+        (false, owner::SocketWaitOutcome::ChildExited),
+    ] {
+        let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+        let child_alive = Cell::new(true);
+        let (cancel, cancelled) = oneshot::channel::<()>();
+        let mut cancel = Some(cancel);
+        let (_, observed) = tokio::join!(
+            async {
+                tokio::time::sleep_until(deadline + Duration::from_secs(2)).await;
+                std::fs::write(&socket, b"presence fixture").unwrap();
+                if cancel_attempt {
+                    cancel.take().unwrap().send(()).unwrap();
+                } else {
+                    child_alive.set(false);
+                }
+            },
+            async {
+                owner::observe_socket_wait(
+                    &socket,
+                    deadline,
+                    async {
+                        let _ = cancelled.await;
+                    },
+                    || {
+                        if child_alive.get() {
+                            owner::ChildLiveness::Alive
+                        } else {
+                            owner::ChildLiveness::Exited
+                        }
+                    },
+                    |_| true,
+                )
+                .await
+            }
+        );
+        assert_eq!(observed.outcome, expected);
+        std::fs::remove_file(&socket).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn socket_wait_yields_to_caller_cancellation_without_advancing_startup() {
     use std::future::Future;
