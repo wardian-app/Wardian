@@ -256,9 +256,31 @@ impl CodexAttachmentCompletion {
         self.stop_registration = registration;
     }
 
-    pub(crate) async fn run(mut self) -> Result<(), String> {
-        let state_app = self.app.clone();
-        let state = state_app.state::<AppState>();
+    pub(crate) async fn run(
+        mut self,
+        publication: Arc<super::RegistrationPublicationState>,
+    ) -> Result<Self, String> {
+        let result = if publication.is_recovery() {
+            tokio::select! {
+                biased;
+                _ = publication.wait_for_recovery_lease_loss() => Err("Codex recovery lost its exact registration lease".into()),
+                result = self.attach(&publication) => result,
+            }
+        } else {
+            self.attach(&publication).await
+        };
+        match result {
+            Ok(()) => Ok(self),
+            Err(error) => Err(self
+                .rollback_after_failure(error, publication.is_recovery())
+                .await),
+        }
+    }
+
+    async fn attach(
+        &mut self,
+        publication: &super::RegistrationPublicationState,
+    ) -> Result<(), String> {
         let liveness_app = self.app.clone();
         let liveness_session = self.session_id.clone();
         let liveness_runtime_generation = self.runtime_generation;
@@ -326,7 +348,7 @@ impl CodexAttachmentCompletion {
             .await;
         if let Err(error) = finalized {
             let failure = format_codex_attachment_error(error.to_string(), &self.watch_state);
-            return self.fail_with_rollback(failure).await;
+            return Err(failure);
         }
 
         if !self.codex_reader_alive.load(Ordering::Acquire) {
@@ -334,7 +356,7 @@ impl CodexAttachmentCompletion {
                 "captured Codex PTY reader exited during finalization",
                 &self.watch_state,
             );
-            return self.fail_with_rollback(failure).await;
+            return Err(failure);
         }
 
         let observations = match self
@@ -345,13 +367,15 @@ impl CodexAttachmentCompletion {
             Ok(observations) => observations,
             Err(error) => {
                 let failure = format_codex_attachment_error(error.to_string(), &self.watch_state);
-                return self.fail_with_rollback(failure).await;
+                return Err(failure);
             }
         };
 
-        if let Err(error) = self.promote_after_attachment(&state).await {
+        let state_app = self.app.clone();
+        let state = state_app.state::<AppState>();
+        if let Err(error) = self.promote_after_attachment(&state, publication).await {
             let failure = format_codex_attachment_error(error, &self.watch_state);
-            return self.fail_with_rollback(failure).await;
+            return Err(failure);
         }
         super::codex_shared::observe_turn_activity(
             self.app.clone(),
@@ -363,11 +387,16 @@ impl CodexAttachmentCompletion {
         Ok(())
     }
 
-    async fn promote_after_attachment(&mut self, state: &AppState) -> Result<(), String> {
+    async fn promote_after_attachment(
+        &mut self,
+        state: &AppState,
+        publication: &super::RegistrationPublicationState,
+    ) -> Result<(), String> {
         let _lifecycle = state.lock_agent_lifecycle(&self.session_id).await;
         if !self.codex_reader_alive.load(Ordering::Acquire) {
             return Err("captured Codex PTY reader exited during finalization".into());
         }
+        publication.with_recovery_publication(|| ())?;
         persist_codex_identity(
             state,
             &self.session_id,
@@ -383,6 +412,7 @@ impl CodexAttachmentCompletion {
         )
         .await?;
 
+        publication.with_recovery_publication(|| ())?;
         let readiness = state
             .interactions
             .record_provider_input_state(
@@ -417,14 +447,16 @@ impl CodexAttachmentCompletion {
         let app = self.app.clone();
         let session_id = self.session_id.clone();
         let current_status = self.current_status.clone();
-        complete_codex_attachment(
-            &mut promotion_generation,
-            self.runtime_generation,
-            &self.codex_attachment_ready,
-            &self.codex_reader_alive,
-            |_| Ok(()),
-            || super::set_agent_status(&app, &session_id, &current_status, "Idle"),
-        )?;
+        publication.with_recovery_publication(|| {
+            complete_codex_attachment(
+                &mut promotion_generation,
+                self.runtime_generation,
+                &self.codex_attachment_ready,
+                &self.codex_reader_alive,
+                |_| Ok(()),
+                || super::set_agent_status(&app, &session_id, &current_status, "Idle"),
+            )
+        })??;
         assert_live_codex_incarnation(
             state,
             &self.session_id,
@@ -439,7 +471,11 @@ impl CodexAttachmentCompletion {
         Ok(())
     }
 
-    async fn fail_with_rollback(mut self, error: String) -> Result<(), String> {
+    pub(crate) async fn rollback_after_failure(
+        mut self,
+        error: String,
+        captured_only: bool,
+    ) -> String {
         self.codex_attachment_ready.store(false, Ordering::Release);
         let owner_cleanup = self.dispose_owner().await.err();
         let registration = self.stop_registration.take();
@@ -450,6 +486,7 @@ impl CodexAttachmentCompletion {
             self.runtime_generation,
             registration,
             &error,
+            captured_only,
         )
         .await
         .err();
@@ -460,7 +497,7 @@ impl CodexAttachmentCompletion {
         if let Some(rollback) = rollback {
             message.push_str(&format!("; provisional rollback failed: {rollback}"));
         }
-        Err(message)
+        message
     }
 
     async fn dispose_owner(&mut self) -> Result<(), String> {
@@ -490,6 +527,7 @@ impl CodexAttachmentCompletion {
                     self.runtime_generation,
                     Some(registration),
                     "Codex onboarding cancelled",
+                    false,
                 )
                 .await
             });

@@ -265,7 +265,10 @@ struct RecoveryLeaseHandoff {
 /// Registration may put a runtime in the map before its roster and provider
 /// attachment are committed. Cancellation and errors must stop lease renewal.
 #[derive(Default)]
-pub(crate) struct RegistrationPublicationState(std::sync::atomic::AtomicU8);
+pub(crate) struct RegistrationPublicationState {
+    phase: std::sync::atomic::AtomicU8,
+    recovery: Option<recovery_publication::RecoveryPublication>,
+}
 
 impl RegistrationPublicationState {
     const PENDING: u8 = 0;
@@ -273,7 +276,12 @@ impl RegistrationPublicationState {
     const FAILED: u8 = 2;
 
     pub(crate) fn commit(&self) {
-        let _ = self.0.compare_exchange(
+        debug_assert!(self.recovery.is_none());
+        self.set_committed();
+    }
+
+    fn set_committed(&self) {
+        let _ = self.phase.compare_exchange(
             Self::PENDING,
             Self::COMMITTED,
             std::sync::atomic::Ordering::AcqRel,
@@ -282,7 +290,12 @@ impl RegistrationPublicationState {
     }
 
     pub(crate) fn fail(&self) {
-        let _ = self.0.compare_exchange(
+        let _recovery_commit = self.recovery.as_ref().map(|recovery| recovery.lock());
+        self.set_failed();
+    }
+
+    fn set_failed(&self) {
+        let _ = self.phase.compare_exchange(
             Self::PENDING,
             Self::FAILED,
             std::sync::atomic::Ordering::AcqRel,
@@ -291,9 +304,12 @@ impl RegistrationPublicationState {
     }
 
     fn state(&self) -> u8 {
-        self.0.load(std::sync::atomic::Ordering::Acquire)
+        self.phase.load(std::sync::atomic::Ordering::Acquire)
     }
 }
+
+#[path = "spawn/recovery_publication.rs"]
+mod recovery_publication;
 
 #[cfg(test)]
 impl RegistrationPublicationState {
@@ -2295,14 +2311,22 @@ fn release_provider_spawn_lease_after_readiness<R: tauri::Runtime>(
             if last_renewal.elapsed() >= PROVIDER_SPAWN_LEASE_HEARTBEAT {
                 let now = chrono::Utc::now();
                 let renewed = if let Some(native_id) = &recovery_native {
-                    wardian_core::conversation_lease::refresh_codex_recovery_lease_persisted(
-                        &owner,
-                        PROVIDER_SPAWN_LEASE_DURATION,
-                        CodexRecoveryLeaseScope::Exact {
-                            agent_id: &session_id,
-                            native_id,
-                        },
-                    )
+                    if let Some(publication) = gate
+                        .registration
+                        .as_ref()
+                        .filter(|state| state.is_recovery())
+                    {
+                        publication.renew_recovery_lease().map(|()| true)
+                    } else {
+                        wardian_core::conversation_lease::refresh_codex_recovery_lease_persisted(
+                            &owner,
+                            PROVIDER_SPAWN_LEASE_DURATION,
+                            CodexRecoveryLeaseScope::Exact {
+                                agent_id: &session_id,
+                                native_id,
+                            },
+                        )
+                    }
                 } else {
                     wardian_core::conversation_lease::renew_lease_owner_persisted(
                         &owner,
@@ -2395,6 +2419,39 @@ async fn wake_after_startup_lease_release(
     {
         (readiness.dispatch)();
     }
+}
+
+#[cfg(test)]
+pub(crate) fn start_recovery_registration_watcher_fixture<R: tauri::Runtime>(
+    lease: crate::commands::agent::RecoveryRegistrationLease,
+    config: &AgentConfig,
+    app: AppHandle<R>,
+    current_status: std::sync::Arc<std::sync::Mutex<String>>,
+    generation: u64,
+    publication: std::sync::Arc<RegistrationPublicationState>,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<Result<(), String>>,
+) {
+    let (result, handoff) = tokio::sync::oneshot::channel();
+    let watcher = release_provider_spawn_lease_after_readiness(
+        lease.lease,
+        current_status,
+        config.session_id.clone(),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        app,
+        generation,
+        SpawnPublicationGate {
+            registration: Some(publication),
+            recovery_heartbeat: Some(lease.heartbeat),
+            recovery_handoff: Some(RecoveryLeaseHandoff {
+                native_id: provider_spawn_session_identity(config).to_owned(),
+                result,
+            }),
+            ..Default::default()
+        },
+    );
+    (watcher, handoff)
 }
 
 fn pty_status_event_policy_for_provider(provider_name: &str) -> ProviderStatusEventPolicy {

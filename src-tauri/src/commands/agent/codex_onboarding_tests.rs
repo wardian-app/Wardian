@@ -102,6 +102,7 @@ fn operation_completion_uses_the_original_registration_incarnation() {
         config: original.config.lock().unwrap().clone(),
         config_handle: original.config.clone(),
         runtime_generation: original.runtime_generation,
+        recovery: None,
     };
     assert!(registered.matches(&original));
     let mut replacement = test_active_agent("planned-agent");
@@ -639,6 +640,25 @@ async fn provisional_commit_releases_roster_maps_while_barrier_is_busy() {
     assert!(persisted
         .iter()
         .any(|config| config.session_id == "claude-live"));
+}
+
+#[tokio::test]
+async fn recovery_lease_loss_rollback_leaves_replacement_generation_untouched() {
+    let (home, state) = seeded_detach_state().await;
+    let id = "codex-provisional";
+    let captured = crate::manager::codex_stop::prepare_stop(home.path(), id).unwrap();
+    let replacement = detachable_agent(id, "codex", Some(8));
+    let replacement_config = replacement.config.clone();
+    state.agents.lock().await.insert(id.into(), replacement);
+    assert!(matches!(
+        super::detach_provisional_codex(&state, id, 7, captured).await,
+        Ok(None)
+    ));
+    let agents = state.agents.lock().await;
+    let current = agents.get(id).unwrap();
+    assert_eq!(current.runtime_generation, Some(8));
+    assert!(Arc::ptr_eq(&current.config, &replacement_config));
+    assert!(current.child_process.is_some());
 }
 
 #[tokio::test]

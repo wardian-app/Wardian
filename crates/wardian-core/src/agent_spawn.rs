@@ -532,6 +532,54 @@ pub fn mark_registered(
     attempt_id: &str,
     provider_session_id: Option<&str>,
 ) -> Result<bool, String> {
+    mark_registered_if_active(operation_id, attempt_id, provider_session_id, |_, _| {
+        Ok(true)
+    })
+    .map(|committed| committed.unwrap_or(false))
+}
+
+/// Verify the captured Codex acquisition under the lease-file lock, then hold
+/// that exclusion through the ordinary registration and name-claim commit.
+/// None means the exact lease cannot authorize publication.
+pub fn mark_codex_recovery_registered(
+    operation_id: &str,
+    attempt_id: &str,
+    owner: &crate::conversation_lease::ConversationLeaseOwner,
+    agent_id: &str,
+    native_id: &str,
+) -> Result<Option<bool>, String> {
+    match crate::conversation_lease::with_exact_codex_recovery_lease(
+        owner,
+        agent_id,
+        native_id,
+        |expiry| {
+            mark_registered_if_active(
+                operation_id,
+                attempt_id,
+                Some(native_id),
+                |tx, planned_agent| {
+                    let exact: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM agent_spawn_codex_launch_audit
+                     WHERE operation_id=?1 AND accepted_attempt_id=?2 AND lease_acquisition_id=?3)",
+                        params![operation_id, attempt_id, owner.acquisition_id],
+                        |row| row.get(0),
+                    )?;
+                    Ok(exact && planned_agent == agent_id && expiry > chrono::Utc::now())
+                },
+            )
+        },
+    ) {
+        Ok(Some(result)) => result,
+        Ok(None) | Err(_) => Ok(None),
+    }
+}
+
+fn mark_registered_if_active(
+    operation_id: &str,
+    attempt_id: &str,
+    provider_session_id: Option<&str>,
+    still_active: impl FnOnce(&Connection, &str) -> rusqlite::Result<bool>,
+) -> Result<Option<bool>, String> {
     crate::db::get_db_conn(|conn| {
         let tx = conn.unchecked_transaction()?;
         let Some((agent_id, name, provider, class, expected_provider_session_id, state)) = tx
@@ -552,13 +600,13 @@ pub fn mark_registered(
             .optional()?
         else {
             tx.commit()?;
-            return Ok(false);
+            return Ok(Some(false));
         };
         if state != "launching"
             || expected_provider_session_id.as_deref() != provider_session_id
         {
             tx.commit()?;
-            return Ok(false);
+            return Ok(Some(false));
         }
         let persisted = tx
             .query_row(
@@ -577,7 +625,7 @@ pub fn mark_registered(
                 || persisted_class.as_deref() != Some(class.as_str())
         }) {
             tx.commit()?;
-            return Ok(false);
+            return Ok(Some(false));
         }
         let owned_claim: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_name_claims
@@ -587,7 +635,7 @@ pub fn mark_registered(
         )?;
         if !owned_claim {
             tx.commit()?;
-            return Ok(false);
+            return Ok(Some(false));
         }
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let changed = tx.execute(
@@ -609,8 +657,11 @@ pub fn mark_registered(
                 .into());
             }
         }
+        if changed == 1 && !still_active(&tx, &agent_id)? {
+            return Ok(None);
+        }
         tx.commit()?;
-        Ok(changed == 1)
+        Ok(Some(changed == 1))
     })
     .map_err(|error| error.to_string())
 }
@@ -1292,6 +1343,29 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        assert_eq!(
+            mark_registered_if_active(
+                &operation_id,
+                &attempt,
+                Some("provider-session"),
+                |_, _| Ok(false)
+            )
+            .unwrap(),
+            None,
+        );
+        assert_eq!(
+            get(&operation_id).unwrap().unwrap().state,
+            AgentSpawnState::Launching
+        );
+        let owner = crate::db::get_db_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT owner_kind FROM agent_name_claims WHERE session_name = 'Registered'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?)
+        })
+        .unwrap();
+        assert_eq!(owner, "operation");
         assert!(!mark_registered(
             &operation_id,
             &uuid::Uuid::new_v4().to_string(),

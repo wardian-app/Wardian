@@ -179,10 +179,26 @@ async fn spawn_recovery_seals_only_a_proved_startup_pre_effect_cut() {
 
 #[tokio::test]
 async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acquisition() {
+    exercise_guarded_registration(None).await;
+}
+
+#[tokio::test]
+async fn spawn_recovery_expired_after_handoff_cannot_commit_registration() {
+    exercise_guarded_registration(Some("expired")).await;
+}
+
+#[tokio::test]
+async fn spawn_recovery_replaced_after_handoff_signals_loss_and_cannot_commit_registration() {
+    exercise_guarded_registration(Some("replaced")).await;
+}
+
+async fn exercise_guarded_registration(lease_loss: Option<&str>) {
     use crate::commands::agent::{
-        bootstrap_prepared_agent_spawn, prepare_durable_agent_spawn, RegisteredAgentSpawn,
+        bootstrap_prepared_agent_spawn, prepare_durable_agent_spawn, RecoveryPendingRegistration,
+        RecoveryRegistrationLease, RegisteredAgentSpawn,
     };
     use crate::spawn_operations::{finish_prepared_operation, WorkerOutcomeGuard};
+    use tauri::Manager;
 
     struct ScopedEnv(&'static str, Option<std::ffi::OsString>);
     impl ScopedEnv {
@@ -244,7 +260,9 @@ async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acqu
     let (crash_request, _) = create_witness("guarded-crash");
     let (expired_request, expired_config) = create_witness("guarded-expired");
     agent_spawn::recover_after_owner_acquired().unwrap();
-    let state = AppState::new();
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
     state.agent_roster_restored.store(true, Ordering::Release);
     let agent_id = &initial_config.session_id;
     let exact_identity = recovery::plan_launch(&request).unwrap();
@@ -343,6 +361,11 @@ async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acqu
     let launch_state = &state;
     let lease_owner = &owner;
     let calls = &launch_calls;
+    let app_handle = app.handle();
+    let handoff_probe = std::cell::RefCell::new(None);
+    let probe = &handoff_probe;
+    let replacement_probe = std::cell::RefCell::new(None);
+    let replacement = &replacement_probe;
     let worker = finish_prepared_operation(
         &state,
         WorkerOutcomeGuard {
@@ -389,7 +412,7 @@ async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acqu
                     .as_deref(),
                 Some(native_id)
             );
-            let (mut registration_lease, ()) =
+            let (registration_lease, ()) =
                 crate::manager::spawn::prepare_codex_owner_after_reservation(
                     &prepared.config,
                     Some(inherited.lease),
@@ -423,24 +446,74 @@ async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acqu
                 created_at: None,
             })
             .unwrap();
-            let active = crate::restored_agent_without_process(
+            let mut active = crate::restored_agent_without_process(
                 prepared.config.clone(),
                 "Idle",
                 "fixture".into(),
                 None,
                 None,
             );
+            active.runtime_generation = Some(7);
+            let publication =
+                std::sync::Arc::new(crate::manager::RegistrationPublicationState::for_recovery(
+                    lease_owner.clone(),
+                    agent_id.clone(),
+                    native_id.to_owned(),
+                ));
+            let (watcher, handoff) =
+                crate::manager::spawn::start_recovery_registration_watcher_fixture(
+                    RecoveryRegistrationLease {
+                        lease: registration_lease,
+                        heartbeat: inherited.heartbeat,
+                    },
+                    &prepared.config,
+                    app_handle.clone(),
+                    active.current_status.clone(),
+                    7,
+                    publication.clone(),
+                );
+            handoff.await.unwrap().unwrap();
+            assert!(!publication.recovery_lease_lost());
             let registered = RegisteredAgentSpawn {
                 config: prepared.config,
                 config_handle: active.config.clone(),
                 runtime_generation: active.runtime_generation,
+                recovery: Some(RecoveryPendingRegistration::fixture(publication.clone())),
             };
             launch_state
                 .agents
                 .lock()
                 .await
                 .insert(agent_id.clone(), active);
-            registration_lease.release().unwrap();
+            if let Some(loss) = lease_loss {
+                let mut leases = wardian_core::conversation_lease::load_leases_checked().unwrap();
+                let entry = leases
+                    .iter_mut()
+                    .find(|lease| &lease.owner() == lease_owner)
+                    .unwrap();
+                if loss == "expired" {
+                    entry.expires_at =
+                        (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+                } else {
+                    entry.acquisition_id = agent_spawn::new_operation_id();
+                    replacement.replace(Some(entry.clone()));
+                }
+                wardian_core::conversation_lease::save_leases(&leases).unwrap();
+                if loss == "replaced" {
+                    tokio::time::pause();
+                    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        publication.wait_for_recovery_lease_loss(),
+                    ).await.expect("the readiness watcher must signal lease loss while registration is pending");
+                    tokio::time::resume();
+                } else {
+                    // The next heartbeat has not observed this loss. The
+                    // synchronous success boundary must check the live file.
+                    assert!(!publication.recovery_lease_lost());
+                }
+            }
+            probe.replace(Some((watcher, publication)));
             Ok(registered)
         },
     );
@@ -448,7 +521,11 @@ async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acqu
     assert_eq!(launch_calls.get(), 1);
     assert_eq!(
         agent_spawn::get(&keys.0).unwrap().unwrap().state,
-        AgentSpawnState::Registered
+        if lease_loss.is_some() {
+            AgentSpawnState::OutcomeUnknown
+        } else {
+            AgentSpawnState::Registered
+        }
     );
     assert!(matches!(
         competing_result.err().unwrap().code,
@@ -458,6 +535,28 @@ async fn spawn_recovery_guarded_launch_materializes_once_and_retargets_same_acqu
         agent_spawn::plan(&keys.0).unwrap().unwrap().request,
         exact_identity.plan.request
     );
+    let (watcher, publication) = handoff_probe.into_inner().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), watcher)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(publication.recovery_lease_lost(), lease_loss.is_some());
+    let leases = wardian_core::conversation_lease::load_leases_checked().unwrap();
+    if let Some(replacement) = replacement_probe.into_inner() {
+        assert!(leases.contains(&replacement));
+    }
+    if lease_loss.is_some() {
+        assert!(agent_spawn::restore_is_excluded(agent_id).unwrap());
+        assert!(agent_spawn::queued_operation_ids().unwrap().is_empty());
+        assert_eq!(
+            admit_launch(&state, request).await.err().unwrap().code,
+            "spawn_recovery_witness_used"
+        );
+        return;
+    }
+    assert!(!leases.iter().any(|lease| lease.owner() == owner));
+    publication.renew_recovery_lease().unwrap();
+    assert!(!publication.recovery_lease_lost());
 
     let (expired, prepared, bootstrap) =
         admit_launch(&state, expired_request.clone()).await.unwrap();

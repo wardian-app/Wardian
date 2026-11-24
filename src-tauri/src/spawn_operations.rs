@@ -303,6 +303,7 @@ async fn finish_prepared_operation<F>(
 {
     let operation_id = &outcome_guard.operation_id;
     let attempt_id = &outcome_guard.attempt_id;
+    let guarded = recovery.is_some();
     let recovery_model = recovery.as_ref().and(prepared.config.model.clone());
     let operation_key = operation_id.clone();
     let attempt_key = attempt_id.clone();
@@ -354,20 +355,45 @@ async fn finish_prepared_operation<F>(
             return;
         }
     };
+    if guarded == registration.recovery.is_some()
+        && commit_spawn_registration(
+            state,
+            &registration,
+            recovery_model,
+            operation_id,
+            attempt_id,
+        )
+        .await
+    {
+        outcome_guard.terminal = true;
+    } else if let Some(recovery) = registration.recovery {
+        // Registration verification releases the lifecycle and roster guards
+        // before exact rollback can reacquire them.
+        recovery.cleanup_after_lease_loss().await;
+    }
+}
+
+async fn commit_spawn_registration(
+    state: &AppState,
+    registration: &RegisteredAgentSpawn,
+    recovery_model: Option<String>,
+    operation_id: &str,
+    attempt_id: &str,
+) -> bool {
     let agent = &registration.config;
 
     let _lifecycle = state.lock_agent_lifecycle(&agent.session_id).await;
     let _roster = match crate::manager::roster_io::acquire_roster_barrier().await {
         Ok(barrier) => barrier,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let agent = {
         let agents = state.agents.lock().await;
         let Some(active) = agents.get(&agent.session_id) else {
-            return;
+            return false;
         };
         if !registration.matches(active) {
-            return;
+            return false;
         }
         let config = active
             .config
@@ -380,10 +406,10 @@ async fn finish_prepared_operation<F>(
     if recovery_model.as_ref().is_some_and(|model| {
         agent.model.as_ref() != Some(model) || registration.config.model.as_ref() != Some(model)
     }) {
-        return;
+        return false;
     }
     let Some(home) = crate::utils::fs::get_wardian_home() else {
-        return;
+        return false;
     };
     let state_path = home.join("settings").join("state.json");
     let expected_session_id = agent.session_id.clone();
@@ -420,7 +446,7 @@ async fn finish_prepared_operation<F>(
     .await
     .unwrap_or(false);
     if !saved {
-        return;
+        return false;
     }
     let current = {
         let agents = state.agents.lock().await;
@@ -435,28 +461,40 @@ async fn finish_prepared_operation<F>(
         })
     };
     if !current {
-        return;
+        return false;
     }
-    let operation_key = operation_id.clone();
-    let attempt_key = attempt_id.clone();
+    let operation_key = operation_id.to_owned();
+    let attempt_key = attempt_id.to_owned();
     let provider_session_id = agent
         .resume_session
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .or(agent.fresh_provider_session_id.as_deref())
         .map(str::to_string);
+    let recovery_publication = registration
+        .recovery
+        .as_ref()
+        .map(|recovery| recovery.publication().clone());
     match tokio::task::spawn_blocking(move || {
         let _lifecycle = _lifecycle;
         let _roster = _roster;
-        wardian_core::agent_spawn::mark_registered(
-            &operation_key,
-            &attempt_key,
-            provider_session_id.as_deref(),
-        )
+        if let Some(publication) = recovery_publication {
+            publication.commit_recovery_registration(
+                &operation_key,
+                &attempt_key,
+                provider_session_id.as_deref(),
+            )
+        } else {
+            wardian_core::agent_spawn::mark_registered(
+                &operation_key,
+                &attempt_key,
+                provider_session_id.as_deref(),
+            )
+        }
     })
     .await
     {
-        Ok(Ok(true)) => outcome_guard.terminal = true,
+        Ok(Ok(true)) => return true,
         Ok(Ok(false)) => crate::manager::log_debug(&format!(
             "[WARDIAN] spawn operation {operation_id} registration did not match its durable plan"
         )),
@@ -467,6 +505,7 @@ async fn finish_prepared_operation<F>(
             "[WARDIAN] spawn operation {operation_id} registration worker failed: {error}"
         )),
     }
+    false
 }
 
 fn safe_preflight_error(error: &str) -> (&'static str, &'static str) {

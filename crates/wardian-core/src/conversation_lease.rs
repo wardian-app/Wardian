@@ -533,19 +533,58 @@ pub fn refresh_codex_recovery_lease_persisted(
     let _file_guard = acquire_lease_file_lock()?;
     let mut leases = load_leases_checked()?;
     let now = chrono::Utc::now();
-    let Some(index) = leases
-        .iter()
-        .position(|lease| lease_matches_owner(lease, owner))
-    else {
+    let Some((index, target)) = active_codex_recovery_lease(&leases, owner, scope, now) else {
         return Ok(false);
     };
+    let target = target.to_owned();
+    let lease = &mut leases[index];
+    lease.resume_session = target;
+    lease.heartbeat_at = now.to_rfc3339();
+    lease.expires_at = (now + duration).to_rfc3339();
+    save_leases(&leases)
+        .map_err(|error| format!("failed to save Codex recovery lease refresh: {error}"))?;
+    Ok(true)
+}
+
+/// Fence synchronous publication until its commit. The callback must not
+/// acquire a conversation lease.
+pub fn with_exact_codex_recovery_lease<T>(
+    owner: &ConversationLeaseOwner,
+    agent_id: &str,
+    native_id: &str,
+    publish: impl FnOnce(chrono::DateTime<chrono::Utc>) -> T,
+) -> Result<Option<T>, String> {
+    inspect_leases_locked(|leases| {
+        active_codex_recovery_lease(
+            leases,
+            owner,
+            CodexRecoveryLeaseScope::Exact {
+                agent_id,
+                native_id,
+            },
+            chrono::Utc::now(),
+        )
+        .and_then(|(index, _)| parse_rfc3339_utc(&leases[index].expires_at))
+        .map(publish)
+    })
+}
+
+fn active_codex_recovery_lease<'a>(
+    leases: &'a [ConversationLease],
+    owner: &ConversationLeaseOwner,
+    scope: CodexRecoveryLeaseScope<'a>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(usize, &'a str)> {
+    let index = leases
+        .iter()
+        .position(|lease| lease_matches_owner(lease, owner))?;
     let current = &leases[index];
     if current.owner_kind != "agent_lifecycle"
         || current.mode != "lifecycle_transition"
         || current.provider != "codex"
         || !parse_rfc3339_utc(&current.expires_at).is_some_and(|expiry| expiry > now)
     {
-        return Ok(false);
+        return None;
     }
     let target = match scope {
         CodexRecoveryLeaseScope::Current => current.resume_session.as_str(),
@@ -562,7 +601,7 @@ pub fn refresh_codex_recovery_lease_persisted(
         {
             native_id
         }
-        _ => return Ok(false),
+        _ => return None,
     };
     if leases.iter().enumerate().any(|(other_index, other)| {
         other_index != index
@@ -570,16 +609,9 @@ pub fn refresh_codex_recovery_lease_persisted(
                 || (other.mode == "uncertain_previous_provider"
                     && other.agent_id == current.agent_id))
     }) {
-        return Ok(false);
+        return None;
     }
-    let target = target.to_owned();
-    let lease = &mut leases[index];
-    lease.resume_session = target;
-    lease.heartbeat_at = now.to_rfc3339();
-    lease.expires_at = (now + duration).to_rfc3339();
-    save_leases(&leases)
-        .map_err(|error| format!("failed to save Codex recovery lease refresh: {error}"))?;
-    Ok(true)
+    Some((index, target))
 }
 
 /// Atomically retarget an exact active lifecycle acquisition to the provider
