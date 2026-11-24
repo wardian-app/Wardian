@@ -17,11 +17,16 @@ mod policy;
 #[cfg(test)]
 #[path = "owner_preparation_tests.rs"]
 mod preparation_tests;
+#[cfg(windows)]
+#[path = "startup_backfill.rs"]
+mod startup_backfill;
 #[path = "startup_resources.rs"]
 mod startup_resources;
 #[path = "owner_stop.rs"]
 pub(super) mod stop;
 pub use stop::CodexThreadExit;
+
+const MAX_BACKFILL_EXTENSION: Duration = Duration::from_secs(60);
 
 /// Phase durations for one owner startup.
 ///
@@ -45,6 +50,7 @@ pub(super) struct OwnerStartTimings {
     socket_wait_diagnostic: Option<SocketWaitDiagnostic>,
     socket_wait_resources: Value,
     socket_wait_job: Value,
+    socket_wait_backfill_advances: u32,
     proxy_connect: std::time::Duration,
     initialize: std::time::Duration,
     launch_model: std::time::Duration,
@@ -220,7 +226,7 @@ impl OwnerStartTimings {
 habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messaging_ms={} \
             socket_recovery_ms={} launch_config_ms={} child_spawn_ms={} \
             stderr_diagnostic={} socket_wait_ms={} \
-            socket_wait_diagnostic={} socket_wait_resources={} proxy_connect_ms={} initialize_ms={} launch_model_ms={} reviewer_checkpoint_ms={} socket_wait_job={}",
+            socket_wait_diagnostic={} socket_wait_resources={} proxy_connect_ms={} initialize_ms={} launch_model_ms={} reviewer_checkpoint_ms={} socket_wait_job={} socket_wait_backfill_advances={}",
             self.total.as_millis(),
             self.quiescent.as_millis(),
             self.habitat_workspace.as_millis(),
@@ -240,6 +246,7 @@ habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messagi
             self.launch_model.as_millis(),
             self.reviewer_checkpoint.as_millis(),
             self.socket_wait_job,
+            self.socket_wait_backfill_advances,
         ));
     }
 }
@@ -500,6 +507,8 @@ impl CodexSharedOwner {
                 .revalidate()
                 .map_err(CodexSharedError::unsupported)?;
         }
+        #[cfg(windows)]
+        let backfill_home = startup_backfill::cold_home(&codex_home);
         let child_spawn_at = std::time::Instant::now();
         #[cfg(windows)]
         let spawned =
@@ -536,15 +545,21 @@ impl CodexSharedOwner {
         let start = async {
             // A private socket must appear while our daemon is alive. No controller
             // RPC is retried, and a proxy handshake failure is final.
-            // Fix the original deadline before optional OS queries so sampling
-            // cannot extend the socket-wait budget.
+            // Fix the ordinary deadline before sampling. Only verified cold
+            // index progress can qualify this owner for the bounded grace period.
             let socket_deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
             let resources = startup_resources::StartupResourceObserver::start(&child);
+            #[cfg(windows)]
+            let mut backfill = startup_backfill::BackfillProbe::new(backfill_home);
             let socket_wait = observe_socket_wait(
                 &socket,
                 socket_deadline,
                 async { let _ = (&mut cancelled).await; },
                 || observe_child_liveness(&mut child),
+                #[cfg(windows)]
+                |now| backfill.poll(now),
+                #[cfg(not(windows))]
+                |_| false,
             )
             .await;
             timings.record_socket_wait(socket_wait);
@@ -552,6 +567,7 @@ impl CodexSharedOwner {
             #[cfg(windows)]
             {
                 timings.socket_wait_job = json!(job.startup_accounting());
+                timings.socket_wait_backfill_advances = backfill.advances();
             }
             socket_wait.outcome.into_result()?;
             let mut proxy_command = Command::new(&program);
@@ -873,6 +889,7 @@ pub(super) async fn observe_socket_wait<C, F>(
     deadline: tokio::time::Instant,
     cancelled: C,
     mut child_liveness: F,
+    observe_backfill: impl FnMut(tokio::time::Instant) -> bool,
 ) -> SocketWaitDiagnostic
 where
     C: Future<Output = ()>,
@@ -882,7 +899,7 @@ where
     let outcome = tokio::select! {
         biased;
         _ = cancelled => SocketWaitOutcome::Cancelled,
-        outcome = wait_for_socket(socket, deadline, &mut child_liveness) => outcome,
+        outcome = wait_for_socket(socket, deadline, &mut child_liveness, observe_backfill) => outcome,
     };
     SocketWaitDiagnostic {
         elapsed: started.elapsed(),
@@ -893,22 +910,33 @@ where
 }
 
 /// Wait only for socket presence while the captured child remains alive.
-pub(super) async fn wait_for_socket(
+async fn wait_for_socket(
     socket: &std::path::Path,
     deadline: tokio::time::Instant,
     mut child_liveness: impl FnMut() -> ChildLiveness,
+    mut observe_backfill: impl FnMut(tokio::time::Instant) -> bool,
 ) -> SocketWaitOutcome {
+    let hard_deadline = deadline + MAX_BACKFILL_EXTENSION;
+    let mut extended = false;
     loop {
         match child_liveness() {
             ChildLiveness::Alive => {}
             ChildLiveness::Exited => return SocketWaitOutcome::ChildExited,
             ChildLiveness::Unavailable => return SocketWaitOutcome::ChildStatusUnavailable,
         }
+        let now = tokio::time::Instant::now();
+        if extended && now >= hard_deadline {
+            return SocketWaitOutcome::TimedOut;
+        }
         if socket_presence(socket) == SocketPresence::Present {
             return SocketWaitOutcome::Ready;
         }
-        if tokio::time::Instant::now() >= deadline {
-            return SocketWaitOutcome::TimedOut;
+        let progressing = observe_backfill(now);
+        if now >= deadline {
+            if now >= hard_deadline || !progressing {
+                return SocketWaitOutcome::TimedOut;
+            }
+            extended = true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

@@ -17,6 +17,7 @@ async fn socket_wait_stays_pending_until_the_path_appears() {
             checks.set(checks.get() + 1);
             owner::ChildLiveness::Alive
         },
+        |_| false,
     );
     tokio::pin!(waiting);
     assert!(
@@ -63,6 +64,7 @@ async fn socket_wait_checks_child_exit_before_accepting_a_present_path() {
                 owner::ChildLiveness::Exited
             }
         },
+        |_| false,
     );
     tokio::pin!(waiting);
     assert!(
@@ -103,6 +105,7 @@ async fn socket_wait_timeout_records_elapsed_and_bounded_diagnostic() {
             checks.set(checks.get() + 1);
             owner::ChildLiveness::Alive
         },
+        |_| false,
     )
     .await;
     assert_eq!(diagnostic.outcome, owner::SocketWaitOutcome::TimedOut);
@@ -127,6 +130,61 @@ async fn socket_wait_timeout_records_elapsed_and_bounded_diagnostic() {
     assert!(!socket.exists());
 }
 
+#[tokio::test(start_paused = true)]
+async fn observed_backfill_can_cross_the_ordinary_deadline_with_a_hard_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("control.sock");
+    let started = tokio::time::Instant::now();
+    let deadline = started + STARTUP_TIMEOUT;
+    let (_, completed) = tokio::join!(
+        async {
+            tokio::time::sleep_until(deadline + Duration::from_secs(10)).await;
+            std::fs::write(&socket, b"presence fixture").unwrap();
+        },
+        owner::observe_socket_wait(
+            &socket,
+            deadline,
+            std::future::pending(),
+            || owner::ChildLiveness::Alive,
+            |_| true,
+        )
+    );
+    assert_eq!(completed.outcome, owner::SocketWaitOutcome::Ready);
+    assert!(tokio::time::Instant::now() > deadline);
+
+    std::fs::remove_file(&socket).unwrap();
+    let cutoff = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+    let expired = owner::observe_socket_wait(
+        &socket,
+        cutoff,
+        std::future::pending(),
+        || owner::ChildLiveness::Alive,
+        |_| true,
+    )
+    .await;
+    assert_eq!(expired.outcome, owner::SocketWaitOutcome::TimedOut);
+    assert!(tokio::time::Instant::now() >= cutoff + Duration::from_secs(60));
+}
+
+#[tokio::test(start_paused = true)]
+async fn loss_of_backfill_progress_ends_grace_before_the_hard_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("control.sock");
+    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+    let loss = deadline + Duration::from_secs(8);
+    let expired = owner::observe_socket_wait(
+        &socket,
+        deadline,
+        std::future::pending(),
+        || owner::ChildLiveness::Alive,
+        |now| now < loss,
+    )
+    .await;
+    assert_eq!(expired.outcome, owner::SocketWaitOutcome::TimedOut);
+    assert!(tokio::time::Instant::now() >= loss);
+    assert!(tokio::time::Instant::now() < loss + Duration::from_secs(1));
+}
+
 #[tokio::test]
 async fn socket_wait_yields_to_caller_cancellation_without_advancing_startup() {
     use std::future::Future;
@@ -149,6 +207,7 @@ async fn socket_wait_yields_to_caller_cancellation_without_advancing_startup() {
                     checks.set(checks.get() + 1);
                     owner::ChildLiveness::Alive
                 },
+                |_| false,
             )
             .await;
             let mut timings = owner::OwnerStartTimings::default();
