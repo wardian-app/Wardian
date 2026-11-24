@@ -2849,6 +2849,46 @@ async fn abandoned_startup_readiness_commands_have_no_effect() {
     );
 }
 
+#[tokio::test]
+async fn readiness_commit_classifies_input_before_a_simultaneous_screen_change() {
+    let broker = Arc::new(TerminalSessionBroker::default());
+    let (input_tx, mut input_rx) = mpsc::channel(2);
+    let runtime = TerminalRuntimeHandles::new(input_tx, |_| Ok(()));
+    let runtime_generation = broker
+        .start_or_replace_runtime("readiness-input-order", runtime, geometry(80, 24))
+        .await
+        .expect("start runtime");
+    let expected = broker
+        .readiness_observation("readiness-input-order")
+        .await
+        .expect("initial screen and input sequence");
+
+    let repaint_broker = broker.clone();
+    tokio::task::spawn_blocking(move || {
+        repaint_broker.process_output_blocking(
+            "readiness-input-order",
+            runtime_generation,
+            b"\x1b[2J\x1b[Hrepaint".to_vec(),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    broker
+        .send_privileged_input("readiness-input-order", b"opposing input".to_vec())
+        .await
+        .expect("advance input sequence");
+
+    assert_eq!(
+        broker
+            .commit_if_readiness_observation_current(expected, || true)
+            .await
+            .expect("runtime remains current"),
+        StartupScreenCommitResult::InputChanged
+    );
+    assert_eq!(input_rx.try_recv().unwrap(), b"opposing input");
+}
+
 fn process_output_for_session(
     broker: Arc<TerminalSessionBroker>,
     session_id: &'static str,

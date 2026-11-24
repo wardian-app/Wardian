@@ -153,6 +153,7 @@ pub(crate) enum StartupReadinessRejection {
     BlockingAction,
     OpposingInput,
     InputOrStatusChanged,
+    InputCommitContended,
     RepaintDidNotSettle,
     BrokerUnavailable,
 }
@@ -165,6 +166,7 @@ impl StartupReadinessRejection {
             Self::BlockingAction => "blocking_action",
             Self::OpposingInput => "opposing_input",
             Self::InputOrStatusChanged => "input_or_status_changed",
+            Self::InputCommitContended => "input_commit_contended",
             Self::RepaintDidNotSettle => "repaint_did_not_settle",
             Self::BrokerUnavailable => "broker_unavailable",
         }
@@ -201,8 +203,12 @@ pub(crate) async fn publish_startup_readiness_from_action_needed<R: tauri::Runti
     {
         return Err(StartupReadinessRejection::StatusOrOwnerChanged);
     }
+    let original_input_sequence = initial.input_sequence;
     let mut expected = initial;
     for attempt in 0..CLAUDE_READY_REOBSERVATION_LIMIT {
+        if expected.input_sequence != original_input_sequence {
+            return Err(StartupReadinessRejection::OpposingInput);
+        }
         if !observation
             .is_current_with_status(state, session_id, Some("Action Needed"))
             .await
@@ -224,11 +230,15 @@ pub(crate) async fn publish_startup_readiness_from_action_needed<R: tauri::Runti
                 return Err(StartupReadinessRejection::RepaintDidNotSettle);
             }
             tokio::time::sleep(CLAUDE_READY_REOBSERVATION_INTERVAL).await;
-            expected = state
+            let refreshed = state
                 .terminal_sessions
                 .readiness_observation(session_id)
                 .await
                 .map_err(|_| StartupReadinessRejection::BrokerUnavailable)?;
+            if refreshed.input_sequence != original_input_sequence {
+                return Err(StartupReadinessRejection::OpposingInput);
+            }
+            expected = refreshed;
             continue;
         }
 
@@ -243,9 +253,13 @@ pub(crate) async fn publish_startup_readiness_from_action_needed<R: tauri::Runti
         let commit_session_id = session_id.to_string();
         let commit_status = observation.current_status.clone();
         let commit_runtime_generation = observation.runtime_generation;
+        let commit_input_generation = observation.input_generation;
         let commit_expected_status_intent_revision = expected_status_intent_revision;
         let commit_owner_can_commit = owner_can_commit.clone();
         let commit_on_committed = on_committed.clone();
+        let commit_retryable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let commit_retryable_for_roster = commit_retryable.clone();
+        let commit_retryable_for_input = commit_retryable.clone();
         let result = state
             .terminal_sessions
             .commit_if_readiness_observation_current(expected.clone(), move || {
@@ -254,8 +268,13 @@ pub(crate) async fn publish_startup_readiness_from_action_needed<R: tauri::Runti
                 }
                 let commit_state = commit_app.state::<AppState>();
                 let current_agent = {
-                    let Ok(agents) = commit_state.agents.try_lock() else {
-                        return false;
+                    let agents = match commit_state.agents.try_lock() {
+                        Ok(agents) => agents,
+                        Err(_) => {
+                            commit_retryable_for_roster
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            return false;
+                        }
                     };
                     agents.get(&commit_session_id).map(|agent| {
                         (
@@ -290,7 +309,20 @@ pub(crate) async fn publish_startup_readiness_from_action_needed<R: tauri::Runti
                         "Action Needed",
                         commit_expected_status_intent_revision,
                         "Idle",
-                        move || input_commit.commit(),
+                        move || {
+                            match input_commit.commit() {
+                            Ok(()) => true,
+                            Err(
+                                crate::state::interactions::StartupPromptReadinessCommitError::
+                                    Contended,
+                            ) => {
+                                commit_retryable_for_input
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                                false
+                            }
+                            Err(_) => false,
+                        }
+                        },
                     )
                 else {
                     return false;
@@ -302,6 +334,7 @@ pub(crate) async fn publish_startup_readiness_from_action_needed<R: tauri::Runti
                     "Idle".to_string(),
                     status_sequence,
                     status_revision,
+                    commit_input_generation,
                 );
                 commit_on_committed();
                 true
@@ -313,17 +346,37 @@ pub(crate) async fn publish_startup_readiness_from_action_needed<R: tauri::Runti
                 return Err(StartupReadinessRejection::OpposingInput)
             }
             Ok(StartupScreenCommitResult::CommitRejected) => {
-                return Err(StartupReadinessRejection::InputOrStatusChanged)
+                if commit_retryable.load(std::sync::atomic::Ordering::Acquire) {
+                    if attempt + 1 == CLAUDE_READY_REOBSERVATION_LIMIT {
+                        return Err(StartupReadinessRejection::InputCommitContended);
+                    }
+                    tokio::time::sleep(CLAUDE_READY_REOBSERVATION_INTERVAL).await;
+                    let refreshed = state
+                        .terminal_sessions
+                        .readiness_observation(session_id)
+                        .await
+                        .map_err(|_| StartupReadinessRejection::BrokerUnavailable)?;
+                    if refreshed.input_sequence != original_input_sequence {
+                        return Err(StartupReadinessRejection::OpposingInput);
+                    }
+                    expected = refreshed;
+                    continue;
+                }
+                return Err(StartupReadinessRejection::InputOrStatusChanged);
             }
             Ok(StartupScreenCommitResult::ScreenChanged) => {
                 if attempt + 1 == CLAUDE_READY_REOBSERVATION_LIMIT {
                     return Err(StartupReadinessRejection::RepaintDidNotSettle);
                 }
-                expected = state
+                let refreshed = state
                     .terminal_sessions
                     .readiness_observation(session_id)
                     .await
                     .map_err(|_| StartupReadinessRejection::BrokerUnavailable)?;
+                if refreshed.input_sequence != original_input_sequence {
+                    return Err(StartupReadinessRejection::OpposingInput);
+                }
+                expected = refreshed;
             }
             Err(crate::state::terminal_session::TerminalBrokerError::StaleRuntimeGeneration {
                 ..
@@ -1194,6 +1247,121 @@ mod tests {
             still_action_required,
             "a stale runtime cannot change the replacement input generation"
         );
+    }
+
+    #[tokio::test]
+    async fn claude_readiness_reobservation_rejects_input_after_initial_snapshot() {
+        use super::super::{test_support::TestWardianHome, tests::insert_test_agent};
+        use crate::state::terminal_session::TerminalRuntimeHandles;
+        use tauri::Manager;
+        use tokio::sync::mpsc;
+        use wardian_core::control::ProviderInputReadiness;
+
+        let _home = TestWardianHome::new_async().await;
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let session_id = "claude-input-during-repaint";
+        insert_test_agent(&state, session_id, session_id, "Coder").await;
+        let (input_tx, mut input_rx) = mpsc::channel(2);
+        let runtime_generation = state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                session_id,
+                TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    rows: 24,
+                    cols: 120,
+                },
+            )
+            .await
+            .unwrap();
+        let input_generation = state
+            .interactions
+            .start_provider_input_generation(session_id, ProviderInputReadiness::Booting, None)
+            .await
+            .generation;
+        state
+            .interactions
+            .record_provider_input_state(
+                session_id,
+                input_generation,
+                ProviderInputReadiness::ActionRequired,
+                None,
+            )
+            .await;
+        let current_status = {
+            let mut agents = state.agents.lock().await;
+            let agent = agents.get_mut(session_id).unwrap();
+            agent.runtime_generation = Some(runtime_generation);
+            agent.config.lock().unwrap().provider = "claude".to_string();
+            *agent.current_status.lock().unwrap() = "Action Needed".to_string();
+            agent.current_status.clone()
+        };
+        let startup_action_intent_revision = {
+            let _status = current_status.lock().unwrap();
+            state.reserve_status_intent(session_id, &current_status, "Action Needed")
+        };
+        let observation = ProviderStartupObservation {
+            input_generation,
+            runtime_generation,
+            current_status: current_status.clone(),
+            startup_action_intent_revision: Some(startup_action_intent_revision),
+        };
+        let initial = state
+            .terminal_sessions
+            .readiness_observation(session_id)
+            .await
+            .unwrap();
+
+        state
+            .terminal_sessions
+            .send_privileged_input(session_id, b"opposing user input".to_vec())
+            .await
+            .unwrap();
+        let terminal = state.terminal_sessions.clone();
+        tokio::task::spawn_blocking(move || {
+            terminal.process_output_blocking(
+                session_id,
+                runtime_generation,
+                "\x1b[2J\x1b[HClaude Code\r\n❯ Try ask Claude\r\n────────\r\nHaiku 4.5 | workspace | /rc\r\n⏵⏵ bypass permissions on (shift+tab to cycle)"
+                    .as_bytes()
+                    .to_vec(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let committed_callback = committed.clone();
+        assert_eq!(
+            publish_startup_readiness_from_action_needed(
+                &app.handle().clone(),
+                &state,
+                session_id,
+                &observation,
+                initial,
+                std::sync::Arc::new(|| true),
+                std::sync::Arc::new(move || {
+                    committed_callback.store(true, std::sync::atomic::Ordering::Release);
+                }),
+            )
+            .await,
+            Err(StartupReadinessRejection::OpposingInput)
+        );
+        assert!(!committed.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(*current_status.lock().unwrap(), "Action Needed");
+        assert_eq!(
+            state
+                .interactions
+                .provider_input_state(session_id)
+                .await
+                .unwrap()
+                .state,
+            ProviderInputReadiness::ActionRequired
+        );
+        assert_eq!(input_rx.try_recv().unwrap(), b"opposing user input");
     }
 
     #[tokio::test]

@@ -2383,10 +2383,10 @@ impl TerminalSessionActor {
                 let result = self
                     .ensure_generation(expected.snapshot.runtime_generation)
                     .map(|()| {
-                        if self.readiness_observation() != expected {
-                            StartupScreenCommitResult::ScreenChanged
-                        } else if self.input_sequence != expected.input_sequence {
+                        if self.input_sequence != expected.input_sequence {
                             StartupScreenCommitResult::InputChanged
+                        } else if self.readiness_observation().snapshot != expected.snapshot {
+                            StartupScreenCommitResult::ScreenChanged
                         } else if commit() {
                             StartupScreenCommitResult::Committed
                         } else {
@@ -2405,8 +2405,11 @@ impl TerminalSessionActor {
                 }
                 let result = match self.ensure_generation(expected.snapshot.runtime_generation) {
                     Err(error) => Err(error),
-                    Ok(()) if self.readiness_observation() != expected => Err(
-                        TerminalBrokerError::InvalidRequest("startup_observation_changed"),
+                    Ok(()) if self.input_sequence != expected.input_sequence => {
+                        Err(TerminalBrokerError::InvalidRequest("opposing_input"))
+                    }
+                    Ok(()) if self.readiness_observation().snapshot != expected.snapshot => Err(
+                        TerminalBrokerError::InvalidRequest("startup_screen_changed"),
                     ),
                     Ok(()) => self
                         .send_privileged_input(bytes)

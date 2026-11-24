@@ -2174,7 +2174,13 @@ async fn wake_after_startup_lease_release(
         .is_some_and(|input| {
             input.generation == readiness.input_generation
                 && input.state == ProviderInputReadiness::Ready
-                && input.ready_evidence == Some(ProviderReadyEvidence::PromptDetected)
+                && matches!(
+                    input.ready_evidence,
+                    Some(
+                        ProviderReadyEvidence::PromptDetected
+                            | ProviderReadyEvidence::ProviderEvent
+                    )
+                )
         });
     if !input_ready {
         return;
@@ -6274,10 +6280,11 @@ mod tests {
         let home = crate::control::test_support::TestWardianHome::new_async().await;
         let app = tauri::test::mock_app();
         app.manage(AppState::new());
-        for (case, ready_before_release) in [
-            ("ready-first", true),
-            ("release-first", false),
-            ("provisional-idle", false),
+        for (case, ready_before_release, provider_event_first) in [
+            ("ready-first", true, false),
+            ("release-first", false, false),
+            ("provisional-idle", false, false),
+            ("provider-event-first", false, true),
         ] {
             let session_id = format!("startup-queue-{case}");
             let (input_tx, mut input_rx) = mpsc::channel(4);
@@ -6328,6 +6335,27 @@ mod tests {
                     Some(ProviderReadyEvidence::PromptDetected),
                 )
                 .await;
+            if provider_event_first {
+                state
+                    .interactions
+                    .record_provider_input_status_observation(
+                        &session_id,
+                        1,
+                        ready.generation,
+                        ProviderInputReadiness::Ready,
+                        Some(ProviderReadyEvidence::ProviderEvent),
+                    )
+                    .await;
+                assert_eq!(
+                    state
+                        .interactions
+                        .provider_input_state(&session_id)
+                        .await
+                        .unwrap()
+                        .ready_evidence,
+                    Some(ProviderReadyEvidence::ProviderEvent)
+                );
+            }
             let admitted = state
                 .interactions
                 .admit_agent_message(wardian_core::db::agent_messaging::Admission {
@@ -6399,6 +6427,10 @@ mod tests {
                         "visible Idle cannot release the lease before readiness commits"
                     );
                     assert_eq!(dispatch_count.load(Ordering::Acquire), 0);
+                    wake.published.store(true, Ordering::Release);
+                } else if case == "provider-event-first" {
+                    // The scheduled Idle status observation can replace the
+                    // prompt evidence before readiness and lease release meet.
                     wake.published.store(true, Ordering::Release);
                 }
                 tokio::time::timeout(std::time::Duration::from_secs(3), watcher)

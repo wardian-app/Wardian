@@ -558,6 +558,7 @@ fn schedule_agent_status_observation(
         status,
         status_sequence,
         status_revision,
+        None,
         Some(Box::new(|app, session_id, status| {
             crate::control::spawn_agent_messaging_if_idle(app, session_id, status);
         })),
@@ -573,6 +574,7 @@ pub(crate) fn schedule_startup_readiness_status_observation<R: tauri::Runtime>(
     status: String,
     status_sequence: u64,
     status_revision: u64,
+    input_generation: u64,
 ) {
     schedule_agent_status_observation_inner(
         app,
@@ -581,6 +583,7 @@ pub(crate) fn schedule_startup_readiness_status_observation<R: tauri::Runtime>(
         status,
         status_sequence,
         status_revision,
+        Some(input_generation),
         None,
     );
 }
@@ -592,6 +595,7 @@ fn schedule_agent_status_observation_inner<R: tauri::Runtime>(
     status: String,
     status_sequence: u64,
     status_revision: u64,
+    input_generation: Option<u64>,
     queue_dispatch: Option<Box<dyn FnOnce(&AppHandle<R>, &str, &str) + Send + 'static>>,
 ) {
     let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -632,11 +636,12 @@ fn schedule_agent_status_observation_inner<R: tauri::Runtime>(
         {
             return;
         }
-        record_provider_input_from_status_state(
+        record_provider_input_from_status_state_for_generation(
             &state,
             &status_session_id,
             &status,
             status_revision,
+            input_generation,
         )
         .await;
         if !status_observation_belongs_to_current_agent(
@@ -895,6 +900,23 @@ pub(crate) async fn record_provider_input_from_status_state(
     next_status: &str,
     status_revision: u64,
 ) {
+    record_provider_input_from_status_state_for_generation(
+        state,
+        session_id,
+        next_status,
+        status_revision,
+        None,
+    )
+    .await;
+}
+
+async fn record_provider_input_from_status_state_for_generation(
+    state: &AppState,
+    session_id: &str,
+    next_status: &str,
+    status_revision: u64,
+    expected_input_generation: Option<u64>,
+) {
     let readiness = match wardian_core::identity::normalize_status(next_status).as_str() {
         "idle" => ProviderInputReadiness::Ready,
         "processing" => ProviderInputReadiness::Busy,
@@ -904,11 +926,14 @@ pub(crate) async fn record_provider_input_from_status_state(
     };
     let evidence = (readiness == ProviderInputReadiness::Ready)
         .then_some(ProviderReadyEvidence::ProviderEvent);
-    let generation = state
-        .interactions
-        .current_provider_input_generation(session_id)
-        .await
-        .unwrap_or(0);
+    let generation = match expected_input_generation {
+        Some(generation) => generation,
+        None => state
+            .interactions
+            .current_provider_input_generation(session_id)
+            .await
+            .unwrap_or(0),
+    };
     state
         .interactions
         .record_provider_input_status_observation(
@@ -3424,6 +3449,46 @@ mod tests {
         assert_eq!(
             current.ready_evidence,
             Some(ProviderReadyEvidence::ProviderEvent)
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_startup_idle_observation_cannot_ready_a_later_input_generation() {
+        let state = AppState::new();
+        let startup = state
+            .interactions
+            .start_provider_input_generation(
+                "agent-1",
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::PromptDetected),
+            )
+            .await;
+        let later_action = state
+            .interactions
+            .start_provider_input_generation(
+                "agent-1",
+                ProviderInputReadiness::ActionRequired,
+                None,
+            )
+            .await;
+
+        record_provider_input_from_status_state_for_generation(
+            &state,
+            "agent-1",
+            "Idle",
+            1,
+            Some(startup.generation),
+        )
+        .await;
+
+        assert_eq!(
+            state
+                .interactions
+                .provider_input_state("agent-1")
+                .await
+                .unwrap(),
+            later_action,
+            "the delayed startup status is confined to its committed input generation"
         );
     }
 

@@ -38,38 +38,50 @@ pub(crate) struct ProviderInputGenerationFence {
     _guard: tokio::sync::OwnedMutexGuard<Option<u64>>,
 }
 
-/// Holds the exact input-state mutation and generation fences while a terminal
-/// actor performs its serialized screen comparison. The commit is synchronous
-/// so the actor can keep repaint processing behind that comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupPromptReadinessCommitError {
+    Contended,
+    Rejected,
+    Persistence,
+}
+
+/// Holds the exact provider generation while a terminal actor performs its
+/// serialized screen comparison. The shared interaction mutation gate is
+/// released before waiting on the actor; the commit itself remains synchronous.
 pub(crate) struct PreparedStartupPromptReadiness {
     state: Arc<InteractionState>,
     session_id: String,
     generation: u64,
-    _mutation_guard: tokio::sync::OwnedMutexGuard<()>,
     generation_guard: tokio::sync::OwnedMutexGuard<Option<u64>>,
 }
 
 impl PreparedStartupPromptReadiness {
-    pub(crate) fn commit(self) -> bool {
+    pub(crate) fn commit(self) -> Result<(), StartupPromptReadinessCommitError> {
+        let _mutation_guard = match self.state.mutation_lock.try_lock() {
+            Ok(mutation_guard) => mutation_guard,
+            Err(_) => return Err(StartupPromptReadinessCommitError::Contended),
+        };
         if *self.generation_guard != Some(self.generation) {
-            return false;
+            return Err(StartupPromptReadinessCommitError::Rejected);
         }
-        let Ok(deleted_sessions) = self.state.deleted_sessions.try_lock() else {
-            return false;
+        let deleted_sessions = match self.state.deleted_sessions.try_lock() {
+            Ok(deleted_sessions) => deleted_sessions,
+            Err(_) => return Err(StartupPromptReadinessCommitError::Contended),
         };
         if deleted_sessions.contains(&self.session_id) {
-            return false;
+            return Err(StartupPromptReadinessCommitError::Rejected);
         }
         drop(deleted_sessions);
 
-        let Ok(mut inputs) = self.state.provider_inputs.try_lock() else {
-            return false;
+        let mut inputs = match self.state.provider_inputs.try_lock() {
+            Ok(inputs) => inputs,
+            Err(_) => return Err(StartupPromptReadinessCommitError::Contended),
         };
         if !inputs.get(&self.session_id).is_some_and(|existing| {
             existing.generation == self.generation
                 && existing.state == ProviderInputReadiness::ActionRequired
         }) {
-            return false;
+            return Err(StartupPromptReadinessCommitError::Rejected);
         }
 
         let record = ProviderInputState {
@@ -79,11 +91,10 @@ impl PreparedStartupPromptReadiness {
             ready_evidence: Some(ProviderReadyEvidence::PromptDetected),
             observed_at: now_rfc3339_millis(),
         };
-        if wardian_core::db::upsert_provider_input_state(&record).is_err() {
-            return false;
-        }
+        wardian_core::db::upsert_provider_input_state(&record)
+            .map_err(|_| StartupPromptReadinessCommitError::Persistence)?;
         inputs.insert(record.session_id.clone(), record);
-        true
+        Ok(())
     }
 }
 
@@ -574,11 +585,11 @@ impl InteractionState {
             return None;
         }
         let _generation_cell = generation_cell?;
+        drop(mutation_guard);
         Some(PreparedStartupPromptReadiness {
             state: self.clone(),
             session_id: session_id.to_string(),
             generation,
-            _mutation_guard: mutation_guard,
             generation_guard,
         })
     }
@@ -1480,7 +1491,8 @@ mod tests {
             .prepare_provider_ready_after_startup_action("agent-1", startup.generation)
             .await
             .expect("current ActionRequired input generation")
-            .commit());
+            .commit()
+            .is_ok());
         let ready = state.provider_input_state("agent-1").await.unwrap();
         assert_eq!(ready.generation, startup.generation);
         assert_eq!(ready.state, ProviderInputReadiness::Ready);
@@ -1500,11 +1512,64 @@ mod tests {
             .prepare_provider_ready_after_startup_action("agent-1", next.generation)
             .await
             .expect("current Busy input generation")
-            .commit());
+            .commit()
+            .is_err());
         assert_eq!(
             state.provider_input_state("agent-1").await.unwrap(),
             next,
             "the startup handoff cannot clear Busy or a replaced input generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_startup_readiness_releases_shared_gate_and_retries_contention() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let state = Arc::new(InteractionState::default());
+        let startup = state
+            .start_provider_input_generation("agent-1", ProviderInputReadiness::Booting, None)
+            .await;
+        state
+            .record_provider_input_state(
+                "agent-1",
+                startup.generation,
+                ProviderInputReadiness::ActionRequired,
+                None,
+            )
+            .await;
+
+        let prepared = state
+            .prepare_provider_ready_after_startup_action("agent-1", startup.generation)
+            .await
+            .expect("current ActionRequired generation");
+        assert!(state.mutation_lock.try_lock().is_ok());
+
+        let mutation = state.mutation_lock.lock().await;
+        assert_eq!(
+            prepared.commit(),
+            Err(StartupPromptReadinessCommitError::Contended)
+        );
+        drop(mutation);
+
+        let prepared = state
+            .prepare_provider_ready_after_startup_action("agent-1", startup.generation)
+            .await
+            .expect("same current ActionRequired generation");
+        let inputs = state.provider_inputs.lock().await;
+        assert_eq!(
+            prepared.commit(),
+            Err(StartupPromptReadinessCommitError::Contended)
+        );
+        drop(inputs);
+
+        assert!(state
+            .prepare_provider_ready_after_startup_action("agent-1", startup.generation)
+            .await
+            .expect("same current ActionRequired generation")
+            .commit()
+            .is_ok());
+        assert_eq!(
+            state.provider_input_state("agent-1").await.unwrap().state,
+            ProviderInputReadiness::Ready
         );
     }
 
