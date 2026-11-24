@@ -186,6 +186,33 @@ async fn loss_of_backfill_progress_ends_grace_before_the_hard_limit() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn socket_first_seen_after_ordinary_deadline_requires_grace() {
+    use std::future::Future;
+    use std::task::Poll;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("control.sock");
+    let waiting = owner::observe_socket_wait(
+        &socket,
+        tokio::time::Instant::now() + STARTUP_TIMEOUT,
+        std::future::pending(),
+        || owner::ChildLiveness::Alive,
+        |_| false,
+    );
+    tokio::pin!(waiting);
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    tokio::time::advance(STARTUP_TIMEOUT + Duration::from_secs(1)).await;
+    std::fs::write(&socket, b"late presence fixture").unwrap();
+    let observed = waiting.await;
+    assert_eq!(observed.socket_presence, owner::SocketPresence::Present);
+    assert_eq!(observed.outcome, owner::SocketWaitOutcome::TimedOut);
+}
+
+#[tokio::test(start_paused = true)]
 async fn socket_present_after_hard_limit_is_rejected_even_if_wait_was_not_polled() {
     use std::future::Future;
     use std::task::Poll;

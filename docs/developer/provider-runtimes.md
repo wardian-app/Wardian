@@ -454,9 +454,11 @@ Codex can gate its listener on a cold private state-index backfill. On Windows,
 the owner can wait at most 60 seconds beyond the ordinary socket deadline
 while it observes strictly advancing checkpoints from that launch's initially
 absent private state database. Checkpoints must come from the same file
-identity. A read-only probe stops granting extra time
-when the last advance reaches 20 seconds of age or the signal becomes
-unavailable. The timestamp of a file write alone gives no grace. The numeric
+identity. After a stale or unavailable observation, a fresh checkpoint
+establishes a new timing baseline and a further advance qualifies for grace.
+The last advance must be less than 20 seconds old when socket presence is
+observed after the ordinary deadline. Startup cancels a queued read or joins
+a running read before handing off the owner. The numeric
 `socket_wait_backfill_advances` field reports advances without cursor paths.
 
 The ordinary TUI startup overlay also sets

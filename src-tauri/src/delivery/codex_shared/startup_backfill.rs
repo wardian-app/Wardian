@@ -1,6 +1,9 @@
 //! A cold, private Codex state index can gate the listener before any RPC.
 
+use super::{observe_socket_wait, ChildLiveness, SocketWaitDiagnostic, SocketWaitOutcome};
+use std::cmp::Ordering;
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -52,30 +55,55 @@ struct Checkpoint {
 #[derive(Default)]
 struct Progress {
     database: Option<DatabaseIdentity>,
-    baseline: Option<String>,
+    high_water: Option<String>,
+    comparable_at: Option<Instant>,
     last_advance: Option<Instant>,
     advances: u32,
 }
 
 impl Progress {
-    fn observe(&mut self, checkpoint: Option<Checkpoint>, sampled_at: Instant) {
+    fn observe(&mut self, checkpoint: Option<Checkpoint>, sampled_at: Instant, now: Instant) {
         // A new file at the same path cannot continue this launch's evidence.
         let row = checkpoint.and_then(|checkpoint| {
             let database = self.database.get_or_insert(checkpoint.database);
             (*database == checkpoint.database).then_some(checkpoint.row)
         });
-        match (row, self.baseline.as_ref()) {
-            (Some(BackfillRow::Running(cursor)), None) => self.baseline = Some(cursor),
-            (Some(BackfillRow::Running(cursor)), Some(previous)) if &cursor > previous => {
-                self.baseline = Some(cursor);
+        let (cursor, running) = match row {
+            Some(BackfillRow::Running(cursor)) => (cursor, true),
+            Some(BackfillRow::Complete(cursor)) => (cursor, false),
+            None => {
+                self.invalidate_timing();
+                return;
+            }
+        };
+        let ordering = self.high_water.as_ref().map(|last| cursor.cmp(last));
+        if ordering == Some(Ordering::Less) {
+            self.invalidate_timing();
+            return;
+        }
+        if ordering != Some(Ordering::Equal) {
+            self.high_water = Some(cursor);
+        }
+        let fresh = sampled_at <= now && now - sampled_at < PROGRESS_WINDOW;
+        let comparable = self
+            .comparable_at
+            .is_some_and(|last| last <= sampled_at && now - last < PROGRESS_WINDOW);
+        if !fresh || !comparable {
+            self.invalidate_timing();
+        }
+        // Completion can preserve previously earned grace during bind.
+        if fresh && running {
+            self.comparable_at = Some(sampled_at);
+            if comparable && ordering == Some(Ordering::Greater) {
                 self.last_advance = Some(sampled_at);
                 self.advances = self.advances.saturating_add(1);
             }
-            (Some(BackfillRow::Running(cursor)), Some(previous)) if &cursor == previous => {}
-            // Completion can precede the bind by a poll. It cannot renew the window.
-            (Some(BackfillRow::Complete(cursor)), Some(previous)) if &cursor >= previous => {}
-            _ => self.last_advance = None,
         }
+    }
+
+    fn invalidate_timing(&mut self) {
+        self.comparable_at = None;
+        self.last_advance = None;
     }
 
     fn recent(&self, now: Instant) -> bool {
@@ -101,7 +129,42 @@ impl BackfillProbe {
         }
     }
 
-    pub(super) fn poll(&mut self, now: Instant) -> bool {
+    pub(super) async fn wait_for_socket(
+        mut self,
+        socket: &Path,
+        deadline: Instant,
+        cancelled: impl Future<Output = ()>,
+        mut child_liveness: impl FnMut() -> ChildLiveness,
+    ) -> (SocketWaitDiagnostic, u32) {
+        tokio::pin!(cancelled);
+        let mut diagnostic = observe_socket_wait(
+            socket,
+            deadline,
+            &mut cancelled,
+            &mut child_liveness,
+            |now| self.poll(now),
+        )
+        .await;
+        // The retained owner task must drain this read before proxy or cleanup.
+        if let Some(pending) = self.pending.take() {
+            pending.abort();
+            let _ = pending.await;
+            if diagnostic.outcome == SocketWaitOutcome::Ready {
+                diagnostic.child_liveness = child_liveness();
+                diagnostic.outcome = if cancelled.now_or_never().is_some() {
+                    SocketWaitOutcome::Cancelled
+                } else {
+                    diagnostic
+                        .child_liveness
+                        .failure()
+                        .unwrap_or(diagnostic.outcome)
+                };
+            }
+        }
+        (diagnostic, self.progress.advances)
+    }
+
+    fn poll(&mut self, now: Instant) -> bool {
         let Some(home) = &self.home else {
             return false;
         };
@@ -112,13 +175,14 @@ impl BackfillProbe {
         {
             self.pending = None;
             self.progress
-                .observe(result.ok().flatten(), self.sampled_at.unwrap_or(now));
+                .observe(result.ok().flatten(), self.sampled_at.unwrap_or(now), now);
         }
         if self
             .sampled_at
             .is_none_or(|at| now.saturating_duration_since(at) >= POLL_INTERVAL)
         {
             if self.pending.is_some() {
+                self.progress.invalidate_timing();
                 return false;
             }
             let home = home.clone();
@@ -126,10 +190,6 @@ impl BackfillProbe {
             self.pending = Some(tokio::task::spawn_blocking(move || read_checkpoint(&home)));
         }
         self.progress.recent(now)
-    }
-
-    pub(super) fn advances(&self) -> u32 {
-        self.progress.advances
     }
 }
 
@@ -191,6 +251,187 @@ fn private_file(path: &Path) -> Option<(File, DatabaseIdentity)> {
 mod tests {
     use super::*;
 
+    fn fixture_checkpoint(cursor: &str) -> Option<Checkpoint> {
+        Some(Checkpoint {
+            database: DatabaseIdentity {
+                volume: 0,
+                file_index: 0,
+            },
+            row: BackfillRow::Running(cursor.into()),
+        })
+    }
+
+    #[test]
+    fn first_checkpoint_after_observation_gap_only_reestablishes_timing() {
+        let now = Instant::now();
+        let mut progress = Progress::default();
+        progress.observe(fixture_checkpoint("a"), now, now);
+        let resumed = now + PROGRESS_WINDOW + Duration::from_secs(1);
+        progress.observe(fixture_checkpoint("b"), resumed, resumed);
+        assert!(!progress.recent(resumed));
+        let next = resumed + POLL_INTERVAL;
+        progress.observe(fixture_checkpoint("c"), next, next);
+        assert!(progress.recent(resumed + POLL_INTERVAL));
+        assert_eq!(progress.advances, 1);
+    }
+
+    #[test]
+    fn a_delayed_read_records_high_water_without_granting_grace() {
+        let now = Instant::now();
+        let received = now + PROGRESS_WINDOW + POLL_INTERVAL;
+        let mut progress = Progress::default();
+        progress.observe(fixture_checkpoint("a"), now, now);
+        progress.observe(fixture_checkpoint("b"), now + POLL_INTERVAL, received);
+        assert!(!progress.recent(received));
+        progress.observe(fixture_checkpoint("a"), received, received);
+        progress.observe(fixture_checkpoint("b"), received, received);
+        assert!(!progress.recent(received));
+        progress.observe(fixture_checkpoint("c"), received, received);
+        assert!(progress.recent(received));
+        assert_eq!(progress.advances, 1);
+    }
+
+    #[test]
+    fn read_unavailability_breaks_comparability_without_resetting_high_water() {
+        let now = Instant::now();
+        let mut progress = Progress::default();
+        progress.observe(fixture_checkpoint("a"), now, now);
+        progress.observe(fixture_checkpoint("b"), now, now);
+        progress.observe(None, now, now);
+        progress.observe(fixture_checkpoint("c"), now, now);
+        assert!(!progress.recent(now));
+        progress.observe(fixture_checkpoint("a"), now, now);
+        progress.observe(fixture_checkpoint("b"), now, now);
+        assert!(!progress.recent(now));
+        progress.observe(fixture_checkpoint("c"), now, now);
+        progress.observe(fixture_checkpoint("d"), now, now);
+        assert!(progress.recent(now));
+        assert_eq!(progress.advances, 2);
+    }
+
+    #[tokio::test]
+    async fn parked_probe_stays_in_owner_gate_until_joined_for_every_outcome() {
+        use std::task::Poll;
+        use tokio::sync::{oneshot, Mutex};
+
+        for expected in [
+            SocketWaitOutcome::Ready,
+            SocketWaitOutcome::TimedOut,
+            SocketWaitOutcome::Cancelled,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("control.sock");
+            let database = directory.path().join(DATABASE);
+            fs::write(&database, b"first owner").unwrap();
+            let deadline = if expected == SocketWaitOutcome::TimedOut {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(60)
+            };
+            if expected == SocketWaitOutcome::Ready {
+                fs::write(&socket, b"presence fixture").unwrap();
+            }
+            let (started_tx, started) = oneshot::channel();
+            let (release, parked) = std::sync::mpsc::channel();
+            let (read_tx, read) = oneshot::channel();
+            let probe_database = database.clone();
+            let pending = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                if parked.recv().is_ok() {
+                    read_tx.send(fs::read(probe_database).unwrap()).unwrap();
+                }
+                None
+            });
+            started.await.unwrap();
+            let probe = BackfillProbe {
+                pending: Some(pending),
+                ..BackfillProbe::default()
+            };
+            let gate = Mutex::new(());
+            let held = gate.lock().await;
+            let startup = async {
+                let _held = held;
+                probe
+                    .wait_for_socket(
+                        &socket,
+                        deadline,
+                        async {
+                            if expected != SocketWaitOutcome::Cancelled {
+                                std::future::pending::<()>().await;
+                            }
+                        },
+                        || ChildLiveness::Alive,
+                    )
+                    .await
+            };
+            tokio::pin!(startup);
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(startup.as_mut().poll(cx)))
+                    .await
+                    .is_pending(),
+                "owner left a probe running after {expected:?}"
+            );
+            assert!(gate.try_lock().is_err());
+            release.send(()).unwrap();
+            let (observed, _) = startup.await;
+            assert_eq!(observed.outcome, expected);
+            let _replacement = gate.try_lock().unwrap();
+            fs::write(&database, b"replacement owner").unwrap();
+            assert_eq!(read.await.unwrap(), b"first owner");
+        }
+    }
+
+    #[test]
+    fn queued_probe_is_cancelled_before_a_replacement_can_start() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::Poll;
+        use tokio::sync::oneshot;
+
+        tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (started, running) = oneshot::channel();
+                let (release, parked) = std::sync::mpsc::channel::<()>();
+                let blocker = tokio::task::spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    let _ = parked.recv();
+                });
+                running.await.unwrap();
+
+                let ran = std::sync::Arc::new(AtomicBool::new(false));
+                let ran_in_probe = ran.clone();
+                let pending = tokio::task::spawn_blocking(move || {
+                    ran_in_probe.store(true, Ordering::Relaxed);
+                    None
+                });
+                let probe = BackfillProbe {
+                    pending: Some(pending),
+                    ..BackfillProbe::default()
+                };
+                let home = tempfile::tempdir().unwrap();
+                let socket = home.path().join("control.sock");
+                let startup =
+                    probe.wait_for_socket(&socket, Instant::now(), std::future::pending(), || {
+                        ChildLiveness::Alive
+                    });
+                tokio::pin!(startup);
+                let selected =
+                    std::future::poll_fn(|cx| Poll::Ready(startup.as_mut().poll(cx))).await;
+                release.send(()).unwrap();
+                let (diagnostic, _) = match selected {
+                    Poll::Ready(diagnostic) => diagnostic,
+                    Poll::Pending => startup.await,
+                };
+                assert_eq!(diagnostic.outcome, SocketWaitOutcome::TimedOut);
+                blocker.await.unwrap();
+                tokio::task::spawn_blocking(|| ()).await.unwrap();
+                assert!(!ran.load(Ordering::Relaxed));
+            });
+    }
+
     fn open_fixture(path: &Path, cursor: &str) -> Connection {
         let writer = Connection::open(path).unwrap();
         writer
@@ -219,23 +460,33 @@ mod tests {
         };
         let sample = |row| Some(Checkpoint { database, row });
         let running = |cursor: &str| sample(BackfillRow::Running(cursor.into()));
-        progress.observe(running("a"), now);
+        progress.observe(running("a"), now, now);
         assert!(!progress.recent(now));
-        progress.observe(running("b"), now);
+        progress.observe(running("b"), now, now);
         assert!(progress.recent(now));
+        let completed = now + POLL_INTERVAL;
+        progress.observe(
+            sample(BackfillRow::Complete("c".into())),
+            completed,
+            completed,
+        );
+        assert!(progress.recent(completed));
         let expired = now + PROGRESS_WINDOW;
-        progress.observe(running("b"), expired);
-        progress.observe(sample(BackfillRow::Complete("c".into())), expired);
+        progress.observe(sample(BackfillRow::Complete("c".into())), expired, expired);
         assert!(!progress.recent(expired));
-        progress.observe(running("c"), expired);
+        progress.observe(running("c"), expired, expired);
+        assert!(!progress.recent(expired));
+        progress.observe(running("d"), expired, expired);
         assert!(progress.recent(expired));
-        progress.observe(running("b"), expired);
+        progress.observe(running("b"), expired, expired);
         assert!(!progress.recent(expired));
-        progress.observe(running("d"), expired);
+        progress.observe(running("d"), expired, expired);
+        assert!(!progress.recent(expired));
+        progress.observe(running("e"), expired, expired);
         assert!(progress.recent(expired));
-        progress.observe(None, expired);
+        progress.observe(None, expired, expired);
         assert!(!progress.recent(expired));
-        progress.observe(running("d"), expired);
+        progress.observe(running("e"), expired, expired);
         assert!(!progress.recent(expired));
         assert_eq!(progress.advances, 3);
     }
@@ -277,16 +528,16 @@ mod tests {
         let now = Instant::now();
         let mut progress = Progress::default();
         let writer = open_fixture(&database, "a");
-        progress.observe(read_checkpoint(home), now);
+        progress.observe(read_checkpoint(home), now, now);
         writer
             .execute("UPDATE backfill_state SET last_watermark = 'b'", [])
             .unwrap();
-        progress.observe(read_checkpoint(home), now);
+        progress.observe(read_checkpoint(home), now, now);
         assert!(progress.recent(now));
         drop(writer);
         fs::rename(&database, home.join("previous.sqlite")).unwrap();
         let _replacement = open_fixture(&database, "c");
-        progress.observe(read_checkpoint(home), now);
+        progress.observe(read_checkpoint(home), now, now);
         assert!(!progress.recent(now));
         assert_eq!(progress.advances, 1);
     }
@@ -330,7 +581,7 @@ mod tests {
                     || ChildLiveness::Alive,
                     |now| {
                         if now >= next_sample {
-                            progress.observe(read_checkpoint(home), now);
+                            progress.observe(read_checkpoint(home), now, now);
                             next_sample = now + Duration::from_secs(1);
                         }
                         progress.recent(now)

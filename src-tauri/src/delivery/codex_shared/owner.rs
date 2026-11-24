@@ -3,6 +3,7 @@ use super::stderr_capture::CodexStderrCapture;
 use super::*;
 use crate::delivery::native_broker::NativeSessionSpec;
 use crate::providers::ProviderFactory;
+use futures_util::FutureExt;
 use std::future::Future;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -119,6 +120,14 @@ pub(super) enum ChildLiveness {
 }
 
 impl ChildLiveness {
+    fn failure(self) -> Option<SocketWaitOutcome> {
+        match self {
+            Self::Alive => None,
+            Self::Exited => Some(SocketWaitOutcome::ChildExited),
+            Self::Unavailable => Some(SocketWaitOutcome::ChildStatusUnavailable),
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Alive => "alive",
@@ -550,15 +559,20 @@ impl CodexSharedOwner {
             let socket_deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
             let resources = startup_resources::StartupResourceObserver::start(&child);
             #[cfg(windows)]
-            let mut backfill = startup_backfill::BackfillProbe::new(backfill_home);
+            let (socket_wait, backfill_advances) = startup_backfill::BackfillProbe::new(backfill_home)
+                .wait_for_socket(
+                    &socket,
+                    socket_deadline,
+                    async { let _ = (&mut cancelled).await; },
+                    || observe_child_liveness(&mut child),
+                )
+                .await;
+            #[cfg(not(windows))]
             let socket_wait = observe_socket_wait(
                 &socket,
                 socket_deadline,
                 async { let _ = (&mut cancelled).await; },
                 || observe_child_liveness(&mut child),
-                #[cfg(windows)]
-                |now| backfill.poll(now),
-                #[cfg(not(windows))]
                 |_| false,
             )
             .await;
@@ -567,7 +581,7 @@ impl CodexSharedOwner {
             #[cfg(windows)]
             {
                 timings.socket_wait_job = json!(job.startup_accounting());
-                timings.socket_wait_backfill_advances = backfill.advances();
+                timings.socket_wait_backfill_advances = backfill_advances;
             }
             socket_wait.outcome.into_result()?;
             let mut proxy_command = Command::new(&program);
@@ -896,43 +910,61 @@ where
     F: FnMut() -> ChildLiveness,
 {
     let started = std::time::Instant::now();
-    let outcome = tokio::select! {
+    tokio::pin!(cancelled);
+    let mut outcome = tokio::select! {
         biased;
-        _ = cancelled => SocketWaitOutcome::Cancelled,
-        outcome = wait_for_socket(socket, deadline, &mut child_liveness, observe_backfill) => outcome,
+        _ = &mut cancelled => SocketWaitOutcome::Cancelled,
+        outcome = wait_for_socket(|| socket_presence(socket), deadline, &mut child_liveness, observe_backfill) => outcome,
     };
+    // A cancellation or exit can arrive during a synchronous socket lookup.
+    let child_liveness = child_liveness();
+    if outcome != SocketWaitOutcome::Cancelled && cancelled.now_or_never().is_some() {
+        outcome = SocketWaitOutcome::Cancelled;
+    } else if outcome == SocketWaitOutcome::Ready {
+        outcome = child_liveness.failure().unwrap_or(outcome);
+    }
     SocketWaitDiagnostic {
         elapsed: started.elapsed(),
         outcome,
-        socket_presence: socket_presence(socket),
-        child_liveness: child_liveness(),
+        socket_presence: if outcome == SocketWaitOutcome::Ready {
+            SocketPresence::Present
+        } else {
+            socket_presence(socket)
+        },
+        child_liveness,
     }
 }
 
 /// Wait only for socket presence while the captured child remains alive.
 async fn wait_for_socket(
-    socket: &std::path::Path,
+    mut lookup: impl FnMut() -> SocketPresence,
     deadline: tokio::time::Instant,
     mut child_liveness: impl FnMut() -> ChildLiveness,
     mut observe_backfill: impl FnMut(tokio::time::Instant) -> bool,
 ) -> SocketWaitOutcome {
     let hard_deadline = deadline + MAX_BACKFILL_EXTENSION;
     loop {
-        match child_liveness() {
-            ChildLiveness::Alive => {}
-            ChildLiveness::Exited => return SocketWaitOutcome::ChildExited,
-            ChildLiveness::Unavailable => return SocketWaitOutcome::ChildStatusUnavailable,
+        if let Some(failure) = child_liveness().failure() {
+            return failure;
         }
-        let now = tokio::time::Instant::now();
-        if now >= hard_deadline {
+        if tokio::time::Instant::now() >= hard_deadline {
             return SocketWaitOutcome::TimedOut;
         }
-        if socket_presence(socket) == SocketPresence::Present {
+        let present = lookup() == SocketPresence::Present;
+        let observed_at = tokio::time::Instant::now();
+        if observed_at >= hard_deadline {
+            return SocketWaitOutcome::TimedOut;
+        }
+        if present && observed_at < deadline {
             return SocketWaitOutcome::Ready;
         }
-        let progressing = observe_backfill(now);
-        if now >= deadline && !progressing {
+        let progressing = observe_backfill(observed_at);
+        let now = tokio::time::Instant::now();
+        if now >= hard_deadline || (now >= deadline && !progressing) {
             return SocketWaitOutcome::TimedOut;
+        }
+        if present {
+            return SocketWaitOutcome::Ready;
         }
         let next_deadline = if now < deadline {
             deadline
@@ -941,6 +973,29 @@ async fn wait_for_socket(
         };
         tokio::time::sleep_until((now + Duration::from_millis(50)).min(next_deadline)).await;
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn socket_lookup_cannot_admit_readiness_after_hard_deadline() {
+    let hard_deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    let mut looked_up = false;
+    let outcome = wait_for_socket(
+        || {
+            looked_up = true;
+            std::thread::sleep(
+                hard_deadline.saturating_duration_since(tokio::time::Instant::now())
+                    + Duration::from_millis(5),
+            );
+            SocketPresence::Present
+        },
+        hard_deadline - MAX_BACKFILL_EXTENSION,
+        || ChildLiveness::Alive,
+        |_| true,
+    )
+    .await;
+    assert!(looked_up);
+    assert_eq!(outcome, SocketWaitOutcome::TimedOut);
 }
 
 fn socket_presence(socket: &std::path::Path) -> SocketPresence {
