@@ -416,8 +416,8 @@ pub fn try_acquire_lease(
     try_acquire_lease_inner(lease, now_rfc3339, None)
 }
 
-/// Rejects a retargeted or replaced transition even if it expired between the
-/// last wait poll and this locked acquisition. Active conflicts still apply.
+/// Rejects a retargeted or replaced transition, including a newer retained
+/// clear, even if it expired before this locked acquisition.
 pub fn try_acquire_lease_after_lifecycle_transition(
     lease: ConversationLease,
     now_rfc3339: &str,
@@ -426,16 +426,35 @@ pub fn try_acquire_lease_after_lifecycle_transition(
     try_acquire_lease_inner(lease, now_rfc3339, Some(expected))
 }
 
-/// Finds evidence that the observed transition changed ownership or intent.
+/// Finds a changed acquisition for the observed operation or a strictly newer
+/// local clear for the same agent. An expired clear can still supersede the
+/// retry intent. Its timestamp establishes ordering only.
 pub fn find_changed_lifecycle_acquisition<'a>(
     leases: &'a [ConversationLease],
     expected: &ConversationLease,
 ) -> Option<&'a ConversationLease> {
+    let expected_clear_start = local_clear_started_at(expected);
     leases.iter().find(|lease| {
-        lease.owner_kind == expected.owner_kind
-            && lease.owner_id == expected.owner_id
-            && !lease.same_lifecycle_transition_acquisition(expected)
+        if lease.owner_kind == expected.owner_kind && lease.owner_id == expected.owner_id {
+            return !lease.same_lifecycle_transition_acquisition(expected);
+        }
+        lease.agent_id == expected.agent_id
+            && expected_clear_start.is_some_and(|expected_start| {
+                local_clear_started_at(lease).is_some_and(|start| start > expected_start)
+            })
     })
+}
+
+fn local_clear_started_at(lease: &ConversationLease) -> Option<chrono::DateTime<chrono::Utc>> {
+    if lease.mode != "lifecycle_transition"
+        || lease.owner_kind != "agent_lifecycle"
+        || lease.owner_node_id.is_some()
+        || lease.acquisition_id.trim().is_empty()
+    {
+        return None;
+    }
+    uuid::Uuid::parse_str(lease.owner_id.strip_prefix("clear:")?).ok()?;
+    parse_rfc3339_utc(&lease.started_at)
 }
 
 fn try_acquire_lease_inner(

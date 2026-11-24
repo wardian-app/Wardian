@@ -7,7 +7,8 @@ use wardian_core::agent_replacement::{
     RecoveryStatus, ReplacementJournalGuard, ReplacementPhase,
 };
 use wardian_core::conversation_lease::{
-    load_leases_checked, release_lease_owner_persisted, save_leases, ConversationLease,
+    load_leases_checked, release_lease_owner_persisted, save_leases, try_acquire_lease,
+    ConversationLease, ConversationLeaseAcquireOutcome,
 };
 use wardian_core::db::agent_messaging;
 
@@ -39,6 +40,134 @@ fn clear_lease(config: &AgentConfig, now: DateTime<Utc>) -> ConversationLease {
 
 fn persist(config: &AgentConfig) {
     crate::manager::try_save_state_snapshot(std::slice::from_ref(config)).unwrap();
+}
+
+fn successive_clear_leases(config: &AgentConfig, now: DateTime<Utc>) -> [ConversationLease; 2] {
+    let mut first = clear_lease(config, now - Duration::minutes(3));
+    first.started_at.clone_from(&first.heartbeat_at);
+    let mut later = clear_lease(config, now - Duration::minutes(2));
+    later.started_at = (now - Duration::minutes(2))
+        .with_timezone(&chrono::FixedOffset::west_opt(5 * 3600).unwrap())
+        .to_rfc3339();
+    assert_ne!(first.owner_id, later.owner_id);
+    [first, later]
+}
+
+#[tokio::test]
+async fn later_retained_clear_cancels_wait_before_retry() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    let config = saved_config();
+    let now = Utc::now();
+    let [first, later] = successive_clear_leases(&config, now);
+    save_leases(std::slice::from_ref(&first)).unwrap();
+    assert!(matches!(
+        try_acquire_lease(later.clone(), &later.started_at).unwrap(),
+        ConversationLeaseAcquireOutcome::Acquired
+    ));
+    let retry = wait_for_lifecycle_restore_lease(&config, &first, load_leases_checked, || now)
+        .await
+        .unwrap();
+    assert!(
+        !retry,
+        "the later clear expired between polls and still supersedes the retry"
+    );
+    assert_eq!(load_leases_checked().unwrap(), vec![first, later]);
+}
+
+#[tokio::test]
+async fn later_retained_clear_cancels_locked_admission_after_wait() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    let config = saved_config();
+    persist(&config);
+    let now = Utc::now();
+    let [first, mut later] = successive_clear_leases(&config, now);
+    // The competing clear can have selected another provider conversation.
+    later.resume_session = "other-replacement-conversation".into();
+    save_leases(std::slice::from_ref(&first)).unwrap();
+    assert!(
+        wait_for_lifecycle_restore_lease(&config, &first, load_leases_checked, || now)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        try_acquire_lease(later.clone(), &later.started_at).unwrap(),
+        ConversationLeaseAcquireOutcome::Acquired
+    ));
+    let error = admit_restore(std::slice::from_ref(&config), &config, Some(&first))
+        .expect_err("the newly observed expired clear must fence locked spawn admission");
+    assert_eq!(error.conflict_lease(), Some(&later));
+    assert_eq!(load_leases_checked().unwrap(), vec![first, later]);
+}
+
+#[tokio::test]
+async fn clear_retry_ignores_history_without_a_newer_clear_for_its_agent() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    let config = saved_config();
+    persist(&config);
+    let now = Utc::now();
+    let [older, expected] = successive_clear_leases(&config, now);
+    let mut equal = expected.clone();
+    equal.owner_id = format!("clear:{}", uuid::Uuid::new_v4());
+    equal.acquisition_id = uuid::Uuid::new_v4().to_string();
+    equal.started_at.clone_from(&equal.heartbeat_at);
+    let [_, mut other_agent] = successive_clear_leases(&config, now + Duration::minutes(1));
+    let mut resume = other_agent.clone();
+    resume.owner_id = format!("resume:{}", uuid::Uuid::new_v4());
+    resume.acquisition_id = uuid::Uuid::new_v4().to_string();
+    other_agent.agent_id = uuid::Uuid::new_v4().to_string();
+    let history = vec![older, equal, other_agent, resume];
+    save_leases(&history).unwrap();
+    assert!(
+        wait_for_lifecycle_restore_lease(&config, &expected, load_leases_checked, || now)
+            .await
+            .unwrap()
+    );
+    drop(
+        admit_restore(std::slice::from_ref(&config), &config, Some(&expected))
+            .unwrap()
+            .expect("retained history leaves ordinary spawn admission available"),
+    );
+    assert_eq!(load_leases_checked().unwrap(), history);
+}
+
+#[tokio::test]
+async fn later_retained_clear_is_inert_for_resume_and_headless_retries() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    let config = saved_config();
+    persist(&config);
+    let now = Utc::now();
+    let [mut resume, later] = successive_clear_leases(&config, now);
+    resume.owner_id = format!("resume:{}", uuid::Uuid::new_v4());
+    let headless = headless_execution_lease(
+        &config,
+        "background_resume",
+        now - Duration::minutes(4),
+        now - Duration::minutes(3),
+    );
+    save_leases(std::slice::from_ref(&later)).unwrap();
+    assert!(
+        wait_for_lifecycle_restore_lease(&config, &resume, load_leases_checked, || now)
+            .await
+            .unwrap()
+    );
+    assert!(wait_for_headless_execution_restore_lease(
+        &config,
+        &headless,
+        load_leases_checked,
+        || now
+    )
+    .await
+    .unwrap());
+    drop(
+        admit_restore(std::slice::from_ref(&config), &config, None)
+            .unwrap()
+            .expect("ordinary admission ignores expired ownership for these retries"),
+    );
+    assert_eq!(load_leases_checked().unwrap(), vec![later]);
 }
 
 #[tokio::test]
