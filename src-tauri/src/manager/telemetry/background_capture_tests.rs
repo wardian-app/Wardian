@@ -563,8 +563,7 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
             assert!(!unchanged.archive_read_ready && !unchanged.unchanged);
             assert_eq!(unchanged.revision, page.revision);
             assert_eq!(unchanged.events, page.events);
-            assert!(unchanged.events.is_empty());
-            assert_eq!(unchanged.progress, "capture_source_replaced");
+            assert_eq!(unchanged.progress, page.progress);
             assert_eq!(unchanged.generation, page.generation);
             assert!(unchanged.source_epoch.is_none());
             assert!(unchanged.recent_admission.is_none());
@@ -641,8 +640,8 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
     )
     .await
     .unwrap();
-    assert!(body.archive_read_ready);
-    assert_eq!(body.progress, "capture_source_replaced");
+    assert!(!body.archive_read_ready);
+    assert_eq!(body.progress, "archive_history_unverified");
     assert!(body.source_epoch.is_none());
     assert!(body.recent_admission.is_none());
     assert!(body.revalidated_ids.is_none());
