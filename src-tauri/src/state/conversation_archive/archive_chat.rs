@@ -420,6 +420,25 @@ struct ConversationPositions {
 }
 
 impl ConversationPositions {
+    /// A request mirror may share its narrative with exactly one other event.
+    fn preceding_request_candidate(&self, position: usize) -> Option<&RowPosition> {
+        let current = self.rows.get(position)?;
+        let prior = self.rows.get(position.checked_sub(1)?)?;
+        if prior.narrative != current.narrative
+            || position
+                .checked_sub(2)
+                .and_then(|index| self.rows.get(index))
+                .is_some_and(|row| row.narrative == current.narrative)
+            || self
+                .rows
+                .get(position + 1)
+                .is_some_and(|row| row.narrative == current.narrative)
+        {
+            return None;
+        }
+        Some(prior)
+    }
+
     fn refresh(
         &mut self,
         directory: &Path,
@@ -1325,7 +1344,8 @@ impl Positions {
                 continue;
             }
             let mut reader = RowReader::open(owned, index)?;
-            for (position, row) in index.rows[..end].iter().enumerate().rev() {
+            let mut rows = index.rows[..end].iter().enumerate().rev();
+            while let Some((position, mut row)) = rows.next() {
                 let partner = index.commentary.get(&position).copied().filter(|&other| {
                     source.zip(epoch).is_some_and(|(source, epoch)| {
                         [row.event, index.rows[other].event]
@@ -1348,7 +1368,25 @@ impl Positions {
                     more = true;
                     break 'cohort;
                 }
-                let (event, record, turn) = reader.read(row, context, source, epoch, page)?;
+                let (mut event, mut record, mut turn) =
+                    reader.read(row, context, source, epoch, page)?;
+                let mut request_mirror = None;
+                if event.provider == "codex" && event.role == Some(AgentChatRole::User) {
+                    if let Some(prior) = index.preceding_request_candidate(position) {
+                        let (first, first_record, first_turn) =
+                            reader.read(prior, context, source, epoch, page)?;
+                        if framed_request_mirror(&first, &event) {
+                            // One display row, with both archive frames retained. The
+                            // earlier frame keeps the same cursor frontier in Older.
+                            request_mirror = Some(event.id);
+                            event = first;
+                            record = first_record;
+                            turn = first_turn;
+                            row = prior;
+                            let _ = rows.next();
+                        }
+                    }
+                }
                 if !displayed.insert(event.id.clone()) {
                     return Err(invalid("ambiguous event identity across chat archives"));
                 }
@@ -1368,11 +1406,17 @@ impl Positions {
                     }
                 }
                 visible.metadata["chat_archive_positioned"] = json!(true);
-                let (alias, covered_sequence) = if let Some(other) = partner {
+                let (alias, covered_sequence) = if let Some(mirror) = request_mirror {
+                    (
+                        Some(AgentChatAlias {
+                            observation_id: mirror,
+                            canonical_id: event.id.clone(),
+                        }),
+                        None,
+                    )
+                } else if let Some(other) = partner {
                     let (paired, _, paired_turn) =
                         reader.read(&index.rows[other], context, source, epoch, page)?;
-                    visible.metadata["chat_display_member_ids"] = json!([event.id, paired.id]);
-                    visible.metadata["chat_display_physical_id"] = json!(event.id);
                     (
                         Some(AgentChatAlias {
                             observation_id: paired.id,
@@ -1385,6 +1429,11 @@ impl Positions {
                 } else {
                     (None, None)
                 };
+                if let Some(alias) = &alias {
+                    visible.metadata["chat_display_member_ids"] =
+                        json!([alias.canonical_id, alias.observation_id]);
+                    visible.metadata["chat_display_physical_id"] = json!(alias.canonical_id);
+                }
                 if visible.text.is_none() {
                     visible.text = event.metadata["text_excerpt"]
                         .as_str()
@@ -1695,6 +1744,23 @@ impl Positions {
         page.reset = false;
         presentation::encode(value).map(Some)
     }
+}
+
+fn framed_request_mirror(first: &AgentChatEvent, second: &AgentChatEvent) -> bool {
+    [first, second].into_iter().all(|event| {
+        event.metadata["generated"] != true
+            && event.metadata["archive_adoption"].is_null()
+            && event.metadata["chat_source_ref"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+            && event.metadata["chat_source_epoch"].is_string()
+    }) && first.metadata["chat_source_ref"] != second.metadata["chat_source_ref"]
+        && first.metadata["chat_source_epoch"] == second.metadata["chat_source_epoch"]
+        && first.metadata["chat_source_end"]
+            .as_u64()
+            .zip(second.metadata["chat_source_start"].as_u64())
+            .is_some_and(|(end, start)| end <= start)
+        && crate::providers::chat_transcript::codex_user_mirror_pair(first, second)
 }
 
 fn has_saved_manifest(listing: &Path) -> io::Result<bool> {

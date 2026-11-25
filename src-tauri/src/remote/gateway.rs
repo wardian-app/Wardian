@@ -5712,13 +5712,15 @@ mod tests {
             "native-message-old",
             "Legacy synthetic request",
         );
-        let first_contents = format!(
-            "{}\n{}",
-            serde_json::json!({"type":"session_meta","payload":{"id":"codex-session-one"}}),
-            first_lines.join("\n")
-        );
-        std::fs::write(&log_path, format!("{first_contents}\n"))
-            .expect("write first synthetic turn");
+        let session_header =
+            serde_json::json!({"type":"session_meta","payload":{"id":"codex-session-one"}});
+        let first_contents = format!("{session_header}\n{}", first_lines.join("\n"));
+        let initial_source = if original_event_msg_seed {
+            format!("{first_contents}\n")
+        } else {
+            format!("{session_header}\n")
+        };
+        std::fs::write(&log_path, initial_source).expect("write first synthetic source extent");
 
         let app = tauri::test::mock_app();
         app.manage(AppState::new());
@@ -5811,6 +5813,29 @@ mod tests {
                 .expect("seed the retained pre-fix archive identity and cursor");
             (first, legacy_id, original_seed_json)
         } else {
+            let initial = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+                "synthetic-codex-agent",
+                "codex",
+                &log_path,
+                source_key,
+                None,
+                true,
+            )
+            .unwrap();
+            assert!(initial.events.is_empty());
+            state
+                .conversation_archive
+                .append_provider_log_batch_with_context(context.clone(), &[], None, &initial.next)
+                .unwrap();
+            writeln!(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&log_path)
+                    .unwrap(),
+                "{}",
+                first_lines.join("\n")
+            )
+            .unwrap();
             let mut legacy = crate::providers::chat_transcript::normalize_chat_lines(
                 "synthetic-codex-agent",
                 "codex",
@@ -5871,7 +5896,7 @@ mod tests {
                 "codex",
                 &log_path,
                 source_key,
-                None,
+                Some(initial.next),
                 true,
             )
             .expect("capture first synthetic turn");
@@ -6075,6 +6100,16 @@ mod tests {
             .active_conversation_id("synthetic-codex-agent")
             .expect("read the ordinary archive handle")
             .expect("normal archive append retains its active conversation");
+        let archive_directory = wardian_core::paths::agent_conversation_dir(
+            "synthetic-codex-agent",
+            &expected_archive_id,
+        )
+        .unwrap();
+        let archive_before = ["events.jsonl", "conversation.jsonl", "turns.jsonl"].map(|name| {
+            let path = archive_directory.join(name);
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        });
         assert_eq!(
             retained_legacy.metadata["conversation_archive_id"].as_str(),
             Some(expected_archive_id.as_str()),
@@ -6324,11 +6359,22 @@ mod tests {
         assert!(pages.last().unwrap()["next_before"].is_null());
         let mut ids = std::collections::HashSet::new();
         let mut turns = std::collections::HashMap::new();
+        let mut aliases = std::collections::HashMap::new();
         let mut historical = None;
         for page in &pages {
             let events = page["events"].as_array().unwrap();
             assert!(events.len() <= 80);
             assert!(page["revalidated_ids"].is_null());
+            if let Some(page_aliases) = page["aliases"].as_array() {
+                for alias in page_aliases {
+                    assert!(aliases
+                        .insert(
+                            alias["observation_id"].as_str().unwrap(),
+                            alias["canonical_id"].as_str().unwrap(),
+                        )
+                        .is_none());
+                }
+            }
             for row in events {
                 assert!(ids.insert(row["id"].as_str().unwrap()));
                 assert!(row["metadata"]["chat_source_ref"].is_null());
@@ -6357,6 +6403,15 @@ mod tests {
         );
         for (turn, _) in &declared_later_turns {
             assert_eq!(turns.get(turn.as_str()), Some(&1), "one row for {turn}");
+        }
+        for pair in later.events.chunks_exact(2) {
+            assert_eq!(
+                aliases.get(pair[1].id.as_str()).copied(),
+                Some(pair[0].id.as_str())
+            );
+        }
+        for (path, bytes) in archive_before {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
         }
         assert_eq!(
             state
