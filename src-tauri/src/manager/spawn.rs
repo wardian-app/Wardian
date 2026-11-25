@@ -1318,6 +1318,7 @@ fn claude_assigned_trust_menu_is_current(output: &str, display_path: &str) -> bo
             .is_some()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_claude_trust_selection(
     terminal_sessions: &crate::state::terminal_session::TerminalSessionBroker,
     session_id: &str,
@@ -1391,8 +1392,8 @@ async fn wait_for_claude_trust_selection(
             return Err("Claude trust selection changed while settling".to_string());
         }
         if claude_trust_snapshots_are_stable(
-            &before_snapshot,
-            &after_snapshot,
+            before_snapshot,
+            after_snapshot,
             runtime_generation,
             display_path,
             selection,
@@ -1443,6 +1444,7 @@ async fn wait_for_claude_startup_ready_prompt(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_claude_startup_ready_prompt_with_timing(
     terminal_sessions: &crate::state::terminal_session::TerminalSessionBroker,
     session_id: &str,
@@ -1498,8 +1500,8 @@ async fn wait_for_claude_startup_ready_prompt_with_timing(
             }
             if before.input_sequence == after.input_sequence
                 && claude_startup_ready_snapshots_are_stable(
-                    &before_snapshot,
-                    &after_snapshot,
+                    before_snapshot,
+                    after_snapshot,
                     runtime_generation,
                 )
             {
@@ -4032,11 +4034,13 @@ async fn spawn_agent_inner(
                                 &current_status_clone,
                                 assigned_claude_trust_prompt,
                             );
-                        if !claude_workspace_trust_started
-                            && trust_action_intent_revision.is_some()
-                            && startup_screen.as_deref().is_some_and(|output| {
-                                crate::control::startup_readiness::
-                                    claude_workspace_trust_prompt_selects_no(output)
+                        if let Some(trust_intent_revision) =
+                            trust_action_intent_revision.filter(|_| {
+                                !claude_workspace_trust_started
+                                    && startup_screen.as_deref().is_some_and(|output| {
+                                        crate::control::startup_readiness::
+                                            claude_workspace_trust_prompt_selects_no(output)
+                                    })
                             })
                         {
                             claude_workspace_trust_started = true;
@@ -4052,12 +4056,10 @@ async fn spawn_agent_inner(
                                 let trust_app = pty_app.clone();
                                 let mut trust_observation = startup_observation.clone();
                                 trust_observation.startup_action_intent_revision =
-                                    trust_action_intent_revision;
+                                    Some(trust_intent_revision);
                                 let trust_intent_app = pty_app.clone();
                                 let trust_intent_session = sid_for_pty.clone();
                                 let trust_intent_status = current_status_clone.clone();
-                                let trust_intent_revision =
-                                    trust_action_intent_revision.expect("checked above");
                                 let trust_intent_is_current: std::sync::Arc<
                                     dyn Fn() -> bool + Send + Sync,
                                 > = std::sync::Arc::new(move || {

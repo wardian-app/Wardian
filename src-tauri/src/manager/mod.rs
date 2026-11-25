@@ -328,26 +328,22 @@ pub(crate) fn set_agent_status_and_get_intent<R: tauri::Runtime>(
         return None;
     }
     let state = app.state::<AppState>();
-    let Some(intent_revision) = reserve_agent_status_intent(
+    let intent_revision = reserve_agent_status_intent(
         state.inner(),
         admission,
         session_id,
         current_status,
         &expected_status,
         next_status,
-    ) else {
-        return None;
-    };
-    let Some((status_sequence, status_revision)) = apply_admitted_status_transition(
+    )?;
+    let (status_sequence, status_revision) = apply_admitted_status_transition(
         state.inner(),
         session_id,
         current_status,
         &expected_status,
         intent_revision,
         next_status,
-    ) else {
-        return None;
-    };
+    )?;
     schedule_agent_status_observation_inner(
         app,
         session_id,
@@ -393,16 +389,14 @@ fn set_agent_status_if_current_with_intent(
         return None;
     }
     let state = app.state::<AppState>();
-    let Some(intent_revision) = reserve_agent_status_intent(
+    let intent_revision = reserve_agent_status_intent(
         state.inner(),
         admission,
         session_id,
         current_status,
         expected_status,
         next_status,
-    ) else {
-        return None;
-    };
+    )?;
     match admission {
         codex_onboarding::CodexStatusAdmission::Blocked => return None,
         codex_onboarding::CodexStatusAdmission::WaitForRoster => {
@@ -642,6 +636,10 @@ pub(crate) fn schedule_startup_readiness_status_observation<R: tauri::Runtime>(
     );
 }
 
+type AgentStatusQueueDispatch<R> =
+    Option<Box<dyn FnOnce(&AppHandle<R>, &str, &str) + Send + 'static>>;
+
+#[allow(clippy::too_many_arguments)]
 fn schedule_agent_status_observation_inner<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
@@ -650,7 +648,7 @@ fn schedule_agent_status_observation_inner<R: tauri::Runtime>(
     status_sequence: u64,
     status_revision: u64,
     input_generation: Option<u64>,
-    queue_dispatch: Option<Box<dyn FnOnce(&AppHandle<R>, &str, &str) + Send + 'static>>,
+    queue_dispatch: AgentStatusQueueDispatch<R>,
 ) {
     let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let status_app = app.clone();

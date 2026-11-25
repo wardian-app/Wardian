@@ -578,9 +578,7 @@ impl InteractionState {
         if self.deleted_sessions.lock().await.contains(session_id) {
             return None;
         }
-        let Some(generation_guard) = generation_guard else {
-            return None;
-        };
+        let generation_guard = generation_guard?;
         if *generation_guard != Some(generation) {
             return None;
         }
