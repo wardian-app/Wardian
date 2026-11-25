@@ -1602,10 +1602,6 @@ impl ProjectionOwner {
         }))
     }
 
-    pub(crate) fn recent_pending_for_test(&self) -> usize {
-        self.recent.lock().unwrap().pending.len()
-    }
-
     pub(crate) fn begin_recent(
         &self,
         snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,

@@ -5,50 +5,6 @@ pub(crate) fn chat_page_needs_recent_capture(page: &AgentChatPage) -> bool {
     page.events.is_empty() && !page.reset && !page.unchanged
 }
 
-/// Coalesce a bounded selection prelude without doing source IO on the request
-/// thread. Capacity stays owned until the actual blocking job has joined.
-pub(crate) fn queue_recent_capture_for_app<R: tauri::Runtime>(
-    state: &AppState,
-    app: &tauri::AppHandle<R>,
-    session_id: &str,
-) -> Result<(), String> {
-    queue_recent_capture_for_app_using(state, app, session_id, publish_recent_for_state)
-}
-
-fn queue_recent_capture_for_app_using<R: tauri::Runtime>(
-    state: &AppState,
-    app: &tauri::AppHandle<R>,
-    session_id: &str,
-    publish: impl FnOnce(&AppState, &str, Option<&Arc<Mutex<String>>>) -> std::io::Result<()>
-        + Send
-        + 'static,
-) -> Result<(), String> {
-    let (snapshot, runtime) = chat_read_snapshot_for_state(state, session_id)?;
-    let nonce = state
-        .conversation_archive
-        .chat_projection
-        .request_recent(&snapshot, &runtime)
-        .map_err(|_| "chat snapshot temporarily busy".to_string())?;
-    if let Some(nonce) = nonce {
-        let owner_app = app.clone();
-        let producer_app = app.clone();
-        let session_id = session_id.to_owned();
-        tauri::async_runtime::spawn(async move {
-            let _ = tauri::async_runtime::spawn_blocking(move || {
-                let state = producer_app.state::<AppState>();
-                publish(&state, &session_id, Some(&runtime))
-            })
-            .await;
-            owner_app
-                .state::<AppState>()
-                .conversation_archive
-                .chat_projection
-                .finish_recent_request(&nonce);
-        });
-    }
-    Ok(())
-}
-
 fn memory_event_belongs_to_conversation(
     event: &wardian_core::memory::MemoryEvent,
     conversation_started_at: Option<&str>,

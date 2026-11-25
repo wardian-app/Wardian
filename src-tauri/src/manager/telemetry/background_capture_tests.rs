@@ -509,6 +509,13 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
 
     let mut cursor = None;
     let mut rows = Vec::new();
+    let expected_epoch = {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&replaced_receipt.native_identity).unwrap())
+        )
+    };
     for page_index in 0..8 {
         let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
             &state,
@@ -522,6 +529,7 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
         .await
         .unwrap();
         assert_eq!(page.progress, "archive_history_unverified");
+        assert_eq!(page.source_epoch.as_deref(), Some(expected_epoch.as_str()));
         assert!(
             !page.archive_read_ready,
             "the earlier native prefix remains unverified"
@@ -565,7 +573,8 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
             assert_eq!(unchanged.events, page.events);
             assert_eq!(unchanged.progress, page.progress);
             assert_eq!(unchanged.generation, page.generation);
-            assert!(unchanged.source_epoch.is_none());
+            assert_eq!(unchanged.source_epoch, page.source_epoch);
+            assert_eq!(unchanged.next_before, page.next_before);
             assert!(unchanged.recent_admission.is_none());
             assert!(unchanged.revalidated_ids.is_none());
             let stale = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
@@ -642,7 +651,7 @@ async fn ordinary_collector_drains_audited_archive_adoption_after_quiet_source_r
     .unwrap();
     assert!(!body.archive_read_ready);
     assert_eq!(body.progress, "archive_history_unverified");
-    assert!(body.source_epoch.is_none());
+    assert_eq!(body.source_epoch.as_deref(), Some(expected_epoch.as_str()));
     assert!(body.recent_admission.is_none());
     assert!(body.revalidated_ids.is_none());
     let detail = body.detail.unwrap();
