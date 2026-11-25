@@ -12,9 +12,16 @@ pub(super) struct Checkpoint {
     root: String,
 }
 
-fn qualified(source: &ProviderLogCaptureState) -> bool {
+fn sealed_interval_qualified(source: &ProviderLogCaptureState) -> bool {
     matches!(source.status.as_str(), "complete" | "pending")
-        && source.reason.is_none()
+        && matches!(
+            source.reason.as_deref(),
+            None | Some(
+                "provider_log_waiting_for_request_root"
+                    | "provider_log_batch_limit"
+                    | "provider_log_partial_record"
+            )
+        )
         && source.unknown_before_offset.is_none()
         && source.disabled_spans.is_empty()
         && source.open_disabled_from.is_none()
@@ -91,17 +98,8 @@ fn codex_capture_scope_matches(input: &Preparation<'_>) -> bool {
 
 fn codex_scope_matches(input: &Preparation<'_>) -> bool {
     codex_capture_scope_matches(input)
-        && input.previous.is_some_and(|previous| {
-            previous.unknown_before_offset.is_none()
-                && previous.disabled_spans.is_empty()
-                && previous.open_disabled_from.is_none()
-                && matches!(previous.status.as_str(), "complete" | "pending")
-                && matches!(
-                    previous.reason.as_deref(),
-                    None | Some("provider_log_waiting_for_request_root")
-                )
-        })
-        && qualified(input.next)
+        && input.previous.is_some_and(sealed_interval_qualified)
+        && sealed_interval_qualified(input.next)
 }
 
 fn codex_owner_matches(
@@ -309,10 +307,9 @@ pub(super) fn already_archived_claude_rows(input: &Preparation<'_>) -> io::Resul
                     && previous.native_identity == input.next.native_identity
                     && previous.policy_generation == input.next.policy_generation
                     && previous.committed_offset <= input.next.committed_offset
-                    && qualified(previous)
+                    && sealed_interval_qualified(previous)
             })
-            || !qualified(input.next)
-            || input.next.status != "complete"
+            || !sealed_interval_qualified(input.next)
             || !proved
             || !proof.matches_capture(input.previous, input.next)?
             || !eligible(old, event, input.next, &input.context.provider_session_ids)

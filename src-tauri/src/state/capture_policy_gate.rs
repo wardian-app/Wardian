@@ -76,6 +76,9 @@ impl CapturePolicyGate {
 }
 
 #[cfg(test)]
+include!("capture_policy_gate_legacy_fixture.inc.rs");
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -210,6 +213,3 @@ mod tests {
         assert!(gate.try_lock().is_ok());
     }
 }
-
-#[cfg(test)]
-include!("capture_policy_gate_legacy_fixture.inc.rs");

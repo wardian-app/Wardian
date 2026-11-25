@@ -76,6 +76,126 @@ fn archive_snapshot(path: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>>
 }
 
 #[tokio::test]
+async fn archive_only_chat_entry_replays_a_sealed_saved_frame_at_the_front_of_a_backlog() {
+    use crate::commands::provider_log_acquisition::acquire_provider_log_batch;
+    use serde_json::json;
+    use std::io::Write as _;
+
+    for provider in ["codex", "claude"] {
+        let home = TestWardianHome::new_async().await;
+        let path = home.path().join(format!("{provider}.jsonl"));
+        std::fs::write(&path, "").unwrap();
+        let source_key = format!("{provider}:session:backlog-fixture");
+        let context = ConversationArchiveContext {
+            provider_session_ids: vec!["backlog-fixture".into()],
+            provider_source_key: Some(source_key.clone()),
+            ..ConversationArchiveContext::for_agent_id(ID, provider)
+        };
+        let archive = ConversationArchiveState::default();
+        let initial =
+            acquire_provider_log_batch(ID, provider, &path, &source_key, None, true).unwrap();
+        archive
+            .append_provider_log_batch_with_context(context.clone(), &[], None, &initial.next)
+            .unwrap();
+        let row = |index, text: &str| {
+            let identity = format!("backlog-{index}");
+            if provider == "codex" {
+                json!({"type":"response_item", "turn_id":identity, "payload":{
+                    "type":"message", "role":"assistant", "content":[{"type":"output_text","text":text}]
+                }})
+            } else {
+                json!({"type":"user","uuid":identity,"message":{"role":"user","content":text}})
+            }
+        };
+        std::fs::write(&path, format!("{}\n", row(0, "saved before the cursor"))).unwrap();
+        let mut first = acquire_provider_log_batch(
+            ID,
+            provider,
+            &path,
+            &source_key,
+            Some(initial.next.clone()),
+            true,
+        )
+        .unwrap();
+        decorate_forward_provider_log_events(&mut first.events, provider, &path);
+        let mut saved = first.events.remove(0);
+        saved.id = if provider == "codex" {
+            legacy_provider_log_event_id(&saved, &path)
+        } else {
+            saved.metadata["chat_compatibility_raw_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        for key in [
+            PROVIDER_LOG_ROW_OFFSET_METADATA_KEY,
+            "legacy_event_ids",
+            "chat_source_ref",
+            "chat_source_start",
+            "chat_source_end",
+            "chat_source_epoch",
+        ] {
+            saved.metadata.as_object_mut().unwrap().remove(key);
+        }
+        archive
+            .append_chat_events_with_context(context.clone(), std::slice::from_ref(&saved))
+            .unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let tail = "x".repeat(7_000);
+        for index in 1..=45 {
+            writeln!(writer, "{}", row(index, &format!("{index} {tail}"))).unwrap();
+        }
+        drop(writer);
+
+        let mut previous = initial.next;
+        let extent = std::fs::metadata(&path).unwrap().len();
+        for pass in 0..2 {
+            let mut batch = acquire_provider_log_batch(
+                ID,
+                provider,
+                &path,
+                &source_key,
+                Some(previous.clone()),
+                true,
+            )
+            .unwrap();
+            decorate_forward_provider_log_events(&mut batch.events, provider, &path);
+            if pass == 0 {
+                assert_eq!(
+                    batch.next.reason.as_deref(),
+                    Some("provider_log_batch_limit")
+                );
+                assert!(batch.source_proof().is_some());
+            }
+            archive
+                .append_verified_provider_log_batch_with_context(
+                    context.clone(),
+                    &batch.events,
+                    Some(&previous),
+                    &batch.next,
+                    batch.source_proof(),
+                )
+                .unwrap_or_else(|error| panic!("{provider} pass {pass}: {error}"));
+            assert!(batch.next.committed_offset > previous.committed_offset);
+            previous = batch.next;
+        }
+        assert_eq!(previous.committed_offset, extent);
+        let archived = archive.chat_events_for_capture(&context).unwrap();
+        assert_eq!(
+            archived.len(),
+            46,
+            "{provider} replay must not add a duplicate"
+        );
+        assert_eq!(archived[0].id, saved.id);
+        let root = wardian_core::paths::agent_conversations_dir(ID).unwrap();
+        assert!(!root.with_file_name("chat-read-objects").exists());
+    }
+}
+
+#[tokio::test]
 async fn archive_only_chat_entry_reads_recent_older_preview_and_artifact_without_writes() {
     let _home = TestWardianHome::new_async().await;
     let state = registered(AgentConversationLoggingSetting::Enabled).await;
@@ -178,12 +298,25 @@ async fn archive_only_chat_entry_inspects_full_owned_transcript_or_reports_missi
     let directory =
         wardian_core::paths::agent_conversation_dir(ID, page.conversation_id.as_deref().unwrap())
             .unwrap();
-    let path = directory.join(reference);
+    let path = directory.join("artifacts").join(reference);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), artifact);
     std::fs::write(&path, "wrong artifact body").unwrap();
     let error = load_agent_chat_transcript_for_state(&restarted, ID.into())
         .await
         .unwrap_err();
     assert!(error.contains("artifact proof changed"), "{error}");
+    std::fs::write(&path, &artifact).unwrap();
+    let events_path = directory.join("events.jsonl");
+    let before = std::fs::read(&events_path).unwrap();
+    let mut frames: Vec<AgentChatEvent> =
+        wardian_core::conversations::read_jsonl_records(&events_path).unwrap();
+    frames[1].metadata["archive_record"]["artifact_refs"] = serde_json::Value::Null;
+    write_jsonl_atomic(&events_path, &frames).unwrap();
+    let error = load_agent_chat_transcript_for_state(&restarted, ID.into())
+        .await
+        .unwrap_err();
+    assert!(error.contains("artifact binding is missing"), "{error}");
+    std::fs::write(&events_path, before).unwrap();
     std::fs::remove_file(path).unwrap();
     let error = load_agent_chat_transcript_for_state(&restarted, ID.into())
         .await
@@ -923,6 +1056,161 @@ async fn archive_only_chat_entry_uses_nested_artifact_when_top_level_is_null() {
         .detail
         .unwrap();
     assert!(text.starts_with(&body.text) && !body.complete && !body.text.is_empty());
+}
+
+#[tokio::test]
+async fn archive_only_chat_entry_covers_both_commentary_sequences_in_a_typed_turn() {
+    use serde_json::json;
+    let home = TestWardianHome::new_async().await;
+    let state = registered(AgentConversationLoggingSetting::Enabled).await;
+    let native = "00000000-0000-4000-8000-000000000492";
+    let path = home
+        .path()
+        .join(format!("rollout-2026-10-04T00-00-00-{native}.jsonl"));
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            json!({"type":"session_meta","payload":{"id":native}})
+        ),
+    )
+    .unwrap();
+    {
+        let roster = state.agents.lock().await;
+        let agent = &roster[ID];
+        let mut config = agent.config.lock().unwrap();
+        config.provider = "codex".into();
+        config.fresh_provider_session_id = Some(native.into());
+        *agent.log_path.lock().unwrap() = Some(path.clone());
+    }
+    let (snapshot, _) = chat_read_snapshot_for_state(&state, ID).unwrap();
+    let context = conversation_archive_context_from_snapshot(&snapshot);
+    let source = context.provider_source_key.as_deref().unwrap();
+    let batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        ID, "codex", &path, source, None, true,
+    )
+    .unwrap();
+    let epoch = crate::commands::chat_recent_seed::hash(
+        &serde_json::to_vec(&batch.next.native_identity).unwrap(),
+    );
+    let message = |id, role, text: &str, metadata| {
+        archived_event(
+            "codex",
+            id,
+            AgentChatEventKind::Message,
+            Some(role),
+            Some(text.into()),
+            metadata,
+        )
+    };
+    let request = message(
+        "request",
+        AgentChatRole::User,
+        "run the fixture",
+        json!({
+            "input_origin":"human_input", "input_purpose":"request", "request_root_id":"root"
+        }),
+    );
+    let commentary = |id, source, raw_type, native_id: Option<&str>, start| {
+        let mut event = message(
+            id,
+            AgentChatRole::Assistant,
+            "checking the fixture",
+            json!({
+                "request_root_id":"root", "provider_phase":"commentary", "provider_turn_id":"actual-turn",
+                "provider_log":true, "provider_session_id":native, "log_path":path, "raw_type":raw_type,
+                "chat_source_ref":id, "chat_source_epoch":epoch, "chat_source_start":start, "chat_source_end":start + 1,
+            }),
+        );
+        event.source = Some(source);
+        event.turn_id = native_id.map(str::to_owned);
+        event
+    };
+    let mut stream = commentary(
+        "commentary-stream",
+        "event_msg".into(),
+        "agent_message",
+        None,
+        1,
+    );
+    let mut retained = commentary(
+        "commentary-complete",
+        "response_item".into(),
+        "message",
+        Some("native-message"),
+        2,
+    );
+    stream.sequence = Some(2);
+    retained.sequence = Some(3);
+    let call = archived_event(
+        "codex",
+        "call",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+        json!({
+            "request_root_id":"root","call_id":"test-call","tool_name":"fixture-tool","tool_input_text":"argument"
+        }),
+    );
+    let result = archived_event(
+        "codex",
+        "result",
+        AgentChatEventKind::ToolResult,
+        None,
+        Some("output".into()),
+        json!({
+            "request_root_id":"root","call_id":"test-call","tool_name":"fixture-tool"
+        }),
+    );
+    let answer = message(
+        "answer",
+        AgentChatRole::Assistant,
+        "finished",
+        json!({
+            "request_root_id":"root", "provider_phase":"final_answer"
+        }),
+    );
+    state
+        .conversation_archive
+        .append_provider_log_batch_with_context(
+            context,
+            &[request, stream, retained, call, result, answer],
+            None,
+            &batch.next,
+        )
+        .unwrap();
+    let page = load_agent_chat_page_with_preview_for_state(
+        &state,
+        ID.into(),
+        None,
+        None,
+        None,
+        None,
+        RecentChatRead::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .filter(|event| event.text.as_deref() == Some("checking the fixture"))
+            .count(),
+        1
+    );
+    assert_eq!(page.aliases.len(), 1);
+    let presentation = page.presentation.unwrap().decode_v1().unwrap().unwrap();
+    assert_eq!(presentation.turns.len(), 1);
+    assert!(presentation.items.iter().any(|item| item
+        .step
+        .as_ref()
+        .is_some_and(|step| step.detail_ref.is_some())));
+    assert_eq!(
+        load_agent_chat_transcript_for_state(&state, ID.into())
+            .await
+            .unwrap()
+            .len(),
+        6
+    );
 }
 
 #[tokio::test]

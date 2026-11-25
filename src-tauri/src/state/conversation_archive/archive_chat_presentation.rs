@@ -10,6 +10,7 @@ pub(super) struct Occurrence {
     pub(super) owner: String,
     pub(super) key: String,
     pub(super) sequence: u64,
+    pub(super) covered_sequence: Option<u64>,
     pub(super) event: AgentChatEvent,
     pub(super) turn: ConversationTurnRecord,
     pub(super) body: Option<String>,
@@ -145,7 +146,10 @@ pub(super) fn window(
         }
         // A partial window or an unrepresented narrative row does not grant
         // turn-membership authority. The ordinary event renderer remains usable.
-        let seqs = rows.iter().map(|row| row.sequence).collect::<HashSet<_>>();
+        let seqs = rows
+            .iter()
+            .flat_map(|row| std::iter::once(row.sequence).chain(row.covered_sequence))
+            .collect::<HashSet<_>>();
         if seqs.len() as u64 != turn.counts.records
             || !seqs.contains(&turn.seq_start)
             || !seqs.contains(&turn.seq_end)

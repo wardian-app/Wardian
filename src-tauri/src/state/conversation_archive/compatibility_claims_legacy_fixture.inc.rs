@@ -1,3 +1,11 @@
+fn qualified(source: &ProviderLogCaptureState) -> bool {
+    matches!(source.status.as_str(), "complete" | "pending")
+        && source.reason.is_none()
+        && source.unknown_before_offset.is_none()
+        && source.disabled_spans.is_empty()
+        && source.open_disabled_from.is_none()
+}
+
 // Legacy projection code retained for compatibility fixtures.
 // This file is included only by the test build of its owner module.
 
@@ -131,21 +139,6 @@ fn codex_owner_digest(event: &AgentChatEvent) -> io::Result<String> {
     ))
 }
 
-fn codex_progress_qualified(source: &ProviderLogCaptureState) -> bool {
-    matches!(source.status.as_str(), "complete" | "pending")
-        && matches!(
-            source.reason.as_deref(),
-            None | Some(
-                "provider_log_waiting_for_request_root"
-                    | "provider_log_batch_limit"
-                    | "provider_log_partial_record"
-            )
-        )
-        && source.unknown_before_offset.is_none()
-        && source.disabled_spans.is_empty()
-        && source.open_disabled_from.is_none()
-}
-
 /// Cursor publication follows the durable frame upgrade. Recover that exact
 /// owner without asking a later acquisition to re-observe already-consumed bytes.
 /// An uncommitted cursor or unframed owner still needs the original sealed row.
@@ -167,8 +160,8 @@ fn committed_codex_owner(
     let coordinate_key =
         digest(format!("coordinate:{}:{}", claim.scope, claim.coordinate).as_bytes());
     if !codex_capture_scope_matches(input)
-        || !codex_progress_qualified(previous)
-        || !codex_progress_qualified(input.next)
+        || !sealed_interval_qualified(previous)
+        || !sealed_interval_qualified(input.next)
         || claim.scope != scope(input.context, input.conversation_id, previous)?
         || claim.scope != scope(input.context, input.conversation_id, input.next)?
         || pending_key != owner_key(input.context, input.conversation_id, &claim.canonical_id)

@@ -1207,9 +1207,24 @@ impl Positions {
                                 return Err(invalid("owned transcript artifact proof changed"));
                             }
                             event.text = Some(text);
-                        } else if event.text.is_none() && record.event_refs.len() == 1 {
-                            event.text = record.text;
-                            if event.text.is_none() && event.metadata["text_excerpt"].is_string() {
+                        } else {
+                            let sole_owner = record.event_refs.len() == 1;
+                            if sole_owner
+                                && !record.artifact_refs.is_empty()
+                                && record.text.is_none()
+                            {
+                                return Err(invalid(
+                                    "owned transcript artifact binding is missing",
+                                ));
+                            }
+                            if event.text.is_none() && sole_owner {
+                                event.text = record.text;
+                            }
+                            if event.text.is_none()
+                                && (event.metadata["text_excerpt"].is_string()
+                                    || record.excerpt.is_some()
+                                    || !record.artifact_refs.is_empty())
+                            {
                                 return Err(invalid("owned transcript body is missing"));
                             }
                         }
@@ -1353,17 +1368,22 @@ impl Positions {
                     }
                 }
                 visible.metadata["chat_archive_positioned"] = json!(true);
-                let alias = if let Some(other) = partner {
-                    let (paired, _, _) =
+                let (alias, covered_sequence) = if let Some(other) = partner {
+                    let (paired, _, paired_turn) =
                         reader.read(&index.rows[other], context, source, epoch, page)?;
                     visible.metadata["chat_display_member_ids"] = json!([event.id, paired.id]);
                     visible.metadata["chat_display_physical_id"] = json!(event.id);
-                    Some(AgentChatAlias {
-                        observation_id: paired.id,
-                        canonical_id: event.id.clone(),
-                    })
+                    (
+                        Some(AgentChatAlias {
+                            observation_id: paired.id,
+                            canonical_id: event.id.clone(),
+                        }),
+                        turn.as_ref()
+                            .filter(|turn| paired_turn.as_ref() == Some(*turn))
+                            .map(|_| index.rows[other].seq),
+                    )
                 } else {
-                    None
+                    (None, None)
                 };
                 if visible.text.is_none() {
                     visible.text = event.metadata["text_excerpt"]
@@ -1423,6 +1443,7 @@ impl Positions {
                         owner: owned.binding.clone(),
                         key: key.clone(),
                         sequence: row.seq,
+                        covered_sequence,
                         event,
                         turn,
                         body: visible.metadata["chat_body_binding"]

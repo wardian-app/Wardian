@@ -425,6 +425,9 @@ fn utf8_tail_start(bytes: &[u8], limit: usize) -> usize {
 }
 
 #[cfg(test)]
+include!("agent_watch_legacy_fixture.inc.rs");
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -611,6 +614,3 @@ mod tests {
             .is_some());
     }
 }
-
-#[cfg(test)]
-include!("agent_watch_legacy_fixture.inc.rs");

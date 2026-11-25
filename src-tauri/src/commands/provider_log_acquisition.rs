@@ -1275,6 +1275,9 @@ pub(crate) fn native_file_identity(file: &std::fs::File) -> io::Result<ProviderL
 }
 
 #[cfg(test)]
+include!("provider_log_acquisition_legacy_fixture.inc.rs");
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2767,6 +2770,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-include!("provider_log_acquisition_legacy_fixture.inc.rs");
