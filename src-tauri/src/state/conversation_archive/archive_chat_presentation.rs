@@ -47,11 +47,13 @@ pub(super) fn item_key(owned: &str, event: &AgentChatEvent) -> String {
 }
 
 pub(super) fn encode(value: ChatPresentationV1) -> io::Result<ChatPresentation> {
-    value.validate().map_err(io::Error::other)?;
-    Ok(ChatPresentation {
+    let envelope = ChatPresentation {
         version: CHAT_PRESENTATION_VERSION,
         payload: serde_json::to_value(value).map_err(io::Error::other)?,
-    })
+    };
+    // Check the wire budget and structural contract before a page publishes.
+    envelope.decode_v1().map_err(io::Error::other)?;
+    Ok(envelope)
 }
 
 pub(super) fn envelope() -> ChatPresentationV1 {

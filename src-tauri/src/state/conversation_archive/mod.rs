@@ -164,6 +164,7 @@ fn refresh_codex_completion_narrative(
 pub struct ConversationArchiveState {
     #[allow(dead_code)]
     active: Mutex<HashMap<String, ActiveConversationHandle>>,
+    #[cfg(test)]
     live_started_at: Mutex<HashMap<String, String>>,
     agent_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     archive_positions: Mutex<HashMap<String, Arc<Mutex<archive_chat::Positions>>>>,
@@ -517,42 +518,6 @@ impl ConversationArchiveState {
                 "{error}; terminal capture status could not be saved: {status_error}"
             )),
         }
-    }
-
-    /// Records the provider-session boundary before startup events are
-    /// emitted. This remains available when conversation logging is disabled,
-    /// because live Chat still projects memory activity.
-    pub fn begin_live_conversation(&self, agent_id: &str, started_at: &str) -> io::Result<()> {
-        let agent_id = agent_id.trim();
-        let started_at = started_at.trim();
-        if agent_id.is_empty() || started_at.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "agent_id and started_at are required",
-            ));
-        }
-        self.live_started_at
-            .lock()
-            .map_err(|_| io::Error::other("live conversation boundary lock poisoned"))?
-            .insert(agent_id.to_string(), started_at.to_string());
-        Ok(())
-    }
-
-    pub fn live_conversation_started_at(&self, agent_id: &str) -> io::Result<Option<String>> {
-        Ok(self
-            .live_started_at
-            .lock()
-            .map_err(|_| io::Error::other("live conversation boundary lock poisoned"))?
-            .get(agent_id.trim())
-            .cloned())
-    }
-
-    pub(crate) fn retire_live_conversation(&self, agent_id: &str) -> io::Result<()> {
-        self.live_started_at
-            .lock()
-            .map_err(|_| io::Error::other("live conversation boundary lock poisoned"))?
-            .remove(agent_id);
-        Ok(())
     }
 
     pub fn active_conversation_id(&self, agent_id: &str) -> io::Result<Option<String>> {

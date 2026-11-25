@@ -2,6 +2,13 @@
   "$comment": "Rust items with no production caller that predate the check (#1085). Shrink freely: delete the code, then the entry (or run `npm run check:rust-deadcode -- --prune`). Adding an entry needs a reason a reviewer accepts. See docs/developer/ci-verification.md#rust-dead-code.",
   "groups": [
     {
+      "reason": "Shared read-only memory audit API used by dependent-crate authorization and delivery fixtures. Archive Chat no longer reads memory events.",
+      "entries": [
+        "crates/wardian-core/src/memory.rs::MemoryEvent",
+        "crates/wardian-core/src/memory.rs::list_events"
+      ]
+    },
+    {
       "reason": "Held only for Drop: the field owns an OS resource (a file watcher, a Windows job object) that must live exactly as long as the struct.",
       "entries": [
         "src-tauri/src/state/app_state.rs::ExplorerWatchRegistration.watcher",

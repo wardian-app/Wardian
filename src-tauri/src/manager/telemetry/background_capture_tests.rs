@@ -2,7 +2,6 @@ use super::*;
 use std::future::{poll_fn, Future};
 use std::io::Write;
 use std::task::Poll;
-use std::time::Duration;
 
 #[cfg(feature = "adoption-throughput")]
 #[path = "adoption_throughput_tests.rs"]
@@ -1046,14 +1045,17 @@ async fn missing_body_page(
     session_id: &str,
     cursor: Option<String>,
 ) -> wardian_core::models::chat::AgentChatPage {
-    crate::commands::chat::load_agent_chat_page_with_limit_for_state(
+    crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         state,
         session_id.into(),
         cursor,
         None,
         None,
         None,
-        Some(24),
+        crate::commands::chat::RecentChatRead {
+            limit: Some(24),
+            preview: false,
+        },
     )
     .await
     .unwrap()

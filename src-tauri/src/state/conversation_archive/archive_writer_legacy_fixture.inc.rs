@@ -1,5 +1,32 @@
 // Fixture-only helpers included by the owning module during tests.
 
+impl ConversationArchiveState {
+    pub fn begin_live_conversation(&self, agent_id: &str, started_at: &str) -> io::Result<()> {
+        let agent_id = agent_id.trim();
+        let started_at = started_at.trim();
+        if agent_id.is_empty() || started_at.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "agent_id and started_at are required",
+            ));
+        }
+        self.live_started_at
+            .lock()
+            .map_err(|_| io::Error::other("live conversation boundary lock poisoned"))?
+            .insert(agent_id.to_string(), started_at.to_string());
+        Ok(())
+    }
+
+    pub fn live_conversation_started_at(&self, agent_id: &str) -> io::Result<Option<String>> {
+        Ok(self
+            .live_started_at
+            .lock()
+            .map_err(|_| io::Error::other("live conversation boundary lock poisoned"))?
+            .get(agent_id.trim())
+            .cloned())
+    }
+}
+
 pub(crate) fn recent_watch_policy(
     agent_id: &str,
 ) -> io::Result<impl Fn(&AgentChatEvent, Option<&str>) -> bool> {
