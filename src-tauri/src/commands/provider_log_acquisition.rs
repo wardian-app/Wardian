@@ -171,6 +171,28 @@ impl ProviderLogSourceProof {
             .count();
         matches == 1
     }
+
+    pub(crate) fn proves_claude_raw_owner(&self, event: &AgentChatEvent, path: &Path) -> bool {
+        event.provider == "claude"
+            && self.proves(event)
+            && self.rows.iter().any(|row| {
+                if row.metadata["chat_source_ref"] != event.metadata["chat_source_ref"] {
+                    return false;
+                }
+                let mut row = row.clone();
+                super::chat::decorate_forward_provider_log_events(
+                    std::slice::from_mut(&mut row),
+                    "claude",
+                    path,
+                );
+                [
+                    "chat_compatibility_raw_id",
+                    "chat_compatibility_native_uuid",
+                ]
+                .iter()
+                .all(|key| row.metadata.get(*key) == event.metadata.get(*key))
+            })
+    }
 }
 
 pub(crate) fn acquire_provider_log_batch(
@@ -230,14 +252,6 @@ pub(crate) struct ProviderLogSource<'a> {
     pub(crate) provider_source_key: &'a str,
 }
 
-#[cfg(test)]
-pub(crate) struct SourceReplayRequest {
-    pub(crate) previous: ProviderLogCaptureState,
-    pub(crate) expected_identity: ProviderLogNativeIdentity,
-    pub(crate) target_extent: u64,
-    pub(crate) anchor_floor: u64,
-}
-
 struct ProviderLogBatchOptions<'a> {
     previous: Option<ProviderLogCaptureState>,
     trust_source_from_start: bool,
@@ -249,66 +263,6 @@ struct ProviderLogBatchOptions<'a> {
     emit_source_proof: bool,
 }
 
-#[cfg(test)]
-/// Replay an independently pinned source interval using the same native
-/// identity, framing, and normalizer as foreground provider acquisition.
-/// This cursor is owned by SourceIndex; it never reads or advances the primary
-/// provider-capture cursor.
-pub(crate) fn acquire_source_replay_batch(
-    source: ProviderLogSource<'_>,
-    request: SourceReplayRequest,
-) -> io::Result<(ProviderLogBatch, ProviderLogReplayMetrics)> {
-    let mut metrics = ProviderLogReplayMetrics::default();
-    let batch = acquire_provider_log_batch_bounded(
-        source,
-        ProviderLogBatchOptions {
-            previous: Some(request.previous),
-            trust_source_from_start: true,
-            expected_identity: Some(&request.expected_identity),
-            target_extent: Some(request.target_extent),
-            max_records: Some(80),
-            anchor_floor: request.anchor_floor,
-            recover_legacy_rows: false,
-            emit_source_proof: false,
-        },
-        &mut metrics,
-    )?;
-    Ok((batch, metrics))
-}
-
-#[cfg(test)]
-pub(crate) fn source_replay_state(
-    path: &Path,
-    provider_source_key: &str,
-    expected_identity: &ProviderLogNativeIdentity,
-    cursor: u64,
-) -> io::Result<ProviderLogCaptureState> {
-    let file = std::fs::File::open(path)?;
-    if file.metadata()?.len() < cursor || native_file_identity(&file)? != *expected_identity {
-        return Err(io::Error::other("provider log replay identity changed"));
-    }
-    let canonical_path = std::fs::canonicalize(path)?.to_string_lossy().to_string();
-    Ok(ProviderLogCaptureState {
-        provider_source_key: provider_source_key.to_owned(),
-        path: canonical_path,
-        native_identity: expected_identity.clone(),
-        committed_offset: cursor,
-        continuity_anchor: ProviderLogContinuityAnchor {
-            start: cursor,
-            len: 0,
-            sha256: format!("{:x}", Sha256::digest(b"")),
-        },
-        normalizer: TranscriptNormalizationState::default(),
-        status: "pending".into(),
-        reason: None,
-        unknown_before_offset: None,
-        policy_generation: 0,
-        disabled_spans: Vec::new(),
-        open_disabled_from: None,
-    })
-}
-
-// Shared capture engine: keep ownership, range, admission mode, and accounting inputs explicit.
 fn acquire_provider_log_batch_bounded(
     source: ProviderLogSource<'_>,
     options: ProviderLogBatchOptions<'_>,
@@ -751,7 +705,7 @@ fn acquire_provider_log_batch_bounded(
 
     let policy_boundary_pending = next_disabled_start(&state, readable_extent)
         .is_some_and(|start| start == state.committed_offset);
-    let source_proof = if emit_source_proof && matches!(provider, "codex" | "mock") {
+    let source_proof = if emit_source_proof && matches!(provider, "codex" | "claude" | "mock") {
         previous
             .as_ref()
             .map(|previous| {
@@ -762,7 +716,7 @@ fn acquire_provider_log_batch_bounded(
                             positions.contains_key(&sequence)
                                 || recovered_pending_rows.contains_key(&sequence)
                         }) && event.metadata["chat_source_ref"].is_string()
-                            && (provider == "mock"
+                            && (provider != "codex"
                                 || super::chat::archive_identity::requires_provider_log_row_identity(
                                     event,
                                 ))
@@ -2813,3 +2767,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+include!("provider_log_acquisition_legacy_fixture.inc.rs");

@@ -75,6 +75,7 @@ composer submissions.
 ## Chat (`commands/chat.rs`)
 
 - `load_agent_chat_page`
+- `load_agent_chat_transcript`
 
 Pass `sessionId` for Recent. `recentPreview: true` reads from the same owned
 archive scope. Pass a returned `cursor` and `revision` for Older or a returned
@@ -82,6 +83,10 @@ archive scope. Pass a returned `cursor` and `revision` for Older or a returned
 A reference that cannot be verified against the archive returns a reset or an
 explicit unavailable result. Legacy projection references require a reset.
 Archive reads do not renew unarchived native observation IDs.
+
+The full-transcript command returns complete saved event payloads, including
+owned text artifacts. It reports unavailable history when it cannot verify
+the complete archived scope.
 
 The standalone read-only verifier is described in
 [offline legacy Chat verification](./state-management.md#offline-legacy-chat-verification).

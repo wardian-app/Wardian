@@ -149,6 +149,49 @@ async fn archive_only_chat_entry_reads_recent_older_preview_and_artifact_without
 }
 
 #[tokio::test]
+async fn archive_only_chat_entry_inspects_full_owned_transcript_or_reports_missing_content() {
+    let _home = TestWardianHome::new_async().await;
+    let state = registered(AgentConversationLoggingSetting::Enabled).await;
+    let context = ConversationArchiveContext::for_agent_id(ID, "mock");
+    let inline = "inline-body-".repeat(380);
+    let artifact = "artifact-body-".repeat(2_000);
+    for text in [&inline, &artifact] {
+        state
+            .conversation_archive
+            .append_delivered_input_with_context(context.clone(), text, None)
+            .unwrap();
+    }
+
+    let page = read(&state, None, None, false).await;
+    assert!(page.archive_read_ready);
+    assert!(page.events[0].text.as_ref().unwrap().len() < inline.len());
+    let restarted = registered(AgentConversationLoggingSetting::Disabled).await;
+    let transcript = load_agent_chat_transcript_for_state(&restarted, ID.into())
+        .await
+        .unwrap();
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(transcript[0].text.as_deref(), Some(inline.as_str()));
+    assert_eq!(transcript[1].text.as_deref(), Some(artifact.as_str()));
+    let reference = transcript[1].metadata["archive_record"]["artifact_refs"][0]
+        .as_str()
+        .unwrap();
+    let directory =
+        wardian_core::paths::agent_conversation_dir(ID, page.conversation_id.as_deref().unwrap())
+            .unwrap();
+    let path = directory.join(reference);
+    std::fs::write(&path, "wrong artifact body").unwrap();
+    let error = load_agent_chat_transcript_for_state(&restarted, ID.into())
+        .await
+        .unwrap_err();
+    assert!(error.contains("artifact proof changed"), "{error}");
+    std::fs::remove_file(path).unwrap();
+    let error = load_agent_chat_transcript_for_state(&restarted, ID.into())
+        .await
+        .unwrap_err();
+    assert!(error.contains("archive_payload_missing"), "{error}");
+}
+
+#[tokio::test]
 async fn archive_only_chat_entry_proves_append_torn_tail_turn_replacement_and_restart() {
     use std::io::Write;
 

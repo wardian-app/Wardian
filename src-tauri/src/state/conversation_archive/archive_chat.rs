@@ -13,7 +13,10 @@ use wardian_core::conversations::{
     ConversationNarrativeRecord, ConversationRecordKind, ConversationTurnRecord,
     CONVERSATION_SCHEMA, CONVERSATION_TURNS_SCHEMA,
 };
-use wardian_core::models::chat::{AgentChatDetail, AgentChatEvent, AgentChatPage};
+use wardian_core::models::chat::{
+    AgentChatAlias, AgentChatDetail, AgentChatEvent, AgentChatEventKind, AgentChatPage,
+    AgentChatRole,
+};
 
 #[path = "archive_chat_presentation.rs"]
 mod presentation;
@@ -310,6 +313,85 @@ struct EventPosition {
     identity: String,
     coalesced: Vec<(u64, String)>,
     body: Result<Option<String>, ()>,
+    commentary: Option<CommentaryPosition>,
+}
+
+/// A display relation can keep both physical frames addressable without
+/// retaining their bodies or changing the archive.
+#[derive(Debug)]
+struct CommentaryPosition {
+    key: String,
+    epoch: String,
+    start: u64,
+    end: u64,
+    completion: bool,
+}
+
+impl CommentaryPosition {
+    fn of(event: &AgentChatEvent) -> Option<Self> {
+        if event.provider != "codex"
+            || event.kind != AgentChatEventKind::Message
+            || event.role != Some(AgentChatRole::Assistant)
+            || event.metadata["provider_phase"] != "commentary"
+            || event.metadata["provider_log"] != true
+            || event.metadata["generated"] == true
+            || !event.metadata["archive_adoption"].is_null()
+            || event.metadata["chat_source_ref"].as_str() != Some(event.id.as_str())
+        {
+            return None;
+        }
+        let completion = match (
+            event.source.as_deref(),
+            event.metadata["raw_type"].as_str(),
+            event.turn_id.as_deref(),
+        ) {
+            (Some("event_msg"), Some("agent_message" | "assistant_message"), None) => false,
+            (Some("response_item"), Some("message"), Some(id)) if !id.is_empty() => true,
+            _ => return None,
+        };
+        let field = |key: &str| {
+            event.metadata[key]
+                .as_str()
+                .filter(|value| !value.is_empty())
+        };
+        let epoch = field("chat_source_epoch")?;
+        let start = event.metadata["chat_source_start"].as_u64()?;
+        let end = event.metadata["chat_source_end"].as_u64()?;
+        let text = event
+            .text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())?;
+        Some(Self {
+            key: hash_json(&(
+                &event.session_id,
+                field("provider_session_id")?,
+                field("provider_turn_id")?,
+                field("log_path")?,
+                field("request_root_id"),
+                epoch,
+                digest(text.as_bytes()),
+            ))
+            .ok()?,
+            epoch: epoch.to_owned(),
+            start,
+            end,
+            completion,
+        })
+    }
+
+    fn admitted(&self, source: &SourceAdmission, epoch: &str) -> bool {
+        self.epoch == epoch
+            && self.start >= source.unknown_before_offset.unwrap_or(0)
+            && self.start < self.end
+            && self.end <= source.committed_offset
+            && source
+                .open_disabled_from
+                .is_none_or(|start| self.end <= start)
+            && !source
+                .disabled_spans
+                .iter()
+                .any(|span| self.start < span.end && span.start < self.end)
+    }
 }
 
 #[derive(Debug)]
@@ -333,6 +415,7 @@ struct ConversationPositions {
     turn_ranges: Vec<(usize, u64)>,
     artifacts: Vec<String>,
     rows: Vec<RowPosition>,
+    commentary: HashMap<usize, usize>,
     incomplete: bool,
 }
 
@@ -379,6 +462,7 @@ impl ConversationPositions {
                     body: body_reference(&event)
                         .map(|reference| reference.map(str::to_owned))
                         .map_err(|_| ()),
+                    commentary: CommentaryPosition::of(&event),
                 })
             },
         )?;
@@ -482,6 +566,25 @@ impl ConversationPositions {
                 })
                 .collect();
             self.rows.sort_by_key(|row| (row.seq, row.event));
+            self.commentary.clear();
+            let mut pairs = HashMap::<&str, Vec<(usize, &CommentaryPosition)>>::new();
+            for (index, row) in self.rows.iter().enumerate() {
+                if let Some(position) = &self.events.frames[row.event].1.commentary {
+                    pairs
+                        .entry(&position.key)
+                        .or_default()
+                        .push((index, position));
+                }
+            }
+            for pair in pairs.values() {
+                if let [(a, stream), (b, completion)] = pair.as_slice() {
+                    if !stream.completion && completion.completion && stream.end <= completion.start
+                    {
+                        self.commentary.insert(*a, *b);
+                        self.commentary.insert(*b, *a);
+                    }
+                }
+            }
             let mut covered = HashSet::new();
             let mut conflicting = false;
             for row in &self.rows {
@@ -870,17 +973,41 @@ impl Positions {
         context: &ConversationArchiveContext,
         request: &Request,
     ) -> io::Result<AgentChatPage> {
-        let result = self.read_indexed(context, request);
+        let result = self.read_indexed(context, request, None);
         if result.is_err() {
             *self = Self::default();
         }
         result
     }
 
+    pub(super) fn inspect(
+        &mut self,
+        context: &ConversationArchiveContext,
+        logging_enabled: bool,
+    ) -> io::Result<Vec<AgentChatEvent>> {
+        let request = Request {
+            before: None,
+            revision: None,
+            detail: None,
+            limit: 0,
+            logging_enabled,
+        };
+        let mut events = Vec::new();
+        let page = self.read_indexed(context, &request, Some(&mut events))?;
+        if !page.archive_read_ready && page.progress != "archive_empty" {
+            return Err(io::Error::other(format!(
+                "chat archive transcript unavailable: {}",
+                page.progress
+            )));
+        }
+        Ok(events)
+    }
+
     fn read_indexed(
         &mut self,
         context: &ConversationArchiveContext,
         request: &Request,
+        inspection: Option<&mut Vec<AgentChatEvent>>,
     ) -> io::Result<AgentChatPage> {
         let listing_path = index_path(&context.agent_id)?;
         let mut index_reads = IndexReads::default();
@@ -988,7 +1115,7 @@ impl Positions {
         'artifacts: for owned in &cohort {
             let index = &self.conversations[&owned.manifest.conversation_id];
             for reference in &index.artifacts {
-                if artifacts.len() == ARTIFACT_PROBE_LIMIT {
+                if inspection.is_none() && artifacts.len() == ARTIFACT_PROBE_LIMIT {
                     artifact_unverified = true;
                     break 'artifacts;
                 }
@@ -1044,7 +1171,53 @@ impl Positions {
         }
         .into();
 
-        if let Some(detail) = request.detail.as_deref() {
+        if let Some(events) = inspection {
+            if page.archive_read_ready {
+                let mut displayed = HashSet::new();
+                for owned in &cohort {
+                    let index = &self.conversations[&owned.manifest.conversation_id];
+                    if index.rows.is_empty() {
+                        continue;
+                    }
+                    let mut reader = RowReader::open(owned, index)?;
+                    for row in &index.rows {
+                        let (mut event, record, _) = reader.read(
+                            row,
+                            context,
+                            relevant_source,
+                            epoch.as_deref(),
+                            &mut page,
+                        )?;
+                        if !displayed.insert(event.id.clone()) {
+                            return Err(invalid("ambiguous event identity across chat archives"));
+                        }
+                        if let Some(reference) = body_reference(&event)? {
+                            let Some(Body::Artifact(file, path, stamp, _)) =
+                                open_body(owned, &event, &record)?
+                            else {
+                                return Err(invalid("owned transcript artifact is missing"));
+                            };
+                            let text =
+                                Body::Artifact(file, path, stamp, String::new()).full(u64::MAX)?;
+                            if record.text_artifact_proof.as_ref().is_some_and(|proof| {
+                                proof.reference != reference
+                                    || proof.bytes != text.len() as u64
+                                    || proof.sha256 != digest(text.as_bytes())
+                            }) {
+                                return Err(invalid("owned transcript artifact proof changed"));
+                            }
+                            event.text = Some(text);
+                        } else if event.text.is_none() && record.event_refs.len() == 1 {
+                            event.text = record.text;
+                            if event.text.is_none() && event.metadata["text_excerpt"].is_string() {
+                                return Err(invalid("owned transcript body is missing"));
+                            }
+                        }
+                        events.push(event);
+                    }
+                }
+            }
+        } else if let Some(detail) = request.detail.as_deref() {
             self.read_detail(
                 detail,
                 &cohort,
@@ -1137,7 +1310,23 @@ impl Positions {
                 continue;
             }
             let mut reader = RowReader::open(owned, index)?;
-            for row in index.rows[..end].iter().rev() {
+            for (position, row) in index.rows[..end].iter().enumerate().rev() {
+                let partner = index.commentary.get(&position).copied().filter(|&other| {
+                    source.zip(epoch).is_some_and(|(source, epoch)| {
+                        [row.event, index.rows[other].event]
+                            .into_iter()
+                            .all(|event| {
+                                index.events.frames[event]
+                                    .1
+                                    .commentary
+                                    .as_ref()
+                                    .is_some_and(|reference| reference.admitted(source, epoch))
+                            })
+                    })
+                });
+                if partner.is_some_and(|other| other < position) {
+                    continue;
+                }
                 if page.events.len() == request.limit
                     || (page.bytes_read as u64 >= PAGE_READ_LIMIT && !page.events.is_empty())
                 {
@@ -1164,6 +1353,18 @@ impl Positions {
                     }
                 }
                 visible.metadata["chat_archive_positioned"] = json!(true);
+                let alias = if let Some(other) = partner {
+                    let (paired, _, _) =
+                        reader.read(&index.rows[other], context, source, epoch, page)?;
+                    visible.metadata["chat_display_member_ids"] = json!([event.id, paired.id]);
+                    visible.metadata["chat_display_physical_id"] = json!(event.id);
+                    Some(AgentChatAlias {
+                        observation_id: paired.id,
+                        canonical_id: event.id.clone(),
+                    })
+                } else {
+                    None
+                };
                 if visible.text.is_none() {
                     visible.text = event.metadata["text_excerpt"]
                         .as_str()
@@ -1195,7 +1396,7 @@ impl Positions {
                     }
                     Err(error) => return Err(error),
                 }
-                let size = serde_json::to_vec(&visible)
+                let size = serde_json::to_vec(&(&visible, &alias))
                     .map_err(io::Error::other)?
                     .len()
                     + 1;
@@ -1207,6 +1408,9 @@ impl Positions {
                     break 'cohort;
                 }
                 encoded += size;
+                if let Some(alias) = alias {
+                    page.aliases.push(alias);
+                }
                 body_evidence.push((
                     key.clone(),
                     visible.metadata["chat_body_binding"]
@@ -1252,7 +1456,7 @@ impl Positions {
             &mut positioned_headers,
         )?;
         if let Some(extra) = extra {
-            if serde_json::to_vec(&(&positioned_headers, &extra))
+            if serde_json::to_vec(&(&positioned_headers, &page.aliases, &extra))
                 .map_err(io::Error::other)?
                 .len()
                 <= IPC_BYTES - 2048
