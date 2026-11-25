@@ -5715,12 +5715,8 @@ mod tests {
         let session_header =
             serde_json::json!({"type":"session_meta","payload":{"id":"codex-session-one"}});
         let first_contents = format!("{session_header}\n{}", first_lines.join("\n"));
-        let initial_source = if original_event_msg_seed {
-            format!("{first_contents}\n")
-        } else {
-            format!("{session_header}\n")
-        };
-        std::fs::write(&log_path, initial_source).expect("write first synthetic source extent");
+        std::fs::write(&log_path, format!("{session_header}\n"))
+            .expect("write first synthetic source extent");
 
         let app = tauri::test::mock_app();
         app.manage(AppState::new());
@@ -5734,6 +5730,29 @@ mod tests {
             provider_session_ids: vec!["codex-session-one".to_string()],
             provider_source_key: Some(source_key.to_string()),
         };
+        let initial = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "synthetic-codex-agent",
+            "codex",
+            &log_path,
+            source_key,
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(initial.events.is_empty());
+        state
+            .conversation_archive
+            .append_provider_log_batch_with_context(context.clone(), &[], None, &initial.next)
+            .unwrap();
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .unwrap(),
+            "{}",
+            first_lines.join("\n")
+        )
+        .unwrap();
 
         let (first, legacy_id, original_seed_json) = if original_event_msg_seed {
             let mut first = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
@@ -5741,7 +5760,7 @@ mod tests {
                 "codex",
                 &log_path,
                 source_key,
-                None,
+                Some(initial.next),
                 true,
             )
             .expect("capture first synthetic turn for the original archive seed");
@@ -5804,38 +5823,20 @@ mod tests {
             );
             state
                 .conversation_archive
-                .append_provider_log_batch_with_context(
-                    context.clone(),
-                    &first.events,
-                    None,
-                    &first.next,
-                )
-                .expect("seed the retained pre-fix archive identity and cursor");
-            (first, legacy_id, original_seed_json)
-        } else {
-            let initial = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
-                "synthetic-codex-agent",
-                "codex",
-                &log_path,
-                source_key,
-                None,
-                true,
-            )
-            .unwrap();
-            assert!(initial.events.is_empty());
+                .append_chat_events_with_context(context.clone(), std::slice::from_ref(old_mirror))
+                .expect("retain only the later native mirror before replay");
             state
                 .conversation_archive
-                .append_provider_log_batch_with_context(context.clone(), &[], None, &initial.next)
-                .unwrap();
-            writeln!(
-                std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(&log_path)
-                    .unwrap(),
-                "{}",
-                first_lines.join("\n")
-            )
-            .unwrap();
+                .append_verified_provider_log_batch_with_context(
+                    context.clone(),
+                    &first.events,
+                    first.previous.as_ref(),
+                    &first.next,
+                    first.source_proof(),
+                )
+                .expect("replay the earlier native request against the retained mirror");
+            (first, legacy_id, original_seed_json)
+        } else {
             let mut legacy = crate::providers::chat_transcript::normalize_chat_lines(
                 "synthetic-codex-agent",
                 "codex",
@@ -6116,6 +6117,26 @@ mod tests {
             "normal DTO overlay identifies the actual active archive conversation"
         );
         if let Some(original_seed_json) = original_seed_json.as_ref() {
+            let raw: Vec<wardian_core::models::chat::AgentChatEvent> =
+                wardian_core::conversations::read_jsonl_records(
+                    &archive_directory.join("events.jsonl"),
+                )
+                .unwrap();
+            let response = first
+                .events
+                .iter()
+                .find(|event| event.source.as_deref() == Some("response_item"))
+                .unwrap();
+            let a = raw.iter().position(|row| row.id == legacy_id).unwrap();
+            let b = raw.iter().position(|row| row.id == response.id).unwrap();
+            assert!(
+                a < b,
+                "later native mirror precedes its request in the durable journal"
+            );
+            assert!(
+                raw[a].metadata["chat_source_start"].as_u64().unwrap()
+                    >= raw[b].metadata["chat_source_end"].as_u64().unwrap()
+            );
             let mut expected_seed_with_overlay = original_seed_json.clone();
             let expected_metadata = expected_seed_with_overlay
                 .get_mut("metadata")
@@ -6404,7 +6425,7 @@ mod tests {
         for (turn, _) in &declared_later_turns {
             assert_eq!(turns.get(turn.as_str()), Some(&1), "one row for {turn}");
         }
-        for pair in later.events.chunks_exact(2) {
+        for pair in later.events.as_chunks::<2>().0 {
             assert_eq!(
                 aliases.get(pair[1].id.as_str()).copied(),
                 Some(pair[0].id.as_str())
@@ -6412,6 +6433,39 @@ mod tests {
         }
         for (path, bytes) in archive_before {
             assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        if !original_event_msg_seed {
+            let records_path = archive_directory.join("conversation.jsonl");
+            let mut records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+                wardian_core::conversations::read_jsonl_records(&records_path).unwrap();
+            let primary = repeated[0]["id"].as_str().unwrap();
+            let mirror = aliases
+                .iter()
+                .find_map(|(id, target)| (*target == primary).then_some(*id))
+                .unwrap();
+            let narrative = records
+                .iter_mut()
+                .find(|record| record.event_refs.iter().any(|id| id == primary))
+                .unwrap();
+            assert_eq!(narrative.event_refs.len(), 2);
+            assert!(narrative.event_refs.iter().any(|id| id == mirror));
+            narrative.event_refs.push("missing-third-event".into());
+            wardian_core::conversations::write_jsonl_atomic(&records_path, &records).unwrap();
+            let uncertain = page_for(get("").await).await;
+            assert_eq!(uncertain["progress"], "archive_payload_missing");
+            assert_eq!(uncertain["archive_read_ready"], false);
+            assert!(uncertain["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|alias| alias["observation_id"] != mirror));
+            for id in [primary, mirror] {
+                assert!(uncertain["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event["id"] == id));
+            }
         }
         assert_eq!(
             state
