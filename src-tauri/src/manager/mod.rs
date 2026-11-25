@@ -348,11 +348,13 @@ pub(crate) fn set_agent_status_and_get_intent<R: tauri::Runtime>(
         app,
         session_id,
         current_status,
-        next_status.to_string(),
-        status_sequence,
-        status_revision,
-        None,
-        None,
+        AgentStatusObservationSchedule {
+            status: next_status.to_string(),
+            status_sequence,
+            status_revision,
+            input_generation: None,
+            queue_dispatch: None,
+        },
     );
     Some(status_revision)
 }
@@ -603,13 +605,15 @@ fn schedule_agent_status_observation(
         app,
         session_id,
         current_status,
-        status,
-        status_sequence,
-        status_revision,
-        None,
-        Some(Box::new(|app, session_id, status| {
-            crate::control::spawn_agent_messaging_if_idle(app, session_id, status);
-        })),
+        AgentStatusObservationSchedule {
+            status,
+            status_sequence,
+            status_revision,
+            input_generation: None,
+            queue_dispatch: Some(Box::new(|app, session_id, status| {
+                crate::control::spawn_agent_messaging_if_idle(app, session_id, status);
+            })),
+        },
     );
 }
 
@@ -628,28 +632,40 @@ pub(crate) fn schedule_startup_readiness_status_observation<R: tauri::Runtime>(
         app,
         session_id,
         current_status,
-        status,
-        status_sequence,
-        status_revision,
-        Some(input_generation),
-        None,
+        AgentStatusObservationSchedule {
+            status,
+            status_sequence,
+            status_revision,
+            input_generation: Some(input_generation),
+            queue_dispatch: None,
+        },
     );
 }
 
 type AgentStatusQueueDispatch<R> =
     Option<Box<dyn FnOnce(&AppHandle<R>, &str, &str) + Send + 'static>>;
 
-#[allow(clippy::too_many_arguments)]
-fn schedule_agent_status_observation_inner<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    session_id: &str,
-    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+struct AgentStatusObservationSchedule<R: tauri::Runtime> {
     status: String,
     status_sequence: u64,
     status_revision: u64,
     input_generation: Option<u64>,
     queue_dispatch: AgentStatusQueueDispatch<R>,
+}
+
+fn schedule_agent_status_observation_inner<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    schedule: AgentStatusObservationSchedule<R>,
 ) {
+    let AgentStatusObservationSchedule {
+        status,
+        status_sequence,
+        status_revision,
+        input_generation,
+        queue_dispatch,
+    } = schedule;
     let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let status_app = app.clone();
     let status_session_id = session_id.to_string();

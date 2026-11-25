@@ -1318,16 +1318,20 @@ fn claude_assigned_trust_menu_is_current(output: &str, display_path: &str) -> bo
             .is_some()
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+struct ClaudeTrustSelectionWait {
+    selection: (bool, bool),
+    wait_for_selection: bool,
+    settle_interval: std::time::Duration,
+    expected_input_sequence: Option<u64>,
+}
+
 async fn wait_for_claude_trust_selection(
     terminal_sessions: &crate::state::terminal_session::TerminalSessionBroker,
     session_id: &str,
     runtime_generation: u64,
     display_path: &str,
-    selection: (bool, bool),
-    wait_for_selection: bool,
-    settle_interval: std::time::Duration,
-    expected_input_sequence: Option<u64>,
+    wait: ClaudeTrustSelectionWait,
 ) -> Result<crate::state::terminal_session::TerminalReadinessObservation, String> {
     let deadline = tokio::time::Instant::now() + CLAUDE_TRUST_SELECTION_TIMEOUT;
     loop {
@@ -1338,7 +1342,10 @@ async fn wait_for_claude_trust_selection(
         .await
         .map_err(|_| "Claude trust screen timed out".to_string())?
         .map_err(|error| format!("Claude trust screen unavailable: {error}"))?;
-        if expected_input_sequence.is_some_and(|expected| before.input_sequence != expected) {
+        if wait
+            .expected_input_sequence
+            .is_some_and(|expected| before.input_sequence != expected)
+        {
             return Err("opposing terminal input arrived during Claude trust confirmation".into());
         }
         let before_snapshot = &before.snapshot;
@@ -1352,8 +1359,8 @@ async fn wait_for_claude_trust_selection(
         let observed = crate::control::startup_readiness::claude_workspace_trust_prompt_selection(
             &before_snapshot.visible_grid,
         );
-        if observed != Some(selection) {
-            if !wait_for_selection {
+        if observed != Some(wait.selection) {
+            if !wait.wait_for_selection {
                 return Err("Claude trust selection changed before it settled".to_string());
             }
             tokio::time::timeout_at(
@@ -1365,7 +1372,7 @@ async fn wait_for_claude_trust_selection(
             continue;
         }
 
-        tokio::time::timeout_at(deadline, tokio::time::sleep(settle_interval))
+        tokio::time::timeout_at(deadline, tokio::time::sleep(wait.settle_interval))
             .await
             .map_err(|_| "Claude trust screen did not settle".to_string())?;
         let after = tokio::time::timeout_at(
@@ -1375,7 +1382,10 @@ async fn wait_for_claude_trust_selection(
         .await
         .map_err(|_| "Claude trust screen timed out".to_string())?
         .map_err(|error| format!("Claude trust screen unavailable: {error}"))?;
-        if expected_input_sequence.is_some_and(|expected| after.input_sequence != expected) {
+        if wait
+            .expected_input_sequence
+            .is_some_and(|expected| after.input_sequence != expected)
+        {
             return Err("opposing terminal input arrived during Claude trust confirmation".into());
         }
         let after_snapshot = &after.snapshot;
@@ -1387,7 +1397,7 @@ async fn wait_for_claude_trust_selection(
         }
         if crate::control::startup_readiness::claude_workspace_trust_prompt_selection(
             &after_snapshot.visible_grid,
-        ) != Some(selection)
+        ) != Some(wait.selection)
         {
             return Err("Claude trust selection changed while settling".to_string());
         }
@@ -1396,7 +1406,7 @@ async fn wait_for_claude_trust_selection(
             after_snapshot,
             runtime_generation,
             display_path,
-            selection,
+            wait.selection,
         ) && before.input_sequence == after.input_sequence
         {
             return Ok(after);
@@ -1436,26 +1446,32 @@ async fn wait_for_claude_startup_ready_prompt(
         session_id,
         runtime_generation,
         display_path,
-        CLAUDE_TRUST_SELECTION_TIMEOUT,
-        CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL,
-        CLAUDE_TRUST_SELECTION_POLL_INTERVAL,
-        Some(expected_input_sequence),
+        ClaudeStartupReadyPromptTiming {
+            timeout: CLAUDE_TRUST_SELECTION_TIMEOUT,
+            settle_interval: CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL,
+            poll_interval: CLAUDE_TRUST_SELECTION_POLL_INTERVAL,
+            expected_input_sequence: Some(expected_input_sequence),
+        },
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+struct ClaudeStartupReadyPromptTiming {
+    timeout: std::time::Duration,
+    settle_interval: std::time::Duration,
+    poll_interval: std::time::Duration,
+    expected_input_sequence: Option<u64>,
+}
+
 async fn wait_for_claude_startup_ready_prompt_with_timing(
     terminal_sessions: &crate::state::terminal_session::TerminalSessionBroker,
     session_id: &str,
     runtime_generation: u64,
     display_path: &str,
-    timeout: std::time::Duration,
-    settle_interval: std::time::Duration,
-    poll_interval: std::time::Duration,
-    expected_input_sequence: Option<u64>,
+    timing: ClaudeStartupReadyPromptTiming,
 ) -> Result<crate::state::terminal_session::TerminalReadinessObservation, String> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + timing.timeout;
     loop {
         let before = tokio::time::timeout_at(
             deadline,
@@ -1464,7 +1480,10 @@ async fn wait_for_claude_startup_ready_prompt_with_timing(
         .await
         .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?
         .map_err(|error| format!("Claude ready screen unavailable: {error}"))?;
-        if expected_input_sequence.is_some_and(|expected| before.input_sequence != expected) {
+        if timing
+            .expected_input_sequence
+            .is_some_and(|expected| before.input_sequence != expected)
+        {
             return Err("opposing terminal input arrived after Claude trust confirmation".into());
         }
         let before_snapshot = &before.snapshot;
@@ -1475,7 +1494,7 @@ async fn wait_for_claude_startup_ready_prompt_with_timing(
             "claude",
             &before_snapshot.visible_grid,
         ) {
-            tokio::time::timeout_at(deadline, tokio::time::sleep(settle_interval))
+            tokio::time::timeout_at(deadline, tokio::time::sleep(timing.settle_interval))
                 .await
                 .map_err(|_| {
                     "Claude ready prompt did not settle after trust confirmation".to_string()
@@ -1487,7 +1506,10 @@ async fn wait_for_claude_startup_ready_prompt_with_timing(
             .await
             .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?
             .map_err(|error| format!("Claude ready screen unavailable: {error}"))?;
-            if expected_input_sequence.is_some_and(|expected| after.input_sequence != expected) {
+            if timing
+                .expected_input_sequence
+                .is_some_and(|expected| after.input_sequence != expected)
+            {
                 return Err(
                     "opposing terminal input arrived after Claude trust confirmation".into(),
                 );
@@ -1516,7 +1538,7 @@ async fn wait_for_claude_startup_ready_prompt_with_timing(
         ) {
             return Err("Claude displayed another startup action after trust confirmation".into());
         }
-        tokio::time::timeout_at(deadline, tokio::time::sleep(poll_interval))
+        tokio::time::timeout_at(deadline, tokio::time::sleep(timing.poll_interval))
             .await
             .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?;
     }
@@ -1534,10 +1556,12 @@ async fn confirm_claude_workspace_trust(
         &session_id,
         runtime_generation,
         &display_path,
-        (true, false),
-        false,
-        CLAUDE_TRUST_PROMPT_SETTLE_INTERVAL,
-        None,
+        ClaudeTrustSelectionWait {
+            selection: (true, false),
+            wait_for_selection: false,
+            settle_interval: CLAUDE_TRUST_PROMPT_SETTLE_INTERVAL,
+            expected_input_sequence: None,
+        },
     )
     .await?;
     let selected_yes = send_claude_trust_key(
@@ -1552,10 +1576,12 @@ async fn confirm_claude_workspace_trust(
         &session_id,
         runtime_generation,
         &display_path,
-        (false, true),
-        true,
-        CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL,
-        Some(selected_yes.input_sequence),
+        ClaudeTrustSelectionWait {
+            selection: (false, true),
+            wait_for_selection: true,
+            settle_interval: CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL,
+            expected_input_sequence: Some(selected_yes.input_sequence),
+        },
     )
     .await?;
     let after_enter = send_claude_trust_key(
@@ -7743,10 +7769,12 @@ mod tests {
             "trust-waiter-timeout",
             generation,
             display_path,
-            std::time::Duration::from_millis(20),
-            std::time::Duration::from_millis(2),
-            std::time::Duration::from_millis(2),
-            Some(0),
+            ClaudeStartupReadyPromptTiming {
+                timeout: std::time::Duration::from_millis(20),
+                settle_interval: std::time::Duration::from_millis(2),
+                poll_interval: std::time::Duration::from_millis(2),
+                expected_input_sequence: Some(0),
+            },
         )
         .await
         .unwrap_err();
@@ -7881,11 +7909,13 @@ mod tests {
                     app,
                     session_id,
                     current_status,
-                    status,
-                    status_sequence,
-                    status_revision,
-                    None,
-                    None,
+                    crate::manager::AgentStatusObservationSchedule {
+                        status,
+                        status_sequence,
+                        status_revision,
+                        input_generation: None,
+                        queue_dispatch: None,
+                    },
                 );
             },
         );
