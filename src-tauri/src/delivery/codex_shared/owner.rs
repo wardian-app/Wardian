@@ -517,7 +517,8 @@ impl CodexSharedOwner {
                 .map_err(CodexSharedError::unsupported)?;
         }
         #[cfg(windows)]
-        let backfill_home = startup_backfill::cold_home(&codex_home);
+        let backfill_home =
+            startup_backfill::cold_home(&wardian_home, &spec.target_agent_id, &codex_home);
         let child_spawn_at = std::time::Instant::now();
         #[cfg(windows)]
         let spawned =

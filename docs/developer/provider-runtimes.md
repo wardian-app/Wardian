@@ -457,8 +457,11 @@ absent private state database. Checkpoints must come from the same file
 identity. After a stale or unavailable observation, a fresh checkpoint
 establishes a new timing baseline and a further advance qualifies for grace.
 The last advance must be less than 20 seconds old when socket presence is
-observed after the ordinary deadline. Startup cancels a queued read or joins
-a running read before handing off the owner. The numeric
+observed after the ordinary deadline. Each probe holds the home preparation
+guards until its read ends. On timeout or cancellation the owner can reap its
+child and release the owner gate while the guards still fence replacement.
+Ready waits for any outstanding read within the hard cap and still observes
+cancellation and child exit before handing off to the proxy. The numeric
 `socket_wait_backfill_advances` field reports advances without cursor paths.
 
 The ordinary TUI startup overlay also sets

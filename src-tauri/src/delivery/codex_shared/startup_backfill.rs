@@ -4,16 +4,18 @@ use super::{
     observe_socket_wait, ChildLiveness, SocketWaitDiagnostic, SocketWaitOutcome,
     MAX_BACKFILL_EXTENSION,
 };
+use crate::utils::codex_home::{acquire_preparation, preparation_turn};
 use std::cmp::Ordering;
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;
 use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::FutureExt;
 use rusqlite::{Connection, OpenFlags};
-use tokio::{task::JoinHandle, time::Instant};
+use tokio::{sync::Mutex, task::JoinHandle, time::Instant};
 use winapi::um::{
     fileapi::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
     winbase::FILE_FLAG_OPEN_REPARSE_POINT,
@@ -28,15 +30,52 @@ const SHM: &str = "state_5.sqlite-shm";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const PROGRESS_WINDOW: Duration = Duration::from_secs(20);
 
+#[derive(Clone)]
+pub(super) struct BackfillHome {
+    wardian_home: PathBuf,
+    agent_id: String,
+    projected: PathBuf,
+    turn: Arc<Mutex<()>>,
+}
+
+impl BackfillHome {
+    fn start_read(
+        &self,
+        read: impl FnOnce(&Path) -> Option<Checkpoint> + Send + 'static,
+    ) -> Option<JoinHandle<Option<Checkpoint>>> {
+        // Reserve the turn before queuing the task. The worker owns it and the
+        // cross-process preparation guard for the entire filesystem read.
+        let turn = self.turn.clone().try_lock_owned().ok()?;
+        let home = self.clone();
+        Some(tokio::task::spawn_blocking(move || {
+            let _turn = turn;
+            let _preparation = acquire_preparation(&home.wardian_home, &home.agent_id).ok()?;
+            read(&home.projected)
+        }))
+    }
+}
+
 /// Qualify before spawn, under the owner gate. Existing or inaccessible state
 /// cannot be attributed to this launch, so it keeps the ordinary socket budget.
-pub(super) fn cold_home(home: &Path) -> Option<PathBuf> {
-    [DATABASE, WAL, SHM]
+pub(super) fn cold_home(
+    wardian_home: &Path,
+    agent_id: &str,
+    projected: &Path,
+) -> Option<BackfillHome> {
+    if ![DATABASE, WAL, SHM]
         .iter()
         .all(|leaf| {
-            matches!(fs::symlink_metadata(home.join(leaf)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            matches!(fs::symlink_metadata(projected.join(leaf)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
         })
-        .then(|| home.to_path_buf())
+    {
+        return None;
+    }
+    Some(BackfillHome {
+        wardian_home: wardian_home.to_path_buf(),
+        agent_id: agent_id.to_owned(),
+        projected: projected.to_path_buf(),
+        turn: preparation_turn(wardian_home, agent_id).ok()?,
+    })
 }
 
 enum BackfillRow {
@@ -118,14 +157,14 @@ impl Progress {
 /// Read at most one checkpoint at a time off the async runtime.
 #[derive(Default)]
 pub(super) struct BackfillProbe {
-    home: Option<PathBuf>,
+    home: Option<BackfillHome>,
     pending: Option<JoinHandle<Option<Checkpoint>>>,
     sampled_at: Option<Instant>,
     progress: Progress,
 }
 
 impl BackfillProbe {
-    pub(super) fn new(home: Option<PathBuf>) -> Self {
+    pub(super) fn new(home: Option<BackfillHome>) -> Self {
         Self {
             home,
             ..Self::default()
@@ -148,22 +187,39 @@ impl BackfillProbe {
             |now| self.poll(now),
         )
         .await;
-        // The retained owner task must drain this read before proxy or cleanup.
-        if let Some(pending) = self.pending.take() {
+        // A queued task can be cancelled. A running task keeps the home fenced
+        // on its own, so terminal startup can reap the child and let Stop finish.
+        if let Some(pending) = &self.pending {
             pending.abort();
-            let _ = pending.await;
         }
-        if diagnostic.outcome == SocketWaitOutcome::Ready {
+        let hard_deadline = deadline + MAX_BACKFILL_EXTENSION;
+        while diagnostic.outcome == SocketWaitOutcome::Ready {
             diagnostic.child_liveness = child_liveness();
-            diagnostic.outcome = if cancelled.now_or_never().is_some() {
+            diagnostic.outcome = if cancelled.as_mut().now_or_never().is_some() {
                 SocketWaitOutcome::Cancelled
             } else if let Some(failure) = diagnostic.child_liveness.failure() {
                 failure
-            } else if Instant::now() >= deadline + MAX_BACKFILL_EXTENSION {
+            } else if Instant::now() >= hard_deadline {
                 SocketWaitOutcome::TimedOut
             } else {
                 SocketWaitOutcome::Ready
             };
+            if diagnostic.outcome != SocketWaitOutcome::Ready {
+                break;
+            }
+            let Some(pending) = self.pending.as_mut() else {
+                break;
+            };
+            // Ready still requires the earlier read to end before handing off
+            // to proxy startup. Poll liveness during that wait.
+            tokio::select! {
+                biased;
+                _ = &mut cancelled => diagnostic.outcome = SocketWaitOutcome::Cancelled,
+                _ = pending => self.pending = None,
+                _ = tokio::time::sleep_until(
+                    (Instant::now() + Duration::from_millis(50)).min(hard_deadline),
+                ) => {}
+            }
         }
         (diagnostic, self.progress.advances)
     }
@@ -189,9 +245,11 @@ impl BackfillProbe {
                 self.progress.invalidate_timing();
                 return false;
             }
-            let home = home.clone();
             self.sampled_at = Some(now);
-            self.pending = Some(tokio::task::spawn_blocking(move || read_checkpoint(&home)));
+            self.pending = home.start_read(read_checkpoint);
+            if self.pending.is_none() {
+                self.progress.invalidate_timing();
+            }
         }
         self.progress.recent(now)
     }
@@ -313,99 +371,190 @@ mod tests {
         assert_eq!(progress.advances, 2);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn parked_probe_stays_in_owner_gate_until_joined_for_every_outcome() {
-        use std::cell::Cell;
+    #[tokio::test]
+    async fn parked_probe_releases_owner_gate_on_stop_and_timeout() {
         use std::task::Poll;
-        use tokio::sync::{oneshot, Mutex};
-        use SocketWaitOutcome::{Cancelled, Ready, TimedOut};
+        use tokio::sync::oneshot;
+        use SocketWaitOutcome::{Cancelled, TimedOut};
 
-        for (selected, cross_hard_cap, expected) in [
-            (Ready, false, Ready),
-            (TimedOut, false, TimedOut),
-            (Cancelled, false, Cancelled),
-            (Ready, true, TimedOut),
-        ] {
-            let directory = tempfile::tempdir().unwrap();
-            let socket = directory.path().join("control.sock");
-            let database = directory.path().join(DATABASE);
+        for outcome in [Cancelled, TimedOut] {
+            let home = tempfile::tempdir().unwrap();
+            let home = home.path();
+            let probe_home = cold_home(home, "agent", home).unwrap();
+            let socket = home.join("control.sock");
+            let database = home.join(DATABASE);
             fs::write(&database, b"first owner").unwrap();
-            let now = Instant::now();
-            let deadline = if cross_hard_cap {
-                now + Duration::from_secs(1) - MAX_BACKFILL_EXTENSION
-            } else if selected == TimedOut {
-                now
-            } else {
-                now + Duration::from_secs(60)
-            };
-            if selected == Ready {
-                fs::write(&socket, b"presence fixture").unwrap();
-            }
-            let (started_tx, started) = oneshot::channel();
-            let (release, parked) = std::sync::mpsc::channel();
+            let (entered, running) = oneshot::channel();
+            let (release, parked) = std::sync::mpsc::channel::<()>();
             let (read_tx, read) = oneshot::channel();
-            let probe_database = database.clone();
-            let pending = tokio::task::spawn_blocking(move || {
-                started_tx.send(()).unwrap();
-                if parked.recv().is_ok() {
-                    read_tx.send(fs::read(probe_database).unwrap()).unwrap();
-                }
-                None
-            });
-            started.await.unwrap();
+            let pending = probe_home
+                .start_read(move |projected| {
+                    entered.send(()).unwrap();
+                    if parked.recv().is_ok() {
+                        read_tx
+                            .send(fs::read(projected.join(DATABASE)).unwrap())
+                            .unwrap();
+                    }
+                    None
+                })
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), running)
+                .await
+                .unwrap()
+                .unwrap();
             let probe = BackfillProbe {
-                home: cross_hard_cap.then(|| directory.path().to_path_buf()),
                 pending: Some(pending),
-                sampled_at: Some(now),
-                progress: Progress {
-                    last_advance: cross_hard_cap.then_some(now),
-                    ..Progress::default()
-                },
+                ..BackfillProbe::default()
             };
-            let liveness_checks = Cell::new(0);
             let gate = Mutex::new(());
             let held = gate.lock().await;
+            let mut command = crate::utils::process::new_silent_command("powershell.exe");
+            command
+                .current_dir(home)
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Start-Sleep -Seconds 120",
+                ])
+                .kill_on_drop(true);
+            let (mut child, job) =
+                crate::utils::process::OwnedBootstrapChild::spawn_contained_runtime(&mut command)
+                    .unwrap();
+            let (cancel, cancelled) = oneshot::channel::<()>();
             let startup = async {
                 let _held = held;
-                probe
+                let deadline = Instant::now()
+                    + if outcome == Cancelled {
+                        Duration::from_secs(60)
+                    } else {
+                        Duration::from_millis(50)
+                    };
+                let (diagnostic, _) = probe
                     .wait_for_socket(
                         &socket,
                         deadline,
                         async {
-                            if selected != Cancelled {
-                                std::future::pending::<()>().await;
-                            }
+                            let _ = cancelled.await;
                         },
-                        || {
-                            liveness_checks.set(liveness_checks.get() + 1);
-                            ChildLiveness::Alive
-                        },
+                        || super::super::observe_child_liveness(&mut child),
                     )
-                    .await
+                    .await;
+                drop(job);
+                super::super::terminate_starting_child(&mut child).await;
+                assert!(child.try_wait().unwrap().is_some());
+                diagnostic
             };
+            let stop = async {
+                let mut signal = Some(cancel);
+                if outcome == Cancelled {
+                    signal.take().unwrap().send(()).unwrap();
+                }
+                let _acknowledged = gate.lock().await;
+                drop(signal);
+            };
+            let (diagnostic, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(startup, stop)
+            })
+            .await
+            .expect("startup cleanup and Stop must finish while the read is still parked");
+            assert_eq!(diagnostic.outcome, outcome);
+
+            // The next owner can enter the owner gate, but its existing home
+            // preparation turn and a cross-process preparer both remain fenced.
+            let _replacement = gate.try_lock().unwrap();
+            let replacement = preparation_turn(home, "agent").unwrap().lock_owned();
+            tokio::pin!(replacement);
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(replacement.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            assert!(acquire_preparation(home, "agent").is_err());
+            release.send(()).unwrap();
+            let _turn = tokio::time::timeout(Duration::from_secs(5), replacement)
+                .await
+                .unwrap();
+            let _preparation = acquire_preparation(home, "agent").unwrap();
+            assert_eq!(read.await.unwrap(), b"first owner");
+            fs::write(database, b"replacement owner").unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn socket_ready_drain_preserves_cancellation_exit_and_hard_cap() {
+        use std::cell::Cell;
+        use std::task::Poll;
+        use tokio::sync::oneshot;
+        use SocketWaitOutcome::{Cancelled, ChildExited, Ready, TimedOut};
+
+        for expected in [Ready, Cancelled, ChildExited, TimedOut] {
+            let directory = tempfile::tempdir().unwrap();
+            let home = directory.path();
+            let socket = home.join("control.sock");
+            fs::write(&socket, b"presence fixture").unwrap();
+            let probe_home = cold_home(home, "agent", home).unwrap();
+            let now = Instant::now();
+            let deadline = if expected == TimedOut {
+                now + Duration::from_secs(1) - MAX_BACKFILL_EXTENSION
+            } else {
+                now + Duration::from_secs(60)
+            };
+            let (started_tx, started) = oneshot::channel();
+            let (release, parked) = std::sync::mpsc::channel::<()>();
+            let pending = probe_home
+                .start_read(move |_| {
+                    started_tx.send(()).unwrap();
+                    let _ = parked.recv();
+                    None
+                })
+                .unwrap();
+            started.await.unwrap();
+            let probe = BackfillProbe {
+                home: Some(probe_home),
+                pending: Some(pending),
+                sampled_at: Some(now),
+                progress: Progress {
+                    last_advance: Some(now),
+                    ..Progress::default()
+                },
+            };
+            let alive = Cell::new(ChildLiveness::Alive);
+            let (cancel, cancelled) = oneshot::channel::<()>();
+            let startup = probe.wait_for_socket(
+                &socket,
+                deadline,
+                async {
+                    let _ = cancelled.await;
+                },
+                || alive.get(),
+            );
             tokio::pin!(startup);
             assert!(
                 std::future::poll_fn(|cx| Poll::Ready(startup.as_mut().poll(cx)))
                     .await
-                    .is_pending(),
-                "owner left a probe running after {selected:?}"
+                    .is_pending()
             );
-            assert!(gate.try_lock().is_err());
-            if cross_hard_cap {
-                // The second liveness check confirms Ready reached the drain.
-                assert_eq!(liveness_checks.get(), 2);
-                tokio::time::advance(Duration::from_secs(2)).await;
-                assert!(gate.try_lock().is_err());
+            if expected == Ready {
+                release.send(()).unwrap();
+                assert_eq!(startup.await.0.outcome, Ready);
+                continue;
             }
-            release.send(()).unwrap();
-            let (observed, _) = startup.await;
-            assert_eq!(
-                observed.outcome, expected,
-                "after {selected:?}, cap crossed: {cross_hard_cap}"
+            match expected {
+                Cancelled => cancel.send(()).unwrap(),
+                ChildExited => {
+                    alive.set(ChildLiveness::Exited);
+                    tokio::time::advance(Duration::from_millis(50)).await;
+                }
+                TimedOut => tokio::time::advance(Duration::from_secs(2)).await,
+                _ => unreachable!(),
+            }
+            let result = std::future::poll_fn(|cx| Poll::Ready(startup.as_mut().poll(cx))).await;
+            assert!(
+                matches!(result, Poll::Ready((diagnostic, _)) if diagnostic.outcome == expected),
+                "Ready drain remained pending or returned the wrong outcome for {expected:?}"
             );
-            let _replacement = gate.try_lock().unwrap();
-            fs::write(&database, b"replacement owner").unwrap();
-            assert_eq!(read.await.unwrap(), b"first owner");
+            release.send(()).unwrap();
         }
     }
 
@@ -523,14 +672,14 @@ mod tests {
     fn cold_qualification_and_read_require_private_wal_files() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
-        assert_eq!(cold_home(home).as_deref(), Some(home));
+        assert!(cold_home(home, "agent", home).is_some());
         assert!(read_checkpoint(home).is_none());
         let database = home.join(DATABASE);
         let writer = Connection::open(&database).unwrap();
         writer
             .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE unrecognized (id INTEGER);")
             .unwrap();
-        assert!(cold_home(home).is_none());
+        assert!(cold_home(home, "agent", home).is_none());
         assert!(read_checkpoint(home).is_none());
         writer.execute_batch(
             "CREATE TABLE backfill_state (id INTEGER PRIMARY KEY, status TEXT, last_watermark TEXT);
