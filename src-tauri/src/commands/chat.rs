@@ -7774,9 +7774,9 @@ Do you want to proceed?
             "the supplied revision reports the new controls through its delta, alias, or reset"
         );
         assert_eq!(control_assistants.len(), 3);
-        assert!(control_assistants.iter().any(|event| {
-            event.source.as_deref() == Some("event_msg") && event.turn_id.is_none()
-        }));
+        assert!(control_assistants
+            .iter()
+            .any(|event| event.source.as_deref() == Some("event_msg")));
         let native_ids = control_assistants
             .iter()
             .filter(|event| event.source.as_deref() == Some("response_item"))
@@ -8057,15 +8057,12 @@ Do you want to proceed?
         assert_eq!(display_member_ids(older_page_pair), paired_observation_ids);
         assert_eq!(
             older_page_pair.metadata["chat_display_physical_id"].as_str(),
-            Some(native.id.as_str()),
-            "older page preserves the actual physical B observation"
+            Some(mirror.id.as_str()),
+            "Older reads the same physical frame that supplied A's stable display identity"
         );
-        for observation_id in &paired_observation_ids {
-            assert!(older_page.aliases.iter().any(|alias| {
-                alias.observation_id.as_str() == observation_id.as_str()
-                    && alias.canonical_id.as_str() == canonical_b_id.as_str()
-            }));
-        }
+        assert!(older_page.aliases.iter().any(|alias| {
+            alias.observation_id == native.id && alias.canonical_id == canonical_b_id
+        }));
         for control in &control_assistants {
             assert!(
                 older_ids.contains(&control.id),

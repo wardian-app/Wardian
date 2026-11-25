@@ -163,6 +163,13 @@ async fn archive_only_chat_entry_replays_a_sealed_saved_frame_at_the_front_of_a_
             )
             .unwrap();
             decorate_forward_provider_log_events(&mut batch.events, provider, &path);
+            attach_archive_bound_provider_log_retry_aliases(
+                &archive,
+                &context,
+                &mut batch.events,
+                &path,
+            )
+            .unwrap();
             if pass == 0 {
                 assert_eq!(
                     batch.next.reason.as_deref(),
