@@ -1,25 +1,40 @@
 //! Independently framed source observations, never a canonical archive seal.
 //! The existing background capture owner publishes recent rows before walking
 //! older intervals. A restart resumes the last immutable checkpoint.
+#[cfg(test)]
 use std::fs::File;
+#[cfg(test)]
 use std::io::{self, Read};
+#[cfg(test)]
 use std::path::Path;
 
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use wardian_core::conversations::write_json_atomic;
+#[cfg(test)]
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind};
 
+#[cfg(test)]
 use super::chat_read::{locations, PAGE_ROWS};
-use super::chat_read_store::{valid_ref, Dependency, Store};
+#[cfg(test)]
+use super::chat_read_store::{Dependency, Store};
+#[cfg(test)]
+use super::storage::valid_ref;
+#[cfg(test)]
 use crate::commands::chat::{
     conversation_archive_context_from_snapshot, AgentArchiveCaptureSnapshot,
 };
+#[cfg(test)]
 use crate::commands::chat_recent_seed::{source_scope, SeedCheckpoint};
 
+#[cfg(test)]
 const SOURCE_INDEX_VERSION: u8 = 5;
 // The normalizer keeps its existing 1 MiB cap; this bounded envelope also
 // stores the pinned acquisition identity, policy spans and cursor metadata.
+#[cfg(test)]
 const REPLAY_STATE_MAX_BYTES: usize = 1024 * 1024 + 64 * 1024;
+#[cfg(test)]
 const REPLAY_STATE_CHUNK_BYTES: usize = 7 * 1024;
 
 #[cfg(test)]
@@ -28,6 +43,7 @@ thread_local! {
     pub(super) static FAILED_CHECKPOINT_ROOT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
 #[derive(Clone, Serialize, Deserialize)]
 struct SourceHead {
     agent_id: String,
@@ -65,6 +81,7 @@ struct SourceHead {
     replay_rows_admitted: u64,
 }
 
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 struct SourceRow {
     agent_id: String,
@@ -79,6 +96,7 @@ struct SourceRow {
     body_required: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(super) struct SourcePage {
     pub(super) reference: String,
@@ -95,6 +113,7 @@ pub(super) struct SourcePage {
     pub(super) reset: bool,
 }
 
+#[cfg(test)]
 pub(super) struct RevalidatedRows {
     pub(super) generation: String,
     pub(super) epoch: String,
@@ -105,6 +124,7 @@ pub(super) struct RevalidatedRows {
     pub(super) body_required: Vec<(String, String)>,
 }
 
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 struct ReplayCheckpoint {
     acquisition: crate::commands::provider_log_acquisition::ProviderLogCaptureState,
@@ -114,12 +134,14 @@ struct ReplayCheckpoint {
     pending_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 struct ReplayStateChunk {
     next: Option<String>,
     hex: String,
 }
 
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 struct ReplayPendingRow {
     key: String,
@@ -127,6 +149,7 @@ struct ReplayPendingRow {
     body_required: bool,
 }
 
+#[cfg(test)]
 fn indexing_revalidation(head: &SourceHead) -> RevalidatedRows {
     RevalidatedRows {
         generation: head.generation.clone(),
@@ -139,6 +162,7 @@ fn indexing_revalidation(head: &SourceHead) -> RevalidatedRows {
     }
 }
 
+#[cfg(test)]
 fn save_replay_checkpoint(store: &Store, checkpoint: &ReplayCheckpoint) -> io::Result<String> {
     let bytes = serde_json::to_vec(checkpoint).map_err(io::Error::other)?;
     if bytes.len() > REPLAY_STATE_MAX_BYTES {
@@ -155,6 +179,7 @@ fn save_replay_checkpoint(store: &Store, checkpoint: &ReplayCheckpoint) -> io::R
     next.ok_or_else(|| io::Error::other("empty source replay checkpoint"))
 }
 
+#[cfg(test)]
 fn load_replay_checkpoint(store: &mut Store, reference: &str) -> io::Result<ReplayCheckpoint> {
     let mut next = Some(reference.to_owned());
     let mut seen = std::collections::HashSet::new();
@@ -182,6 +207,7 @@ fn load_replay_checkpoint(store: &mut Store, reference: &str) -> io::Result<Repl
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 
+#[cfg(test)]
 fn replay_pending_key(row_key: &str) -> io::Result<String> {
     let (start, ordinal) = row_key
         .split_once(':')
@@ -233,6 +259,7 @@ pub(super) fn valid_source_id(agent_id: &str, source_id: &str) -> bool {
     source_id_parts(agent_id, source_id).is_some()
 }
 
+#[cfg(test)]
 /// Resolve only explicitly selected, backend-issued source observations. A
 /// complete current index is required before any row can be acknowledged.
 pub(super) fn revalidate_rows(
@@ -432,6 +459,7 @@ pub(super) fn revalidate_rows(
     })
 }
 
+#[cfg(test)]
 /// A page certifies display relations only while its complete index head still
 /// covers the current admitted source extent and remains the published head.
 pub(super) fn current_complete(snapshot: &AgentArchiveCaptureSnapshot, page: &SourcePage) -> bool {
@@ -447,6 +475,7 @@ pub(super) fn current_complete(snapshot: &AgentArchiveCaptureSnapshot, page: &So
     })
 }
 
+#[cfg(test)]
 pub(super) fn current_complete_scope(
     snapshot: &AgentArchiveCaptureSnapshot,
     reference: &str,
@@ -466,6 +495,7 @@ pub(super) fn current_complete_scope(
     })
 }
 
+#[cfg(test)]
 pub(super) fn pointer(agent_id: &str) -> io::Result<Option<String>> {
     let path = locations(agent_id)?
         .0
@@ -490,6 +520,7 @@ pub(super) fn pointer(agent_id: &str) -> io::Result<Option<String>> {
     Ok(reference)
 }
 
+#[cfg(test)]
 fn key(event: &AgentChatEvent) -> io::Result<String> {
     let offset = event.metadata["chat_source_start"]
         .as_u64()
@@ -504,6 +535,7 @@ fn key(event: &AgentChatEvent) -> io::Result<String> {
     Ok(format!("{offset:020}:{ordinal:020}"))
 }
 
+#[cfg(test)]
 fn key_position(key: &str) -> Option<(u64, u64)> {
     let (offset, ordinal) = key.split_once(':')?;
     if offset.len() != 20 || ordinal.len() != 20 {
@@ -512,6 +544,7 @@ fn key_position(key: &str) -> Option<(u64, u64)> {
     Some((offset.parse().ok()?, ordinal.parse().ok()?))
 }
 
+#[cfg(test)]
 /// One bounded forward checkpoint, called only by the coalesced capture owner
 /// after privacy policy commit and before full canonical archive maintenance.
 pub(crate) fn advance(snapshot: &AgentArchiveCaptureSnapshot) -> io::Result<bool> {
@@ -952,6 +985,7 @@ pub(crate) fn advance(snapshot: &AgentArchiveCaptureSnapshot) -> io::Result<bool
             || (extent > head.target_extent && made_progress)))
 }
 
+#[cfg(test)]
 fn new_replay_checkpoint(
     _snapshot: &AgentArchiveCaptureSnapshot,
     context: &super::ConversationArchiveContext,
@@ -982,10 +1016,12 @@ fn new_replay_checkpoint(
     })
 }
 
+#[cfg(test)]
 fn replay_end(policy: &super::chat_read::SourcePolicy, extent: u64) -> u64 {
     policy.open_disabled.unwrap_or(extent).min(extent)
 }
 
+#[cfg(test)]
 fn replay_boundaries_framed(
     snapshot: &AgentArchiveCaptureSnapshot,
     policy: &super::chat_read::SourcePolicy,
@@ -1024,6 +1060,7 @@ fn replay_boundaries_framed(
     Ok(true)
 }
 
+#[cfg(test)]
 struct ReplayAdmissionContext<'a> {
     snapshot: &'a AgentArchiveCaptureSnapshot,
     context: &'a super::ConversationArchiveContext,
@@ -1032,6 +1069,7 @@ struct ReplayAdmissionContext<'a> {
 }
 
 // Keep the exact owner/head/checkpoint inputs visible at the admission boundary.
+#[cfg(test)]
 fn queue_replay_events(
     store: &mut Store,
     head: &mut SourceHead,
@@ -1126,6 +1164,7 @@ fn queue_replay_events(
     Ok(())
 }
 
+#[cfg(test)]
 fn drain_replay_rows(
     store: &mut Store,
     head: &mut SourceHead,
@@ -1233,6 +1272,7 @@ fn drain_replay_rows(
     Ok(admitted)
 }
 
+#[cfg(test)]
 fn save_head_checkpoint(
     snapshot: &AgentArchiveCaptureSnapshot,
     store: &mut Store,
@@ -1280,6 +1320,7 @@ fn save_head_checkpoint(
     publish(store, head)
 }
 
+#[cfg(test)]
 fn publish(store: &mut Store, head: &SourceHead) -> io::Result<()> {
     let reference = store.put(head)?;
     // Rows and seek roots are immutable and durable before the pointer changes.
@@ -1291,6 +1332,7 @@ fn publish(store: &mut Store, head: &SourceHead) -> io::Result<()> {
     )
 }
 
+#[cfg(test)]
 pub(super) fn framed_extent(
     snapshot: &AgentArchiveCaptureSnapshot,
     epoch: &str,
@@ -1300,6 +1342,7 @@ pub(super) fn framed_extent(
     framed_extent_counted(snapshot, epoch, extent, &mut native_bytes_read)
 }
 
+#[cfg(test)]
 fn framed_extent_counted(
     snapshot: &AgentArchiveCaptureSnapshot,
     epoch: &str,
@@ -1328,6 +1371,7 @@ fn framed_extent_counted(
     Ok(byte[0] == b'\n')
 }
 
+#[cfg(test)]
 fn apply_updates(
     store: &mut Store,
     head: &mut SourceHead,
@@ -1360,6 +1404,7 @@ fn apply_updates(
     Ok(())
 }
 
+#[cfg(test)]
 fn coverage_complete(head: &SourceHead, extent: u64) -> bool {
     head.logical_version >= SOURCE_INDEX_VERSION
         && extent == head.target_extent
@@ -1371,6 +1416,7 @@ fn coverage_complete(head: &SourceHead, extent: u64) -> bool {
         && !head.logical.narrative_pending()
 }
 
+#[cfg(test)]
 /// Read only indexed headers under today's independently validated admission.
 /// Cursor heads can continue after backfill, but never across source/privacy
 /// changes. The caller shares its object/byte budget with the canonical reader.
@@ -1384,6 +1430,7 @@ pub(super) fn page(
     page_limited(snapshot, store, reference, cursor, previous, PAGE_ROWS)
 }
 
+#[cfg(test)]
 pub(super) fn page_limited(
     snapshot: &AgentArchiveCaptureSnapshot,
     store: &mut Store,
@@ -1542,6 +1589,7 @@ pub(super) fn page_limited(
     })
 }
 
+#[cfg(test)]
 fn admitted_head(
     snapshot: &AgentArchiveCaptureSnapshot,
     store: &mut Store,
@@ -1562,6 +1610,7 @@ fn admitted_head(
     Ok((head, extent))
 }
 
+#[cfg(test)]
 pub(super) fn scope(
     snapshot: &AgentArchiveCaptureSnapshot,
     store: &mut Store,
@@ -1571,6 +1620,7 @@ pub(super) fn scope(
     Ok((generation, epoch, progress))
 }
 
+#[cfg(test)]
 /// Return renewal readiness from the same admitted head and aggregate budget.
 pub(super) fn scope_with_completion(
     snapshot: &AgentArchiveCaptureSnapshot,
@@ -1586,6 +1636,7 @@ pub(super) fn scope_with_completion(
     ))
 }
 
+#[cfg(test)]
 pub(super) struct Qualification {
     pub(super) generation: String,
     pub(super) epoch: String,
@@ -1596,6 +1647,7 @@ pub(super) struct Qualification {
     pub(super) complete: bool,
 }
 
+#[cfg(test)]
 /// Compare canonical coverage against the actual current interval and privacy
 /// admission without opening another Store or resetting its aggregate budget.
 pub(super) fn qualification(
@@ -1616,6 +1668,7 @@ pub(super) fn qualification(
     })
 }
 
+#[cfg(test)]
 /// Find whether older provisional observations remain without decoding a page.
 /// The recent seed already independently validated this exact admission.
 pub(super) fn continuation(

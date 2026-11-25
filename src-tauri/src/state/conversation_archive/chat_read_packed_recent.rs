@@ -36,9 +36,7 @@ impl Binding {
     fn from_head(head: &Head) -> io::Result<Self> {
         // Bind every admission, logical, bootstrap, and publication field while
         // excluding the only field that would introduce a content-hash cycle.
-        let mut unbound = head.clone();
-        unbound.recent_page = None;
-        let head_binding = digest(&serde_json::to_vec(&unbound).map_err(io::Error::other)?);
+        let head_binding = head.legacy_pack_binding()?;
         Ok(Self {
             version: 1,
             head_binding,

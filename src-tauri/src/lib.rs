@@ -1,5 +1,6 @@
 pub mod artifact_service;
 pub mod automation;
+mod chat_cache_admin;
 pub mod commands;
 pub mod control;
 pub mod delivery;
@@ -26,6 +27,11 @@ extern "C" {}
 use crate::state::AppState;
 use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::models::AgentConfig;
+
+/// Compare an offline copy of legacy Chat data with its conversation archive.
+pub fn run_chat_cache_admin(arguments: &[String]) -> Result<(serde_json::Value, bool), String> {
+    chat_cache_admin::dispatch(arguments)
+}
 
 const TELEMETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const TELEMETRY_TICK_SLOW_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(30);

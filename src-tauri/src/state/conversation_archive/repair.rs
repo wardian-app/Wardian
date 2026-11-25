@@ -7,7 +7,8 @@ use std::{
 use wardian_core::conversations::{
     append_index_upsert, append_jsonl_record, read_jsonl_records, write_json_atomic,
     write_jsonl_atomic, ConversationInputOrigin, ConversationNarrativeRecord,
-    ConversationRecordKind, ConversationSourceRecord, ConversationTurnRecord,
+    ConversationRecordKind, ConversationSourceRecord, ConversationTextArtifactProof,
+    ConversationTurnRecord,
 };
 use wardian_core::models::chat::AgentChatEvent;
 use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
@@ -1088,6 +1089,26 @@ fn restore_event_text_metadata(
         if !artifact_refs.is_empty() {
             record.text = None;
             record.artifact_refs = artifact_refs;
+            if let [reference] = record.artifact_refs.as_slice() {
+                if event.text.is_none() {
+                    // Recovery can carry the event writer's proof for the
+                    // same owned reference. Reading the artifact here would
+                    // only establish its current bytes, not what was written.
+                    record.text_artifact_proof = event
+                        .metadata
+                        .get("text_artifact_proof")
+                        .and_then(|value| {
+                            serde_json::from_value::<ConversationTextArtifactProof>(value.clone())
+                                .ok()
+                        })
+                        .filter(|proof| {
+                            &proof.reference == reference
+                                && proof.bytes > 0
+                                && proof.sha256.len() == 64
+                                && proof.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        });
+                }
+            }
         }
     }
     if let Some(excerpt) = event.metadata["text_excerpt"].as_str() {

@@ -1,16 +1,18 @@
 use std::{
     collections::{HashMap, HashSet},
-    io,
+    fs, io,
+    path::Path,
     sync::{Arc, Mutex},
 };
 
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use wardian_core::conversations::{
     append_index_upsert, materialize_text_payload, read_jsonl_records, read_latest_index_entries,
     write_json_atomic, write_jsonl_atomic, ConversationBoundaryReason, ConversationFormatVersions,
     ConversationIndexEntry, ConversationLoggingSetting, ConversationManifest,
     ConversationNarrativeRecord, ConversationRecordKind, ConversationSourceRecord,
-    ConversationStatus, CONVERSATION_SCHEMA,
+    ConversationStatus, ConversationTextArtifactProof, CONVERSATION_SCHEMA,
 };
 use wardian_core::models::chat::AgentChatEvent;
 use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir, agents_dir};
@@ -63,13 +65,56 @@ pub(super) fn index_path(agent_id: &str) -> io::Result<std::path::PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe agent path"))
 }
 
-fn capture_state_path(agent_id: &str) -> io::Result<std::path::PathBuf> {
+pub(super) fn capture_state_path(agent_id: &str) -> io::Result<std::path::PathBuf> {
     agent_conversations_dir(agent_id)
         .and_then(|dir| {
             dir.parent()
                 .map(|agent_dir| agent_dir.join("conversation-capture.json"))
         })
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe agent path"))
+}
+
+pub(super) fn open_read_nofollow(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || is_reparse_point(&metadata) {
+        return Err(io::Error::other(
+            "archive path is not a regular non-reparse file",
+        ));
+    }
+    Ok(file)
+}
+
+pub(super) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+pub(super) fn digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+pub(super) fn valid_ref(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub(super) fn read_capture_state(agent_id: &str) -> io::Result<ConversationCaptureState> {
@@ -81,6 +126,7 @@ pub(super) fn read_capture_state(agent_id: &str) -> io::Result<ConversationCaptu
     serde_json::from_str(&content).map_err(io::Error::other)
 }
 
+#[cfg(test)]
 /// Recent admission reads only this bounded policy object, never archive bodies.
 pub(super) fn read_recent_capture_state(
     agent_id: &str,
@@ -544,6 +590,15 @@ pub(super) fn materialize_record_text(
         &artifact_stem_for_record(record),
         text,
     )?;
+    record.text_artifact_proof =
+        payload
+            .artifact_refs
+            .first()
+            .map(|reference| ConversationTextArtifactProof {
+                reference: reference.clone(),
+                bytes: text.len() as u64,
+                sha256: digest(text.as_bytes()),
+            });
     record.text = payload.text;
     record.excerpt = payload.excerpt;
     record.artifact_refs = payload.artifact_refs;
@@ -590,6 +645,9 @@ pub(super) fn event_record_for_jsonl(
         ])
         .collect();
     event.metadata = serde_json::Value::Object(metadata);
+    if let Some(proof) = &record.text_artifact_proof {
+        event.metadata["text_artifact_proof"] = serde_json::json!(proof);
+    }
     event
 }
 

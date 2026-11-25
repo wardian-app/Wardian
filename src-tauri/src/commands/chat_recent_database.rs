@@ -4,22 +4,31 @@
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
 
-use rusqlite::{Connection, OpenFlags, StatementStatus};
+#[cfg(test)]
+use rusqlite::StatementStatus;
+use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind};
 
 use super::provider_log_acquisition::{native_file_identity, ProviderLogNativeIdentity};
 
+#[cfg(test)]
 const ROWS: usize = 80;
+#[cfg(test)]
 const PAYLOAD_BYTES: usize = 128 * 1024;
+#[cfg(test)]
 const VALUE_BYTES: usize = 16 * 1024;
+#[cfg(test)]
 const VM_QUANTUM: i32 = 100;
+#[cfg(test)]
 const VM_QUANTA: usize = 1000;
+#[cfg(test)]
 const OPENCODE_QUERIES: [&str; 2] = [
     "SELECT p.rowid,p.id,p.time_created,m.rowid,m.id,m.time_created FROM part p JOIN message m ON m.id=p.message_id WHERE p.session_id=?1 AND m.session_id=?1 AND p.time_created IS NOT NULL ORDER BY p.time_created DESC,p.id DESC LIMIT 80",
     "SELECT p.rowid,p.id,p.time_created,m.rowid,m.id,m.time_created FROM part p JOIN message m ON m.id=p.message_id WHERE p.session_id=?1 AND m.session_id=?1 AND p.time_created IS NULL ORDER BY m.time_created DESC,p.id DESC LIMIT 80",
@@ -303,10 +312,12 @@ impl Source {
         Ok((after.modified()?, super::chat_recent_seed::hash(&bytes)))
     }
 
+    #[cfg(test)]
     pub(crate) fn is_database(&self) -> bool {
         self.watch_version.is_none()
     }
 
+    #[cfg(test)]
     pub(crate) fn matches_path(&self, path: &Path) -> bool {
         path.canonicalize().is_ok_and(|path| path == self.path)
     }
@@ -358,6 +369,7 @@ fn plain_path(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 #[derive(Default, Debug)]
 pub(super) struct Metrics {
     pub(super) vm_steps: usize,
@@ -367,12 +379,14 @@ pub(super) struct Metrics {
     pub(super) decoded_rows: usize,
 }
 
+#[cfg(test)]
 pub(super) struct OpenCodeRow {
     pub(super) part: super::chat::OpencodeDbPart,
     pub(super) key: String,
     pub(super) version: String,
 }
 
+#[cfg(test)]
 pub(super) struct OpenCodeBatch {
     pub(super) source: Source,
     pub(super) rows: Vec<OpenCodeRow>,
@@ -403,6 +417,7 @@ pub(super) fn opencode_part_binding(
     Ok((key, version))
 }
 
+#[cfg(test)]
 fn bounded_connection(path: &Path) -> io::Result<(Connection, Arc<AtomicUsize>)> {
     let mut connection = Connection::open_with_flags(
         path,
@@ -453,6 +468,7 @@ fn database_guard(path: &Path) -> io::Result<File> {
     }
 }
 
+#[cfg(test)]
 fn payload_bytes(
     connection: &Connection,
     table: &str,
@@ -474,6 +490,7 @@ fn payload_bytes(
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn payload(
     connection: &Connection,
     table: &str,
@@ -485,6 +502,7 @@ fn payload(
         .map_err(io::Error::other)
 }
 
+#[cfg(test)]
 /// Both native timestamp branches reproduce the normal COALESCE ordering
 /// without inventing a global sequence. The same interrupt bounds both plans.
 pub(super) fn opencode(path: &Path, session: &str) -> io::Result<OpenCodeBatch> {
@@ -560,18 +578,21 @@ pub(super) fn opencode(path: &Path, session: &str) -> io::Result<OpenCodeBatch> 
     })
 }
 
+#[cfg(test)]
 pub(super) struct AntigravityRow {
     pub(super) message: crate::providers::antigravity::AntigravityConversationMessage,
     pub(super) key: String,
     pub(super) version: String,
 }
 
+#[cfg(test)]
 pub(super) struct AntigravityBatch {
     pub(super) source: Source,
     pub(super) rows: Vec<AntigravityRow>,
     pub(super) metrics: Metrics,
 }
 
+#[cfg(test)]
 pub(super) fn antigravity(path: &Path, session: &str) -> io::Result<AntigravityBatch> {
     use crate::providers::antigravity::AntigravityProvider;
     if session.is_empty()

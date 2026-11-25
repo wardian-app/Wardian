@@ -1131,6 +1131,37 @@ describe("useRemoteStore watchlists", () => {
     expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls.every((call) => call[5] === undefined)).toBe(true);
   });
 
+  it("refreshes positioned detail in Older and keeps typed presentation on unchanged", async () => {
+    vi.useFakeTimers();
+    const generation = "a".repeat(64);
+    const revision = (digit: string) => `archive1:${generation}:${digit.repeat(64)}`;
+    const positioned = (shape: Partial<RemoteAgentChatPage>) => stoppedArchivePage({ generation, progress: "ready", ...shape });
+    const presentation = { version: 1, payload: { turns: [], items: [], state_event_refs: [], legacy_turns: [], detail: null } };
+    const older = { ...chatMessage("owned-older", "old preview", 1), metadata: {
+      chat_archive_positioned: true, chat_body_binding: "first", chat_detail_ref: "first-ref",
+    } };
+    const updated = { ...older, text: "new verified preview", metadata: {
+      ...older.metadata, chat_body_binding: "second", chat_detail_ref: "second-ref",
+    } };
+    const recent = { ...chatMessage("owned-recent", "recent", 2), metadata: { chat_archive_positioned: true } };
+    vi.mocked(remoteClient.loadAgentChatPage)
+      .mockResolvedValueOnce(positioned({ revision: revision("b"), events: [recent], next_before: "older" }))
+      .mockResolvedValueOnce(positioned({ revision: revision("b"), older_page: true, events: [older], next_before: "frontier" }))
+      .mockResolvedValueOnce(positioned({ revision: revision("c"), events: [updated, recent], presentation, next_before: "recent-frontier" }))
+      .mockResolvedValueOnce(positioned({ revision: revision("c"), unchanged: true }));
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat" });
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    await useRemoteStore.getState().loadOlderActiveAgentChat();
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect.soft(useRemoteStore.getState().chatEvents[0]?.metadata.chat_detail_ref).toBe("second-ref");
+    expect.soft(useRemoteStore.getState().chatEvents[0]?.text).toBe("new verified preview");
+    expect(useRemoteStore.getState().chatNextBefore).toBe("frontier");
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState().chatPresentationPage?.presentation).toEqual(presentation);
+    expect(useRemoteStore.getState().chatNextBefore).toBe("frontier");
+    expect(useRemoteStore.getState().chatBrowsingOlder).toBe(true);
+  });
+
   it("preserves archive qualification on a recent unchanged response without copying stale rows", async () => {
     vi.useFakeTimers();
     const initial = stoppedArchivePage({ events: [chatMessage("archive-owned", "Owned row", 1)], next_before: "archive-before" });

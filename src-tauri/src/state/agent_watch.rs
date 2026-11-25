@@ -62,6 +62,7 @@ impl AgentWatchState {
         self.live_chat_boundary = Some((started_at.to_owned(), self.next_sequence));
     }
 
+    #[cfg(test)]
     pub(crate) fn live_chat_boundary(&self) -> Option<&(String, u64)> {
         self.live_chat_boundary.as_ref()
     }
@@ -78,6 +79,7 @@ impl AgentWatchState {
         });
     }
 
+    #[cfg(test)]
     pub(crate) fn recent_file_source(
         &self,
     ) -> Option<&(crate::commands::chat_recent_database::Source, u64)> {
@@ -123,6 +125,7 @@ impl AgentWatchState {
         cursor
     }
 
+    #[cfg(test)]
     /// Visit the newest retained transcript records without cloning their bodies.
     /// The second sequence is the unchanged normal transcript mapper's ordinal.
     pub(crate) fn visit_recent_transcript(

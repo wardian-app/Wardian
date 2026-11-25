@@ -4,8 +4,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+pub(super) use super::storage::{digest, valid_ref};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
@@ -15,14 +15,6 @@ use super::chat_read::PAGE_ROWS;
 pub(super) const READ_BYTES: usize = 1024 * 1024;
 pub(super) const READ_OBJECTS: usize = 512;
 pub(super) const OBJECT_BYTES: usize = 16 * 1024;
-
-pub(super) fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-pub(super) fn valid_ref(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
 
 /// An operation-local cache of already hash-validated immutable index data.
 /// Nodes and values share the existing retained byte and object limits.

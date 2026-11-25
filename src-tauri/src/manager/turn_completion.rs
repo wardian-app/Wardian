@@ -475,11 +475,8 @@ async fn poll_transcript_turn_completion(
         {
             return;
         }
-        let Ok(events) = crate::commands::chat::load_agent_chat_transcript_for_state(
-            state,
-            session_id.to_owned(),
-        )
-        .await
+        let Ok(events) =
+            crate::commands::chat::observe_current_turn_transcript(state, session_id).await
         else {
             continue;
         };

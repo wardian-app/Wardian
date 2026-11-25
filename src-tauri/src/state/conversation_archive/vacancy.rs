@@ -133,7 +133,7 @@ impl ConversationArchiveState {
                 )?)?;
             }
         }
-        self.chat_projection.invalidate(agent_id)?;
+        self.invalidate_archive_positions(agent_id)?;
         let adoption_regrant_required = !self.has_pending_adoption(agent_id)?;
         Ok(ArchiveVacancyResponse {
             schema: CONTROL_SCHEMA,

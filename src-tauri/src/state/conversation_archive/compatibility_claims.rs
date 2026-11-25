@@ -1,8 +1,11 @@
 //! Capture-only reservations for historically persisted provider-log owners.
 //! The private checkpoint publishes prepared roots before advancing its cursor.
+#[cfg(test)]
 use super::chat_read_store::{digest, valid_ref, Store, READ_OBJECTS};
 use super::*;
+#[cfg(test)]
 use crate::commands::provider_log_acquisition::ProviderLogCaptureState;
+#[cfg(test)]
 use wardian_core::models::chat::AgentChatEventKind;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11,6 +14,7 @@ pub(super) struct Checkpoint {
     root: String,
 }
 
+#[cfg(test)]
 #[derive(Default, Serialize, Deserialize)]
 struct Root {
     version: u8,
@@ -18,6 +22,7 @@ struct Root {
     pending: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Claim {
     scope: String,
@@ -32,6 +37,7 @@ struct Claim {
     codex_owner_digest: Option<String>,
 }
 
+#[cfg(test)]
 fn load(store: &mut Store, checkpoint: Option<&Checkpoint>) -> io::Result<Root> {
     let Some(checkpoint) = checkpoint else {
         return Ok(Root {
@@ -56,10 +62,12 @@ fn load(store: &mut Store, checkpoint: Option<&Checkpoint>) -> io::Result<Root> 
     Ok(root)
 }
 
+#[cfg(test)]
 fn objects(agent_id: &str) -> io::Result<std::path::PathBuf> {
     Ok(chat_read::locations(agent_id)?.1)
 }
 
+#[cfg(test)]
 pub(super) fn pending(state: &ConversationCaptureState, agent_id: &str) -> io::Result<bool> {
     let mut store = Store::new(&objects(agent_id)?);
     Ok(load(&mut store, state.compatibility_claims.as_ref())?
@@ -67,6 +75,7 @@ pub(super) fn pending(state: &ConversationCaptureState, agent_id: &str) -> io::R
         .is_some())
 }
 
+#[cfg(test)]
 fn scope(
     context: &ConversationArchiveContext,
     conversation_id: &str,
@@ -85,6 +94,7 @@ fn scope(
     ))
 }
 
+#[cfg(test)]
 fn qualified(source: &ProviderLogCaptureState) -> bool {
     matches!(source.status.as_str(), "complete" | "pending")
         && source.reason.is_none()
@@ -93,6 +103,7 @@ fn qualified(source: &ProviderLogCaptureState) -> bool {
         && source.open_disabled_from.is_none()
 }
 
+#[cfg(test)]
 fn stored_scope(
     context: &ConversationArchiveContext,
     conversation_id: &str,
@@ -111,10 +122,12 @@ fn stored_scope(
     })
 }
 
+#[cfg(test)]
 fn owner_key(context: &ConversationArchiveContext, conversation_id: &str, id: &str) -> String {
     digest(format!("owner:{}:{conversation_id}:{id}", context.agent_id).as_bytes())
 }
 
+#[cfg(test)]
 fn admitted(event: &AgentChatEvent, source: &ProviderLogCaptureState) -> bool {
     let Some((start, end)) = event.metadata["chat_source_start"]
         .as_u64()
@@ -148,6 +161,7 @@ fn admitted(event: &AgentChatEvent, source: &ProviderLogCaptureState) -> bool {
         && ordinal == "0"
 }
 
+#[cfg(test)]
 fn eligible(
     old: &AgentChatEvent,
     current: &AgentChatEvent,
@@ -188,6 +202,7 @@ fn eligible(
         && admitted(current, source)
 }
 
+#[cfg(test)]
 fn reserve(store: &mut Store, root: &mut Root, owner_key: &str, claim: &Claim) -> io::Result<()> {
     let coordinate_key =
         digest(format!("coordinate:{}:{}", claim.scope, claim.coordinate).as_bytes());
@@ -214,6 +229,7 @@ fn reserve(store: &mut Store, root: &mut Root, owner_key: &str, claim: &Claim) -
     Ok(())
 }
 
+#[cfg(test)]
 /// Prepare immutable claims using only archive data already loaded by its writer.
 /// The returned overlay is private until the caller commits cursor and policy.
 #[derive(Clone, Copy)]
@@ -230,6 +246,7 @@ pub(super) struct Preparation<'a> {
         Option<&'a crate::commands::provider_log_acquisition::ProviderLogSourceProof>,
 }
 
+#[cfg(test)]
 fn codex_capture_scope_matches(input: &Preparation<'_>) -> bool {
     input.context.provider == "codex"
         && !input.context.provider_session_ids.is_empty()
@@ -251,6 +268,7 @@ fn codex_capture_scope_matches(input: &Preparation<'_>) -> bool {
             == Some(input.next.provider_source_key.as_str())
 }
 
+#[cfg(test)]
 fn codex_scope_matches(input: &Preparation<'_>) -> bool {
     codex_capture_scope_matches(input)
         && input.previous.is_some_and(|previous| {
@@ -266,6 +284,7 @@ fn codex_scope_matches(input: &Preparation<'_>) -> bool {
         && qualified(input.next)
 }
 
+#[cfg(test)]
 fn codex_owner_matches(
     old: &AgentChatEvent,
     current: &AgentChatEvent,
@@ -332,6 +351,7 @@ fn codex_owner_matches(
         && admitted(current, input.next)
 }
 
+#[cfg(test)]
 /// Bind immutable Codex reservations to semantic owner fields, independent of
 /// canonical role normalization and the source frame added during migration.
 fn codex_owner_digest(event: &AgentChatEvent) -> io::Result<String> {
@@ -358,6 +378,7 @@ fn codex_owner_digest(event: &AgentChatEvent) -> io::Result<String> {
     ))
 }
 
+#[cfg(test)]
 fn codex_progress_qualified(source: &ProviderLogCaptureState) -> bool {
     matches!(source.status.as_str(), "complete" | "pending")
         && matches!(
@@ -373,6 +394,7 @@ fn codex_progress_qualified(source: &ProviderLogCaptureState) -> bool {
         && source.open_disabled_from.is_none()
 }
 
+#[cfg(test)]
 /// Cursor publication follows the durable frame upgrade. Recover that exact
 /// owner without asking a later acquisition to re-observe already-consumed bytes.
 /// An uncommitted cursor or unframed owner still needs the original sealed row.
@@ -451,6 +473,7 @@ fn committed_codex_owner(
     Ok(true)
 }
 
+#[cfg(test)]
 fn codex_upgraded_owner(
     old: &AgentChatEvent,
     current: &AgentChatEvent,
@@ -473,6 +496,7 @@ fn codex_upgraded_owner(
     Ok(upgraded.remove(0))
 }
 
+#[cfg(test)]
 /// Reserve a historical Codex owner only through a sealed acquisition receipt.
 /// The shared alias matcher never treats an alias as a physical source proof.
 fn prepare_codex_claims(
@@ -565,6 +589,7 @@ fn prepare_codex_claims(
     Ok(())
 }
 
+#[cfg(test)]
 /// Persist a bounded pending seek root with the unchanged source cursor.
 pub(super) fn prepare(
     input: Preparation<'_>,
@@ -770,6 +795,7 @@ pub(super) fn prepare(
     Ok((remaining, overlay))
 }
 
+#[cfg(test)]
 /// Reapply immutable completed bindings to already-loaded candidate rows.
 /// Pending tracks crash recovery; clearing it must not erase presentation ownership.
 pub(super) fn restore_candidate(
@@ -856,31 +882,6 @@ pub(super) fn restore_candidate(
             return Err(io::Error::other("completed native proof changed"));
         }
         *event = display;
-    }
-    Ok(())
-}
-
-pub(super) fn overlay(
-    mut events: Vec<AgentChatEvent>,
-    replacements: &HashMap<String, AgentChatEvent>,
-) -> Vec<AgentChatEvent> {
-    for event in &mut events {
-        if let Some(display) = replacements.get(&event.id) {
-            *event = display.clone();
-        }
-    }
-    events
-}
-
-pub(super) fn finish(state: &mut ConversationCaptureState, agent_id: &str) -> io::Result<()> {
-    let mut store = Store::writer(&objects(agent_id)?);
-    let mut root = load(&mut store, state.compatibility_claims.as_ref())?;
-    if root.pending.take().is_some() {
-        state.compatibility_claims = Some(Checkpoint {
-            version: 1,
-            root: store.put(&root)?,
-        });
-        write_capture_state(agent_id, state)?;
     }
     Ok(())
 }

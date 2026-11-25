@@ -130,12 +130,15 @@ impl Receipt {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn status(&self) -> &AgentChatStatus {
         &self.status
     }
+    #[cfg(test)]
     pub(super) fn complete(&self) -> bool {
         self.complete
     }
+    #[cfg(test)]
     pub(super) fn partial(&self) -> bool {
         self.partial
     }
@@ -188,6 +191,7 @@ pub(super) fn attach(
     Ok(changed)
 }
 
+#[cfg(test)]
 pub(super) fn for_request(
     scope: &super::chat_turn_index::Scope<'_>,
     event: &AgentChatEvent,

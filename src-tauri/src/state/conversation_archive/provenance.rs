@@ -608,10 +608,13 @@ pub(super) fn refresh_native_message_records(
             record.text = None;
             record.excerpt = stored.metadata["text_excerpt"].as_str().map(str::to_owned);
             record.artifact_refs = refs;
+            record.text_artifact_proof =
+                serde_json::from_value(stored.metadata["text_artifact_proof"].clone()).ok();
         } else if !same_inline {
             record.text = source.text.clone();
             record.excerpt = None;
             record.artifact_refs.clear();
+            record.text_artifact_proof = None;
         }
     }
 }
@@ -622,6 +625,22 @@ pub(super) fn refresh_native_message_records(
 pub(crate) fn refresh_events(
     archived: &mut Vec<AgentChatEvent>,
     current: &[AgentChatEvent],
+) -> io::Result<bool> {
+    refresh_events_inner(archived, current, None)
+}
+
+pub(super) fn refresh_archived_events(
+    archived: &mut Vec<AgentChatEvent>,
+    records: &[ConversationNarrativeRecord],
+    current: &[AgentChatEvent],
+) -> io::Result<bool> {
+    refresh_events_inner(archived, current, Some(records))
+}
+
+fn refresh_events_inner(
+    archived: &mut Vec<AgentChatEvent>,
+    current: &[AgentChatEvent],
+    records: Option<&[ConversationNarrativeRecord]>,
 ) -> io::Result<bool> {
     let mut result = archived.clone();
     for observation in current {
@@ -634,28 +653,72 @@ pub(crate) fn refresh_events(
             continue;
         };
         let mut canonical = result[first].clone();
+        let mut removed = Vec::new();
         for &index in matches.iter().skip(1) {
             let duplicate = &result[index];
+            if let Some(records) = records.filter(|_| canonical.id != duplicate.id) {
+                let Some(sequence) = native_refresh_owner(records, &canonical, duplicate) else {
+                    continue;
+                };
+                append_coalescence(
+                    &mut canonical,
+                    REFRESHED_OBSERVATIONS,
+                    sequence,
+                    &duplicate.id,
+                )?;
+            }
             // Preserve archive-only metadata from either historical alias.
             if let (Some(target), Some(source)) = (
                 canonical.metadata.as_object_mut(),
                 duplicate.metadata.as_object(),
             ) {
                 for (key, value) in source {
+                    if matches!(key.as_str(), COALESCED_INPUTS | REFRESHED_OBSERVATIONS) {
+                        continue;
+                    }
                     target.entry(key.clone()).or_insert_with(|| value.clone());
                 }
             }
             enrich(&mut canonical, duplicate)?;
+            removed.push(index);
         }
         enrich(&mut canonical, observation)?;
         result[first] = canonical;
-        for index in matches.into_iter().skip(1).rev() {
+        for index in removed.into_iter().rev() {
             result.remove(index);
         }
     }
     let changed = result != *archived;
     *archived = result;
     Ok(changed)
+}
+
+fn native_refresh_owner(
+    records: &[ConversationNarrativeRecord],
+    canonical: &AgentChatEvent,
+    duplicate: &AgentChatEvent,
+) -> Option<u64> {
+    if canonical.metadata["provider_log"] != true
+        || duplicate.metadata["provider_log"] != true
+        || canonical.metadata["generated"] == true
+        || duplicate.metadata["generated"] == true
+        || canonical.role != duplicate.role
+        || canonical.text != duplicate.text
+        || canonical.metadata["text_artifact_refs"] != duplicate.metadata["text_artifact_refs"]
+        || !same_observation(canonical, duplicate)
+        || !same_observation(duplicate, canonical)
+        || duplicate.metadata.get(REFRESHED_OBSERVATIONS).is_some()
+    {
+        return None;
+    }
+    let mut owners = records.iter().filter(|record| {
+        record.event_refs.contains(&canonical.id) || record.event_refs.contains(&duplicate.id)
+    });
+    let owner = owners.next()?;
+    (owners.next().is_none()
+        && owner.event_refs.contains(&canonical.id)
+        && owner.event_refs.contains(&duplicate.id))
+    .then_some(owner.seq)
 }
 
 pub(crate) fn changed_observation_ids(
@@ -1271,7 +1334,7 @@ pub(super) fn refresh_records(
 ) {
     for event in events {
         let claude_raw_line = event.provider == "claude" && event.metadata["provider_log"] == true;
-        let (matches, ids) = if claude_raw_line {
+        let matches = if claude_raw_line {
             let exact_matches: Vec<usize> = records
                 .iter()
                 .enumerate()
@@ -1283,7 +1346,7 @@ pub(super) fn refresh_records(
                 continue;
             }
             if !exact_matches.is_empty() {
-                (exact_matches, vec![event.id.as_str()])
+                exact_matches
             } else {
                 let ids = event_identity_ids(event);
                 let matches = records
@@ -1300,7 +1363,7 @@ pub(super) fn refresh_records(
                 if matches.len() > 1 {
                     continue;
                 }
-                (matches, ids)
+                matches
             }
         } else {
             let ids = event_identity_ids(event);
@@ -1315,7 +1378,7 @@ pub(super) fn refresh_records(
                         .then_some(i)
                 })
                 .collect();
-            (matches, ids)
+            matches
         };
         let Some(&first) = matches.first() else {
             continue;
@@ -1333,6 +1396,7 @@ pub(super) fn refresh_records(
                     canonical.text = Some(text.clone());
                     canonical.excerpt = None;
                     canonical.artifact_refs.clear();
+                    canonical.text_artifact_proof = None;
                 }
             } else if let Some(refs) = event.metadata["text_artifact_refs"].as_array() {
                 canonical.text = None;
@@ -1341,6 +1405,8 @@ pub(super) fn refresh_records(
                     .iter()
                     .filter_map(|value| value.as_str().map(str::to_owned))
                     .collect();
+                canonical.text_artifact_proof =
+                    serde_json::from_value(event.metadata["text_artifact_proof"].clone()).ok();
             }
         }
         // Broker-authored delivery provenance remains authoritative. Native
@@ -1361,10 +1427,11 @@ pub(super) fn refresh_records(
             }
             canonical.causal_ref = projection.causal_ref.or(canonical.causal_ref);
         }
-        for id in ids {
-            if !canonical.event_refs.iter().any(|old| old == id) {
-                canonical.event_refs.push(id.into());
-            }
+        // An identity alias can find an owner without proving another
+        // physical frame. Retain existing references and receipts, and add
+        // only the ID of the observed archive frame itself.
+        if !canonical.event_refs.contains(&event.id) {
+            canonical.event_refs.push(event.id.clone());
         }
         for &index in matches.iter().skip(1) {
             let duplicate = &records[index];
@@ -1449,10 +1516,72 @@ pub(super) fn bind_delivered_inputs(
             continue;
         };
         let observation = events[*native].clone();
-        enrich(&mut events[generated], &observation)?;
+        // This receipt is recorded only for the exact observation that this
+        // archive transaction removes. Generic adapter aliases are not proof.
+        record_coalesced_input(&mut events[generated], record, &observation)?;
         events.remove(*native);
     }
     Ok(*events != before)
+}
+
+/// Called only after the writer has selected this same narrative owner for
+/// the native observation, either before suppression or before frame removal.
+pub(super) fn record_coalesced_input(
+    generated: &mut AgentChatEvent,
+    record: &ConversationNarrativeRecord,
+    native: &AgentChatEvent,
+) -> io::Result<bool> {
+    if generated.metadata["generated"] != true
+        || generated.session_id != native.session_id
+        || generated.provider != native.provider
+        || !record.event_refs.contains(&generated.id)
+        || !record.event_refs.contains(&native.id)
+    {
+        return Ok(false);
+    }
+    let before = generated.clone();
+    enrich(generated, native)?;
+    append_coalescence(generated, COALESCED_INPUTS, record.seq, &native.id)?;
+    Ok(*generated != before)
+}
+
+fn append_coalescence(
+    event: &mut AgentChatEvent,
+    field: &str,
+    sequence: u64,
+    removed_id: &str,
+) -> io::Result<()> {
+    if event.id == removed_id {
+        return Ok(());
+    }
+    let mut receipts: Vec<CoalescedInput> = serde_json::from_value(
+        event
+            .metadata
+            .get(field)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )
+    .map_err(io::Error::other)?;
+    let receipt = CoalescedInput {
+        version: 1,
+        sequence,
+        removed_id: removed_id.into(),
+    };
+    if !receipts.contains(&receipt) {
+        receipts.push(receipt);
+        event.metadata[field] = serde_json::to_value(receipts).map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
+pub(super) const COALESCED_INPUTS: &str = "archive_coalesced_inputs";
+pub(super) const REFRESHED_OBSERVATIONS: &str = "archive_refreshed_observations";
+
+#[derive(Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(super) struct CoalescedInput {
+    pub(super) version: u8,
+    pub(super) sequence: u64,
+    pub(super) removed_id: String,
 }
 
 #[cfg(test)]

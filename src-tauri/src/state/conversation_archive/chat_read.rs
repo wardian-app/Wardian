@@ -1,39 +1,58 @@
-//! The capture owner builds immutable display indexes in bounded checkpoints.
-//! Normal Chat never enters the archive gate or reads raw archive JSONL.
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+//! Legacy projection formats and helpers shared with the archive reader.
+//! Normal Chat reads the archive directly. Legacy projection publication is
+//! retained for compatibility fixtures.
+use std::collections::BTreeSet;
+#[cfg(test)]
+use std::collections::{BTreeMap, HashMap, VecDeque};
 #[cfg(test)]
 use std::fs;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::{Arc, Mutex, Weak};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use wardian_core::conversations::write_json_atomic;
-use wardian_core::models::chat::{AgentChatEvent, AgentChatPage};
+use wardian_core::models::chat::AgentChatEvent;
+#[cfg(test)]
+use wardian_core::models::chat::AgentChatPage;
 use wardian_core::paths::agent_conversations_dir;
 
-use super::chat_read_store::{digest, valid_ref, Dependency, SeekCache, Store};
+#[cfg(test)]
+use super::chat_read_store::{Dependency, SeekCache, Store};
+use super::storage::digest;
+#[cfg(test)]
+use super::storage::valid_ref;
 use super::ConversationArchiveContext;
 
 #[path = "chat_archive_bootstrap.rs"]
 mod cold_bootstrap;
+#[cfg(test)]
 #[path = "chat_read_packed_recent.rs"]
 pub(super) mod packed_recent;
+#[cfg(test)]
 #[path = "chat_preview_bridge.rs"]
 mod preview_bridge;
+#[cfg(test)]
 #[path = "chat_preview_projection.rs"]
 mod preview_projection;
+#[cfg(test)]
 #[path = "chat_retired_view.rs"]
 mod retired_view;
+#[cfg(test)]
 pub(crate) use retired_view::Read as RetiredChatRead;
+#[cfg(test)]
 #[path = "chat_turn_read.rs"]
 mod turn_read;
 
 pub(crate) const PAGE_ROWS: usize = 80;
 pub(crate) const PREVIEW_BYTES: usize = 1024;
 pub(crate) const BODY_BYTES: usize = 16 * 1024;
+#[cfg(test)]
 const HEAD_BYTES: u64 = 4096;
 pub(crate) const POLICY_BYTES: u64 = 32 * 1024;
 pub(crate) const IPC_BYTES: usize = 256 * 1024;
@@ -118,6 +137,7 @@ pub(super) fn publish_policy(
     write_json_atomic(&policy_path(&context.agent_id)?, &Some(policy))
 }
 
+#[cfg(test)]
 pub(crate) fn source_policy(context: &ConversationArchiveContext) -> io::Result<SourcePolicy> {
     let mut file = File::open(policy_path(&context.agent_id)?)?;
     let extent = file.metadata()?.len();
@@ -148,6 +168,7 @@ pub(crate) fn source_policy(context: &ConversationArchiveContext) -> io::Result<
 }
 
 impl SourcePolicy {
+    #[cfg(test)]
     pub(crate) fn admission_digest(&self) -> io::Result<String> {
         // Cursor/anchor progress does not alter which source bytes are private.
         Ok(digest(
@@ -165,6 +186,7 @@ impl SourcePolicy {
             .map_err(io::Error::other)?,
         ))
     }
+    #[cfg(test)]
     pub(crate) fn same_admission(&self, other: &Self) -> bool {
         self.agent_id == other.agent_id
             && self.source_key == other.source_key
@@ -176,6 +198,7 @@ impl SourcePolicy {
             && self.valid == other.valid
             && self.framed_starts == other.framed_starts
     }
+    #[cfg(test)]
     pub(crate) fn admits(&self, start: u64, end: u64) -> bool {
         self.valid
             && start >= self.unknown_before
@@ -187,6 +210,7 @@ impl SourcePolicy {
                 .any(|span| start < span.end && end > span.start)
     }
 
+    #[cfg(test)]
     /// Choose a single admitted interval. Disabled bytes are not read or decoded.
     pub(crate) fn recent_interval(&self, extent: u64) -> Option<(u64, u64)> {
         let mut end = self.open_disabled.unwrap_or(extent).min(extent);
@@ -235,6 +259,18 @@ pub(crate) struct Head {
     bootstrap: Option<cold_bootstrap::Progress>,
 }
 
+impl Head {
+    pub(crate) fn legacy_pack_binding(&self) -> io::Result<String> {
+        // Removing this reference avoids a content-hash cycle. All other
+        // fields, including historical defaults, use the Head serializer.
+        let mut unbound = self.clone();
+        unbound.recent_page = None;
+        Ok(digest(
+            &serde_json::to_vec(&unbound).map_err(io::Error::other)?,
+        ))
+    }
+}
+
 /// Writer-produced native interval coverage, separate from archive byte extent
 /// and opaque capture fingerprints. Old checkpoints deliberately have no proof.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -247,6 +283,7 @@ pub(super) struct CanonicalSourceCoverage {
 }
 
 impl CanonicalSourceCoverage {
+    #[cfg(test)]
     fn matches(&self, current: &super::chat_source_index::Qualification) -> bool {
         current.complete
             && self.normalizer_settled
@@ -258,6 +295,7 @@ impl CanonicalSourceCoverage {
 }
 
 impl Head {
+    #[cfg(test)]
     fn checkpoint_dependencies(&self) -> Vec<Dependency> {
         let mut roots = self
             .root
@@ -293,6 +331,7 @@ impl Head {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Serialize, Deserialize)]
 struct Row {
     agent_id: String,
@@ -306,6 +345,7 @@ struct Row {
     removed_display_ids: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Body {
     binding: String,
@@ -321,12 +361,17 @@ pub(super) struct Candidate {
     pub(super) conversation_id: String,
     pub(super) events: Vec<AgentChatEvent>,
     pub(super) committed_output_bytes: u64,
+    #[cfg(test)]
     pub(super) verified_ids: std::collections::HashSet<String>,
+    #[cfg(test)]
     pub(super) generated_ids: std::collections::HashSet<String>,
+    #[cfg(test)]
     pub(super) generated_input_bindings: HashMap<String, String>,
+    #[cfg(test)]
     pub(super) source_epoch: Option<String>,
 }
 
+#[cfg(test)]
 struct Work {
     candidate: Candidate,
     claude_relations: HashMap<String, super::chat_logical_index::Relation>,
@@ -341,6 +386,7 @@ struct Work {
     request_starts: HashMap<String, RequestStart>,
 }
 
+#[cfg(test)]
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RequestStart {
     order: String,
@@ -349,7 +395,9 @@ struct RequestStart {
     native_key: Option<String>,
 }
 
+#[cfg(test)]
 impl Work {
+    #[cfg(test)]
     fn request_archive_display(&mut self) -> io::Result<()> {
         if self.head.progress == "ready"
             && self.todo.is_empty()
@@ -366,12 +414,14 @@ impl Work {
     }
 }
 
+#[cfg(test)]
 struct BodyWork {
     row: Row,
     source: BodySource,
     offset: u64,
 }
 
+#[cfg(test)]
 enum BodySource {
     Text(String),
     Combined(Vec<BodySource>),
@@ -382,7 +432,9 @@ enum BodySource {
     },
 }
 
+#[cfg(test)]
 impl BodySource {
+    #[cfg(test)]
     fn binding(&self) -> io::Result<String> {
         match self {
             Self::Text(text) => Ok(digest(text.as_bytes())),
@@ -409,6 +461,7 @@ impl BodySource {
         }
     }
 
+    #[cfg(test)]
     fn length(&self) -> io::Result<u64> {
         match self {
             Self::Text(text) => Ok(text.len() as u64),
@@ -423,6 +476,7 @@ impl BodySource {
 
     // A checkpoint reads one segment, so metadata plus an artifact stays within
     // the same per-chunk budget and retains the artifact's held-handle checks.
+    #[cfg(test)]
     fn chunk(&mut self, mut offset: u64) -> io::Result<Vec<u8>> {
         match self {
             Self::Text(text) => {
@@ -479,6 +533,7 @@ impl BodySource {
     }
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct ProjectionOwner {
     work: Mutex<HashMap<String, Work>>,
@@ -489,6 +544,7 @@ pub(crate) struct ProjectionOwner {
     recent_scope_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+#[cfg(test)]
 struct RecentSlot {
     agent_id: String,
     runtime: Weak<Mutex<String>>,
@@ -508,7 +564,9 @@ struct RecentSlot {
     charge: usize,
 }
 
+#[cfg(test)]
 impl RecentSlot {
+    #[cfg(test)]
     /// Certification is independent of the Watch publication receipt: another
     /// reader may prove a gap or publish unqualified source rows without
     /// changing the published Head or headers.
@@ -517,6 +575,7 @@ impl RecentSlot {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Serialize)]
 struct RecentCoverage {
     event_id: String,
@@ -525,6 +584,7 @@ struct RecentCoverage {
     native_key: Option<String>,
 }
 
+#[cfg(test)]
 struct RecentSlots {
     revision_owner: String,
     slots: VecDeque<RecentSlot>,
@@ -533,6 +593,7 @@ struct RecentSlots {
     pending: Vec<PendingRecent>,
 }
 
+#[cfg(test)]
 struct PendingRecent {
     agent_id: String,
     runtime: Weak<Mutex<String>>,
@@ -540,6 +601,7 @@ struct PendingRecent {
     nonce: String,
 }
 
+#[cfg(test)]
 /// Keeps an actual privacy mutation fenced across its IO and error paths.
 /// It owns no work lock, source handle or provider payload.
 pub(crate) struct RecentBoundary {
@@ -547,6 +609,7 @@ pub(crate) struct RecentBoundary {
     agent_id: Option<String>,
 }
 
+#[cfg(test)]
 impl Drop for RecentBoundary {
     fn drop(&mut self) {
         let Ok(mut recent) = self.recent.lock() else {
@@ -567,6 +630,7 @@ impl Drop for RecentBoundary {
     }
 }
 
+#[cfg(test)]
 impl Default for RecentSlots {
     fn default() -> Self {
         Self {
@@ -579,6 +643,7 @@ impl Default for RecentSlots {
     }
 }
 
+#[cfg(test)]
 fn recent_scope(
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
 ) -> io::Result<(String, usize)> {
@@ -618,6 +683,7 @@ fn recent_scope(
     })).map_err(io::Error::other)?), policy_bytes + logging_bytes))
 }
 
+#[cfg(test)]
 fn recent_request_scope(
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
 ) -> io::Result<String> {
@@ -628,7 +694,9 @@ fn recent_request_scope(
     })).map_err(io::Error::other)?))
 }
 
+#[cfg(test)]
 impl ProjectionOwner {
+    #[cfg(test)]
     pub(crate) fn recent_boundary(&self, agent_id: Option<&str>) -> io::Result<RecentBoundary> {
         let mut recent = self
             .recent
@@ -660,6 +728,7 @@ impl ProjectionOwner {
         })
     }
 
+    #[cfg(test)]
     /// Admit before old archive work. The token fences IO finishing after a
     /// runtime, Watch, source or privacy retirement, including A-B-A changes.
     pub(crate) fn begin_recent_with_source(
@@ -733,6 +802,7 @@ impl ProjectionOwner {
         Ok((admission, 1))
     }
 
+    #[cfg(test)]
     pub(crate) fn abandon_recent(&self, receipt: &(String, u64)) {
         if let Ok(mut recent) = self.recent.lock() {
             recent
@@ -741,6 +811,7 @@ impl ProjectionOwner {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn has_recent_native(
         &self,
         snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
@@ -759,6 +830,7 @@ impl ProjectionOwner {
         })
     }
 
+    #[cfg(test)]
     /// Selection dispatch performs no source IO or body decoding. A pending
     /// request is released only after its actual blocking job joins.
     pub(crate) fn request_recent(
@@ -818,12 +890,14 @@ impl ProjectionOwner {
         Ok(Some(nonce))
     }
 
+    #[cfg(test)]
     pub(crate) fn finish_recent_request(&self, nonce: &str) {
         if let Ok(mut recent) = self.recent.lock() {
             recent.pending.retain(|pending| pending.nonce != nonce);
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn note_recent_watch(
         &self,
         receipt: &(String, u64),
@@ -843,6 +917,7 @@ impl ProjectionOwner {
         Ok(())
     }
 
+    #[cfg(test)]
     /// The normal publisher supplies original mapper identities. The cache
     /// never derives canonical identities from preview IDs or body text.
     pub(crate) fn note_recent_coverage(
@@ -895,6 +970,7 @@ impl ProjectionOwner {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn owns_recent_revision(&self, revision: Option<&str>) -> bool {
         self.recent.lock().is_ok_and(|recent| {
             revision.is_some_and(|revision| {
@@ -903,6 +979,7 @@ impl ProjectionOwner {
         })
     }
 
+    #[cfg(test)]
     /// Only the still-current producer token may publish. No provider IO or
     /// archive/projection work lock is held while touching this short mutex.
     pub(crate) fn publish_recent(
@@ -1028,6 +1105,7 @@ impl ProjectionOwner {
             .any(|slot| slot.admission == *admission && slot.issued == *issued))
     }
 
+    #[cfg(test)]
     /// A retraction marker keeps its originating admission legacy. A different
     /// admission may qualify using ordinary stateless hints and alias proof.
     pub(crate) fn retired_view_reader(
@@ -1071,6 +1149,7 @@ impl ProjectionOwner {
         })
     }
 
+    #[cfg(test)]
     /// Retain the same producer-issued lifetime on canonical Older reads.
     /// This continuation adds no cursor, renewal or detail authority.
     pub(crate) fn canonical_bridge_reader(
@@ -1118,6 +1197,7 @@ impl ProjectionOwner {
         })
     }
 
+    #[cfg(test)]
     /// Move bounded policy/native metadata reads off the async command thread.
     /// The returned closure owns only the cache and actual runtime identities.
     pub(crate) fn recent_reader_with_hints(
@@ -1555,6 +1635,7 @@ impl ProjectionOwner {
     }
 }
 
+#[cfg(test)]
 fn recent_canonical_proof(
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
     coverage: &[RecentCoverage],
@@ -1641,10 +1722,12 @@ fn recent_canonical_proof(
     ))
 }
 
+#[cfg(test)]
 fn recent_native_index_key(key: &str) -> String {
     digest(format!("recent-native:{key}").as_bytes())
 }
 
+#[cfg(test)]
 fn trim_recent_slots(recent: &mut RecentSlots) {
     // Every mutation must charge the complete retained admission, including
     // its sticky certificate. Overflow retires A rather than dropping proof.
@@ -1700,6 +1783,7 @@ pub(crate) struct ProjectionWorkTestSnapshot {
     pub(crate) logical_scalars: serde_json::Value,
 }
 
+#[cfg(test)]
 impl std::fmt::Debug for ProjectionOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProjectionOwner").finish_non_exhaustive()
@@ -1822,6 +1906,7 @@ pub(super) fn locations(agent_id: &str) -> io::Result<(PathBuf, PathBuf)> {
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn head(agent_id: &str) -> io::Result<Option<String>> {
     let (path, _) = locations(agent_id)?;
     let mut file = match File::open(path) {
@@ -1844,6 +1929,7 @@ pub(crate) fn head(agent_id: &str) -> io::Result<Option<String>> {
     Ok(Some(reference))
 }
 
+#[cfg(test)]
 /// A missing raw file cannot turn a previously committed display extent into
 /// a new empty history. Other conversations do not impose that prior extent.
 pub(super) fn committed_output_extent(
@@ -1860,6 +1946,7 @@ pub(super) fn committed_output_extent(
     Ok((head.conversation_id == conversation_id).then_some(head.committed_output_bytes))
 }
 
+#[cfg(test)]
 /// Bind unresolved provider names only to actual accepted input records, without
 /// turning generated archive identity into native-provider correspondence.
 pub(super) fn generated_input_bindings(
@@ -1903,6 +1990,7 @@ pub(super) fn generated_input_bindings(
         .collect()
 }
 
+#[cfg(test)]
 /// Keep the provider unresolved until native correspondence is independently
 /// verified; the canonical accepted-input binding supplies eligibility only.
 pub(super) fn is_owned_unknown_input(candidate: &Candidate, event: &AgentChatEvent) -> bool {
@@ -1938,10 +2026,12 @@ pub(super) fn is_owned_unknown_input(candidate: &Candidate, event: &AgentChatEve
             })
 }
 
+#[cfg(test)]
 fn store(agent_id: &str) -> io::Result<Store> {
     Ok(Store::new(&locations(agent_id)?.1))
 }
 
+#[cfg(test)]
 pub(crate) fn advance_source_index(
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
 ) -> io::Result<bool> {
@@ -2053,9 +2143,10 @@ pub(crate) use test_support::source_index_test_snapshot;
 pub(crate) struct InputFence {
     pub(crate) conversation_id: String,
     pub(crate) source_epoch: Option<String>,
-    policy_generation: Option<u64>,
+    pub(super) policy_generation: Option<u64>,
 }
 
+#[cfg(test)]
 /// A bounded published scope, never an archive scan or owner-lock acquisition.
 pub(crate) fn input_fence(
     context: &ConversationArchiveContext,
@@ -2429,6 +2520,7 @@ pub(crate) fn header(event: &AgentChatEvent) -> AgentChatEvent {
     }
 }
 
+#[cfg(test)]
 fn body_source(candidate: &Candidate, event: &AgentChatEvent) -> io::Result<Option<BodySource>> {
     let input = tool_input_body(event);
     let mut parts = Vec::new();
@@ -2448,6 +2540,7 @@ fn body_source(candidate: &Candidate, event: &AgentChatEvent) -> io::Result<Opti
     })
 }
 
+#[cfg(test)]
 fn output_body_source(
     candidate: &Candidate,
     event: &AgentChatEvent,
@@ -2502,7 +2595,9 @@ fn output_body_source(
     }))
 }
 
+#[cfg(test)]
 impl ProjectionOwner {
+    #[cfg(test)]
     /// Adoption without native source proof needs the gated physical recount.
     /// Its capture owner continues through that replay after the bounded import
     /// drains, so materializing a second warm projection only duplicates work.
@@ -2541,6 +2636,7 @@ impl ProjectionOwner {
         Ok(true)
     }
 
+    #[cfg(test)]
     /// Restore saved history in fixed checkpoints without hydrating the archive
     /// writer. The caller holds the policy and per-agent archive gates.
     pub(super) fn bootstrap_saved(&self, context: &ConversationArchiveContext) -> io::Result<bool> {
@@ -2574,6 +2670,7 @@ impl ProjectionOwner {
         Ok(pending)
     }
 
+    #[cfg(test)]
     pub(super) fn committed(
         &self,
         mut candidate: Candidate,
@@ -2824,6 +2921,7 @@ impl ProjectionOwner {
         Ok(())
     }
 
+    #[cfg(test)]
     /// At most 80 headers and 64 KiB of body source per checkpoint. Only the
     /// background capture owner calls this; reads never contend on this mutex.
     pub(crate) fn advance(&self, agent_id: &str) -> io::Result<bool> {
@@ -3118,6 +3216,7 @@ impl ProjectionOwner {
         Ok(pending)
     }
 
+    #[cfg(test)]
     /// Keep already owned projection work moving even when the provider source
     /// is quiet. Archive handoffs are executed only by gated bootstrap_saved.
     pub(crate) fn has_pending_capture_work(&self, agent_id: &str) -> bool {
@@ -3133,12 +3232,14 @@ impl ProjectionOwner {
         })
     }
 
+    #[cfg(test)]
     /// Return scheduling demand for ordinary indexing and gated archive replay.
     /// Plain advance never performs cold archive I/O outside the archive gate.
     pub(crate) fn advance_capture(&self, agent_id: &str) -> io::Result<bool> {
         Ok(self.advance(agent_id)? || self.has_pending_capture_work(agent_id))
     }
 
+    #[cfg(test)]
     pub(crate) fn invalidate(&self, agent_id: &str) -> io::Result<()> {
         let _recent_boundary = self.recent_boundary(Some(agent_id))?;
         self.work
@@ -3148,6 +3249,7 @@ impl ProjectionOwner {
         cold_bootstrap::retire(agent_id)
     }
 
+    #[cfg(test)]
     /// Try the projection owner before any generated archive write. This seam
     /// never hydrates or scans legacy history and never waits for capture.
     pub(super) fn commit_input(
@@ -3241,6 +3343,7 @@ impl ProjectionOwner {
     }
 }
 
+#[cfg(test)]
 /// Source coordinates and accepted archive sequences order evidence. The
 /// projection's mutable row ordinal is deliberately excluded.
 pub(super) fn presentation_order(event: &AgentChatEvent) -> Option<String> {
@@ -3267,6 +3370,7 @@ pub(super) fn presentation_order(event: &AgentChatEvent) -> Option<String> {
         .map(|seq| format!("archive:{seq:020}:{}", event.id))
 }
 
+#[cfg(test)]
 fn observe_turn(
     store: &mut Store,
     head: &mut Head,
@@ -3295,6 +3399,7 @@ fn observe_turn(
     }
 }
 
+#[cfg(test)]
 fn insert_row(store: &mut Store, head: &mut Head, row: &Row) -> io::Result<String> {
     let dependencies = row
         .body
@@ -3346,6 +3451,7 @@ fn insert_row(store: &mut Store, head: &mut Head, row: &Row) -> io::Result<Strin
     Ok(reference)
 }
 
+#[cfg(test)]
 fn stable_commentary_relation(
     store: &mut Store,
     head: &Head,
@@ -3405,6 +3511,7 @@ fn stable_commentary_relation(
     Ok(relation)
 }
 
+#[cfg(test)]
 fn apply_logical_updates(
     store: &mut Store,
     head: &mut Head,
@@ -3438,6 +3545,7 @@ fn apply_logical_updates(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn alias(
     store: &mut Store,
     head: &Head,
@@ -3449,6 +3557,7 @@ pub(super) fn alias(
     read_alias_row(store, head, source_ref, &reference)
 }
 
+#[cfg(test)]
 fn alias_with_cache(
     store: &mut Store,
     head: &Head,
@@ -3463,6 +3572,7 @@ fn alias_with_cache(
     read_alias_row(store, head, source_ref, &reference)
 }
 
+#[cfg(test)]
 fn read_alias_row(
     store: &mut Store,
     head: &Head,
@@ -3479,6 +3589,7 @@ fn read_alias_row(
     Ok(Some(display_event(row, reference)))
 }
 
+#[cfg(test)]
 fn display_event(mut row: Row, reference: &str) -> AgentChatEvent {
     // Only the authenticated canonical Row owner can issue this certificate.
     // Raw-source header construction deliberately does not copy it.
@@ -3510,6 +3621,7 @@ fn display_event(mut row: Row, reference: &str) -> AgentChatEvent {
     row.event
 }
 
+#[cfg(test)]
 pub(super) fn page(
     store: &mut Store,
     head_ref: &str,
@@ -3519,6 +3631,7 @@ pub(super) fn page(
     page_limited(store, head_ref, head, before, PAGE_ROWS)
 }
 
+#[cfg(test)]
 /// A recent target never splits a physical frame or certified member component.
 pub(super) fn recent_window_start(events: &[AgentChatEvent], limit: usize) -> usize {
     fn linked(a: &AgentChatEvent, b: &AgentChatEvent) -> bool {
@@ -3558,6 +3671,7 @@ pub(super) fn recent_window_start(events: &[AgentChatEvent], limit: usize) -> us
     start
 }
 
+#[cfg(test)]
 fn page_limited(
     store: &mut Store,
     head_ref: &str,
@@ -3626,6 +3740,7 @@ fn page_limited(
     Ok((events, next))
 }
 
+#[cfg(test)]
 /// Bind a reduced mixed window to the first physical row actually emitted.
 /// A new raw suffix may have no canonical row yet. In that case Older waits
 /// for publication rather than inheriting a cursor past omitted headers.
@@ -3658,6 +3773,7 @@ fn canonical_recent_frontier(
     )
 }
 
+#[cfg(test)]
 fn changes_since(
     store: &mut Store,
     reference: &str,
@@ -3705,6 +3821,7 @@ fn changes_since(
     Ok(None)
 }
 
+#[cfg(test)]
 pub(super) fn detail(
     store: &mut Store,
     head: &Head,
@@ -3737,6 +3854,7 @@ pub(super) fn detail(
     })
 }
 
+#[cfg(test)]
 /// Recheck the owned generation after the blocking read, independently of any
 /// native renewal receipt. A lifecycle/privacy retirement cannot retain the
 /// archive marker on a response whose saved scope no longer exists.
@@ -3766,6 +3884,7 @@ pub(crate) fn archive_page_is_current(
     check().unwrap_or(false)
 }
 
+#[cfg(test)]
 pub(crate) fn finish(mut page: AgentChatPage) -> io::Result<AgentChatPage> {
     // Ownership is an internal staging fact, never a claim accepted from or
     // exposed to a client. The versioned payload carries the admitted result.
@@ -3900,11 +4019,13 @@ pub(crate) fn validate_revalidation_request(
     Ok(Some(unique))
 }
 
+#[cfg(test)]
 struct CompleteSeedCommentary {
     pairs: Vec<(String, String)>,
     unpaired_ids: BTreeSet<String>,
 }
 
+#[cfg(test)]
 fn seed_assistant_commentary_candidate(event: &AgentChatEvent) -> bool {
     let Some((_, side)) =
         crate::providers::chat_transcript::codex_display_evidence_from_bounded_header(event)
@@ -3934,6 +4055,7 @@ fn seed_assistant_commentary_candidate(event: &AgentChatEvent) -> bool {
     }
 }
 
+#[cfg(test)]
 fn complete_seed_commentary_pairs(
     context: &ConversationArchiveContext,
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
@@ -4158,6 +4280,7 @@ fn complete_seed_commentary_pairs(
     })
 }
 
+#[cfg(test)]
 fn apply_seed_commentary_pairs(events: &mut [AgentChatEvent], pairs: &[(String, String)]) {
     for event in events {
         let Some(source_ref) = event.metadata["chat_source_ref"].as_str() else {
@@ -4174,6 +4297,7 @@ fn apply_seed_commentary_pairs(events: &mut [AgentChatEvent], pairs: &[(String, 
     }
 }
 
+#[cfg(test)]
 /// Reuse only relations certified by a complete, admission-checked source page.
 fn source_page_commentary_pairs(
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
@@ -4214,6 +4338,7 @@ fn source_page_commentary_pairs(
         .collect()
 }
 
+#[cfg(test)]
 fn archived_codex_commentary_text(event: &AgentChatEvent) -> Option<&str> {
     let text = event
         .text
@@ -4230,6 +4355,7 @@ fn archived_codex_commentary_text(event: &AgentChatEvent) -> Option<&str> {
     Some(text)
 }
 
+#[cfg(test)]
 fn archived_codex_commentary_fields_match(
     archived: &AgentChatEvent,
     native: &AgentChatEvent,
@@ -4285,6 +4411,7 @@ fn archived_codex_commentary_fields_match(
     })
 }
 
+#[cfg(test)]
 fn archived_codex_commentary_matches(
     archived: &AgentChatEvent,
     native: &AgentChatEvent,
@@ -4302,6 +4429,7 @@ fn archived_codex_commentary_matches(
         )
 }
 
+#[cfg(test)]
 /// A projected logical group has a different public ID from its physical
 /// members. Accept overlap only when the current SourcePage certifies exactly
 /// this A/B pair and the bounded relation contains no other native identity.
@@ -4366,6 +4494,7 @@ fn projected_codex_commentary_group_members(
     ))
 }
 
+#[cfg(test)]
 fn certified_codex_commentary_member(
     event: &AgentChatEvent,
     source_ref: &str,
@@ -4400,6 +4529,7 @@ fn certified_codex_commentary_member(
             })
 }
 
+#[cfg(test)]
 fn reconcile_archived_codex_commentary_pairs(
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
     page: &mut AgentChatPage,
@@ -4623,6 +4753,7 @@ fn reconcile_archived_codex_commentary_pairs(
     }
 }
 
+#[cfg(test)]
 /// The shared read boundary. Every disk/decode path uses fixed limits, including
 /// stale cursors and detail failures. No capture, repair or archive lock occurs.
 pub(crate) fn read_with_revalidation_and_limit(
@@ -4668,12 +4799,14 @@ pub(crate) fn read_with_revalidation_and_limit(
     read_revalidated(context, snapshot, revision.unwrap(), &source_ids)
 }
 
+#[cfg(test)]
 struct ReadOptions {
     limit: usize,
     staging: bool,
     qualify_turns: bool,
 }
 
+#[cfg(test)]
 /// The aware opening returns the ordinary source window before attempting a
 /// turn handoff. Source authorization, ordering and read limits stay identical;
 /// only the optional turn projection waits for a later read of the same A.
@@ -4704,6 +4837,7 @@ pub(crate) fn read_legacy_source(
     )
 }
 
+#[cfg(test)]
 /// Preserve authenticated Row markers only inside this producer operation.
 /// The bridge must pass the result through `finish` before publishing it.
 pub(super) fn read_preview_source(
@@ -4731,6 +4865,7 @@ pub(super) fn read_preview_source(
     )
 }
 
+#[cfg(test)]
 fn read_with_recent_limit(
     context: &ConversationArchiveContext,
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
@@ -6250,6 +6385,7 @@ fn read_with_recent_limit(
     finish_recent(result)
 }
 
+#[cfg(test)]
 fn revision_matches_heads(revision: &str, canonical: Option<&str>, source: Option<&str>) -> bool {
     let Some((pinned_canonical, body)) = revision.split_once('.') else {
         return false;
@@ -6260,6 +6396,7 @@ fn revision_matches_heads(revision: &str, canonical: Option<&str>, source: Optio
     pinned_canonical == canonical.unwrap_or("none") && pinned_source == source.unwrap_or("none")
 }
 
+#[cfg(test)]
 fn read_revalidated(
     context: &ConversationArchiveContext,
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
@@ -6449,6 +6586,7 @@ fn read_revalidated(
     finish(result)
 }
 
+#[cfg(test)]
 struct RevalidatedPageFields<'a> {
     revision: &'a str,
     published: Option<Head>,
@@ -6461,6 +6599,7 @@ struct RevalidatedPageFields<'a> {
 }
 
 // Assemble the reply from separately validated scope, completeness, and body results.
+#[cfg(test)]
 fn finish_revalidated(
     context: &ConversationArchiveContext,
     fields: RevalidatedPageFields<'_>,
@@ -6517,6 +6656,7 @@ fn finish_revalidated(
     finish(result)
 }
 
+#[cfg(test)]
 pub(crate) fn revalidation_page_is_current(
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
     page: &AgentChatPage,
@@ -6559,6 +6699,7 @@ pub(crate) fn revalidation_page_is_current(
         && !page.reset
 }
 
+#[cfg(test)]
 /// Select the same logical window for packed metadata and public pages. Physical
 /// aliases remain in the Store; a certified display ID occupies one page slot.
 fn canonical_display_window(rows: Vec<AgentChatEvent>) -> Vec<AgentChatEvent> {
@@ -6577,6 +6718,7 @@ fn canonical_display_window(rows: Vec<AgentChatEvent>) -> Vec<AgentChatEvent> {
     events
 }
 
+#[cfg(test)]
 fn project_display_result(result: &mut AgentChatPage) {
     for event in &result.events {
         if let Some(members) = event.metadata["chat_display_member_ids"].as_array() {

@@ -1260,20 +1260,6 @@ async fn load_client_agent_chat<R: Runtime>(
             "agent_chat_projection_unavailable",
         ));
     }
-    let queue_error = if query.recent_preview == Some(true)
-        && query.before.is_none()
-        && query.detail.is_none()
-        && revalidate_ids.is_none()
-        && !session_id.trim().is_empty()
-        && query
-            .revision
-            .as_ref()
-            .is_none_or(|value| value.len() <= 512)
-    {
-        crate::commands::chat::queue_recent_capture_for_app(&state, &ctx.app, &session_id).err()
-    } else {
-        None
-    };
     let page = crate::remote::operations::remote_agent_chat_page_with_preview(
         &state,
         &session_id,
@@ -1302,11 +1288,6 @@ async fn load_client_agent_chat<R: Runtime>(
         }
         _ => RemoteGatewayError::bad_request("agent_chat_projection_unavailable"),
     })?;
-    if queue_error.is_some() && crate::commands::chat::chat_page_needs_recent_capture(&page) {
-        return Err(RemoteGatewayError::service_unavailable(
-            "agent_chat_read_retryable",
-        ));
-    }
     audit_client_gateway_event(
         &session,
         client_origin,
@@ -2251,20 +2232,6 @@ async fn load_remote_agent_chat<R: Runtime>(
             "agent_chat_projection_unavailable",
         ));
     }
-    let queue_error = if query.recent_preview == Some(true)
-        && query.before.is_none()
-        && query.detail.is_none()
-        && revalidate_ids.is_none()
-        && !session_id.trim().is_empty()
-        && query
-            .revision
-            .as_ref()
-            .is_none_or(|value| value.len() <= 512)
-    {
-        crate::commands::chat::queue_recent_capture_for_app(&state, &ctx.app, &session_id).err()
-    } else {
-        None
-    };
     let page = crate::remote::operations::remote_agent_chat_page_with_preview(
         &state,
         &session_id,
@@ -2293,11 +2260,6 @@ async fn load_remote_agent_chat<R: Runtime>(
         }
         _ => RemoteGatewayError::bad_request("agent_chat_projection_unavailable"),
     })?;
-    if queue_error.is_some() && crate::commands::chat::chat_page_needs_recent_capture(&page) {
-        return Err(RemoteGatewayError::service_unavailable(
-            "agent_chat_read_retryable",
-        ));
-    }
     audit_gateway_event(
         &session,
         &origin,

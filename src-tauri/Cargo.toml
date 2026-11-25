@@ -5,6 +5,7 @@ description = "Where local agent work becomes visible, durable, and malleable."
 authors = ["Tan Gemicioglu"]
 edition = "2021"
 build = "build.rs"
+default-run = "Wardian"
 license = "MIT"
 repository = "https://github.com/wardian-app/Wardian"
 homepage = "https://wardian.org"
@@ -21,6 +22,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [[bin]]
 name = "Wardian"
 path = "src/main.rs"
+
+[[bin]]
+name = "wardian-chat-cache-admin"
+path = "src/bin/chat_cache_admin.rs"
 
 [features]
 adoption-throughput = []

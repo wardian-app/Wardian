@@ -282,6 +282,16 @@ pub struct ConversationNarrativeRecord {
     pub event_refs: Vec<String>,
     pub source_refs: Vec<String>,
     pub artifact_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_artifact_proof: Option<ConversationTextArtifactProof>,
+}
+
+/// Length and SHA-256 of the exact text written to the named owned artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationTextArtifactProof {
+    pub reference: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -964,6 +974,7 @@ mod tests {
             event_refs: vec!["events:7".to_string()],
             source_refs: vec!["sources:3".to_string()],
             artifact_refs: vec!["artifacts/tool-result-7.txt".to_string()],
+            text_artifact_proof: None,
         };
 
         let json = serde_json::to_value(&record).unwrap();
@@ -1340,6 +1351,7 @@ mod tests {
             event_refs: Vec::new(),
             source_refs: Vec::new(),
             artifact_refs: Vec::new(),
+            text_artifact_proof: None,
         }
     }
 

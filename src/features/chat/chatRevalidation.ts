@@ -56,6 +56,7 @@ function validRecentPreview(page: AgentChatPage): boolean {
 
 /** Only producer-issued source references and display members can select rows. */
 export function chatSourceIdsForEvent(event: AgentChatEvent): string[] {
+  if (event.metadata.chat_archive_positioned === true) return [];
   const ids: string[] = [];
   const add = (value: unknown) => {
     if (sourceId(value) && !ids.includes(value)) ids.push(value);
@@ -111,10 +112,37 @@ const completeCanonicalIdentity = (page: AgentChatPage) =>
 const archiveCaptureStops = new Set([
   "capture_source_replaced", "capture_source_truncated", "capture_source_rewritten",
 ]);
+const positionedArchiveProgress = new Set([
+  "ready", "logging_disabled", "archive_payload_missing", "archive_tail_pending",
+  "archive_history_unverified", "archive_detail_unavailable",
+]);
+const emptyArchiveProgress = new Set([
+  "archive_empty", "archive_catalog_unavailable", "archive_scope_unavailable", "archive_tail_pending",
+]);
+
+function isEmptyArchivePage(page: AgentChatPage): boolean {
+  return emptyArchiveProgress.has(page.progress) && page.revision === `archive1:${page.progress}`
+    && page.conversation_id === null && page.generation === null && page.source_epoch === null
+    && page.archive_read_ready !== true && page.recent_admission == null
+    && page.events.length === 0 && page.next_before === null && page.detail === null
+    && page.aliases.length === 0 && page.removed_ids.length === 0 && page.revalidated_ids == null;
+}
 
 /** The backend's complete cold-cohort classification grants owned archive reads.
  * Source-shaped historical members and display aliases grant no native renewal. */
 export function isArchiveReadPage(page: AgentChatPage): boolean {
+  const positioned = /^archive1:([a-f0-9]{64}):[a-f0-9]{64}$/.exec(page.revision);
+  if (positioned) {
+    return nonEmptyScopeValue(page.session_id) && nonEmptyScopeValue(page.conversation_id)
+      && page.generation === positioned[1] && positionedArchiveProgress.has(page.progress)
+      && (page.source_epoch === null || nonEmptyScopeValue(page.source_epoch))
+      && page.recent_admission == null
+      && page.revalidated_ids == null && page.events.length <= 80
+      && new Set(page.events.map((event) => event.id)).size === page.events.length
+      && page.events.every((event) => event.session_id === page.session_id && nonEmptyScopeValue(event.id)
+        && event.metadata.chat_archive_positioned === true && event.metadata.chat_provisional !== true
+        && event.metadata.chat_source_admission == null && event.metadata.chat_source_epoch == null);
+  }
   return page.archive_read_ready === true && completeCanonicalIdentity(page)
     && page.recent_admission == null && page.revalidated_ids == null
     && archiveCaptureStops.has(page.progress) && page.events.length <= 80
@@ -122,6 +150,18 @@ export function isArchiveReadPage(page: AgentChatPage): boolean {
     && page.events.every((event) => event.session_id === page.session_id && nonEmptyScopeValue(event.id)
       && event.metadata.chat_source_epoch == null && event.metadata.chat_source_admission == null
       && event.metadata.chat_provisional !== true);
+}
+
+/** A failed archive anchor is a new Recent snapshot with its own frontier. */
+export function isPositionedArchiveReset(page: AgentChatPage): boolean {
+  return page.reset && !page.older_page && page.revision.startsWith("archive1:") && isArchiveReadPage(page);
+}
+
+/** A retained step can belong to another loaded window in the same archive scope. */
+export function archiveStepDisplayRevision(page: AgentChatPage | null, reference: string): string | undefined {
+  if (!page || !page.revision.startsWith("archive1:") || !isArchiveReadPage(page)) return undefined;
+  const token = /^step:archive1:[a-f0-9]{64}:\d+:[a-f0-9]{64}:\d+:[a-f0-9]{64}:[a-f0-9]{64}:[a-f0-9]{64}:([a-f0-9]{64})$/.exec(reference);
+  return token ? `archive1:${page.generation}:${token[1]}` : undefined;
 }
 
 function eventAdmission(event: AgentChatEvent): string | null {
@@ -250,6 +290,9 @@ export function chatPageScopeRelation(
   }
 
   if (next.archive_read_ready === true && !nextArchive) return previousArchive ? "changed" : "unknown";
+  if (!requireAdmissionProof && isEmptyArchivePage(previous) && isEmptyArchivePage(next)) {
+    return "canonical";
+  }
   if (previousArchive || nextArchive) {
     if (requireAdmissionProof) return "unknown";
     if (previousArchive && nextArchive) {

@@ -1,20 +1,32 @@
 //! Bounded, provisional observations from the independently owned recent source.
 //! No archive cursor, complete-history or speculative alias claim is made here.
+#[cfg(test)]
 use std::fs::File;
+#[cfg(test)]
 use std::io::{self, Read, Seek, SeekFrom};
 
+#[cfg(test)]
 use serde_json::json;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use wardian_core::models::chat::{AgentChatDetail, AgentChatEvent};
 
+#[cfg(test)]
 use super::chat::AgentArchiveCaptureSnapshot;
-use super::provider_log_acquisition::{native_file_identity, ProviderLogNativeIdentity};
+#[cfg(test)]
+use super::provider_log_acquisition::native_file_identity;
+use super::provider_log_acquisition::ProviderLogNativeIdentity;
 
+#[cfg(test)]
 const HEADER_BYTES: u64 = 4096;
+#[cfg(test)]
 const TAIL_BYTES: u64 = 128 * 1024;
+#[cfg(test)]
 const RECORD_BYTES: usize = 16 * 1024;
+#[cfg(test)]
 const RECORDS: usize = 80;
 
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Seed {
     pub(crate) revision: String,
@@ -26,6 +38,7 @@ pub(crate) struct Seed {
     pub(crate) checkpoint: Option<SeedCheckpoint>,
 }
 
+#[cfg(test)]
 pub(crate) struct SeedCheckpoint {
     pub(crate) epoch: String,
     pub(crate) admission: String,
@@ -55,6 +68,7 @@ pub(crate) fn source_reference(
     )
 }
 
+#[cfg(test)]
 fn ownership(snapshot: &AgentArchiveCaptureSnapshot, header: &[u8]) -> bool {
     let Some(expected) = snapshot
         .resume_session
@@ -87,6 +101,7 @@ fn ownership(snapshot: &AgentArchiveCaptureSnapshot, header: &[u8]) -> bool {
     }
 }
 
+#[cfg(test)]
 fn observe(
     snapshot: &AgentArchiveCaptureSnapshot,
 ) -> io::Result<(
@@ -142,6 +157,7 @@ fn observe(
     ))
 }
 
+#[cfg(test)]
 /// Recognized native capture stops may coexist with qualified owned history.
 /// Privacy transition fences and unclassified ownership failures stay distinct.
 pub(crate) fn capture_stop_progress(error: &io::Error) -> Option<&'static str> {
@@ -157,6 +173,7 @@ pub(crate) fn capture_stop_progress(error: &io::Error) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
 /// Validate the published privacy/ownership boundary without decoding history.
 pub(crate) fn source_scope(
     snapshot: &AgentArchiveCaptureSnapshot,
@@ -165,6 +182,7 @@ pub(crate) fn source_scope(
     Ok((epoch, admission, extent, modified))
 }
 
+#[cfg(test)]
 pub(crate) fn source_scope_with_policy(
     snapshot: &AgentArchiveCaptureSnapshot,
 ) -> io::Result<(
@@ -184,6 +202,7 @@ pub(crate) fn source_scope_with_policy(
     ))
 }
 
+#[cfg(test)]
 fn normalize(
     snapshot: &AgentArchiveCaptureSnapshot,
     identity: &ProviderLogNativeIdentity,
@@ -249,6 +268,7 @@ fn normalize(
     .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn read_limited(
     snapshot: &AgentArchiveCaptureSnapshot,
     previous: Option<&str>,
@@ -257,6 +277,7 @@ pub(crate) fn read_limited(
     read_window_limited(snapshot, previous, None, limit)
 }
 
+#[cfg(test)]
 /// A background checkpoint seeks backward inside one independently admitted
 /// source interval. It never searches beyond the same recent-read budget.
 pub(crate) fn read_window(
@@ -267,6 +288,7 @@ pub(crate) fn read_window(
     read_window_limited(snapshot, previous, before, RECORDS)
 }
 
+#[cfg(test)]
 fn read_window_limited(
     snapshot: &AgentArchiveCaptureSnapshot,
     previous: Option<&str>,
@@ -548,6 +570,7 @@ fn read_window_limited(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn detail(
     snapshot: &AgentArchiveCaptureSnapshot,
     reference: &str,

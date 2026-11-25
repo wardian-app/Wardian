@@ -230,6 +230,7 @@ pub(crate) struct ProviderLogSource<'a> {
     pub(crate) provider_source_key: &'a str,
 }
 
+#[cfg(test)]
 pub(crate) struct SourceReplayRequest {
     pub(crate) previous: ProviderLogCaptureState,
     pub(crate) expected_identity: ProviderLogNativeIdentity,
@@ -248,6 +249,7 @@ struct ProviderLogBatchOptions<'a> {
     emit_source_proof: bool,
 }
 
+#[cfg(test)]
 /// Replay an independently pinned source interval using the same native
 /// identity, framing, and normalizer as foreground provider acquisition.
 /// This cursor is owned by SourceIndex; it never reads or advances the primary
@@ -274,6 +276,7 @@ pub(crate) fn acquire_source_replay_batch(
     Ok((batch, metrics))
 }
 
+#[cfg(test)]
 pub(crate) fn source_replay_state(
     path: &Path,
     provider_source_key: &str,

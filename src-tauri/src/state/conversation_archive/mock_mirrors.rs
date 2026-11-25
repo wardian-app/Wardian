@@ -62,7 +62,7 @@ fn identity(context: &ConversationArchiveContext, event: &AgentChatEvent) -> Opt
         || uuid::Uuid::parse_str(incarnation).is_err()
         || observation.len() > 128
         || !observation.starts_with(&format!("{incarnation}:"))
-        || !chat_read_store::valid_ref(payload)
+        || !storage::valid_ref(payload)
     {
         return None;
     }
@@ -82,8 +82,7 @@ fn identity(context: &ConversationArchiveContext, event: &AgentChatEvent) -> Opt
 }
 
 fn admitted(event: &AgentChatEvent, source: &ProviderLogCaptureState) -> bool {
-    let epoch =
-        chat_read_store::digest(&serde_json::to_vec(&source.native_identity).unwrap_or_default());
+    let epoch = storage::digest(&serde_json::to_vec(&source.native_identity).unwrap_or_default());
     let Some((start, end)) = event.metadata["chat_source_start"]
         .as_u64()
         .zip(event.metadata["chat_source_end"].as_u64())
@@ -94,7 +93,7 @@ fn admitted(event: &AgentChatEvent, source: &ProviderLogCaptureState) -> bool {
     let coordinate = string(event, "chat_source_ref").and_then(|value| value.strip_prefix(&prefix));
     let valid_coordinate = coordinate
         .and_then(|value| value.split_once(':'))
-        .is_some_and(|(digest, ordinal)| chat_read_store::valid_ref(digest) && ordinal == "0");
+        .is_some_and(|(digest, ordinal)| storage::valid_ref(digest) && ordinal == "0");
     valid_coordinate
         && event.metadata["chat_source_epoch"].as_str() == Some(epoch.as_str())
         && start < end
@@ -218,7 +217,7 @@ fn describes(binding: &Identity, event: &AgentChatEvent) -> bool {
         )
         && observation
         && binding.observation.len() <= 128
-        && chat_read_store::valid_ref(&binding.payload)
+        && storage::valid_ref(&binding.payload)
         && uuid::Uuid::parse_str(&binding.incarnation)
             .is_ok_and(|uuid| !uuid.is_nil() && uuid.to_string() == binding.incarnation)
         && event.session_id == binding.agent
@@ -661,7 +660,7 @@ mod tests {
             disabled_spans: Vec::new(),
             open_disabled_from: None,
         };
-        let epoch = chat_read_store::digest(&serde_json::to_vec(&source.native_identity).unwrap());
+        let epoch = storage::digest(&serde_json::to_vec(&source.native_identity).unwrap());
         let coordinate = format!("source:mirror-agent:{epoch}:10:{}:0", "b".repeat(64));
         let identity = Identity {
             agent: context.agent_id.clone(),

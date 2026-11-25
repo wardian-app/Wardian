@@ -2,20 +2,27 @@
 //! Admission, source qualification and publication remain with the archive owner.
 //! No transcript bodies, raw records or delivery inference live here. Preview
 //! hints are bounded metadata retained only by the existing in-memory owner.
+#[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
 use std::io;
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use wardian_core::models::chat::{
-    AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
-};
+#[cfg(test)]
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind};
+#[cfg(test)]
+use wardian_core::models::chat::{AgentChatRole, AgentChatStatus};
 use wardian_core::models::chat_presentation::*;
 
+#[cfg(test)]
 use super::chat_read_store::{digest, valid_ref, SeekCache, Store};
 
+#[cfg(test)]
 const ID_BYTES: usize = 512;
 const LABEL_BYTES: usize = 160;
 
+#[cfg(test)]
 pub(super) struct Scope<'a> {
     pub(super) agent_id: &'a str,
     pub(super) conversation_id: &'a str,
@@ -26,6 +33,7 @@ pub(super) struct Scope<'a> {
     pub(super) can_activate: bool,
 }
 
+#[cfg(test)]
 /// Opaque, bounded ownership hints from the caller's exact immutable Head.
 /// These retain metadata only and grant no canonical output/detail authority.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -46,6 +54,7 @@ pub(super) struct PreviewOwners {
     opening_roots: BTreeSet<String>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Serialize, Deserialize)]
 struct PreviewOwner {
     item: Item,
@@ -55,7 +64,9 @@ struct PreviewOwner {
     physical_members: Vec<String>,
 }
 
+#[cfg(test)]
 impl PreviewOwners {
+    #[cfg(test)]
     /// These maps index the same retained source backing certificates. Count
     /// the largest logical set rather than duplicate JSON/index representations.
     pub(super) fn record_count(&self) -> usize {
@@ -65,11 +76,13 @@ impl PreviewOwners {
             .max(self.state_rows.len())
     }
 
+    #[cfg(test)]
     /// Roots certified by the same scoped Turn reads used to resolve this slice.
     pub(super) fn proven_openings(&self) -> &BTreeSet<String> {
         &self.opening_roots
     }
 
+    #[cfg(test)]
     /// Preserve admitted item order within the caller's fenced source admission.
     /// Canonical capture may choose a later call's order for an unpaired result;
     /// matching identity can retain view order without changing current evidence.
@@ -113,6 +126,7 @@ impl PreviewOwners {
         }
     }
 
+    #[cfg(test)]
     /// Retain identity metadata for only this admitted presentation. Transcript
     /// text, previews, labels, invocation/result records and detail refs are absent.
     pub(super) fn from_presentation(
@@ -199,6 +213,7 @@ impl PreviewOwners {
         Ok(Some(saved))
     }
 
+    #[cfg(test)]
     /// Carry this slice's certified component aliases forward, bounded by the
     /// current admitted items rather than growing a session-wide identity cache.
     pub(super) fn remember(
@@ -304,12 +319,14 @@ impl PreviewOwners {
     }
 }
 
+#[cfg(test)]
 struct Component {
     item: Item,
     kind: ChatPresentedItemKind,
     versions: BTreeSet<String>,
 }
 
+#[cfg(test)]
 struct PageMembers {
     members: Vec<Membership>,
     source_order: Option<String>,
@@ -327,6 +344,7 @@ pub(super) struct Index {
     events: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Totals {
     items: u64,
@@ -338,6 +356,7 @@ struct Totals {
     action_required: u64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Serialize, Deserialize)]
 struct Turn {
     active: bool,
@@ -359,6 +378,7 @@ struct Turn {
     order_key: Option<String>,
 }
 
+#[cfg(test)]
 impl Default for Turn {
     fn default() -> Self {
         Self {
@@ -376,15 +396,19 @@ impl Default for Turn {
     }
 }
 
+#[cfg(test)]
 impl Turn {
+    #[cfg(test)]
     fn eligible(&self) -> bool {
         self.active && self.supported && self.adapter_proven && self.order_key.is_some()
     }
 
+    #[cfg(test)]
     fn membership_complete(&self) -> bool {
         self.adapter_proven && self.membership_closed && !self.invalid_proof
     }
 
+    #[cfg(test)]
     fn closed_source_order(&self) -> Option<&str> {
         (self.eligible()
             && self.membership_complete()
@@ -401,12 +425,14 @@ impl Turn {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Membership {
     turn_key: String,
     item_key: String,
 }
 
+#[cfg(test)]
 /// The first accepted source order belongs to each physical observation, not
 /// just the currently selected backing. Replays of older result IDs must not
 /// acquire a newer order when capture appends them again.
@@ -418,6 +444,7 @@ struct Observation {
     source_order: String,
 }
 
+#[cfg(test)]
 #[derive(Clone, Serialize, Deserialize)]
 struct Item {
     membership: Membership,
@@ -431,6 +458,7 @@ struct Item {
     legacy_only: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone, Serialize, Deserialize)]
 struct Step {
     tool_name: String,
@@ -444,6 +472,7 @@ struct Step {
     failed: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone, Serialize, Deserialize)]
 struct StepRecord {
     event_id: String,
@@ -452,7 +481,9 @@ struct StepRecord {
     source_order: String,
 }
 
+#[cfg(test)]
 impl Step {
+    #[cfg(test)]
     fn records(&self) -> impl Iterator<Item = &StepRecord> {
         [
             self.invocation.as_ref(),
@@ -463,6 +494,7 @@ impl Step {
         .flatten()
     }
 
+    #[cfg(test)]
     fn status(&self) -> ChatStepStatus {
         if self.failed
             || self
@@ -487,6 +519,7 @@ impl Index {
             && self.events.is_none()
     }
 
+    #[cfg(test)]
     /// Schema-defined links for the existing Store checkpoint traversal.
     pub(super) fn node_roots(&self) -> impl Iterator<Item = &str> {
         [
@@ -498,6 +531,7 @@ impl Index {
         .flatten()
     }
 
+    #[cfg(test)]
     /// Observe one qualified canonical candidate BEFORE header clipping.
     /// The caller owns acceptance of `request_root_id` and source coordinates.
     /// Missing request evidence is intentionally not reconstructed from turn IDs.
@@ -794,6 +828,7 @@ impl Index {
         Ok(Some(membership.item_key))
     }
 
+    #[cfg(test)]
     /// Construct only this bounded page, using persisted whole-turn totals.
     /// Qualified canonical display rows select one representation per turn.
     /// Unsupported/unmigrated turns retain producer-owned legacy groups in this
@@ -807,6 +842,7 @@ impl Index {
         self.page_inner(store, events, complete, false)
     }
 
+    #[cfg(test)]
     /// A bound canonical view retains its lifetime while paging into legacy
     /// history. This grants no turn membership to those legacy rows.
     pub(super) fn continuation_page(
@@ -817,6 +853,7 @@ impl Index {
         self.page_inner(store, events, false, true)
     }
 
+    #[cfg(test)]
     fn page_inner(
         &self,
         store: &mut Store,
@@ -1081,6 +1118,7 @@ impl Index {
         Ok(Some(page))
     }
 
+    #[cfg(test)]
     /// Return only requested roots' proven terminal source boundaries, reusing
     /// hash-validated immutable seek nodes from the caller's operation-local
     /// cache. Store read limits and source-boundary qualification are unchanged.
@@ -1116,6 +1154,7 @@ impl Index {
         Ok(closed)
     }
 
+    #[cfg(test)]
     /// Compare physical ranges rather than mutable normalizer sequences or
     /// projection IDs. A closing frame itself is never after its own boundary.
     pub(super) fn after_closed_source_order(event: &AgentChatEvent, order: &str) -> bool {
@@ -1128,6 +1167,7 @@ impl Index {
             .is_some_and(|(closed, observed)| observed > closed)
     }
 
+    #[cfg(test)]
     /// Reuse only a previous producer-certified owner from this same source
     /// admission when a newly coalesced physical mirror has not been captured.
     /// The caller's operation-local cache reuses hash-validated immutable seek
@@ -1349,6 +1389,7 @@ impl Index {
         Ok(Some(owners))
     }
 
+    #[cfg(test)]
     /// Return stored opaque keys for the canonical Row owner after observation.
     /// An inactive turn may have metadata, so this does not grant presentation
     /// authority; page publication still validates Item membership and Turn.
@@ -1370,6 +1411,7 @@ impl Index {
         .map(|member| (member.turn_key, member.item_key)))
     }
 
+    #[cfg(test)]
     /// Resolve a canonical step for the existing detail owner without reading
     /// transcript bodies. Inactive request roots grant no presentation authority.
     pub(super) fn step_key(&self, store: &mut Store, event_id: &str) -> io::Result<Option<String>> {
@@ -1378,6 +1420,7 @@ impl Index {
             .map(|(item, _)| item.membership.item_key))
     }
 
+    #[cfg(test)]
     /// Resolve one step using its persisted evidence and proven turn state.
     /// Turn termination stops unresolved work without touching other step rows.
     pub(super) fn step_status(
@@ -1390,6 +1433,7 @@ impl Index {
             .and_then(|(item, turn)| item.step.map(|step| resolved_step_status(&step, &turn))))
     }
 
+    #[cfg(test)]
     /// Resolve the latest owned canonical backing for a saved step reference.
     /// These are archive event IDs, so Head.identities retains all detail and
     /// privacy authority. A result supersedes invocation output within its step.
@@ -1406,6 +1450,7 @@ impl Index {
             .map(|record| record.event_id))
     }
 
+    #[cfg(test)]
     /// Resolve the current owned invocation's canonical event ID for bounded
     /// input reads. Head.identities and current-root guards retain authority;
     /// missing invocation evidence grants no raw artifact fallback.
@@ -1421,6 +1466,7 @@ impl Index {
             .map(|record| record.event_id))
     }
 
+    #[cfg(test)]
     fn owned_step(&self, store: &mut Store, event_id: &str) -> io::Result<Option<(Item, Turn)>> {
         if self.version != 1 {
             return Ok(None);
@@ -1451,6 +1497,7 @@ impl Index {
         .then_some((item, turn)))
     }
 
+    #[cfg(test)]
     fn remembered_component(
         &self,
         store: &mut Store,
@@ -1553,6 +1600,7 @@ impl Index {
         }))
     }
 
+    #[cfg(test)]
     fn component(
         &self,
         store: &mut Store,
@@ -1604,6 +1652,7 @@ impl Index {
         }))
     }
 
+    #[cfg(test)]
     fn page_members(
         &self,
         store: &mut Store,
@@ -1678,6 +1727,7 @@ impl Index {
     }
 }
 
+#[cfg(test)]
 fn lookup<T: DeserializeOwned>(
     store: &mut Store,
     root: &Option<String>,
@@ -1690,12 +1740,14 @@ fn lookup<T: DeserializeOwned>(
         .transpose()
 }
 
+#[cfg(test)]
 fn key(value: &impl Serialize) -> io::Result<String> {
     Ok(digest(
         &serde_json::to_vec(value).map_err(io::Error::other)?,
     ))
 }
 
+#[cfg(test)]
 struct Identity<'a> {
     owner: String,
     source: String,
@@ -1705,6 +1757,7 @@ struct Identity<'a> {
     call: Option<&'a str>,
 }
 
+#[cfg(test)]
 /// Bind opaque ownership hints to the exact displayed physical/component row,
 /// excluding mutable normalization sequence and display text from identity.
 fn physical_members(event: &AgentChatEvent) -> Vec<String> {
@@ -1724,6 +1777,7 @@ fn physical_members(event: &AgentChatEvent) -> Vec<String> {
         })
 }
 
+#[cfg(test)]
 fn source_position(order: &str) -> Option<(u64, u64)> {
     let mut fields = order.strip_prefix("source:")?.split(':');
     let start = fields.next()?.parse().ok()?;
@@ -1731,12 +1785,14 @@ fn source_position(order: &str) -> Option<(u64, u64)> {
     (start < end).then_some((start, end))
 }
 
+#[cfg(test)]
 fn source_order_after(observed: &str, closed: &str) -> bool {
     source_position(observed)
         .zip(source_position(closed))
         .map_or_else(|| observed > closed, |(observed, closed)| observed > closed)
 }
 
+#[cfg(test)]
 fn native_member_start(scope: &Scope<'_>, id: &str) -> Option<u64> {
     if !super::chat_source_index::valid_source_id(scope.agent_id, id) {
         return None;
@@ -1749,6 +1805,7 @@ fn native_member_start(scope: &Scope<'_>, id: &str) -> Option<u64> {
     fields.next()?.parse().ok()
 }
 
+#[cfg(test)]
 fn preview_observation(event: &AgentChatEvent) -> io::Result<Option<String>> {
     let Some(root) = string(event, "request_root_id").filter(|root| bounded_id(root)) else {
         return Ok(None);
@@ -1789,6 +1846,7 @@ fn preview_observation(event: &AgentChatEvent) -> io::Result<Option<String>> {
     .map(Some)
 }
 
+#[cfg(test)]
 /// Keep physical and invocation identity identical across canonical observation
 /// and bounded previews. Qualification remains with each caller; this retains
 /// the canonical event-ID fallback and foreign-scope error ordering unchanged.
@@ -1828,10 +1886,12 @@ fn identity<'a>(
     }))
 }
 
+#[cfg(test)]
 fn owner_identity(scope: &Scope<'_>) -> io::Result<String> {
     key(&("turn-owner-v1", scope.agent_id, scope.conversation_id))
 }
 
+#[cfg(test)]
 fn turn_identity(
     owner: &str,
     source_key: Option<&str>,
@@ -1843,6 +1903,7 @@ fn turn_identity(
     Ok((source, turn_key))
 }
 
+#[cfg(test)]
 fn source_identity(
     owner: &str,
     source_key: Option<&str>,
@@ -1851,6 +1912,7 @@ fn source_identity(
     key(&("turn-source-v1", owner, source_key, source_epoch))
 }
 
+#[cfg(test)]
 fn bounded_id(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= ID_BYTES
 }
@@ -1861,6 +1923,7 @@ fn string<'a>(event: &'a AgentChatEvent, field: &str) -> Option<&'a str> {
         .filter(|value| !value.trim().is_empty())
 }
 
+#[cfg(test)]
 fn request_prompt(event: &AgentChatEvent) -> bool {
     event.kind == AgentChatEventKind::Message
         && event.role == Some(AgentChatRole::User)
@@ -1871,6 +1934,7 @@ fn request_prompt(event: &AgentChatEvent) -> bool {
         && matches!(string(event, "input_purpose"), None | Some("request"))
 }
 
+#[cfg(test)]
 /// Only the adapter for the canonical provider can certify request provenance.
 /// Delivery identity, generic metadata and publication readiness cannot do so.
 fn proven_adapter(event: &AgentChatEvent) -> bool {
@@ -1880,6 +1944,7 @@ fn proven_adapter(event: &AgentChatEvent) -> bool {
     )
 }
 
+#[cfg(test)]
 fn compatible_component_kinds(left: &ChatPresentedItemKind, right: &ChatPresentedItemKind) -> bool {
     left == right
         || matches!(
@@ -1894,6 +1959,7 @@ fn compatible_component_kinds(left: &ChatPresentedItemKind, right: &ChatPresente
         )
 }
 
+#[cfg(test)]
 /// The normalizer's explicit context classification is state evidence, not
 /// assistant prose. No inference from system text, purpose or visibility occurs.
 fn state_only(event: &AgentChatEvent) -> bool {
@@ -1910,6 +1976,7 @@ fn state_only(event: &AgentChatEvent) -> bool {
             ))
 }
 
+#[cfg(test)]
 /// This capability supports only existing admitted prompt, assistant, tool and
 /// state shapes. Unsupported evidence stays on the legacy owner unchanged.
 fn item_kind(event: &AgentChatEvent) -> Option<ChatPresentedItemKind> {
@@ -1937,6 +2004,7 @@ fn item_kind(event: &AgentChatEvent) -> Option<ChatPresentedItemKind> {
     }
 }
 
+#[cfg(test)]
 /// Return source invocation identity after the owner proves request membership.
 pub(super) fn call_identity(event: &AgentChatEvent) -> Option<&str> {
     // Tool-event normalizers use turn_id for invocation identity. It is usable
@@ -1953,6 +2021,7 @@ pub(super) fn call_identity(event: &AgentChatEvent) -> Option<&str> {
         .filter(|id| bounded_id(id))
 }
 
+#[cfg(test)]
 fn update_step(item: &mut Item, event: &AgentChatEvent, source_order: &str) {
     let (tool_name, category, description) = label(event);
     let step = item.step.get_or_insert_with(|| Step {
@@ -2008,10 +2077,12 @@ fn update_step(item: &mut Item, event: &AgentChatEvent, source_order: &str) {
     }
 }
 
+#[cfg(test)]
 fn record_order(record: &StepRecord) -> (&str, &str) {
     (&record.source_order, &record.event_id)
 }
 
+#[cfg(test)]
 fn resolved_step_status(step: &Step, turn: &Turn) -> ChatStepStatus {
     let status = step.status();
     if !matches!(
@@ -2029,6 +2100,7 @@ fn resolved_step_status(step: &Step, turn: &Turn) -> ChatStepStatus {
     }
 }
 
+#[cfg(test)]
 fn step_status(event: &AgentChatEvent) -> ChatStepStatus {
     if event.exit_code.is_some_and(|code| code != 0) {
         return ChatStepStatus::Failed;
@@ -2043,6 +2115,7 @@ fn step_status(event: &AgentChatEvent) -> ChatStepStatus {
     }
 }
 
+#[cfg(test)]
 fn turn_status(event: &AgentChatEvent) -> Option<ChatTurnStatus> {
     match event.status {
         Some(AgentChatStatus::Running | AgentChatStatus::Processing) => {
@@ -2057,6 +2130,7 @@ fn turn_status(event: &AgentChatEvent) -> Option<ChatTurnStatus> {
     }
 }
 
+#[cfg(test)]
 fn aggregate_status(turn: &Turn) -> ChatTurnStatus {
     if terminal_turn(&turn.status) {
         turn.status.clone()
@@ -2069,6 +2143,7 @@ fn aggregate_status(turn: &Turn) -> ChatTurnStatus {
     }
 }
 
+#[cfg(test)]
 fn terminal_turn(status: &ChatTurnStatus) -> bool {
     matches!(
         status,
@@ -2079,6 +2154,7 @@ fn terminal_turn(status: &ChatTurnStatus) -> bool {
     )
 }
 
+#[cfg(test)]
 fn terminal_step(status: &ChatStepStatus) -> bool {
     matches!(
         status,
@@ -2089,7 +2165,9 @@ fn terminal_step(status: &ChatStepStatus) -> bool {
     )
 }
 
+#[cfg(test)]
 impl Totals {
+    #[cfg(test)]
     fn contribution(item: &Item) -> Self {
         if item.legacy_only || item.state_only {
             return Self::default();
@@ -2106,6 +2184,7 @@ impl Totals {
         }
     }
 
+    #[cfg(test)]
     fn remove(&mut self, item: &Item) -> io::Result<()> {
         let old = Self::contribution(item);
         for (count, delta) in [
@@ -2124,6 +2203,7 @@ impl Totals {
         Ok(())
     }
 
+    #[cfg(test)]
     fn add(&mut self, item: &Item) -> io::Result<()> {
         let new = Self::contribution(item);
         for (count, delta) in [
@@ -2143,6 +2223,7 @@ impl Totals {
     }
 }
 
+#[cfg(test)]
 fn present_step(step: &Step, turn: &Turn) -> ChatPresentedStep {
     ChatPresentedStep {
         tool_name: step.tool_name.clone(),
@@ -2161,6 +2242,7 @@ fn present_step(step: &Step, turn: &Turn) -> ChatPresentedStep {
     }
 }
 
+#[cfg(test)]
 fn tail_reference(event: &AgentChatEvent) -> Option<String> {
     string(event, "chat_step_detail_ref")
         .filter(|reference| reference.len() <= ID_BYTES && reference.ends_with(":tail"))
@@ -2183,7 +2265,7 @@ fn safe_label(value: &str) -> Option<&str> {
     .then_some(value)
 }
 
-fn label(event: &AgentChatEvent) -> (String, ChatToolCategory, String) {
+pub(super) fn label(event: &AgentChatEvent) -> (String, ChatToolCategory, String) {
     let tool = string(event, "tool_name")
         .or_else(|| {
             (event.kind == AgentChatEventKind::ToolCall)
@@ -2280,6 +2362,8 @@ fn label(event: &AgentChatEvent) -> (String, ChatToolCategory, String) {
 #[path = "chat_turn_index_tests.rs"]
 mod tests;
 
+#[cfg(test)]
 #[path = "chat_turn_preview.rs"]
 mod chat_turn_preview;
+#[cfg(test)]
 pub(super) use chat_turn_preview::preview;

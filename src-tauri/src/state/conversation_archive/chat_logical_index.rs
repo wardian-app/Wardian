@@ -1,15 +1,22 @@
 //! Derived display relations. Physical rows, source coordinates and capture
 //! cursors are never changed by this index. Every update touches a bounded
 //! component; readers use certificates materialized in published row objects.
+#[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
 use std::io;
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::json;
+#[cfg(test)]
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind};
 
+#[cfg(test)]
 use super::chat_read_store::{digest, valid_ref, Store};
+#[cfg(test)]
 use super::ConversationArchiveContext;
+#[cfg(test)]
 use crate::providers::chat_transcript::{
     codex_display_evidence, codex_display_evidence_from_bounded_header, CodexDisplaySide,
 };
@@ -37,13 +44,16 @@ pub(super) struct Index {
     sequence_ready: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Relation {
     pub(super) id: String,
     pub(super) members: Vec<String>,
 }
 
+#[cfg(test)]
 impl Relation {
+    #[cfg(test)]
     pub(super) fn prefer_member_first(&mut self, member_id: &str) {
         if let Some(index) = self.members.iter().position(|id| id == member_id) {
             self.members.swap(0, index);
@@ -51,6 +61,7 @@ impl Relation {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Serialize, Deserialize)]
 struct Member {
     token: String,
@@ -62,6 +73,7 @@ struct Member {
     commentary_id: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Serialize, Deserialize)]
 struct Bucket {
     scope: String,
@@ -72,10 +84,12 @@ struct Bucket {
     watermark: u64,
 }
 
+#[cfg(test)]
 fn narrative_bucket_key(scope: &str, evidence: &str) -> String {
     digest(format!("{scope}:narrative:{evidence}").as_bytes())
 }
 
+#[cfg(test)]
 fn narrative_side_is_right(side: CodexDisplaySide) -> bool {
     matches!(
         side,
@@ -83,6 +97,7 @@ fn narrative_side_is_right(side: CodexDisplaySide) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(super) struct Admission<'a> {
     pub(super) context: &'a ConversationArchiveContext,
     pub(super) conversation: Option<&'a str>,
@@ -93,6 +108,7 @@ pub(super) struct Admission<'a> {
     pub(super) sequence_trusted: bool,
 }
 
+#[cfg(test)]
 /// Ownership of complete saved archive envelopes, independent of native-source
 /// admission. Member-to-group presentation aliases reconcile archived display
 /// rows only; this scope grants no native source-coordinate correspondence.
@@ -103,7 +119,9 @@ pub(super) struct ArchiveAdmission<'a> {
     pub(super) extent: u64,
 }
 
+#[cfg(test)]
 impl ArchiveAdmission<'_> {
+    #[cfg(test)]
     fn scope(&self) -> String {
         digest(
             &serde_json::to_vec(&json!([
@@ -120,6 +138,7 @@ impl ArchiveAdmission<'_> {
         )
     }
 
+    #[cfg(test)]
     fn owned(&self, event: &AgentChatEvent) -> bool {
         event.session_id == self.context.agent_id
             && event.provider == "codex"
@@ -152,6 +171,7 @@ impl ArchiveAdmission<'_> {
                 })
     }
 
+    #[cfg(test)]
     fn evidence(&self, event: &AgentChatEvent) -> Option<(String, bool)> {
         let required = |key: &str| {
             event
@@ -211,7 +231,9 @@ impl ArchiveAdmission<'_> {
     }
 }
 
+#[cfg(test)]
 impl Admission<'_> {
+    #[cfg(test)]
     fn scope(&self) -> String {
         digest(
             &serde_json::to_vec(&json!([
@@ -227,6 +249,7 @@ impl Admission<'_> {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn native(&self, event: &AgentChatEvent) -> bool {
         let Some((start, end)) = event.metadata["chat_source_start"]
             .as_u64()
@@ -253,6 +276,7 @@ impl Admission<'_> {
             && event.metadata["chat_source_epoch"].as_str() == Some(self.epoch)
     }
 
+    #[cfg(test)]
     /// Checks source ownership independently from narrative-message eligibility.
     /// Native tool rows remain covered source records even though they do not
     /// contribute observations to the display relation index.
@@ -283,6 +307,7 @@ impl Admission<'_> {
                 .is_none_or(|epoch| epoch == self.epoch)
     }
 
+    #[cfg(test)]
     pub(super) fn owned(&self, event: &AgentChatEvent) -> bool {
         if event.metadata["chat_turn_after_closed"] == true {
             // Later records cannot enrich a component of an immutable turn.
@@ -295,6 +320,7 @@ impl Admission<'_> {
 }
 
 impl Index {
+    #[cfg(test)]
     /// Count an owned legacy assistant envelope before body or metadata clipping.
     /// Activation must wait for the complete immutable archive extent. Native
     /// rows and compatibility bridges never enter this separate display index.
@@ -337,6 +363,7 @@ impl Index {
         )
     }
 
+    #[cfg(test)]
     /// Persistent trees only. `before`/`narrative_before` are seek keys, while
     /// member/bucket fields contain logical IDs and ordinal keys, not roots.
     pub(super) fn node_roots(&self) -> impl Iterator<Item = &str> {
@@ -351,6 +378,7 @@ impl Index {
         .flatten()
     }
 
+    #[cfg(test)]
     fn bucket(&self, store: &mut Store, key: &str) -> io::Result<Option<Bucket>> {
         store
             .get(&self.buckets, key)?
@@ -358,6 +386,7 @@ impl Index {
             .transpose()
     }
 
+    #[cfg(test)]
     fn member(&self, store: &mut Store, token: &str) -> io::Result<Member> {
         let r = store
             .get(&self.members, token)?
@@ -365,6 +394,7 @@ impl Index {
         store.read(&r)
     }
 
+    #[cfg(test)]
     fn qualified(&self, bucket: &Bucket) -> bool {
         bucket.scope == self.scope
             && !bucket.conflict
@@ -380,6 +410,7 @@ impl Index {
             && (bucket.kind != "prefix" || self.complete_prefix)
     }
 
+    #[cfg(test)]
     /// Count a complete bounded native interval with the same narrative bucket
     /// and one-to-one qualification used by the persisted index. The caller
     /// must prove that the interval covers every admitted row before using it.
@@ -506,6 +537,7 @@ impl Index {
             .collect()
     }
 
+    #[cfg(test)]
     /// Register one owned physical occurrence. Saturating counts retain enough
     /// evidence to refuse ambiguity without an unbounded list in any object.
     pub(super) fn observe(
@@ -622,6 +654,7 @@ impl Index {
         self.register_member(store, member, keys, admission.watermark)
     }
 
+    #[cfg(test)]
     fn register_member(
         &mut self,
         store: &mut Store,
@@ -681,6 +714,7 @@ impl Index {
         self.updates(store, &affected)
     }
 
+    #[cfg(test)]
     fn updates(
         &self,
         store: &mut Store,
@@ -760,6 +794,7 @@ impl Index {
         Ok(updates.into_iter().collect())
     }
 
+    #[cfg(test)]
     /// Activate already-counted claims in fixed checkpoints after the archive
     /// prefix is indexed. No page request walks this queue or native history.
     pub(super) fn activate(
@@ -785,10 +820,12 @@ impl Index {
         self.updates(store, &affected)
     }
 
+    #[cfg(test)]
     pub(super) fn pending(&self) -> bool {
         self.legacy_ready && self.pending.is_some()
     }
 
+    #[cfg(test)]
     pub(super) fn qualify_legacy(&mut self, complete_prefix: bool) {
         if !self.legacy_ready || self.complete_prefix != complete_prefix {
             self.pending = self.claims.clone();
@@ -798,6 +835,7 @@ impl Index {
         self.complete_prefix = complete_prefix;
     }
 
+    #[cfg(test)]
     /// Preserve original sequence counts while acquisition is still pending;
     /// qualification can later change without rewriting a physical member's
     /// evidence keys or treating newly trusted evidence as an identity conflict.
@@ -809,13 +847,16 @@ impl Index {
         self.sequence_ready = ready;
     }
 
+    #[cfg(test)]
     pub(super) fn admits(&self, admission: &str) -> bool {
         self.scope.is_empty() || self.admission == admission
     }
+    #[cfg(test)]
     pub(super) fn has_evidence(&self) -> bool {
         self.members.is_some()
     }
 
+    #[cfg(test)]
     /// Source-tail candidates cannot certify occurrence uniqueness. The saved
     /// watermark still qualifies unchanged buckets from an earlier complete
     /// interval; newly touched buckets must await the next completed interval.
@@ -823,14 +864,17 @@ impl Index {
         self.narrative_deferred = true;
     }
 
+    #[cfg(test)]
     pub(super) fn narratives_completed(&self, watermark: u64) -> bool {
         self.narrative_watermark == Some(watermark)
     }
 
+    #[cfg(test)]
     pub(super) fn completed_watermark(&self) -> Option<u64> {
         self.narrative_watermark
     }
 
+    #[cfg(test)]
     /// Pin an immutable bucket root after the caller completes all admitted
     /// counts through this watermark. This is an index queue, never a source
     /// replay. Its root/cursor survive restart in the published owner head.
@@ -842,10 +886,12 @@ impl Index {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn narrative_pending(&self) -> bool {
         self.narrative_queue.is_some()
     }
 
+    #[cfg(test)]
     pub(super) fn activate_narratives(
         &mut self,
         store: &mut Store,
@@ -873,6 +919,7 @@ impl Index {
     }
 }
 
+#[cfg(test)]
 /// Revalidate the saved acquisition owner before using any retained claims.
 /// This reads only capture/policy metadata, the fixed native header and overlap.
 pub(super) struct SourceProof {
@@ -886,6 +933,7 @@ pub(super) struct SourceProof {
     pub(super) policy: super::chat_read::SourcePolicy,
 }
 
+#[cfg(test)]
 pub(super) fn source_proof(
     context: &ConversationArchiveContext,
 ) -> io::Result<Option<SourceProof>> {
@@ -895,6 +943,7 @@ pub(super) fn source_proof(
     checked_source_proof(context)
 }
 
+#[cfg(test)]
 /// Capture publication calls this only after its required native cursor and
 /// policy commit. This records coverage; it grants no display relation claims.
 pub(super) fn mock_canonical_coverage(
@@ -914,6 +963,7 @@ pub(super) fn mock_canonical_coverage(
     )
 }
 
+#[cfg(test)]
 fn checked_source_proof(context: &ConversationArchiveContext) -> io::Result<Option<SourceProof>> {
     use std::io::Read;
     let state = super::read_capture_state(&context.agent_id)?;
@@ -1003,7 +1053,9 @@ fn checked_source_proof(context: &ConversationArchiveContext) -> io::Result<Opti
     }))
 }
 
+#[cfg(test)]
 impl SourceProof {
+    #[cfg(test)]
     pub(super) fn admission<'a>(
         &'a self,
         context: &'a ConversationArchiveContext,

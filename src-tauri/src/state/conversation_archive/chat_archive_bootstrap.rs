@@ -2,15 +2,21 @@
 //! Every pass reads one bounded JSONL window. Immutable roots and cursors live
 //! in the published head, so a restart never mistakes a partial index for ready.
 use super::*;
+#[cfg(test)]
 use wardian_core::conversations::{
     ConversationIndexEntry, ConversationLoggingSetting, ConversationManifest,
     ConversationNarrativeRecord, ConversationStatus,
 };
 
+#[cfg(test)]
 const WINDOW_BYTES: u64 = 256 * 1024;
+#[cfg(test)]
 const ADMIT_ROWS: usize = 24;
+#[cfg(test)]
 const BODY_CHUNKS_PER_PASS: usize = 16;
+#[cfg(test)]
 const BODY_JOBS_PER_PASS: usize = 16;
+#[cfg(test)]
 const RESERVED_BODY_CHUNKS: usize = 4;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -21,6 +27,7 @@ struct Stamp {
 }
 
 impl Stamp {
+    #[cfg(test)]
     fn read(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
         let metadata = file.metadata()?;
@@ -30,6 +37,7 @@ impl Stamp {
             identity: crate::commands::provider_log_acquisition::native_file_identity(&file)?,
         })
     }
+    #[cfg(test)]
     fn validate(&self, path: &Path) -> io::Result<()> {
         if Self::read(path)? != *self {
             return Err(io::Error::other("saved chat file changed during bootstrap"));
@@ -56,6 +64,7 @@ pub(super) struct Progress {
 }
 
 impl Progress {
+    #[cfg(test)]
     /// Body/proof indexes are roots; their seek positions and stamps are not.
     pub(super) fn node_roots(&self) -> impl Iterator<Item = &str> {
         [self.proofs.as_deref(), self.bodies.as_deref()]
@@ -78,6 +87,7 @@ struct SelectionScope {
 }
 
 impl SelectionScope {
+    #[cfg(test)]
     fn new(context: &ConversationArchiveContext) -> Self {
         Self {
             agent_id: context.agent_id.clone(),
@@ -87,6 +97,7 @@ impl SelectionScope {
         }
     }
 
+    #[cfg(test)]
     fn matches(&self, context: &ConversationArchiveContext) -> bool {
         self.agent_id == context.agent_id
             && self.provider == context.provider
@@ -95,6 +106,7 @@ impl SelectionScope {
     }
 }
 
+#[cfg(test)]
 /// Cold checkpoints must retain the complete selection binding across restart.
 /// Older unbound checkpoints require reselection; warm candidates keep their
 /// existing admission contract.
@@ -107,6 +119,7 @@ pub(super) fn scope_matches(head: &Head, context: &ConversationArchiveContext) -
     })
 }
 
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 struct Selection {
     scope: String,
@@ -115,12 +128,14 @@ struct Selection {
     seen: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 struct Proof {
     generated: bool,
     input_binding: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 struct BodyJob {
     event_start: u64,
@@ -129,7 +144,9 @@ struct BodyJob {
     offset: u64,
 }
 
+#[cfg(test)]
 impl BodyJob {
+    #[cfg(test)]
     /// A queued job owns its chunks even when no current display row refers to
     /// them. Register the schema-defined body root on every unfinished write.
     fn put(&self, store: &mut Store) -> io::Result<String> {
@@ -145,6 +162,7 @@ impl BodyJob {
     }
 }
 
+#[cfg(test)]
 /// Physical line starts are stable private ordering keys. They are deliberately
 /// not narrative sequence numbers (older event envelopes often omit sequence).
 /// Oversized individual envelopes fail explicitly instead of allocating a whole
@@ -182,6 +200,7 @@ fn window(path: &Path, before: u64) -> io::Result<Vec<(u64, Vec<u8>)>> {
     Ok(rows)
 }
 
+#[cfg(test)]
 fn bounded_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
     let mut file = File::open(path)?;
     let extent = file.metadata()?.len();
@@ -196,12 +215,14 @@ fn bounded_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 
+#[cfg(test)]
 fn selection_path(context: &ConversationArchiveContext) -> io::Result<PathBuf> {
     Ok(locations(&context.agent_id)?
         .0
         .with_file_name("chat-bootstrap-selection.json"))
 }
 
+#[cfg(test)]
 fn select(
     context: &ConversationArchiveContext,
     store: &mut Store,
@@ -338,6 +359,7 @@ fn select(
     Ok((None, pending))
 }
 
+#[cfg(test)]
 fn context_scope(
     context: &ConversationArchiveContext,
 ) -> (&str, &str, &Option<String>, &Vec<String>) {
@@ -349,6 +371,7 @@ fn context_scope(
     )
 }
 
+#[cfg(test)]
 fn candidate(context: &ConversationArchiveContext, conversation_id: &str) -> Candidate {
     Candidate {
         context: context.clone(),
@@ -362,6 +385,7 @@ fn candidate(context: &ConversationArchiveContext, conversation_id: &str) -> Can
     }
 }
 
+#[cfg(test)]
 /// A stored display link is not a native-coordinate proof. Preserve canonical
 /// IDs while leaving these cold legacy links unresolved until an owner commits
 /// a positively verified candidate. Never match or alias by text.
@@ -385,6 +409,7 @@ fn unresolved(event: &mut AgentChatEvent) {
     }
 }
 
+#[cfg(test)]
 /// Archive relations combine saved display rows and allow member-to-group
 /// presentation aliases. Existing native relations take precedence; native
 /// source correspondence and detail authority remain with their existing owners.
@@ -415,6 +440,7 @@ fn apply_archive_display_updates(
     apply_logical_updates(store, head, admitted, changes)
 }
 
+#[cfg(test)]
 /// A warm projection has no bootstrap state. After restart, only a matching
 /// saved archive without current native authority may replace that derived head.
 pub(super) fn can_upgrade_saved_head(
@@ -462,6 +488,7 @@ pub(super) fn can_upgrade_saved_head(
     Ok(true)
 }
 
+#[cfg(test)]
 fn archive_counts_complete(progress: &Progress) -> bool {
     progress.narrative_before == 0
         && progress.event_before == 0
@@ -470,6 +497,7 @@ fn archive_counts_complete(progress: &Progress) -> bool {
         })
 }
 
+#[cfg(test)]
 pub(super) fn archive_display_ready(context: &ConversationArchiveContext) -> io::Result<bool> {
     let Some(reference) = head(&context.agent_id)? else {
         return Ok(false);
@@ -492,6 +520,7 @@ pub(super) fn archive_display_ready(context: &ConversationArchiveContext) -> io:
         .is_some_and(archive_counts_complete))
 }
 
+#[cfg(test)]
 /// A complete saved cohort grants archive paging only. A warm candidate or a
 /// partial recount cannot bypass native cursor/renewal qualification.
 pub(super) fn archive_only_head(head: &Head, context: &ConversationArchiveContext) -> bool {
@@ -525,6 +554,7 @@ pub(super) fn archive_only_head(head: &Head, context: &ConversationArchiveContex
         })
 }
 
+#[cfg(test)]
 pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> {
     let (head_path, objects) = locations(&context.agent_id)?;
     let mut store = Store::checkpoint_writer(&objects);
@@ -930,6 +960,7 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
     Ok(pending)
 }
 
+#[cfg(test)]
 pub(super) fn retire(agent_id: &str) -> io::Result<()> {
     let path = locations(agent_id)?.0;
     write_json_atomic(&path, &Option::<String>::None)?;

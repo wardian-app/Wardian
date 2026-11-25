@@ -4525,6 +4525,7 @@ fn narrative_record_with_turn(seq: u64, turn_id: &str, text: &str) -> Conversati
         event_refs: Vec::new(),
         source_refs: Vec::new(),
         artifact_refs: Vec::new(),
+        text_artifact_proof: None,
     }
 }
 

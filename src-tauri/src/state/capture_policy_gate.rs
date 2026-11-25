@@ -40,6 +40,7 @@ impl Drop for LifecycleBoundary<'_> {
 }
 
 impl CapturePolicyGate {
+    #[cfg(test)]
     /// Optimistic recent-header admission must stand aside for a registered
     /// lifecycle boundary without waiting for older archive IO.
     pub(crate) fn background_admission_open(&self) -> bool {
