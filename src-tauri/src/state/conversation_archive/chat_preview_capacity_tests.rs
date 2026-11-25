@@ -70,14 +70,14 @@ fn a_normalized_running_prefix_fills_the_default_window_without_retiring_its_adm
         .all(|event| event.metadata["chat_turn_membership_complete"] != true));
     archive
         .append_verified_provider_log_batch_with_context(
-            context,
+            context.clone(),
             &batch.events,
             None,
             &batch.next,
             batch.source_proof(),
         )
         .unwrap();
-    super::tests::finish_projection(&archive);
+    super::tests::finish_projection(&archive, &context);
     let owner = &archive.chat_projection;
     let runtime = Arc::new(Mutex::new("Processing".into()));
     let receipt = owner.begin_recent(&source, &runtime).unwrap();

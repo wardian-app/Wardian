@@ -390,16 +390,49 @@ async fn completed_claim_publication_progresses_past_8193_unclaimed_legacy_rows(
     let temp = tempfile::tempdir().unwrap();
     std::env::set_var("WARDIAN_HOME", temp.path());
     let (state, context, old, batch) = fixture(temp.path());
+    let conversation = state.active_conversation_id_for_test("agent-1").unwrap();
+    let directory = conversation_dir("agent-1", &conversation).unwrap();
+    let manifest = read_manifest(&directory.join("manifest.json")).unwrap();
+    let records = read_jsonl_records(&directory.join("conversation.jsonl")).unwrap();
+    let saved = read_jsonl_records(&directory.join("events.jsonl")).unwrap();
+    let mut captured = read_capture_state("agent-1").unwrap();
+    let (_, overlay) = prepare(
+        Preparation {
+            context: &context,
+            conversation_id: &conversation,
+            manifest: manifest.as_ref(),
+            archived: &saved,
+            records: &records,
+            events: &batch.events,
+            previous: batch.previous.as_ref(),
+            next: &batch.next,
+            source_proof: batch.source_proof(),
+        },
+        &mut captured,
+    )
+    .unwrap();
+    assert!(overlay.contains_key(&old.id));
     state
-        .append_provider_log_batch_with_context(
+        .append_verified_provider_log_batch_with_context(
             context.clone(),
             &batch.events,
             batch.previous.as_ref(),
             &batch.next,
+            batch.source_proof(),
         )
         .unwrap();
-    let conversation = state.active_conversation_id_for_test("agent-1").unwrap();
-    let directory = conversation_dir("agent-1", &conversation).unwrap();
+    // Seal the old compatibility state explicitly. Product capture never writes
+    // the legacy claim graph.
+    let mut captured = read_capture_state("agent-1").unwrap();
+    let store = Store::writer(&objects("agent-1").unwrap());
+    let mut root = load(
+        &mut Store::new(&objects("agent-1").unwrap()),
+        captured.compatibility_claims.as_ref(),
+    )
+    .unwrap();
+    root.pending = None;
+    captured.compatibility_claims.as_mut().unwrap().root = store.put(&root).unwrap();
+    write_capture_state("agent-1", &captured).unwrap();
     let before = std::fs::read(directory.join("events.jsonl")).unwrap();
     let mut events: Vec<AgentChatEvent> =
         read_jsonl_records(&directory.join("events.jsonl")).unwrap();
@@ -442,7 +475,7 @@ async fn completed_claim_publication_progresses_past_8193_unclaimed_legacy_rows(
 }
 
 #[tokio::test]
-async fn ordinary_policy_bridge_survives_native_generated_and_restart_rebuilds() {
+async fn verified_claude_replay_preserves_saved_rows_through_append_and_restart() {
     let _guard = crate::utils::wardian_test_env_lock_async().await;
     let previous_home = std::env::var_os("WARDIAN_HOME");
     let temp = tempfile::tempdir().unwrap();
@@ -456,11 +489,12 @@ async fn ordinary_policy_bridge_survives_native_generated_and_restart_rebuilds()
     let batch = policy_then_acquire(&state, &context, &path);
     assert_eq!(batch.previous.as_ref().unwrap().status, "pending");
     state
-        .append_provider_log_batch_with_context(
+        .append_verified_provider_log_batch_with_context(
             context.clone(),
             &batch.events,
             batch.previous.as_ref(),
             &batch.next,
+            batch.source_proof(),
         )
         .unwrap();
     assert_eq!(
@@ -471,11 +505,10 @@ async fn ordinary_policy_bridge_survives_native_generated_and_restart_rebuilds()
         std::fs::read(directory.join("conversation.jsonl")).unwrap(),
         records_before
     );
-    let coordinate = batch.events[0].metadata["chat_source_ref"]
-        .as_str()
-        .unwrap();
-    assert_canonical_alias(coordinate, &old.id);
-    assert!(!pending(&read_capture_state("agent-1").unwrap(), "agent-1").unwrap());
+    assert!(read_capture_state("agent-1")
+        .unwrap()
+        .compatibility_claims
+        .is_none());
 
     use std::io::Write;
     std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(
@@ -483,24 +516,30 @@ async fn ordinary_policy_bridge_survives_native_generated_and_restart_rebuilds()
     ).unwrap();
     let next = policy_then_acquire(&state, &context, &path);
     state
-        .append_provider_log_batch_with_context(
+        .append_verified_provider_log_batch_with_context(
             context.clone(),
             &next.events,
             next.previous.as_ref(),
             &next.next,
+            next.source_proof(),
         )
         .unwrap();
-    assert_canonical_alias(coordinate, &old.id);
     state
         .append_delivered_input_with_context(context.clone(), "Generated input", None)
         .unwrap();
-    assert_canonical_alias(coordinate, &old.id);
     drop(state);
     let restarted = ConversationArchiveState::default();
     restarted
         .append_delivered_input_with_context(context.clone(), "After restart", None)
         .unwrap();
-    assert_canonical_alias(coordinate, &old.id);
+    let observed: Vec<AgentChatEvent> =
+        read_jsonl_records(&directory.join("events.jsonl")).unwrap();
+    assert_eq!(
+        observed.iter().filter(|event| event.id == old.id).count(),
+        1
+    );
+    let (head, objects) = chat_read::locations("agent-1").unwrap();
+    assert!(!head.exists() && !objects.exists());
     assert!(std::fs::read(directory.join("events.jsonl"))
         .unwrap()
         .starts_with(&events_before));
@@ -514,13 +553,13 @@ async fn ordinary_policy_bridge_survives_native_generated_and_restart_rebuilds()
 }
 
 #[tokio::test]
-async fn prepared_claim_failures_keep_old_cursor_and_history_then_restart_recovers() {
+async fn verified_claude_cursor_failures_preserve_archive_and_resume_after_restart() {
     let _guard = crate::utils::wardian_test_env_lock_async().await;
     let previous_home = std::env::var_os("WARDIAN_HOME");
-    for stage in [1, 2, 3, 4] {
+    for stage in [3, 4] {
         let temp = tempfile::tempdir().unwrap();
         std::env::set_var("WARDIAN_HOME", temp.path());
-        let (state, context, old, batch) = fixture(temp.path());
+        let (state, context, _, batch) = fixture(temp.path());
         let conversation = state.active_conversation_id_for_test("agent-1").unwrap();
         let directory = conversation_dir("agent-1", &conversation).unwrap();
         let events_before = std::fs::read(directory.join("events.jsonl")).unwrap();
@@ -535,11 +574,12 @@ async fn prepared_claim_failures_keep_old_cursor_and_history_then_restart_recove
                 .store(stage, Ordering::SeqCst);
         }
         assert!(state
-            .append_provider_log_batch_with_context(
+            .append_verified_provider_log_batch_with_context(
                 context.clone(),
                 &batch.events,
                 batch.previous.as_ref(),
-                &batch.next
+                &batch.next,
+                batch.source_proof(),
             )
             .is_err());
         let captured = read_capture_state("agent-1").unwrap();
@@ -551,7 +591,7 @@ async fn prepared_claim_failures_keep_old_cursor_and_history_then_restart_recove
                 batch.previous.as_ref().unwrap().committed_offset
             }
         );
-        assert_eq!(captured.compatibility_claims.is_some(), stage != 1);
+        assert!(captured.compatibility_claims.is_none());
         drop(state);
         let restarted = ConversationArchiveState::default();
         if stage == 4 {
@@ -567,11 +607,12 @@ async fn prepared_claim_failures_keep_old_cursor_and_history_then_restart_recove
             let retry =
                 policy_then_acquire(&restarted, &context, &temp.path().join("claude.jsonl"));
             restarted
-                .append_provider_log_batch_with_context(
+                .append_verified_provider_log_batch_with_context(
                     context.clone(),
                     &retry.events,
                     retry.previous.as_ref(),
                     &retry.next,
+                    retry.source_proof(),
                 )
                 .unwrap();
         }
@@ -583,21 +624,14 @@ async fn prepared_claim_failures_keep_old_cursor_and_history_then_restart_recove
             std::fs::read(directory.join("conversation.jsonl")).unwrap(),
             records_before
         );
-        assert!(!pending(&read_capture_state("agent-1").unwrap(), "agent-1").unwrap());
+        let captured = read_capture_state("agent-1").unwrap();
+        assert_eq!(
+            captured.provider_log_sources[0].committed_offset,
+            batch.next.committed_offset
+        );
+        assert!(captured.compatibility_claims.is_none());
         let (head, objects) = chat_read::locations("agent-1").unwrap();
-        let reference: String = serde_json::from_slice(&std::fs::read(head).unwrap()).unwrap();
-        let mut store = Store::new(&objects);
-        let head: chat_read::Head = store.read(&reference).unwrap();
-        let row = chat_read::alias(
-            &mut store,
-            &head,
-            batch.events[0].metadata["chat_source_ref"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(row.id, old.id);
+        assert!(!head.exists() && !objects.exists());
     }
     match previous_home {
         Some(value) => std::env::set_var("WARDIAN_HOME", value),

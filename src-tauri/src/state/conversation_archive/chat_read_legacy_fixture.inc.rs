@@ -1758,15 +1758,6 @@ pub(crate) fn advance_source_index(
     super::chat_source_index::advance(snapshot)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SourceIndexTestSnapshot {
-    pub(crate) generation: String,
-    pub(crate) epoch: String,
-    pub(crate) progress: String,
-    pub(crate) complete: bool,
-    pub(crate) scalars: serde_json::Value,
-}
-
 /// A bounded published scope, never an archive scan or owner-lock acquisition.
 pub(crate) fn input_fence(
     context: &ConversationArchiveContext,

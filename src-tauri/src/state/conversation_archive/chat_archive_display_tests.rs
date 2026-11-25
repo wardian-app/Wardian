@@ -136,6 +136,9 @@ fn drain_capture(archive: &ConversationArchiveState, context: &ConversationArchi
 }
 
 fn begin_recount(archive: &ConversationArchiveState, context: &ConversationArchiveContext) -> Head {
+    // A production archive append no longer publishes a legacy Candidate.
+    // Seed the retired path only in this compatibility fixture.
+    super::super::tests::seed_legacy_candidate(archive, context);
     while archive.chat_projection.advance(&context.agent_id).unwrap() {}
     assert!(archive
         .chat_projection
@@ -1022,9 +1025,12 @@ fn archive_display_handoff_retires_without_resurrecting_warm_state() {
             assert!(!archive.bootstrap_saved_chat(&context).unwrap());
             assert_eq!(head("agent-1").unwrap(), before);
         } else {
+            let before = head("agent-1").unwrap();
             archive
                 .rollover_agent("agent-1", ConversationBoundaryReason::Clear)
                 .unwrap();
+            assert_eq!(head("agent-1").unwrap(), before);
+            archive.chat_projection.invalidate("agent-1").unwrap();
             assert!(head("agent-1").unwrap().is_none());
         }
         assert!(!archive.chat_projection.has_pending_capture_work("agent-1"));

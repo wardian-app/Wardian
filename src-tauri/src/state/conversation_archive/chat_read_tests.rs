@@ -5,7 +5,12 @@ use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
 
 #[test]
 fn declined_receipts_preserve_narrative_prefix() {
-    for decline in ["busy", "missing", "handoff", "stale-fence"] {
+    for decline in [
+        "busy",
+        "missing-owner",
+        "foreign-conversation",
+        "stale-fence",
+    ] {
         assert_declined_receipt_preserves_narrative_prefix(decline);
     }
 }
@@ -18,7 +23,7 @@ fn terminal_archive_stop_declines_receipt_without_writing_or_allocating() {
     archive
         .append_delivered_input_with_context(ctx.clone(), "warm", None)
         .unwrap();
-    let fence = input_fence(&ctx, None).unwrap().unwrap();
+    let fence = archive.archive_input_fence(&ctx, None).unwrap().unwrap();
     let directory =
         super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
     let before =
@@ -58,7 +63,7 @@ fn assert_declined_receipt_preserves_narrative_prefix(decline: &str) {
     archive
         .append_delivered_input_with_context(ctx.clone(), "warm", None)
         .unwrap();
-    let mut fence = input_fence(&ctx, None).unwrap().unwrap();
+    let mut fence = archive.archive_input_fence(&ctx, None).unwrap().unwrap();
     let directory =
         super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
     let before = ["events.jsonl", "conversation.jsonl"].map(|name| {
@@ -67,36 +72,24 @@ fn assert_declined_receipt_preserves_narrative_prefix(decline: &str) {
         (path, bytes)
     });
 
-    match decline {
-        "missing" => {
-            archive
-                .chat_projection
-                .work
-                .lock()
-                .unwrap()
-                .remove(&ctx.agent_id);
-        }
-        "handoff" => {
-            archive
-                .chat_projection
-                .work
-                .lock()
-                .unwrap()
-                .get_mut(&ctx.agent_id)
-                .unwrap()
-                .archive_display_handoff = true;
-        }
-        "stale-fence" => fence.source_epoch = Some("stale".into()),
-        "busy" => {}
+    let restarted = ConversationArchiveState::default();
+    let archive = match decline {
+        "missing-owner" => &restarted,
+        "busy" | "foreign-conversation" | "stale-fence" => &archive,
         _ => panic!("unknown admission decline"),
+    };
+    match decline {
+        "foreign-conversation" => fence.conversation_id = "foreign-conversation".into(),
+        "stale-fence" => fence.source_epoch = Some("stale".into()),
+        _ => {}
     }
-    // Model another capture pass holding the shared projection work map.
-    let projection_busy = (decline == "busy").then(|| archive.chat_projection.work.lock().unwrap());
+    let archive_gate = archive.test_agent_archive_gate(&ctx.agent_id).unwrap();
+    let busy = (decline == "busy").then(|| archive_gate.lock().unwrap());
     assert!(archive
         .append_delivered_input_receipt(ctx.clone(), "accepted but unreceipted", &fence)
         .unwrap()
         .is_none());
-    drop(projection_busy);
+    drop(busy);
     for (path, bytes) in &before {
         assert_eq!(fs::read(path).unwrap().as_slice(), bytes.as_slice());
     }
@@ -127,33 +120,33 @@ fn assert_declined_receipt_preserves_narrative_prefix(decline: &str) {
 }
 
 #[test]
-fn admitted_receipt_error_preserves_durable_identity_for_recovery() {
+fn deferred_archive_summary_error_preserves_durable_receipt_for_recovery() {
     let (_guard, _temp) = isolated_home();
     let archive = ConversationArchiveState::default();
     let ctx = context();
     archive
         .append_delivered_input_with_context(ctx.clone(), "warm", None)
         .unwrap();
-    let fence = input_fence(&ctx, None).unwrap().unwrap();
+    let fence = archive.archive_input_fence(&ctx, None).unwrap().unwrap();
     let directory =
         super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
-    // Fail derived publication after the admitted callback has synced the
-    // canonical event and narrative. Retrying the same text is a new input.
-    archive
-        .chat_projection
-        .fail_checkpoint_stage
-        .store(3, std::sync::atomic::Ordering::SeqCst);
-    assert!(archive
+    let first = archive
         .append_delivered_input_receipt(ctx.clone(), "same", &fence)
-        .is_err());
-    let after_failure: Vec<AgentChatEvent> =
-        read_jsonl_records(&directory.join("events.jsonl")).unwrap();
-    let failed_id = after_failure.last().unwrap().id.clone();
+        .unwrap()
+        .unwrap();
+    let turns = directory.join("turns.jsonl");
+    let retained = directory.join("retained-turns.jsonl");
+    fs::rename(&turns, &retained).unwrap();
+    fs::create_dir(&turns).unwrap();
+    assert!(archive.flush_deferred_chat_summaries(&ctx).is_err());
+    assert!(archive.has_deferred_chat_summaries(&ctx.agent_id));
+    fs::remove_dir(&turns).unwrap();
+    fs::rename(&retained, &turns).unwrap();
     let accepted = archive
         .append_delivered_input_receipt(ctx.clone(), "same", &fence)
         .unwrap()
         .unwrap();
-    assert_ne!(accepted.chat_event_id, failed_id);
+    assert_ne!(accepted.chat_event_id, first.chat_event_id);
     archive
         .append_chat_events_with_context(ctx.clone(), &[event("after-error", "normal observation")])
         .unwrap();
@@ -161,7 +154,7 @@ fn admitted_receipt_error_preserves_durable_identity_for_recovery() {
         .append_chat_events_with_context(ctx, &[event("after-recovery", "recovery observation")])
         .unwrap();
     let events: Vec<AgentChatEvent> = read_jsonl_records(&directory.join("events.jsonl")).unwrap();
-    for id in [&failed_id, &accepted.chat_event_id] {
+    for id in [&first.chat_event_id, &accepted.chat_event_id] {
         assert_eq!(events.iter().filter(|event| &event.id == id).count(), 1);
     }
     let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
@@ -180,7 +173,7 @@ fn partial_receipt_write_recovers_original_event_without_reusing_sequence() {
     archive
         .append_delivered_input_with_context(ctx.clone(), "warm", None)
         .unwrap();
-    let fence = input_fence(&ctx, None).unwrap().unwrap();
+    let fence = archive.archive_input_fence(&ctx, None).unwrap().unwrap();
     let directory =
         super::super::storage::conversation_dir(&ctx.agent_id, &fence.conversation_id).unwrap();
     let narrative = directory.join("conversation.jsonl");
@@ -2443,7 +2436,7 @@ fn recent_alias_source_window_reuses_identity_nodes_within_one_read() {
             captured.source_proof(),
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     assert!(super::super::chat_source_index::pointer("agent-1")
         .unwrap()
         .is_none());
@@ -2661,7 +2654,7 @@ fn recent_native_window_tracks_actual_emitted_frontier_through_canonical_catchup
         )
         .unwrap();
     finish_source_index(&snapshot);
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     let ordinary = read(&context, &snapshot, None, None, None).unwrap();
     assert_eq!(ordinary.events.len(), 20);
     assert!(!ordinary.events.iter().any(|row| row.id == "foreign-raw"));
@@ -2749,7 +2742,7 @@ fn recent_native_window_tracks_actual_emitted_frontier_through_canonical_catchup
         )
         .unwrap();
     finish_source_index(&snapshot);
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     let current =
         read_with_revalidation_and_limit(&context, &snapshot, None, None, None, None, Some(8))
             .unwrap();
@@ -3154,7 +3147,7 @@ fn exact_receipts_distinguish_repeated_inputs_and_fence_new_conversations() {
     archive
         .append_delivered_input_with_context(ctx.clone(), "warm", None)
         .unwrap();
-    let fence = input_fence(&ctx, None).unwrap().unwrap();
+    let fence = archive.archive_input_fence(&ctx, None).unwrap().unwrap();
     let first = archive
         .append_delivered_input_receipt(ctx.clone(), "same", &fence)
         .unwrap()
@@ -3474,7 +3467,7 @@ fn large_owned_message_body_requires_and_uses_its_exact_canonical_source_row() {
             acquired.source_proof(),
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     let ordinary = read(&context, &snapshot, None, None, None).unwrap();
     let (source_epoch_before, source_admission_before, source_extent_before, _, live_policy_before) =
         crate::commands::chat_recent_seed::source_scope_with_policy(&snapshot).unwrap();
@@ -4483,7 +4476,7 @@ fn empty_owned_source_revision_reaches_the_first_published_header() {
             .unwrap(),
         1
     );
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
     assert!(super::head("agent-1").unwrap().is_some());
 
@@ -4743,7 +4736,7 @@ fn large_native_tool_output_keeps_source_coverage_separate_from_narrative_pairs(
             acquired.source_proof(),
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
 
     let ordinary = read(&context, &snapshot, None, None, None).unwrap();
@@ -5038,7 +5031,7 @@ fn large_native_tool_output_keeps_source_coverage_separate_from_narrative_pairs(
             late.source_proof(),
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
     let after_late_index = source_index_page(&snapshot);
     assert!(
@@ -5815,7 +5808,43 @@ fn provisional_explicit_turn_pair_joins_across_windows_and_older_page_boundary()
     assert!(head("agent-1").unwrap().is_none());
 }
 
-pub(super) fn finish_projection(archive: &ConversationArchiveState) {
+/// Materialize the old display format only for tests that inspect its bytes or
+/// exercise the retired read path. Actual archive writes never do this.
+pub(super) fn seed_legacy_candidate(
+    archive: &ConversationArchiveState,
+    context: &ConversationArchiveContext,
+) {
+    let conversation_id = archive
+        .active_conversation_id(&context.agent_id)
+        .unwrap()
+        .unwrap();
+    let directory =
+        super::super::storage::conversation_dir(&context.agent_id, &conversation_id).unwrap();
+    let events_path = directory.join("events.jsonl");
+    let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).unwrap();
+    archive
+        .publish_chat_candidate(Candidate {
+            context: context.clone(),
+            generated_input_bindings: generated_input_bindings(&records, &conversation_id),
+            generated_ids: records
+                .iter()
+                .flat_map(|record| record.event_refs.iter().cloned())
+                .collect(),
+            conversation_id,
+            events: read_jsonl_records(&events_path).unwrap(),
+            committed_output_bytes: fs::metadata(events_path).unwrap().len(),
+            verified_ids: Default::default(),
+            source_epoch: None,
+        })
+        .unwrap();
+}
+
+pub(super) fn finish_projection(
+    archive: &ConversationArchiveState,
+    context: &ConversationArchiveContext,
+) {
+    seed_legacy_candidate(archive, context);
     for _ in 0..128 {
         if !archive.chat_projection.advance("agent-1").unwrap() {
             return;
@@ -6130,7 +6159,7 @@ fn codex_original_sequence_bridge_and_user_mirror_share_normal_paged_relation() 
     archive
         .append_provider_log_batch_with_context(ctx.clone(), &batch.events, None, &batch.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &ctx);
     let page = read(&ctx, &snapshot, None, None, None).unwrap();
     let rows: Vec<_> = page
         .events
@@ -6251,7 +6280,7 @@ fn repeated_same_turn_after_qualified_pair_retracts_aliases_and_keeps_physical_r
     archive
         .append_provider_log_batch_with_context(ctx.clone(), &first.events, None, &first.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &ctx);
     let qualified = read(&ctx, &snapshot, None, None, None).unwrap();
     assert_eq!(qualified.events.len(), 1);
     let old_display_id = qualified.events[0].id.clone();
@@ -6282,7 +6311,7 @@ fn repeated_same_turn_after_qualified_pair_retracts_aliases_and_keeps_physical_r
             &next.next,
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &ctx);
     let retracted = read(&ctx, &snapshot, None, Some(&qualified.revision), None).unwrap();
     assert_eq!(
         retracted
@@ -6353,7 +6382,7 @@ fn commentary_relation_retracts_on_late_duplicate_and_reopens_all_native_rows() 
     archive
         .append_provider_log_batch_with_context(context.clone(), &first.events, None, &first.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
 
     let qualified = read(&context, &snapshot, None, None, None).unwrap();
@@ -6563,7 +6592,7 @@ fn bounded_seed_retracts_a_pair_only_after_observing_a_same_side_collision() {
     archive
         .append_provider_log_batch_with_context(context.clone(), &first.events, None, &first.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
 
     let h0_seed = crate::commands::chat_recent_seed::read(&snapshot, None).unwrap();
@@ -6785,7 +6814,7 @@ fn stale_logical_head_reconciles_current_qualified_commentary_seed_before_projec
     archive
         .append_provider_log_batch_with_context(context.clone(), &first.events, None, &first.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
 
     let qualified = read(&context, &snapshot, None, None, None).unwrap();
@@ -6976,7 +7005,7 @@ fn source_revalidation_follows_live_member_and_restores_owned_rows_after_late_am
     archive
         .append_provider_log_batch_with_context(context.clone(), &first.events, None, &first.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
 
     let qualified = read(&context, &snapshot, None, None, None).unwrap();
@@ -7165,7 +7194,7 @@ fn source_revalidation_follows_live_member_and_restores_owned_rows_after_late_am
             &late.next,
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
 
     let ambiguous = read(&context, &snapshot, None, Some(&qualified.revision), None).unwrap();
@@ -7370,7 +7399,7 @@ fn source_revalidation_retains_loaded_pair_outside_h1_pages_and_restores_raw_row
     archive
         .append_provider_log_batch_with_context(context.clone(), &first.events, None, &first.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index_with_diagnostic(&snapshot, "H0");
 
     let initial_extent = fs::metadata(&path).unwrap().len();
@@ -7656,7 +7685,7 @@ fn source_revalidation_retains_loaded_pair_outside_h1_pages_and_restores_raw_row
             &h1_capture.next,
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index_with_diagnostic(&snapshot, "H1");
     let h1_extent = fs::metadata(&path).unwrap().len();
     let (h1_epoch, h1_admission, h1_completed_span, h1_tool_call_rows) =
@@ -7987,7 +8016,7 @@ fn source_revalidation_retains_loaded_pair_outside_h1_pages_and_restores_raw_row
             &h2_history_capture.next,
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     append_native_line(
         &path,
         &commentary_item_line_with_text("msg-commentary-late-C", &text),
@@ -8019,7 +8048,7 @@ fn source_revalidation_retains_loaded_pair_outside_h1_pages_and_restores_raw_row
             &h2_capture.next,
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     let h2_extent_before_index = fs::metadata(&path).unwrap().len();
     let lagging_source_page = source_index_page_with_cursor(&snapshot, Some(h0_cursor));
     let lagging_source_head = super::super::chat_source_index::pointer("agent-1")
@@ -9298,7 +9327,7 @@ fn stale_head_older_cursor_reconciles_qualified_commentary_pair_inside_page() {
     archive
         .append_provider_log_batch_with_context(context.clone(), &first.events, None, &first.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
 
     let first_publication = read(&context, &snapshot, None, None, None).unwrap();
     let first_pair: Vec<_> = first_publication
@@ -9344,7 +9373,7 @@ fn stale_head_older_cursor_reconciles_qualified_commentary_pair_inside_page() {
             &completion.next,
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
 
     let qualified = read(
@@ -9621,7 +9650,7 @@ fn stale_head_older_cursor_records_loaded_pair_outside_page_dto() {
     archive
         .append_provider_log_batch_with_context(context.clone(), &first.events, None, &first.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
 
     let first_publication = read(&context, &snapshot, None, None, None).unwrap();
     let first_pair: Vec<_> = first_publication
@@ -9696,7 +9725,7 @@ fn stale_head_older_cursor_records_loaded_pair_outside_page_dto() {
             &tail.next,
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
 
     // One bounded checkpoint reaches the pair and stops before the third tail
     // row, so the independently scanned prefix is useful but incomplete.
@@ -9900,7 +9929,7 @@ fn pi_original_algorithm_sequence_bridge_reaches_normal_recent_older_and_restart
     archive
         .append_provider_log_batch_with_context(ctx.clone(), &batch.events, None, &batch.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &ctx);
     let recent = read(&ctx, &snapshot, None, None, None).unwrap();
     let older = read(&ctx, &snapshot, recent.next_before.as_deref(), None, None).unwrap();
     let grouped = older
@@ -9992,7 +10021,7 @@ fn pi_repeated_original_legacy_envelopes_refuse_sequence_bridge_without_transcri
     archive
         .append_provider_log_batch_with_context(ctx.clone(), &batch.events, None, &batch.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &ctx);
     let page = read(&ctx, &snapshot, None, None, None).unwrap();
     assert!(page.events.iter().any(|event| event.id == legacy.id));
     assert!(page.events.iter().any(|event| event.id == native_id));
@@ -10244,7 +10273,7 @@ fn disabled_native_interval_cannot_complete_a_pair_or_legacy_claim() {
             &visible.next,
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &ctx);
     for _ in 0..16 {
         if !advance_source_index(&snapshot).unwrap() {
             break;
@@ -10399,7 +10428,7 @@ fn pi_repeated_native_old_algorithm_ids_do_not_bridge_an_unsequenced_legacy_row(
     archive
         .append_provider_log_batch_with_context(ctx.clone(), &batch.events, None, &batch.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &ctx);
     let page = read(&ctx, &snapshot, None, None, None).unwrap();
     assert_eq!(
         page.events
@@ -10697,8 +10726,8 @@ fn legacy_generated_links_are_downgraded_only_in_the_display_projection() {
     archive
         .append_delivered_input_with_context(ctx.clone(), "same", None)
         .unwrap();
-    let fence = input_fence(&ctx, None).unwrap().unwrap();
-    let directory = super::super::conversation_dir("agent-1", &fence.conversation_id).unwrap();
+    let conversation_id = archive.active_conversation_id_for_test("agent-1").unwrap();
+    let directory = super::super::conversation_dir("agent-1", &conversation_id).unwrap();
     let path = directory.join("events.jsonl");
     let mut events: Vec<AgentChatEvent> =
         wardian_core::conversations::read_jsonl_records(&path).unwrap();
@@ -10714,7 +10743,7 @@ fn legacy_generated_links_are_downgraded_only_in_the_display_projection() {
     archive
         .publish_chat_candidate(Candidate {
             context: ctx.clone(),
-            conversation_id: fence.conversation_id,
+            conversation_id,
             events,
             committed_output_bytes: before.len() as u64,
             verified_ids: Default::default(),
@@ -11676,7 +11705,7 @@ fn captured_shape_controlled_legacy_codex_metadata_rejoins_only_certified_commen
     archive
         .append_provider_log_batch_with_context(context.clone(), &batch.events, None, &batch.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
 
     let source_page = source_index_page(&snapshot);
@@ -11847,7 +11876,7 @@ fn captured_shape_controlled_legacy_codex_both_rows_rejoin_only_certified_commen
                 &batch.next,
             )
             .unwrap();
-        finish_projection(&archive);
+        finish_projection(&archive, &context);
         finish_source_index(&snapshot);
 
         let native_rows: Vec<_> = batch
@@ -12117,7 +12146,7 @@ fn controlled_legacy_codex_projected_group_lands_on_older_page_with_recent_loade
                 &batch.next,
             )
             .unwrap();
-        finish_projection(&archive);
+        finish_projection(&archive, &context);
         finish_source_index(&snapshot);
 
         let initial_source = source_index_page(&snapshot);
@@ -12245,7 +12274,7 @@ fn controlled_legacy_codex_projected_group_lands_on_older_page_with_recent_loade
                 &filler_batch.next,
             )
             .unwrap();
-        finish_projection(&archive);
+        finish_projection(&archive, &context);
         finish_source_index(&snapshot);
 
         let recent_source = source_index_page(&snapshot);
@@ -12497,7 +12526,7 @@ fn controlled_legacy_codex_projected_group_retracts_after_late_equal_text_native
                 &first.next,
             )
             .unwrap();
-        finish_projection(&archive);
+        finish_projection(&archive, &context);
         finish_source_index(&snapshot);
 
         let qualified = read(&context, &snapshot, None, None, None).unwrap();
@@ -12596,7 +12625,7 @@ fn controlled_legacy_codex_projected_group_retracts_after_late_equal_text_native
                 &late.next,
             )
             .unwrap();
-        finish_projection(&archive);
+        finish_projection(&archive, &context);
         finish_source_index(&snapshot);
 
         let native_ids = BTreeSet::from([
@@ -12722,7 +12751,7 @@ fn captured_shape_controlled_legacy_codex_final_answer_does_not_join() {
     archive
         .append_provider_log_batch_with_context(context.clone(), &batch.events, None, &batch.next)
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &context);
     finish_source_index(&snapshot);
 
     let page = read(&context, &snapshot, None, None, None).unwrap();
@@ -12819,7 +12848,7 @@ fn assert_claude_narration_projection(text: &str, watch_text: &str) {
     archive
         .append_chat_events_with_context(ctx.clone(), &[watch.clone()])
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &ctx);
     let before = read(&ctx, &source, None, None, None).unwrap();
     assert!(before.events.iter().any(|row| row.id == watch.id));
 
@@ -12843,7 +12872,7 @@ fn assert_claude_narration_projection(text: &str, watch_text: &str) {
             batch.source_proof(),
         )
         .unwrap();
-    finish_projection(&archive);
+    finish_projection(&archive, &ctx);
     finish_source_index(&source);
     for revision in [None, Some(before.revision.as_str())] {
         let page = read(&ctx, &source, None, revision, None).unwrap();
@@ -12952,7 +12981,7 @@ fn claude_chat_render_fixture_preserves_one_prompt_across_recent_and_older_pages
             .unwrap();
         let more = batch.continue_immediately;
         capture = Some(batch.next);
-        finish_projection(&archive);
+        finish_projection(&archive, &context);
         if !more {
             break;
         }

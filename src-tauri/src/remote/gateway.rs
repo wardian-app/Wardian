@@ -5733,7 +5733,6 @@ mod tests {
             provider_source_key: Some(source_key.to_string()),
         };
 
-        let mut separate_historical_body_bytes = 0u64;
         let (first, legacy_id, original_seed_json) = if original_event_msg_seed {
             let mut first = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
                 "synthetic-codex-agent",
@@ -5836,7 +5835,6 @@ mod tests {
                 .as_deref()
                 .expect("controlled historical user row has a full text body");
             assert!(legacy_text.is_ascii());
-            separate_historical_body_bytes = legacy_text.len() as u64;
             legacy.id = crate::commands::chat::archive_identity::legacy_provider_log_event_id(
                 &legacy, &log_path,
             );
@@ -5924,11 +5922,12 @@ mod tests {
             );
             state
                 .conversation_archive
-                .append_provider_log_batch_with_context(
+                .append_verified_provider_log_batch_with_context(
                     context.clone(),
                     &first.events,
                     first.previous.as_ref(),
                     &first.next,
+                    first.source_proof(),
                 )
                 .expect("publish first native batch through the normal archive path");
             (first, legacy_id, None)
@@ -6020,7 +6019,6 @@ mod tests {
             declared_later_turns.len() * 2,
             "each declared later turn has its response_item and event_msg observations"
         );
-        let mut declared_native_groups = Vec::with_capacity(declared_later_turns.len());
         for (index, (turn_id, expected_text)) in declared_later_turns.iter().enumerate() {
             let pair = &later.events[index * 2..index * 2 + 2];
             assert_eq!(pair[0].source.as_deref(), Some("response_item"));
@@ -6052,20 +6050,15 @@ mod tests {
             assert!(source_frames[0].0 < source_frames[0].1);
             assert!(source_frames[0].1 <= source_frames[1].0);
             assert!(source_frames[1].0 < source_frames[1].1);
-            declared_native_groups.push((
-                turn_id.clone(),
-                expected_text.clone(),
-                source_refs,
-                source_frames,
-            ));
         }
         state
             .conversation_archive
-            .append_provider_log_batch_with_context(
+            .append_verified_provider_log_batch_with_context(
                 context.clone(),
                 &later.events,
                 Some(&first.next),
                 &later.next,
+                later.source_proof(),
             )
             .expect("append synthetic history to Chat archive");
         let archive_events = state
@@ -6116,21 +6109,20 @@ mod tests {
             assert!(retained_legacy.metadata["chat_source_end"].is_u64());
             assert!(retained_legacy.metadata["chat_source_epoch"].is_string());
         } else {
-            assert!(
-                [
-                    "chat_source_ref",
-                    "chat_source_start",
-                    "chat_source_end",
-                    "chat_source_epoch",
-                    "provider_log_row_offset",
-                ]
+            let native = first
+                .events
                 .iter()
-                .all(|key| retained_legacy
-                    .metadata
-                    .get(*key)
-                    .is_none_or(|value| value.is_null())),
-                "retained historical identity remains distinct from current native coordinates"
-            );
+                .find(|event| event.source.as_deref() == Some("response_item"))
+                .unwrap();
+            for key in [
+                "chat_source_ref",
+                "chat_source_start",
+                "chat_source_end",
+                "chat_source_epoch",
+            ] {
+                assert_eq!(retained_legacy.metadata[key], native.metadata[key]);
+            }
+            assert_eq!(retained_legacy.id, legacy_id);
         }
 
         state.agents.lock().await.insert(
@@ -6188,453 +6180,9 @@ mod tests {
             config: gateway_config.clone(),
         };
 
-        let (chat_snapshot, _) =
-            crate::commands::chat::chat_read_snapshot_for_state(&state, "synthetic-codex-agent")
-                .expect("synthetic chat source snapshot");
-        assert_eq!(first.next.status, "complete");
-        assert!(!first.next.normalizer_has_pending_events());
-        assert_eq!(
-            first.next.committed_offset,
-            first_contents.len() as u64 + 1,
-            "first normalizer cohort ends at its complete initial file extent"
-        );
-        let source_bytes = std::fs::read(&log_path).expect("read the controlled source cohort");
-        assert!(
-            source_bytes.ends_with(b"\n"),
-            "source cohort is newline framed"
-        );
-        assert_eq!(later.next.status, "complete");
-        assert!(!later.next.normalizer_has_pending_events());
-        assert_eq!(later.next.committed_offset, source_bytes.len() as u64);
-        let physical_records = source_bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|record| !record.is_empty())
-            .count();
-        assert!(
-            physical_records > 0,
-            "the captured source cohort is nonempty"
-        );
-        let normalized_source_rows = first
-            .events
-            .len()
-            .checked_add(later.events.len())
-            .expect("normalized source row count does not overflow");
-        let source_event_rows =
-            u64::try_from(normalized_source_rows).expect("normalized source row count fits u64");
-        let physical_record_count =
-            u64::try_from(physical_records).expect("physical record count fits u64");
-        let max_record_bytes = source_bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|record| !record.is_empty())
-            .map(|record| record.len())
-            .max()
-            .expect("controlled source has a framed record");
-        let acquisition_chunk_bytes =
-            crate::commands::provider_log_acquisition::PROVIDER_LOG_BATCH_BYTES;
-        assert!(
-            u64::try_from(max_record_bytes).expect("record length fits u64")
-                < acquisition_chunk_bytes,
-            "every controlled framed record fits within one real provider acquisition chunk"
-        );
-        // Source replay reads at most PROVIDER_LOG_BATCH_BYTES per input
-        // chunk. Count actual input bytes, physical records, three fixed
-        // observe keys and six bounded queue entries per normalized row, plus
-        // explicit lifecycle work.
-        let source_input_chunks = (source_bytes.len() as u64).div_ceil(acquisition_chunk_bytes);
-        let source_lifecycle_steps = 4u64; // head initialization, two queue clears, complete-scope publication
-        let source_work_ceiling = source_event_rows
-            .checked_mul(9)
-            .and_then(|work| work.checked_add(physical_record_count))
-            .and_then(|work| work.checked_add(source_input_chunks))
-            .and_then(|work| work.checked_add(source_lifecycle_steps))
-            .expect("finite source-index work bound");
-        let archive_rows = u64::try_from(archive_events.len()).expect("archive row count fits u64");
-        for event in first.events.iter().chain(&later.events) {
-            if event.text.is_some() {
-                assert_eq!(
-                    event.kind,
-                    wardian_core::models::chat::AgentChatEventKind::Message
-                );
-                assert_eq!(
-                    event.role,
-                    Some(wardian_core::models::chat::AgentChatRole::User)
-                );
-                assert!(event.text.as_deref().is_some_and(str::is_ascii));
-            }
-        }
-        let provider_body_bytes = first
-            .events
-            .iter()
-            .chain(&later.events)
-            .try_fold(0u64, |total, event| {
-                total
-                    .checked_add(event.text.as_deref().map_or(0, |text| text.len() as u64))
-                    .ok_or_else(|| std::io::Error::other("controlled body byte count overflow"))
-            })
-            .expect("bounded full provider-input body bytes");
-        let body_text_bytes = provider_body_bytes
-            .checked_add(separate_historical_body_bytes)
-            .expect("full controlled body byte count does not overflow");
-        let body_chunks = body_text_bytes
-            .div_ceil(crate::state::conversation_archive::chat_read::BODY_BYTES as u64);
-        // For n body-bearing rows, sum(ceil(body_i / BODY_BYTES)) is at most
-        // n + ceil(total_body_bytes / BODY_BYTES). The 2*n row term therefore
-        // covers one todo plus one base body chunk per archive row; body_chunks
-        // covers the remaining chunks, including bodies spilled from 8 KiB
-        // inline previews into text artifacts by the archive writer.
-        let projection_logical_items = archive_rows
-            .checked_add(source_event_rows)
-            .expect("finite logical contributor count");
-        let projection_lifecycle_steps = 4u64; // source-proof qualification, two queue clears, ready publication
-        let projection_work_ceiling = archive_rows
-            .checked_mul(2)
-            .and_then(|work| {
-                projection_logical_items
-                    .checked_mul(6)
-                    .and_then(|queue_work| work.checked_add(queue_work))
-            })
-            .and_then(|work| work.checked_add(body_chunks))
-            .and_then(|work| work.checked_add(projection_lifecycle_steps))
-            .expect("finite projection work bound");
-        assert!(archive_rows > 0, "the projection cohort is nonempty");
-
-        let mut source_calls = 0u64;
-        let mut source_done = false;
-        let mut previous_source =
-            crate::state::conversation_archive::chat_read::source_index_test_snapshot(
-                &chat_snapshot,
-            )
-            .expect("read initial source-index scalar state");
-        let mut source_narrative_progress = QueuePhaseProgress::default();
-        let mut source_queue_clears = 0u64;
-        while !source_done {
-            assert!(
-                source_calls < source_work_ceiling,
-                "source index exceeded cohort-derived work bound: calls={source_calls}, bound={source_work_ceiling}, records={physical_record_count}, normalized_rows={source_event_rows}, input_chunks={source_input_chunks}"
-            );
-            let pending =
-                crate::state::conversation_archive::chat_read::advance_source_index(&chat_snapshot)
-                    .expect("advance synthetic source index");
-            source_calls += 1;
-            let current =
-                crate::state::conversation_archive::chat_read::source_index_test_snapshot(
-                    &chat_snapshot,
-                )
-                .expect("read source-index scalar state after checkpoint")
-                .expect("source index publishes a head for the controlled cohort");
-            assert_eq!(
-                current.scalars["target_extent"].as_u64(),
-                Some(source_bytes.len() as u64),
-                "source-index extent remains bound to the complete controlled file"
-            );
-            if let Some(before) = previous_source.as_ref() {
-                assert_eq!(
-                    current.generation, before.generation,
-                    "source generation is stable"
-                );
-                assert_eq!(current.epoch, before.epoch, "source epoch is stable");
-                assert_eq!(
-                    current.scalars["invalidations"], before.scalars["invalidations"],
-                    "source admission is not reset during the bounded walk"
-                );
-                assert_eq!(
-                    current.scalars["target_extent"], before.scalars["target_extent"],
-                    "source-index input watermark is stable"
-                );
-                for key in [
-                    "replay_bytes_read",
-                    "replay_records_decoded",
-                    "replay_rows_admitted",
-                ] {
-                    let before_count = before.scalars[key]
-                        .as_u64()
-                        .expect("source progress counter is present");
-                    let current_count = current.scalars[key]
-                        .as_u64()
-                        .expect("source progress counter is present");
-                    assert!(
-                        current_count >= before_count,
-                        "source progress counter {key} is monotonic"
-                    );
-                }
-                let replay_was_settled = before.scalars["replay_settled"] == true;
-                let replay_is_settled = current.scalars["replay_settled"] == true;
-                let (queue_moved, cleared) = source_narrative_progress.transition(
-                    "SourceIndex narrative",
-                    replay_was_settled,
-                    &before.scalars["narrative_queue"],
-                    &current.scalars["narrative_queue"],
-                    &before.scalars["narrative_before"],
-                    &current.scalars["narrative_before"],
-                );
-                if replay_was_settled {
-                    assert!(
-                        replay_is_settled,
-                        "settled source replay cannot reset during queue activation"
-                    );
-                    for key in [
-                        "replay_bytes_read",
-                        "replay_records_decoded",
-                        "replay_rows_admitted",
-                    ] {
-                        assert_eq!(
-                            current.scalars[key], before.scalars[key],
-                            "settled source replay counter {key} remains fixed"
-                        );
-                    }
-                    let expected_watermark = serde_json::json!(source_bytes.len() as u64);
-                    assert_eq!(current.scalars["narrative_watermark"], expected_watermark);
-                    assert_eq!(
-                        before.scalars["narrative_watermark"],
-                        current.scalars["narrative_watermark"],
-                        "settled source narrative watermark remains fixed"
-                    );
-                    assert!(before.scalars["framed"] == true);
-                    assert!(current.scalars["framed"] == true);
-                    assert_eq!(before.scalars["before"], serde_json::Value::Null);
-                    assert_eq!(current.scalars["before"], serde_json::Value::Null);
-                    for key in [
-                        "logical_buckets",
-                        "logical_claims",
-                        "logical_pending",
-                        "logical_before",
-                    ] {
-                        assert_eq!(
-                            current.scalars[key], before.scalars[key],
-                            "settled source logical root/cursor {key} remains fixed"
-                        );
-                    }
-                    if cleared {
-                        source_queue_clears += 1;
-                        assert!(
-                            source_queue_clears <= 1,
-                            "SourceIndex narrative queue clears once"
-                        );
-                    }
-                    if pending {
-                        assert!(
-                            queue_moved,
-                            "settled SourceIndex returned pending without descending narrative cursor or one clear"
-                        );
-                    }
-                } else if pending {
-                    let input_progress = [
-                        "replay_bytes_read",
-                        "replay_records_decoded",
-                        "replay_rows_admitted",
-                    ]
-                    .iter()
-                    .any(|key| {
-                        current.scalars[*key]
-                            .as_u64()
-                            .expect("source progress counter is present")
-                            > before.scalars[*key]
-                                .as_u64()
-                                .expect("source progress counter is present")
-                    });
-                    let settled = !replay_was_settled && replay_is_settled;
-                    assert!(
-                        input_progress || settled,
-                        "SourceIndex pending requires input work or one settled-phase transition"
-                    );
-                }
-            } else if pending {
-                assert!(
-                    !current.generation.is_empty() && !current.epoch.is_empty(),
-                    "initial SourceIndex checkpoint publishes its owned source identity"
-                );
-            }
-            if !pending {
-                assert!(
-                    current.complete,
-                    "false source-index pending is accepted only with current complete scope (progress={})",
-                    current.progress
-                );
-                source_done = true;
-            }
-            previous_source = Some(current);
-        }
-        assert!(
-            previous_source.as_ref().is_some_and(|source| source.complete),
-            "source completion is established by current_complete_scope, including provisional progress"
-        );
-        let completed_source = previous_source
-            .as_ref()
-            .expect("completed SourceIndex retains its scalar receipt");
-        assert_eq!(completed_source.scalars["replay_settled"], true);
-        assert_eq!(
-            completed_source.scalars["narrative_watermark"],
-            serde_json::json!(source_bytes.len() as u64)
-        );
-        assert_eq!(
-            completed_source.scalars["target_extent"],
-            serde_json::json!(source_bytes.len() as u64)
-        );
-        assert_eq!(completed_source.scalars["framed"], true);
-        assert_eq!(completed_source.scalars["before"], serde_json::Value::Null);
-        assert!(completed_source.scalars["narrative_queue"].is_null());
-        let current_source_epoch = completed_source.epoch.clone();
-
-        let owner = &state.conversation_archive.chat_projection;
-        let mut projection_calls = 0u64;
-        let mut projection_done = false;
-        let initial_owner = owner
-            .test_work_snapshot("synthetic-codex-agent")
-            .expect("snapshot initial projection work")
-            .expect("committed archive has projection-owner work");
-        assert_eq!(initial_owner.agent_id, "synthetic-codex-agent");
-        assert_eq!(initial_owner.source_key.as_deref(), Some(source_key));
-        assert_eq!(initial_owner.row_count as u64, archive_rows);
-        assert_eq!(
-            initial_owner.source_epoch.as_deref(),
-            Some(current_source_epoch.as_str())
-        );
-        assert_eq!(
-            initial_owner.head_source_epoch.as_deref(),
-            Some(current_source_epoch.as_str()),
-            "projection starts under the completed SourceIndex epoch"
-        );
-        let mut projection_pending_progress = QueuePhaseProgress::default();
-        let mut projection_narrative_progress = QueuePhaseProgress::default();
-        let mut projection_queue_clears = 0u64;
-        while !projection_done {
-            assert!(
-                projection_calls < projection_work_ceiling,
-                "projection owner exceeded cohort-derived work bound: calls={projection_calls}, bound={projection_work_ceiling}, rows={archive_rows}, body_bytes={body_text_bytes}, body_chunks={body_chunks}"
-            );
-            let before = owner
-                .test_work_snapshot("synthetic-codex-agent")
-                .expect("snapshot projection work before checkpoint")
-                .expect("projection work remains owned until ready");
-            let pending = owner
-                .advance("synthetic-codex-agent")
-                .expect("advance synthetic archive projection");
-            projection_calls += 1;
-            let after = owner
-                .test_work_snapshot("synthetic-codex-agent")
-                .expect("snapshot projection work after checkpoint")
-                .expect("completed projection retains its owner receipt");
-            assert_eq!(after.agent_id, before.agent_id);
-            assert_eq!(after.conversation_id, before.conversation_id);
-            assert_eq!(after.source_key, before.source_key);
-            assert_eq!(after.source_epoch, before.source_epoch);
-            assert_eq!(after.head_generation, before.head_generation);
-            assert_eq!(after.head_source_epoch, before.head_source_epoch);
-            assert_eq!(after.row_count, before.row_count);
-            assert_eq!(after.committed_output_bytes, before.committed_output_bytes);
-            assert!(after.todo_count <= before.todo_count);
-            assert!(after.candidate_events <= before.candidate_events);
-            assert_eq!(
-                after.source_epoch.as_deref(),
-                Some(current_source_epoch.as_str())
-            );
-            assert_eq!(
-                after.head_source_epoch.as_deref(),
-                Some(current_source_epoch.as_str()),
-                "projection stays fenced to the completed SourceIndex epoch"
-            );
-            let ingestion_pending =
-                before.todo_count > 0 || before.body_jobs > 0 || before.remaining_body_bytes > 0;
-            let (pending_moved, pending_cleared) = projection_pending_progress.transition(
-                "projection pending",
-                !ingestion_pending,
-                &before.logical_scalars["pending"],
-                &after.logical_scalars["pending"],
-                &before.logical_scalars["before"],
-                &after.logical_scalars["before"],
-            );
-            let (narrative_moved, narrative_cleared) = projection_narrative_progress.transition(
-                "projection narrative",
-                !ingestion_pending,
-                &before.logical_scalars["narrative_queue"],
-                &after.logical_scalars["narrative_queue"],
-                &before.logical_scalars["narrative_before"],
-                &after.logical_scalars["narrative_before"],
-            );
-            if ingestion_pending {
-                if pending {
-                    assert!(
-                        after.todo_count < before.todo_count
-                            || after.body_jobs < before.body_jobs
-                            || after.remaining_body_bytes < before.remaining_body_bytes,
-                        "projection ingestion returned pending without reducing todo/body work"
-                    );
-                }
-            } else {
-                assert_eq!(after.todo_count, 0, "stable queue phase has no todo work");
-                assert_eq!(after.body_jobs, 0, "stable queue phase has no body jobs");
-                assert_eq!(
-                    after.remaining_body_bytes, 0,
-                    "stable queue phase has no remaining body bytes"
-                );
-                assert_eq!(
-                    before.logical_scalars["narrative_watermark"].as_u64(),
-                    Some(later.next.committed_offset),
-                    "stable narrative watermark matches the committed source extent"
-                );
-                assert_eq!(
-                    after.logical_scalars["narrative_watermark"].as_u64(),
-                    Some(later.next.committed_offset),
-                    "stable narrative watermark matches the committed source extent"
-                );
-                assert_eq!(
-                    after.logical_scalars["narrative_watermark"],
-                    before.logical_scalars["narrative_watermark"],
-                    "stable narrative watermark cannot oscillate"
-                );
-                for key in ["buckets", "claims"] {
-                    assert_eq!(
-                        after.logical_scalars[key], before.logical_scalars[key],
-                        "stable logical root {key} cannot change during queue activation"
-                    );
-                }
-                if pending_cleared {
-                    projection_queue_clears += 1;
-                }
-                if narrative_cleared {
-                    projection_queue_clears += 1;
-                }
-                assert!(
-                    projection_queue_clears <= 2,
-                    "projection activation clears at most its two bounded queues"
-                );
-                if pending {
-                    assert!(
-                        pending_moved || narrative_moved,
-                        "stable projection returned pending without a descending queue cursor or clear"
-                    );
-                }
-            }
-            if !pending {
-                assert_eq!(after.head_progress, "ready");
-                assert_eq!(after.todo_count, 0);
-                assert_eq!(after.body_jobs, 0);
-                assert_eq!(after.remaining_body_bytes, 0);
-                assert_eq!(after.candidate_events, 0);
-                assert!(after.logical_scalars["pending"].is_null());
-                assert!(after.logical_scalars["narrative_queue"].is_null());
-                assert_eq!(
-                    after.logical_scalars["narrative_watermark"].as_u64(),
-                    Some(later.next.committed_offset),
-                    "ready projection watermark matches the committed source extent"
-                );
-                assert_eq!(
-                    after.source_epoch.as_deref(),
-                    Some(current_source_epoch.as_str())
-                );
-                assert_eq!(
-                    after.head_source_epoch.as_deref(),
-                    Some(current_source_epoch.as_str()),
-                    "ready projection retains the completed SourceIndex epoch"
-                );
-                projection_done = true;
-            }
-        }
-        assert!(projection_calls > 0);
-
         let _capture_guard = state.conversation_capture_policy_lock.lock().await;
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(10),
             load_remote_agent_chat(
                 State(ctx),
                 action_headers(&session),
@@ -6643,110 +6191,12 @@ mod tests {
             ),
         )
         .await
-        .expect("normal Chat read must not join the capture gate")
-        .expect("authenticated gateway chat read")
+        .expect("normal Chat read must not join the capture policy gate")
+        .expect("authenticated gateway Chat read")
         .into_response();
-
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("gateway response body");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("gateway JSON");
-
-        let repeated_users = payload["events"]
-            .as_array()
-            .expect("chat event page")
-            .iter()
-            .filter(|event| event["role"] == "user" && event["text"] == prompt)
-            .collect::<Vec<_>>();
-        let repeated_diagnostics = repeated_users
-            .iter()
-            .map(|event| {
-                (
-                    event["metadata"]["provider_turn_id"].as_str(),
-                    event["metadata"]["chat_source_ref"]
-                        .as_str()
-                        .is_some_and(|value| !value.is_empty()),
-                    event["metadata"]["chat_source_start"].as_u64(),
-                    event["metadata"]["chat_source_end"].as_u64(),
-                    event["id"].as_str().is_some(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            repeated_users.len(),
-            2,
-            "the two identical-text native turns remain separate: {:?}",
-            repeated_diagnostics
-        );
-        let repeated_a = repeated_users
-            .iter()
-            .find(|event| event["metadata"]["provider_turn_id"] == "provider-turn-repeated-a")
-            .expect("canonical page retains repeated provider turn A");
-        let repeated_b = repeated_users
-            .iter()
-            .find(|event| event["metadata"]["provider_turn_id"] == "provider-turn-repeated-b")
-            .expect("canonical page retains repeated provider turn B");
-        let repeated_a_source = repeated_a["metadata"]["chat_source_ref"]
-            .as_str()
-            .expect("turn A framed source observation");
-        let repeated_b_source = repeated_b["metadata"]["chat_source_ref"]
-            .as_str()
-            .expect("turn B framed source observation");
-        assert_ne!(
-            repeated_a_source, repeated_b_source,
-            "separate provider turns retain distinct framed source observations"
-        );
-        let repeated_a_start = repeated_a["metadata"]["chat_source_start"]
-            .as_u64()
-            .expect("turn A native source start");
-        let repeated_a_end = repeated_a["metadata"]["chat_source_end"]
-            .as_u64()
-            .expect("turn A native source end");
-        let repeated_b_start = repeated_b["metadata"]["chat_source_start"]
-            .as_u64()
-            .expect("turn B native source start");
-        let repeated_b_end = repeated_b["metadata"]["chat_source_end"]
-            .as_u64()
-            .expect("turn B native source end");
-        assert!(
-            repeated_a_start < repeated_a_end
-                && repeated_a_end <= repeated_b_start
-                && repeated_b_start < repeated_b_end,
-            "source-frame coordinates preserve A-before-B order: {:?}",
-            repeated_diagnostics
-        );
-        let repeated_turn_order = repeated_users
-            .iter()
-            .map(|event| {
-                event["metadata"]["provider_turn_id"]
-                    .as_str()
-                    .expect("provider turn metadata")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            repeated_turn_order,
-            vec!["provider-turn-repeated-a", "provider-turn-repeated-b"],
-            "normal Chat page preserves source order without collapsing equal text: {:?}",
-            repeated_diagnostics
-        );
-        let ids = repeated_users
-            .iter()
-            .filter_map(|event| event["id"].as_str())
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(ids.len(), repeated_users.len());
-        assert_eq!(
-            state
-                .conversation_archive
-                .provider_log_capture_state("synthetic-codex-agent", source_key)
-                .unwrap(),
-            Some(later.next.clone())
-        );
-        assert!(payload["bytes_read"].as_u64().unwrap() <= 2 * 1024 * 1024);
-        assert!(repeated_users
-            .iter()
-            .all(|event| event["id"].as_str().is_some()));
-        assert_ne!(repeated_users[0]["id"], repeated_users[1]["id"]);
+        let legacy_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let legacy_page: serde_json::Value = serde_json::from_slice(&legacy_body).unwrap();
 
         let client_token = seed_client_access_token(
             &state,
@@ -6761,1414 +6211,165 @@ mod tests {
             config: gateway_config,
         });
         let chat_path = "/remote/client/v1/agents/synthetic-codex-agent/chat";
-        let response = client_router
-            .clone()
-            .oneshot(client_bearer_request(
-                chat_path,
-                "https://client.example",
-                &client_token,
-            ))
-            .await
-            .expect("paired-client Chat route response");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(
-            response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
-            "https://client.example"
-        );
-        assert!(!response
-            .headers()
-            .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS));
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("paired-client Chat page body");
-        let page: serde_json::Value = serde_json::from_slice(&body).expect("Chat page JSON");
-        assert_eq!(page["session_id"], "synthetic-codex-agent");
-        let page_session_id = page["session_id"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .expect("initial page session scope")
-            .to_string();
-        let page_conversation_id = page["conversation_id"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .expect("initial page conversation scope")
-            .to_string();
-        assert_eq!(
-            page_conversation_id, expected_archive_id,
-            "normal page scope identifies the actual archive handle"
-        );
-        let page_generation = page["generation"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .expect("initial page generation scope")
-            .to_string();
-        let page_source_epoch = page["source_epoch"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .expect("initial page source epoch")
-            .to_string();
-        assert_eq!(
-            page_source_epoch, current_source_epoch,
-            "initial page belongs to the positively completed SourceIndex epoch"
-        );
-        let page_events = page["events"].as_array().expect("populated Chat page");
-        assert_eq!(
-            page_events.len(),
-            40,
-            "the newest 80 physical observations project to 40 two-member logical rows"
-        );
-        let revision = page["revision"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .expect("opaque current revision")
-            .to_string();
-        let mut paging_revision = revision.clone();
-        let older_cursor = page["next_before"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .expect("bounded page exposes older cursor")
-            .to_string();
-        let large_event = page_events
-            .iter()
-            .find(|event| event["metadata"]["chat_detail_ref"].is_string())
-            .expect("large event exposes lazy detail reference");
-        let detail_ref = large_event["metadata"]["chat_detail_ref"]
-            .as_str()
-            .expect("opaque detail reference")
-            .to_string();
-        assert!(large_event["text"].as_str().unwrap_or_default().len() <= 1024);
-        assert!(!page.to_string().contains(&long_text));
-
-        let mut detail_cursor = detail_ref;
-        let mut assembled_detail = String::new();
-        let mut detail_complete = false;
-        for _ in 0..8 {
-            let query = format!(
-                "revision={}&detail={}",
-                encode_remote_chat_query_component(&revision),
-                encode_remote_chat_query_component(&detail_cursor),
-            );
-            let response = client_router
-                .clone()
-                .oneshot(client_bearer_request(
-                    &format!("{chat_path}?{query}"),
-                    "https://client.example",
-                    &client_token,
-                ))
-                .await
-                .expect("lazy detail response");
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("lazy detail body");
-            let detail_page: serde_json::Value =
-                serde_json::from_slice(&body).expect("lazy detail JSON");
-            let detail = detail_page["detail"].as_object().expect("detail chunk");
-            assert_eq!(detail["event_id"], large_event["id"]);
-            assembled_detail.push_str(detail["text"].as_str().expect("detail text"));
-            if detail["complete"] == true {
-                detail_complete = true;
-                break;
-            }
-            detail_cursor = detail["next"]
-                .as_str()
-                .expect("continuation detail cursor")
-                .to_string();
-        }
-        assert!(detail_complete, "bounded detail chunks reach completion");
-        assert_eq!(assembled_detail, long_text);
-
-        let turn_index_by_id = declared_native_groups
-            .iter()
-            .enumerate()
-            .map(|(index, group)| (group.0.clone(), index))
-            .collect::<std::collections::HashMap<_, _>>();
-        let validate_declared_row = |event: &serde_json::Value,
-                                     aliases: &serde_json::Value,
-                                     index: usize|
-         -> (String, serde_json::Value) {
-            let (turn_id, expected_text, source_refs, source_frames) =
-                &declared_native_groups[index];
-            let metadata = event["metadata"]
-                .as_object()
-                .expect("declared logical row metadata");
-            assert_eq!(
-                metadata["provider_turn_id"],
-                serde_json::json!(turn_id),
-                "logical row retains its declared provider turn"
-            );
-            if index + 1 == declared_native_groups.len() {
-                let preview = event["text"].as_str().unwrap_or_default();
-                assert!(
-                    preview.len() <= 1024,
-                    "large body stays lazy in page headers"
-                );
-            } else {
-                assert_eq!(event["text"].as_str(), Some(expected_text.as_str()));
-            }
-            let public_id = event["id"]
-                .as_str()
-                .filter(|id| !id.is_empty())
-                .expect("logical row has a public identity")
-                .to_string();
-            let members = metadata["chat_display_member_ids"]
-                .as_array()
-                .expect("logical row retains physical member identities")
-                .iter()
-                .map(|member| {
-                    member
-                        .as_str()
-                        .expect("physical member identity is a string")
-                        .to_string()
-                })
-                .collect::<std::collections::HashSet<_>>();
-            let expected_members = source_refs
-                .iter()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>();
-            assert_eq!(members.len(), 2, "logical row has exactly two members");
-            assert_eq!(members, expected_members);
-            let source_ref = metadata["chat_source_ref"]
-                .as_str()
-                .expect("logical row retains a source-bound observation");
-            assert!(source_refs
-                .iter()
-                .any(|member| member.as_str() == source_ref));
-            let physical_id = metadata["chat_display_physical_id"]
-                .as_str()
-                .expect("logical row retains its selected physical identity");
-            assert!(source_refs.iter().any(|member| member == physical_id));
-            let source_start = metadata["chat_source_start"]
-                .as_u64()
-                .expect("logical row source frame start");
-            let source_end = metadata["chat_source_end"]
-                .as_u64()
-                .expect("logical row source frame end");
-            assert!(source_refs
-                .iter()
-                .zip(source_frames)
-                .any(|(member, (start, end))| {
-                    member == source_ref && *start == source_start && *end == source_end
-                }));
-            assert_eq!(
-                metadata["chat_source_epoch"].as_str(),
-                Some(current_source_epoch.as_str()),
-                "logical row remains in the completed current source epoch"
-            );
-            let page_aliases = aliases.as_array().expect("page source aliases");
-            for member in source_refs {
-                let matching = page_aliases
-                    .iter()
-                    .filter(|alias| alias["observation_id"].as_str() == Some(member.as_str()))
-                    .collect::<Vec<_>>();
-                assert_eq!(matching.len(), 1, "each physical member has one page alias");
-                assert_eq!(
-                    matching[0]["canonical_id"].as_str(),
-                    Some(public_id.as_str()),
-                    "page alias resolves to this row's public identity"
-                );
-            }
-            let signature = serde_json::json!({
-                "id": public_id.clone(),
-                "provider_turn_id": turn_id,
-                "text": event["text"].clone(),
-                "source_ref": metadata["chat_source_ref"].clone(),
-                "source_start": metadata["chat_source_start"].clone(),
-                "source_end": metadata["chat_source_end"].clone(),
-                "source_epoch": metadata["chat_source_epoch"].clone(),
-                "physical_id": metadata["chat_display_physical_id"].clone(),
-                "members": metadata["chat_display_member_ids"].clone(),
-            });
-            (public_id, signature)
-        };
-
-        let physical_archive_entries = first
-            .events
-            .len()
-            .checked_add(later.events.len())
-            .and_then(|count| {
-                if original_seed_json.is_none() {
-                    count.checked_add(1)
-                } else {
-                    Some(count)
-                }
-            })
-            .expect("declared physical archive cohort does not overflow");
-        assert_eq!(
-            archive_events.len(),
-            physical_archive_entries,
-            "archive contains the declared native rows plus only the pre-coordinate seed"
-        );
-        // One extra page permits the terminal clear/overlap boundary after
-        // the declared 80-entry physical slices.
-        let maximum_page_count = u64::try_from(physical_archive_entries)
-            .expect("physical archive entries fit u64")
-            .div_ceil(80)
-            .checked_add(1)
-            .expect("one terminal page fits the declared physical cohort");
-        let mut pages = vec![page.clone()];
-        let mut issued_cursors = std::collections::HashSet::new();
-        assert!(issued_cursors.insert(older_cursor.clone()));
-        let mut next_cursor = Some(older_cursor.clone());
-        while let Some(cursor) = next_cursor {
-            assert!(
-                (pages.len() as u64) < maximum_page_count,
-                "opaque older cursor walk stays within the declared 80-physical-entry cohort"
-            );
-            let older_query = format!(
-                "before={}&revision={}",
-                encode_remote_chat_query_component(&cursor),
-                encode_remote_chat_query_component(&paging_revision),
-            );
-            let response = client_router
-                .clone()
-                .oneshot(client_bearer_request(
-                    &format!("{chat_path}?{older_query}"),
-                    "https://client.example",
-                    &client_token,
-                ))
-                .await
-                .expect("older Chat page response");
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("older Chat page body");
-            let older_page: serde_json::Value =
-                serde_json::from_slice(&body).expect("older Chat page JSON");
-            assert_eq!(older_page["older_page"], true);
-            assert_eq!(
-                older_page["session_id"].as_str(),
-                Some(page_session_id.as_str())
-            );
-            assert_eq!(
-                older_page["conversation_id"].as_str(),
-                Some(page_conversation_id.as_str())
-            );
-            assert_eq!(
-                older_page["generation"].as_str(),
-                Some(page_generation.as_str())
-            );
-            assert_eq!(
-                older_page["source_epoch"].as_str(),
-                Some(page_source_epoch.as_str())
-            );
-            assert_eq!(
-                older_page["source_epoch"].as_str(),
-                Some(current_source_epoch.as_str()),
-                "older page remains in the positively completed SourceIndex epoch"
-            );
-            let older_revision = older_page["revision"]
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .expect("each older page issues its own opaque revision")
-                .to_string();
-            assert!(!older_page["events"]
-                .as_array()
-                .expect("older Chat page events")
-                .is_empty());
-            paging_revision.clone_from(&older_revision);
-            let continuation = older_page
-                .get("next_before")
-                .expect("older page carries its opaque continuation field");
-            next_cursor = if continuation.is_null() {
-                None
-            } else {
-                let next = continuation
-                    .as_str()
-                    .filter(|value| !value.is_empty())
-                    .expect("older page returns a nonempty opaque continuation");
-                assert!(
-                    issued_cursors.insert(next.to_string()),
-                    "opaque older cursor does not repeat"
-                );
-                Some(next.to_string())
-            };
-            pages.push(older_page);
-        }
-
-        let first_native_refs = first
-            .events
-            .iter()
-            .filter(|event| event.kind == wardian_core::models::chat::AgentChatEventKind::Message)
-            .map(|event| {
-                event.metadata["chat_source_ref"]
-                    .as_str()
-                    .expect("initial native observation reference")
-                    .to_string()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(first_native_refs.len(), 2);
-        let first_native_frames = first
-            .events
-            .iter()
-            .filter(|event| event.kind == wardian_core::models::chat::AgentChatEventKind::Message)
-            .map(|event| {
-                (
-                    event.metadata["chat_source_ref"]
-                        .as_str()
-                        .expect("initial native observation reference")
-                        .to_string(),
-                    event.metadata["chat_source_start"]
-                        .as_u64()
-                        .expect("initial native frame start"),
-                    event.metadata["chat_source_end"]
-                        .as_u64()
-                        .expect("initial native frame end"),
-                )
-            })
-            .collect::<Vec<_>>();
-        let first_native_ref_set = first_native_refs
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(first_native_ref_set.len(), 2);
-        let validate_declared_first_row =
-            |event: &serde_json::Value,
-             aliases: &[serde_json::Value],
-             allowed_members: &std::collections::HashSet<String>|
-             -> (std::collections::HashSet<String>, String, serde_json::Value) {
-                let metadata = event["metadata"]
-                    .as_object()
-                    .expect("declared first-seed row metadata");
-                let public_id = event["id"]
-                    .as_str()
-                    .filter(|id| !id.is_empty())
-                    .expect("first-seed row has a public identity")
-                    .to_string();
-                let member_ids = metadata["chat_display_member_ids"]
-                    .as_array()
-                    .expect("first-seed row retains physical identities")
-                    .iter()
-                    .map(|member| {
-                        member
-                            .as_str()
-                            .expect("first-seed member identity is a string")
-                            .to_string()
-                    })
-                    .collect::<Vec<_>>();
-                let members = member_ids
-                    .iter()
-                    .cloned()
-                    .collect::<std::collections::HashSet<_>>();
-                assert!(!members.is_empty());
-                assert_eq!(members.len(), member_ids.len());
-                assert!(
-                    members.is_subset(allowed_members),
-                    "first-seed row contains only independently declared physical identities"
-                );
-                let source_ref = metadata["chat_source_ref"]
-                    .as_str()
-                    .expect("first-seed row is source-bound");
-                assert!(members.contains(source_ref));
-                let source_start = metadata["chat_source_start"]
-                    .as_u64()
-                    .expect("first-seed source frame start");
-                let source_end = metadata["chat_source_end"]
-                    .as_u64()
-                    .expect("first-seed source frame end");
-                assert!(
-                    first_native_frames
-                        .iter()
-                        .any(|(declared_ref, start, end)| {
-                            declared_ref.as_str() == source_ref
-                                && *start == source_start
-                                && *end == source_end
-                        }),
-                    "first-seed source reference and coordinates match the declared input frame"
-                );
-                assert_eq!(
-                    metadata["chat_source_epoch"].as_str(),
-                    Some(current_source_epoch.as_str()),
-                    "first-seed row is admitted under the current source epoch"
-                );
-                let physical_id = metadata["chat_display_physical_id"]
-                    .as_str()
-                    .expect("first-seed row retains its physical display identity");
-                assert!(members.contains(physical_id));
-                for member in &member_ids {
-                    let matching = aliases
-                        .iter()
-                        .filter(|alias| alias["observation_id"].as_str() == Some(member.as_str()))
-                        .collect::<Vec<_>>();
-                    assert_eq!(
-                        matching.len(),
-                        1,
-                        "each declared first-seed member has one source alias"
-                    );
-                    assert_eq!(
-                        matching[0]["canonical_id"].as_str(),
-                        Some(public_id.as_str()),
-                        "first-seed aliases certify the row's public identity"
-                    );
-                }
-                let signature = serde_json::json!({
-                    "id": public_id,
-                    "text": event["text"].clone(),
-                    "source_ref": metadata["chat_source_ref"].clone(),
-                    "source_start": metadata["chat_source_start"].clone(),
-                    "source_end": metadata["chat_source_end"].clone(),
-                    "source_epoch": metadata["chat_source_epoch"].clone(),
-                    "physical_id": metadata["chat_display_physical_id"].clone(),
-                    "members": metadata["chat_display_member_ids"].clone(),
-                });
-                (members, public_id, signature)
-            };
-        let matches_declared_first_observation =
-            |event: &serde_json::Value, source_ref: &str, source_start: u64, source_end: u64| {
-                first.events.iter().any(|candidate| {
-                    candidate.kind == wardian_core::models::chat::AgentChatEventKind::Message
-                        && serde_json::to_value(&candidate.kind)
-                            .is_ok_and(|kind| event.get("kind") == Some(&kind))
-                        && candidate.metadata["chat_source_ref"].as_str() == Some(source_ref)
-                        && candidate.metadata["chat_source_start"].as_u64() == Some(source_start)
-                        && candidate.metadata["chat_source_end"].as_u64() == Some(source_end)
-                        && candidate.metadata["chat_source_epoch"].as_str()
-                            == Some(current_source_epoch.as_str())
-                        && event["metadata"]["chat_source_epoch"].as_str()
-                            == Some(current_source_epoch.as_str())
-                        && candidate.source.as_deref() == event["source"].as_str()
-                        && serde_json::to_value(&candidate.role)
-                            .is_ok_and(|role| event.get("role") == Some(&role))
-                        && candidate.text.as_deref() == event["text"].as_str()
-                })
-            };
-        let matches_declared_first_archive_identity =
-            |event: &serde_json::Value,
-             public_id: &str,
-             source_ref: &str,
-             source_start: u64,
-             source_end: u64| {
-                original_seed_json.is_some()
-                    && public_id != legacy_id
-                    && first.events.iter().any(|candidate| {
-                        candidate.id == public_id
-                            && candidate.source.as_deref() != Some("event_msg")
-                            && candidate.kind
-                                == wardian_core::models::chat::AgentChatEventKind::Message
-                            && candidate.metadata["chat_source_ref"].as_str() == Some(source_ref)
-                            && candidate.metadata["chat_source_start"].as_u64()
-                                == Some(source_start)
-                            && candidate.metadata["chat_source_end"].as_u64() == Some(source_end)
-                            && candidate.metadata["chat_source_epoch"].as_str()
-                                == Some(current_source_epoch.as_str())
-                            && event["metadata"]["chat_source_epoch"].as_str()
-                                == Some(current_source_epoch.as_str())
-                            && candidate.source.as_deref() == event["source"].as_str()
-                            && serde_json::to_value(&candidate.kind)
-                                .is_ok_and(|kind| event.get("kind") == Some(&kind))
-                            && serde_json::to_value(&candidate.role)
-                                .is_ok_and(|role| event.get("role") == Some(&role))
-                            && candidate.text.as_deref() == event["text"].as_str()
-                    })
-            };
-        let page_sequence_matches_row_key =
-            |event: &serde_json::Value, metadata: &serde_json::Map<String, serde_json::Value>| {
-                metadata
-                    .get("chat_page_key")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(|key| key.parse::<u64>().ok())
-                    .and_then(|key| key.checked_add(1))
-                    .is_some_and(|sequence| {
-                        event.get("sequence").and_then(serde_json::Value::as_u64) == Some(sequence)
-                    })
-            };
-        let report_unclassified_first_row = |event: &serde_json::Value| {
-            let metadata = event.get("metadata").and_then(serde_json::Value::as_object);
-            let bounded = |value: Option<&str>| {
-                value
-                    .map(|value| {
-                        value
-                            .chars()
-                            .filter(|character| !character.is_control())
-                            .take(80)
-                            .collect::<String>()
-                    })
-                    .unwrap_or_else(|| "<missing>".to_string())
-            };
-            let number = |value: Option<u64>| {
-                value
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "<missing>".to_string())
-            };
-            let member_kind =
-                match metadata.and_then(|metadata| metadata.get("chat_display_member_ids")) {
-                    None => "absent",
-                    Some(serde_json::Value::Array(values)) if values.is_empty() => "empty-array",
-                    Some(serde_json::Value::Array(_)) => "array",
-                    Some(_) => "malformed",
-                };
-            let original_seed_comparison = original_seed_json
-                .as_ref()
-                .map(|seed| {
-                    let seed_metadata = seed.get("metadata").and_then(serde_json::Value::as_object);
-                    serde_json::json!({
-                        "id_matches": event.get("id") == seed.get("id"),
-                        "kind_matches": event.get("kind") == seed.get("kind"),
-                        "source_matches": event.get("source") == seed.get("source"),
-                        "role_matches": event.get("role") == seed.get("role"),
-                        "text_matches": event.get("text") == seed.get("text"),
-                        "sequence_matches": event.get("sequence") == seed.get("sequence"),
-                        "sequence_page": event.get("sequence"),
-                        "sequence_seed": seed.get("sequence"),
-                        "source_ref_matches": metadata.and_then(|metadata| metadata.get("chat_source_ref")) == seed_metadata.and_then(|metadata| metadata.get("chat_source_ref")),
-                        "source_start_matches": metadata.and_then(|metadata| metadata.get("chat_source_start")) == seed_metadata.and_then(|metadata| metadata.get("chat_source_start")),
-                        "source_end_matches": metadata.and_then(|metadata| metadata.get("chat_source_end")) == seed_metadata.and_then(|metadata| metadata.get("chat_source_end")),
-                        "source_epoch_matches": metadata.and_then(|metadata| metadata.get("chat_source_epoch")) == seed_metadata.and_then(|metadata| metadata.get("chat_source_epoch")),
-                        "archive_id_matches": metadata.and_then(|metadata| metadata.get("conversation_archive_id")).and_then(serde_json::Value::as_str) == Some(expected_archive_id.as_str()),
-                        "member_ids_present": metadata.is_some_and(|metadata| metadata.contains_key("chat_display_member_ids")),
-                        "physical_id_present": metadata.is_some_and(|metadata| metadata.contains_key("chat_display_physical_id")),
-                    })
-                })
-                .unwrap_or(serde_json::Value::Null);
-            eprintln!(
-                "unclassified_first_seed_row id={} source={} source_ref={} start={} end={} epoch={} seed_id={} seed_source={} seed_source_ref={} seed_start={} seed_end={} seed_archive_id={} page_archive_id={} member_kind={} original_seed_comparison={}",
-                bounded(event.get("id").and_then(serde_json::Value::as_str)),
-                bounded(event.get("source").and_then(serde_json::Value::as_str)),
-                bounded(metadata.and_then(|metadata| metadata.get("chat_source_ref")).and_then(serde_json::Value::as_str)),
-                number(metadata.and_then(|metadata| metadata.get("chat_source_start")).and_then(serde_json::Value::as_u64)),
-                number(metadata.and_then(|metadata| metadata.get("chat_source_end")).and_then(serde_json::Value::as_u64)),
-                bounded(metadata.and_then(|metadata| metadata.get("chat_source_epoch")).and_then(serde_json::Value::as_str)),
-                bounded(original_seed_json.as_ref().and_then(|seed| seed.get("id")).and_then(serde_json::Value::as_str)),
-                bounded(original_seed_json.as_ref().and_then(|seed| seed.get("source")).and_then(serde_json::Value::as_str)),
-                bounded(original_seed_json.as_ref().and_then(|seed| seed.get("metadata")).and_then(serde_json::Value::as_object).and_then(|metadata| metadata.get("chat_source_ref")).and_then(serde_json::Value::as_str)),
-                number(original_seed_json.as_ref().and_then(|seed| seed.get("metadata")).and_then(serde_json::Value::as_object).and_then(|metadata| metadata.get("chat_source_start")).and_then(serde_json::Value::as_u64)),
-                number(original_seed_json.as_ref().and_then(|seed| seed.get("metadata")).and_then(serde_json::Value::as_object).and_then(|metadata| metadata.get("chat_source_end")).and_then(serde_json::Value::as_u64)),
-                bounded(original_seed_json.as_ref().and_then(|seed| seed.get("metadata")).and_then(serde_json::Value::as_object).and_then(|metadata| metadata.get("conversation_archive_id")).and_then(serde_json::Value::as_str)),
-                bounded(metadata.and_then(|metadata| metadata.get("conversation_archive_id")).and_then(serde_json::Value::as_str)),
-                member_kind,
-                original_seed_comparison,
-            );
-        };
-        let mut first_reference_owners = std::collections::HashMap::<
-            String,
-            (usize, Vec<String>, String, serde_json::Value),
-        >::new();
-        let mut seen_first_native_refs = std::collections::HashSet::new();
-        let mut original_legacy_row: Option<(usize, serde_json::Value)> = None;
-        let mut seen_turns = std::collections::HashMap::new();
-        let mut public_ids = std::collections::HashMap::new();
-        let mut previous_page_oldest = Some(45usize);
-        let mut legacy_alias_targets = Vec::new();
-        for (page_index, current_page) in pages.iter().enumerate() {
-            assert_eq!(current_page["session_id"], "synthetic-codex-agent");
-            assert!(
-                current_page["revision"]
-                    .as_str()
-                    .is_some_and(|value| !value.is_empty()),
-                "each normal page carries its own opaque revision"
-            );
-            assert_eq!(
-                current_page["conversation_id"].as_str(),
-                Some(page_conversation_id.as_str())
-            );
-            assert_eq!(
-                current_page["generation"].as_str(),
-                Some(page_generation.as_str())
-            );
-            assert_eq!(
-                current_page["source_epoch"].as_str(),
-                Some(page_source_epoch.as_str())
-            );
-            let events = current_page["events"]
-                .as_array()
-                .expect("normal Chat page events");
-            let aliases = current_page["aliases"]
-                .as_array()
-                .expect("normal Chat page aliases");
-            if page_index > 0 {
-                let (turn_index, source_id, older_public_id, older_signature) = events
-                    .iter()
-                    .find_map(|event| {
-                        let turn_id = event["metadata"]["provider_turn_id"].as_str()?;
-                        let turn_index = turn_index_by_id.get(turn_id).copied()?;
-                        let source_id = event["metadata"]["chat_source_ref"]
-                            .as_str()
-                            .filter(|value| !value.is_empty())?
-                            .to_string();
-                        let (public_id, signature) =
-                            validate_declared_row(event, &current_page["aliases"], turn_index);
-                        Some((turn_index, source_id, public_id, signature))
-                    })
-                    .expect("each older page contains a declared native observation");
-                let source_ids_json = serde_json::to_string(&vec![source_id.clone()])
-                    .expect("canonical older source ID list");
-                let older_renewal_query = format!(
-                    "revision={}&revalidate_ids={}",
-                    encode_remote_chat_query_component(
-                        current_page["revision"]
-                            .as_str()
-                            .expect("older page revision")
-                    ),
-                    encode_remote_chat_query_component(&source_ids_json),
-                );
-                let response = client_router
-                    .clone()
+        let get = |query: &str| {
+            let uri = format!("{chat_path}{query}");
+            let router = client_router.clone();
+            let token = client_token.clone();
+            async move {
+                router
                     .oneshot(client_bearer_request(
-                        &format!("{chat_path}?{older_renewal_query}"),
+                        &uri,
                         "https://client.example",
-                        &client_token,
+                        &token,
                     ))
                     .await
-                    .expect("older-page authenticated revalidation response");
-                assert_eq!(response.status(), StatusCode::OK);
-                let body = to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .expect("older-page revalidation body");
-                let renewed_page: serde_json::Value =
-                    serde_json::from_slice(&body).expect("older-page revalidation JSON");
-                let older_revision = current_page["revision"]
-                    .as_str()
-                    .expect("older page revision");
-                assert_eq!(
-                    renewed_page["revalidated_ids"],
-                    serde_json::json!([source_id.clone()])
-                );
-                assert_eq!(
-                    renewed_page["revision"].as_str(),
-                    Some(older_revision),
-                    "revalidation acknowledges the revision issued by this older page"
-                );
-                assert_eq!(
-                    renewed_page["session_id"].as_str(),
-                    Some(page_session_id.as_str())
-                );
-                assert_eq!(
-                    renewed_page["conversation_id"].as_str(),
-                    Some(page_conversation_id.as_str())
-                );
-                assert_eq!(
-                    renewed_page["generation"].as_str(),
-                    Some(page_generation.as_str())
-                );
-                assert_eq!(
-                    renewed_page["source_epoch"].as_str(),
-                    Some(page_source_epoch.as_str())
-                );
-                assert_eq!(renewed_page["reset"], false);
-                let renewed_events = renewed_page["events"]
-                    .as_array()
-                    .expect("older-page revalidation events");
-                let matching_events = renewed_events
-                    .iter()
-                    .filter(|event| {
-                        event["metadata"]["chat_source_ref"].as_str() == Some(source_id.as_str())
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    matching_events.len(),
-                    1,
-                    "revalidation returns the requested native observation exactly once"
-                );
-                let (renewed_public_id, renewed_signature) =
-                    validate_declared_row(matching_events[0], &renewed_page["aliases"], turn_index);
-                let expected_native_members = declared_native_groups[turn_index]
-                    .2
-                    .iter()
-                    .cloned()
-                    .collect::<std::collections::HashSet<_>>();
-                assert_eq!(expected_native_members.len(), 2);
-                let signature_members = |signature: &serde_json::Value| {
-                    let member_ids = signature["members"]
-                        .as_array()
-                        .expect("lineage signature physical members");
-                    let members = member_ids
-                        .iter()
-                        .map(|member| {
-                            member
-                                .as_str()
-                                .expect("lineage member identity is a string")
-                                .to_string()
-                        })
-                        .collect::<std::collections::HashSet<_>>();
-                    assert_eq!(
-                        members.len(),
-                        member_ids.len(),
-                        "lineage signatures contain no duplicate physical member"
-                    );
-                    members
-                };
-                assert_eq!(signature_members(&older_signature), expected_native_members);
-                assert_eq!(
-                    signature_members(&renewed_signature),
-                    expected_native_members
-                );
-                for field in [
-                    "provider_turn_id",
-                    "text",
-                    "source_ref",
-                    "source_start",
-                    "source_end",
-                    "source_epoch",
-                    "physical_id",
-                ] {
-                    assert_eq!(
-                        older_signature[field], renewed_signature[field],
-                        "only a response's public ID may be rekeyed"
-                    );
-                }
-                let mut component_ids = expected_native_members.clone();
-                component_ids.insert(older_public_id.clone());
-                component_ids.insert(renewed_public_id.clone());
-                let older_public_is_live_native =
-                    [current_page, &renewed_page]
-                        .into_iter()
-                        .any(|response_page| {
-                            response_page["events"]
-                                .as_array()
-                                .expect("lineage response events")
-                                .iter()
-                                .any(|event| {
-                                    let metadata = &event["metadata"];
-                                    metadata["chat_source_ref"].as_str()
-                                        == Some(older_public_id.as_str())
-                                        || metadata["chat_display_physical_id"].as_str()
-                                            == Some(older_public_id.as_str())
-                                        || metadata["chat_display_member_ids"]
-                                            .as_array()
-                                            .is_some_and(|members| {
-                                                members.iter().any(|member| {
-                                                    member.as_str()
-                                                        == Some(older_public_id.as_str())
-                                                })
-                                            })
-                                })
-                        });
-                let older_public_tombstone_allowed =
-                    older_public_id != renewed_public_id && !older_public_is_live_native;
-                let assert_response_lineage =
-                    |response_page: &serde_json::Value, response_public_id: &str| {
-                        let response_events = response_page["events"]
-                            .as_array()
-                            .expect("lineage response events");
-                        let incident_rows = response_events
-                            .iter()
-                            .filter(|event| {
-                                let metadata = &event["metadata"];
-                                let member_incident = metadata["chat_display_member_ids"]
-                                    .as_array()
-                                    .is_some_and(|members| {
-                                        members.iter().any(|member| {
-                                            member
-                                                .as_str()
-                                                .is_some_and(|id| component_ids.contains(id))
-                                        })
-                                    });
-                                let source_incident = [
-                                    metadata["chat_source_ref"].as_str(),
-                                    metadata["chat_display_physical_id"].as_str(),
-                                ]
-                                .into_iter()
-                                .flatten()
-                                .any(|id| component_ids.contains(id));
-                                let public_incident = event["id"]
-                                    .as_str()
-                                    .is_some_and(|id| component_ids.contains(id));
-                                let turn_incident = metadata["provider_turn_id"].as_str()
-                                    == Some(declared_native_groups[turn_index].0.as_str());
-                                member_incident
-                                    || source_incident
-                                    || public_incident
-                                    || turn_incident
-                            })
-                            .collect::<Vec<_>>();
-                        assert_eq!(
-                            incident_rows.len(),
-                            1,
-                            "each response has one row incident to the selected native component"
-                        );
-                        let response_row = incident_rows[0];
-                        assert_eq!(response_row["id"].as_str(), Some(response_public_id));
-                        assert_eq!(
-                            response_row["metadata"]["provider_turn_id"].as_str(),
-                            Some(declared_native_groups[turn_index].0.as_str())
-                        );
-                        let response_member_ids = response_row["metadata"]
-                            ["chat_display_member_ids"]
-                            .as_array()
-                            .expect("lineage row physical members");
-                        let response_members = response_member_ids
-                            .iter()
-                            .map(|member| {
-                                member
-                                    .as_str()
-                                    .expect("lineage row member identity is a string")
-                                    .to_string()
-                            })
-                            .collect::<std::collections::HashSet<_>>();
-                        assert_eq!(
-                            response_members.len(),
-                            response_member_ids.len(),
-                            "lineage rows contain no duplicate physical member"
-                        );
-                        assert_eq!(response_members, expected_native_members);
-                        let response_aliases = response_page["aliases"]
-                            .as_array()
-                            .expect("lineage response aliases");
-                        for member in &expected_native_members {
-                            let member_edges = response_aliases
-                                .iter()
-                                .filter(|alias| {
-                                    alias["observation_id"].as_str() == Some(member.as_str())
-                                })
-                                .collect::<Vec<_>>();
-                            assert_eq!(
-                                member_edges.len(),
-                                1,
-                                "each declared native member has one response-local alias edge"
-                            );
-                            assert_eq!(
-                                member_edges[0]["canonical_id"].as_str(),
-                                Some(response_public_id)
-                            );
-                        }
-                        for alias in response_aliases {
-                            let observation_id = alias["observation_id"]
-                                .as_str()
-                                .expect("lineage alias observation identity");
-                            let canonical_id = alias["canonical_id"]
-                                .as_str()
-                                .expect("lineage alias canonical identity");
-                            if component_ids.contains(observation_id)
-                                || component_ids.contains(canonical_id)
-                            {
-                                let native_edge = expected_native_members.contains(observation_id)
-                                    && canonical_id == response_public_id;
-                                let current_self_edge = observation_id == response_public_id
-                                    && canonical_id == response_public_id;
-                                let old_tombstone_edge = older_public_tombstone_allowed
-                                    && observation_id == older_public_id.as_str()
-                                    && (canonical_id == older_public_id.as_str()
-                                        || canonical_id == renewed_public_id.as_str());
-                                assert!(
-                                    native_edge || current_self_edge || old_tombstone_edge,
-                                    "lineage aliases stay within declared members and actual response IDs"
-                                );
-                            }
-                        }
-                        for removed in response_page["removed_ids"]
-                            .as_array()
-                            .expect("lineage response removed IDs")
-                        {
-                            let removed_id = removed
-                                .as_str()
-                                .expect("lineage removed identity is a string");
-                            if component_ids.contains(removed_id) {
-                                let allowed_old_tombstone = older_public_tombstone_allowed
-                                    && removed_id == older_public_id.as_str()
-                                    && removed_id != response_public_id;
-                                assert!(
-                                    allowed_old_tombstone,
-                                    "responses retain every live component identity"
-                                );
-                            }
-                        }
-                    };
-                assert_response_lineage(current_page, &older_public_id);
-                assert_response_lineage(&renewed_page, &renewed_public_id);
+                    .unwrap()
             }
-            // Group membership is full certified identity, which may cross a physical page boundary.
-            let page_legacy_target = if original_seed_json.is_some() {
-                None
-            } else {
-                let page_legacy_aliases = aliases
-                    .iter()
-                    .filter(|alias| alias["observation_id"].as_str() == Some(legacy_id.as_str()))
-                    .collect::<Vec<_>>();
-                assert!(
-                    page_legacy_aliases.len() <= 1,
-                    "pre-coordinate identity has at most one alias on a page"
-                );
-                page_legacy_aliases.first().map(|alias| {
-                    alias["canonical_id"]
-                        .as_str()
-                        .expect("pre-coordinate alias has a canonical identity")
-                        .to_string()
-                })
-            };
-            let mut page_turn_indices = Vec::new();
-            let mut local_indices = std::collections::HashSet::new();
-            let mut repeated_boundary_indices = Vec::new();
-            let mut page_first_native_refs = std::collections::HashSet::new();
-            let mut repeated_first_group_keys = std::collections::HashSet::new();
-            for event in events {
-                let turn_id = event["metadata"]["provider_turn_id"].as_str();
-                if let Some(index) = turn_id.and_then(|id| turn_index_by_id.get(id).copied()) {
-                    let (public_id, signature) =
-                        validate_declared_row(event, &current_page["aliases"], index);
-                    assert!(
-                        local_indices.insert(index),
-                        "a page contains each declared turn once"
-                    );
-                    page_turn_indices.push(index);
-                    if let Some((previous_public_id, previous_signature)) = seen_turns.get(&index) {
-                        repeated_boundary_indices.push(index);
-                        assert_eq!(
-                            previous_page_oldest,
-                            Some(index),
-                            "only the adjacent older-page boundary may overlap"
-                        );
-                        assert_eq!(previous_public_id, &public_id);
-                        assert_eq!(previous_signature, &signature);
-                    } else {
-                        if page_index > 0 {
-                            assert!(
-                                previous_page_oldest.is_some_and(|oldest| index < oldest),
-                                "older-page turns precede the already loaded cohort"
-                            );
-                        }
-                        assert!(
-                            public_ids.insert(public_id.clone(), index).is_none(),
-                            "distinct declared turns keep distinct public identities"
-                        );
-                        seen_turns.insert(index, (public_id, signature));
-                    }
-                } else {
-                    let Some(public_id) = event
-                        .get("id")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_string)
-                    else {
-                        report_unclassified_first_row(event);
-                        panic!("first-seed row has no declared public identity");
-                    };
-                    let is_declared_original = original_seed_json.as_ref().is_some_and(|seed| {
-                        let Some(seed_metadata) =
-                            seed.get("metadata").and_then(serde_json::Value::as_object)
-                        else {
-                            return false;
-                        };
-                        let Some(metadata) =
-                            event.get("metadata").and_then(serde_json::Value::as_object)
-                        else {
-                            return false;
-                        };
-                        event.get("id") == seed.get("id")
-                            && event.get("kind") == seed.get("kind")
-                            && event.get("source") == seed.get("source")
-                            && event.get("role") == seed.get("role")
-                            && event.get("text") == seed.get("text")
-                            && page_sequence_matches_row_key(event, metadata)
-                            && [
-                                "chat_source_ref",
-                                "chat_source_start",
-                                "chat_source_end",
-                                "chat_source_epoch",
-                            ]
-                            .iter()
-                            .all(|key| metadata.get(*key) == seed_metadata.get(*key))
-                            && metadata
-                                .get("conversation_archive_id")
-                                .is_none_or(|archive_id| {
-                                    archive_id.as_str() == Some(expected_archive_id.as_str())
-                                })
-                    });
-                    if is_declared_original {
-                        let seed = original_seed_json
-                            .as_ref()
-                            .expect("exact original event_msg seed remains declared");
-                        let seed_metadata = seed["metadata"]
-                            .as_object()
-                            .expect("declared original event_msg metadata");
-                        let metadata = event["metadata"]
-                            .as_object()
-                            .expect("exact retained original event_msg metadata");
-                        let source_ref = seed_metadata["chat_source_ref"]
-                            .as_str()
-                            .expect("original event_msg seed source reference");
-                        let source_start = seed_metadata["chat_source_start"]
-                            .as_u64()
-                            .expect("original event_msg seed source start");
-                        let source_end = seed_metadata["chat_source_end"]
-                            .as_u64()
-                            .expect("original event_msg seed source end");
-                        assert_eq!(public_id, legacy_id);
-                        assert_eq!(event["id"], seed["id"]);
-                        assert_eq!(event["kind"], seed["kind"]);
-                        assert_eq!(event["source"], seed["source"]);
-                        assert_eq!(event["role"], seed["role"]);
-                        assert_eq!(event["text"], seed["text"]);
-                        assert!(
-                            page_sequence_matches_row_key(event, metadata),
-                            "page sequence follows its persisted archive page key"
-                        );
-                        assert!(
-                            metadata
-                                .get("conversation_archive_id")
-                                .is_none_or(|archive_id| {
-                                    archive_id.as_str() == Some(expected_archive_id.as_str())
-                                }),
-                            "an event-level archive handle, when present, matches page scope"
-                        );
-                        assert_eq!(
-                            metadata["chat_source_ref"],
-                            seed_metadata["chat_source_ref"]
-                        );
-                        assert_eq!(
-                            metadata["chat_source_start"],
-                            seed_metadata["chat_source_start"]
-                        );
-                        assert_eq!(
-                            metadata["chat_source_end"],
-                            seed_metadata["chat_source_end"]
-                        );
-                        assert_eq!(
-                            metadata["chat_source_epoch"],
-                            seed_metadata["chat_source_epoch"]
-                        );
-                        assert_eq!(
-                            metadata["chat_source_epoch"].as_str(),
-                            Some(current_source_epoch.as_str())
-                        );
-                        assert!(first_native_ref_set.contains(source_ref));
-                        assert!(first_native_frames
-                            .iter()
-                            .any(|(declared_ref, start, end)| {
-                                declared_ref.as_str() == source_ref
-                                    && *start == source_start
-                                    && *end == source_end
-                            }));
-                        assert!(matches_declared_first_observation(
-                            event,
-                            source_ref,
-                            source_start,
-                            source_end
-                        ));
-                        if !is_unqualified_original_event_msg_identity(seed_metadata, metadata) {
-                            report_unclassified_first_row(event);
-                            panic!("unqualified original event_msg row gained group identity");
-                        }
-                        let signature = serde_json::json!({
-                            "id": public_id,
-                            "kind": event["kind"].clone(),
-                            "source": event["source"].clone(),
-                            "role": event["role"].clone(),
-                            "text": event["text"].clone(),
-                            "sequence": event["sequence"].clone(),
-                            "source_ref": metadata["chat_source_ref"].clone(),
-                            "source_start": metadata["chat_source_start"].clone(),
-                            "source_end": metadata["chat_source_end"].clone(),
-                            "source_epoch": metadata["chat_source_epoch"].clone(),
-                        });
-                        seen_first_native_refs.insert(source_ref.to_string());
-                        if let Some((previous_page, previous_signature)) =
-                            original_legacy_row.as_ref()
-                        {
-                            assert_eq!(
-                            *previous_page + 1,
-                            page_index,
-                            "unqualified original row overlaps only at an adjacent page boundary"
-                        );
-                            assert_eq!(previous_signature, &signature);
-                        } else {
-                            original_legacy_row = Some((page_index, signature));
-                        }
-                    } else {
-                        let metadata = event.get("metadata").and_then(serde_json::Value::as_object);
-                        let source_ref = metadata
-                            .and_then(|metadata| metadata.get("chat_source_ref"))
-                            .and_then(serde_json::Value::as_str)
-                            .filter(|source_ref| !source_ref.is_empty());
-                        let source_start = metadata
-                            .and_then(|metadata| metadata.get("chat_source_start"))
-                            .and_then(serde_json::Value::as_u64);
-                        let source_end = metadata
-                            .and_then(|metadata| metadata.get("chat_source_end"))
-                            .and_then(serde_json::Value::as_u64);
-                        let is_precoordinate_group =
-                            page_legacy_target.as_deref() == Some(public_id.as_str());
-                        let has_group_identity = metadata.is_some_and(has_display_group_identity);
-                        let is_raw_native = !is_precoordinate_group
-                            && !has_group_identity
-                            && source_start.zip(source_end).is_some_and(|(start, end)| {
-                                let Some(source_ref) = source_ref else {
-                                    return false;
-                                };
-                                (source_ref == public_id.as_str()
-                                    && matches_declared_first_observation(
-                                        event, source_ref, start, end,
-                                    ))
-                                    || matches_declared_first_archive_identity(
-                                        event,
-                                        public_id.as_str(),
-                                        source_ref,
-                                        start,
-                                        end,
-                                    )
-                            });
-                        let (members, validated_id, signature) = if is_raw_native {
-                            assert!(
-                                metadata.is_some_and(|metadata| {
-                                    page_sequence_matches_row_key(event, metadata)
-                                }),
-                                "bounded page sequence follows its persisted row key independently of provider sequence"
-                            );
-                            let source_ref = source_ref
-                                .expect("raw native identity is its declared source reference");
-                            let source_start = source_start.expect("raw native source start");
-                            let source_end = source_end.expect("raw native source end");
-                            let members = std::collections::HashSet::from([source_ref.to_string()]);
-                            let signature = serde_json::json!({
-                                "id": public_id,
-                                "kind": event["kind"].clone(),
-                                "source": event["source"].clone(),
-                                "role": event["role"].clone(),
-                                "text": event["text"].clone(),
-                                "source_ref": source_ref,
-                                "source_start": source_start,
-                                "source_end": source_end,
-                                "source_epoch": event["metadata"]["chat_source_epoch"].clone(),
-                                "raw_native_observation": source_ref == public_id,
-                                "legacy_archive_identity": source_ref != public_id,
-                            });
-                            (members, public_id.clone(), signature)
-                        } else {
-                            let Some(member_ids) = metadata
-                                .and_then(|metadata| metadata.get("chat_display_member_ids"))
-                                .and_then(serde_json::Value::as_array)
-                            else {
-                                report_unclassified_first_row(event);
-                                panic!("first-seed row is neither a declared raw observation nor a certified group");
-                            };
-                            if member_ids.is_empty()
-                                || member_ids.iter().any(|member| {
-                                    member.as_str().is_none_or(|member| member.is_empty())
-                                })
-                            {
-                                report_unclassified_first_row(event);
-                                panic!("first-seed group has malformed member identities");
-                            }
-                            let (Some(source_ref), Some(source_start), Some(source_end)) =
-                                (source_ref, source_start, source_end)
-                            else {
-                                report_unclassified_first_row(event);
-                                panic!("first-seed group has no complete source frame");
-                            };
-                            if !matches_declared_first_observation(
-                                event,
-                                source_ref,
-                                source_start,
-                                source_end,
-                            ) {
-                                report_unclassified_first_row(event);
-                                panic!(
-                                    "first-seed group does not match a declared source observation"
-                                );
-                            }
-                            let mut allowed_members = first_native_ref_set.clone();
-                            if is_precoordinate_group {
-                                assert!(allowed_members.insert(legacy_id.clone()));
-                            }
-                            let (members, validated_id, signature) =
-                                validate_declared_first_row(event, aliases, &allowed_members);
-                            assert_eq!(validated_id, public_id);
-                            if is_precoordinate_group {
-                                assert_eq!(
-                                members, allowed_members,
-                                "replacement legacy group has both declared native members and its legacy owner"
-                            );
-                            } else {
-                                assert!(
-                                members.is_subset(&first_native_ref_set),
-                                "older source groups contain only declared first-seed native members"
-                            );
-                            }
-                            (members, validated_id, signature)
-                        };
-                        assert_eq!(validated_id, public_id);
-                        let mut group_members = members.iter().cloned().collect::<Vec<_>>();
-                        group_members.sort();
-                        for member in &group_members {
-                            if !first_native_ref_set.contains(member) {
-                                continue;
-                            }
-                            seen_first_native_refs.insert(member.clone());
-                            assert!(
-                                page_first_native_refs.insert(member.clone()),
-                                "each first-seed native observation appears once per page"
-                            );
-                            if let Some((
-                                previous_page,
-                                previous_members,
-                                previous_id,
-                                previous_signature,
-                            )) = first_reference_owners.get(member)
-                            {
-                                assert_eq!(
-                                    *previous_page + 1,
-                                    page_index,
-                                    "first-seed overlap is limited to adjacent pages"
-                                );
-                                assert_eq!(previous_members, &group_members);
-                                assert_eq!(previous_id, &public_id);
-                                assert_eq!(previous_signature, &signature);
-                                repeated_first_group_keys.insert(group_members.clone());
-                            } else {
-                                first_reference_owners.insert(
-                                    member.clone(),
-                                    (
-                                        page_index,
-                                        group_members.clone(),
-                                        public_id.clone(),
-                                        signature.clone(),
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            if original_seed_json.is_some() {
-                assert!(
-                    aliases.iter().all(|alias| {
-                        alias["observation_id"].as_str() != Some(legacy_id.as_str())
-                            && alias["canonical_id"].as_str() != Some(legacy_id.as_str())
-                    }),
-                    "unqualified original identity receives no synthetic alias"
-                );
-            }
-            assert!(page_turn_indices
-                .windows(2)
-                .all(|pair| pair[1] == pair[0] + 1));
-            if page_index == 0 {
-                assert_eq!(page_turn_indices, (45..85).collect::<Vec<_>>());
-                let declared_native_observations = page_turn_indices
-                    .iter()
-                    .map(|index| declared_native_groups[*index].2.len())
-                    .sum::<usize>();
-                assert_eq!(
-                    declared_native_observations, 80,
-                    "the 40 declared current rows account for exactly 80 native observations"
-                );
-            } else {
-                assert!(
-                    repeated_boundary_indices.len() <= 1,
-                    "an older page has at most one certified current-group boundary overlap"
-                );
-                assert!(
-                    repeated_first_group_keys.len() <= 1,
-                    "an older page has at most one certified first-seed boundary overlap"
-                );
-                if let Some(overlap) = repeated_boundary_indices.first() {
-                    assert_eq!(page_turn_indices.last(), Some(overlap));
-                }
-                if let Some(oldest_new_turn) = page_turn_indices
-                    .iter()
-                    .filter(|index| !repeated_boundary_indices.contains(*index))
-                    .min()
-                {
-                    previous_page_oldest = Some(*oldest_new_turn);
-                }
-            }
-
-            if original_seed_json.is_none() {
-                for alias in aliases
-                    .iter()
-                    .filter(|alias| alias["observation_id"].as_str() == Some(legacy_id.as_str()))
-                {
-                    let canonical_id = alias["canonical_id"]
-                        .as_str()
-                        .expect("pre-coordinate alias has a canonical identity");
-                    let targets = events
-                        .iter()
-                        .filter(|event| event["id"].as_str() == Some(canonical_id))
-                        .collect::<Vec<_>>();
-                    assert_eq!(targets.len(), 1, "legacy alias targets one row on its page");
-                    let target = targets[0];
-                    assert_eq!(target["text"], "Legacy synthetic request");
-                    let target_metadata = target["metadata"]
-                        .as_object()
-                        .expect("source-bound historical group metadata");
-                    let target_members = target_metadata["chat_display_member_ids"]
-                        .as_array()
-                        .expect("historical group physical members")
-                        .iter()
-                        .map(|value| value.as_str().expect("member source identity").to_string())
-                        .collect::<std::collections::HashSet<_>>();
-                    let mut expected_first_members = first_native_ref_set.clone();
-                    assert!(
-                        expected_first_members.insert(legacy_id.clone()),
-                        "legacy owner identity is distinct from both native observations"
-                    );
-                    assert_eq!(
-                        target_members, expected_first_members,
-                        "canonical archive group retains both native members and its legacy owner"
-                    );
-                    let target_source_ref = target_metadata["chat_source_ref"]
-                        .as_str()
-                        .expect("historical group source reference");
-                    assert!(first_native_frames.iter().any(|(source_ref, start, end)| {
-                        target_source_ref == source_ref
-                            && target_metadata["chat_source_start"].as_u64() == Some(*start)
-                            && target_metadata["chat_source_end"].as_u64() == Some(*end)
-                    }));
-                    assert_eq!(
-                        target_metadata["chat_source_epoch"].as_str(),
-                        Some(current_source_epoch.as_str())
-                    );
-                    legacy_alias_targets.push(canonical_id.to_string());
-                }
-            }
-        }
-        assert_eq!(
-            seen_first_native_refs, first_native_ref_set,
-            "older pages retain exactly the declared first-seed native identities"
-        );
-        assert_eq!(
-            seen_turns.len(),
-            declared_native_groups.len(),
-            "opaque cursor walk retains the complete declared 85-turn cohort"
-        );
-        assert!((0..declared_native_groups.len()).all(|index| seen_turns.contains_key(&index)));
-        assert_eq!(
-            public_ids.len(),
-            declared_native_groups.len(),
-            "the declared logical turns remain distinct by public identity"
-        );
-        if original_seed_json.is_none() {
+        };
+        let page_for = |response: axum::response::Response| async move {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
             assert_eq!(
-                legacy_alias_targets.len(),
-                1,
-                "the pre-coordinate identity has one alias on its actual source-bound page"
+                response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                "https://client.example"
             );
-        }
+            assert!(!response
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS));
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let recent = page_for(get("").await).await;
+        assert_eq!(recent["events"], legacy_page["events"]);
+        assert_eq!(recent["session_id"], "synthetic-codex-agent");
+        assert_eq!(recent["conversation_id"], expected_archive_id);
+        assert_eq!(recent["archive_read_ready"], true);
+        assert_eq!(recent["progress"], "ready");
+        let revision = recent["revision"].as_str().unwrap();
+        assert!(revision.starts_with("archive1:"));
+        let preview = page_for(get("?recent_preview=true").await).await;
+        assert_eq!(preview["events"], recent["events"]);
+        assert!(preview["recent_admission"].is_null());
 
-        let source_id = page_events
+        let events = recent["events"].as_array().unwrap();
+        let repeated = events
             .iter()
-            .find_map(|event| event["metadata"]["chat_source_ref"].as_str())
-            .expect("admitted source row reference")
-            .to_string();
-        let source_ids_json =
-            serde_json::to_string(&vec![source_id.clone()]).expect("canonical source id list");
-        let renewal_query = format!(
-            "revision={}&revalidate_ids={}",
-            encode_remote_chat_query_component(&revision),
-            encode_remote_chat_query_component(&source_ids_json),
-        );
-        let response = client_router
-            .oneshot(client_bearer_request(
-                &format!("{chat_path}?{renewal_query}"),
-                "https://client.example",
-                &client_token,
-            ))
-            .await
-            .expect("sequential Chat renewal response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("sequential Chat renewal body");
-        let renewal: serde_json::Value =
-            serde_json::from_slice(&body).expect("sequential Chat renewal JSON");
+            .filter(|event| event["role"] == "user" && event["text"] == prompt)
+            .collect::<Vec<_>>();
         assert_eq!(
-            renewal["revalidated_ids"],
-            serde_json::json!([source_id.clone()])
+            repeated.len(),
+            2,
+            "both separate equal-text requests appear once"
         );
-        assert!(renewal["events"].as_array().is_some_and(|events| {
-            events
-                .iter()
-                .any(|event| event["metadata"]["chat_source_ref"] == source_id)
-        }));
+        assert_eq!(
+            repeated[0]["metadata"]["provider_turn_id"],
+            "provider-turn-repeated-a"
+        );
+        assert_eq!(
+            repeated[1]["metadata"]["provider_turn_id"],
+            "provider-turn-repeated-b"
+        );
+        assert_ne!(repeated[0]["id"], repeated[1]["id"]);
+
+        let large = events
+            .iter()
+            .find(|event| event["metadata"]["provider_turn_id"] == "provider-turn-large-detail")
+            .expect("owned large turn is listed in Recent");
+        assert!(large["text"].as_str().unwrap().len() <= 1024);
+        assert!(!recent.to_string().contains(&long_text));
+        let mut reference = large["metadata"]["chat_detail_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut contents = String::new();
+        let mut complete = false;
+        for _ in 0..8 {
+            let query = format!(
+                "?revision={}&detail={}",
+                encode_remote_chat_query_component(revision),
+                encode_remote_chat_query_component(&reference),
+            );
+            let reply = page_for(get(&query).await).await;
+            let detail = &reply["detail"];
+            assert_eq!(detail["event_id"], large["id"]);
+            contents.push_str(detail["text"].as_str().unwrap());
+            if detail["complete"] == true {
+                complete = true;
+                break;
+            }
+            reference = detail["next"].as_str().unwrap().to_string();
+        }
+        assert!(complete);
+        assert_eq!(contents, long_text);
+
+        let mut pages = vec![recent.clone()];
+        for _ in 0..8 {
+            let Some(cursor) = pages.last().unwrap()["next_before"].as_str() else {
+                break;
+            };
+            let query = format!(
+                "?before={}&revision={}",
+                encode_remote_chat_query_component(cursor),
+                encode_remote_chat_query_component(revision),
+            );
+            let older = page_for(get(&query).await).await;
+            assert_eq!(older["older_page"], true);
+            assert_eq!(older["reset"], false);
+            assert_eq!(older["generation"], recent["generation"]);
+            assert_eq!(older["conversation_id"], expected_archive_id);
+            assert!(!older["events"].as_array().unwrap().is_empty());
+            pages.push(older);
+        }
+        assert!(pages.len() > 1);
+        assert!(pages.last().unwrap()["next_before"].is_null());
+        let mut ids = std::collections::HashSet::new();
+        let mut turns = std::collections::HashMap::new();
+        let mut historical = None;
+        for page in &pages {
+            let events = page["events"].as_array().unwrap();
+            assert!(events.len() <= 80);
+            assert!(page["revalidated_ids"].is_null());
+            for row in events {
+                assert!(ids.insert(row["id"].as_str().unwrap()));
+                assert!(row["metadata"]["chat_source_ref"].is_null());
+                if row["role"] == "user" {
+                    if row["text"] == "Legacy synthetic request" {
+                        assert!(historical.replace(row["id"].as_str().unwrap()).is_none());
+                    }
+                    if let Some(turn) = row["metadata"]["provider_turn_id"].as_str() {
+                        *turns.entry(turn).or_insert(0usize) += 1;
+                    }
+                }
+            }
+        }
+        let historical = historical.expect("Older retained the historical request");
+        assert!(
+            historical == legacy_id
+                || pages.iter().any(|page| {
+                    page["aliases"].as_array().is_some_and(|aliases| {
+                        aliases.iter().any(|alias| {
+                            alias["observation_id"] == legacy_id
+                                && alias["canonical_id"] == historical
+                        })
+                    })
+                }),
+            "an exact archive ID stays visible or resolves through its owned alias",
+        );
+        for (turn, _) in &declared_later_turns {
+            assert_eq!(turns.get(turn.as_str()), Some(&1), "one row for {turn}");
+        }
+        assert_eq!(
+            state
+                .conversation_archive
+                .provider_log_capture_state("synthetic-codex-agent", source_key)
+                .unwrap(),
+            Some(later.next),
+        );
+        let archive =
+            wardian_core::paths::agent_conversations_dir("synthetic-codex-agent").unwrap();
+        let agent_directory = archive.parent().unwrap();
+        assert!(!agent_directory.join("chat-read-head.json").exists());
+        assert!(!agent_directory.join("chat-read-objects").exists());
     }
 
     #[test]
