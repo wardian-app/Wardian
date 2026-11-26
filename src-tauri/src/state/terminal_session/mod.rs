@@ -16,6 +16,7 @@ pub use actor::{
     MAX_DESKTOP_PRESENTATIONS_PER_SESSION, MAX_REMOTE_PRESENTATIONS_PER_SESSION,
     TERMINAL_SESSION_ACTOR_CAPACITY,
 };
+pub(crate) use actor::{StartupScreenCommitResult, TerminalReadinessObservation};
 pub use native::{
     forward_terminal_output, native_pty_resize_gate, native_terminal_runtime, SharedPtyMaster,
 };

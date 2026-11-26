@@ -2800,6 +2800,130 @@ async fn terminal_session_replacement_lifecycle_notifications_never_regress_gene
     assert_eq!(replaced_new.runtime_generation, second);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoned_startup_readiness_commands_have_no_effect() {
+    let broker = Arc::new(TerminalSessionBroker::default());
+    let (input_tx, mut input_rx) = mpsc::channel(2);
+    let runtime = TerminalRuntimeHandles::new(input_tx, |_| Ok(()));
+    broker
+        .start_or_replace_runtime("abandoned-readiness", runtime, geometry(80, 24))
+        .await
+        .expect("start runtime");
+    let expected = broker
+        .readiness_observation("abandoned-readiness")
+        .await
+        .expect("current readiness observation");
+    let release = broker
+        .block_actor_for_test("abandoned-readiness")
+        .await
+        .expect("block actor before readiness commands");
+
+    let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let committed_by_command = committed.clone();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(25),
+        broker.commit_if_readiness_observation_current(expected.clone(), move || {
+            committed_by_command.store(true, std::sync::atomic::Ordering::Release);
+            true
+        }),
+    )
+    .await
+    .is_err());
+    assert!(tokio::time::timeout(
+        Duration::from_millis(25),
+        broker.send_privileged_input_if_readiness_current(
+            expected.clone(),
+            b"trust key".to_vec(),
+            Box::new(|| true),
+        ),
+    )
+    .await
+    .is_err());
+
+    release.send(()).expect("release actor");
+    let after = broker
+        .readiness_observation("abandoned-readiness")
+        .await
+        .expect("process abandoned messages");
+    assert!(!committed.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(after.input_sequence, expected.input_sequence);
+    assert!(
+        input_rx.try_recv().is_err(),
+        "no abandoned trust key is sent"
+    );
+}
+
+#[tokio::test]
+async fn privileged_startup_input_requires_current_owner_proof_at_actor_admission() {
+    let broker = Arc::new(TerminalSessionBroker::default());
+    let (runtime, mut input_rx, _) = runtime();
+    broker
+        .start_or_replace_runtime("startup-owner-proof", runtime, geometry(80, 24))
+        .await
+        .expect("start runtime");
+    let expected = broker
+        .readiness_observation("startup-owner-proof")
+        .await
+        .expect("current startup screen and input");
+
+    let result = broker
+        .send_privileged_input_if_readiness_current(
+            expected,
+            b"trust key".to_vec(),
+            Box::new(|| false),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(TerminalBrokerError::InvalidRequest("startup_owner_changed"))
+    ));
+    assert!(
+        input_rx.try_recv().is_err(),
+        "stale owner proof sends no key"
+    );
+}
+
+#[tokio::test]
+async fn readiness_commit_classifies_input_before_a_simultaneous_screen_change() {
+    let broker = Arc::new(TerminalSessionBroker::default());
+    let (input_tx, mut input_rx) = mpsc::channel(2);
+    let runtime = TerminalRuntimeHandles::new(input_tx, |_| Ok(()));
+    let runtime_generation = broker
+        .start_or_replace_runtime("readiness-input-order", runtime, geometry(80, 24))
+        .await
+        .expect("start runtime");
+    let expected = broker
+        .readiness_observation("readiness-input-order")
+        .await
+        .expect("initial screen and input sequence");
+
+    let repaint_broker = broker.clone();
+    tokio::task::spawn_blocking(move || {
+        repaint_broker.process_output_blocking(
+            "readiness-input-order",
+            runtime_generation,
+            b"\x1b[2J\x1b[Hrepaint".to_vec(),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    broker
+        .send_privileged_input("readiness-input-order", b"opposing input".to_vec())
+        .await
+        .expect("advance input sequence");
+
+    assert_eq!(
+        broker
+            .commit_if_readiness_observation_current(expected, || true)
+            .await
+            .expect("runtime remains current"),
+        StartupScreenCommitResult::InputChanged
+    );
+    assert_eq!(input_rx.try_recv().unwrap(), b"opposing input");
+}
+
 fn process_output_for_session(
     broker: Arc<TerminalSessionBroker>,
     session_id: &'static str,

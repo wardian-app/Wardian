@@ -366,6 +366,11 @@ async fn publishing_starting_does_not_supersede_a_newer_queued_transition() {
         None,
         "publishing the older Starting value must preserve queued Processing"
     );
+    assert_eq!(
+        state.status_intent_revision("claude-live", &current_status),
+        intent_revision,
+        "a rejected publication must leave the newer intent revision untouched"
+    );
     assert_eq!(*current_status.lock().unwrap(), "Booting");
     drop(agents);
     let applied = super::apply_deferred_status_transition(
@@ -387,6 +392,67 @@ async fn publishing_starting_does_not_supersede_a_newer_queued_transition() {
     );
     // MockRuntime covers the revision and transition decision. The production
     // Wry scheduler and persistence boundary is exercised by runtime tests.
+    drop(home);
+}
+
+#[tokio::test]
+async fn status_publication_reuses_only_an_exact_committed_revision() {
+    let (home, state) = seeded_state().await;
+    let current_status = Arc::new(Mutex::new("Booting".to_string()));
+
+    assert_eq!(
+        state.status_intent_revision("uninitialized", &current_status),
+        0
+    );
+    assert_eq!(state.status_revision("uninitialized", &current_status), 0);
+    let initial_revision = crate::manager::commit_agent_status_publication(
+        &state,
+        "uninitialized",
+        &current_status,
+        "Booting",
+    )
+    .expect("publication should initialize an Arc without a prior revision");
+    assert!(initial_revision > 0);
+    assert_eq!(
+        state.status_intent_revision("uninitialized", &current_status),
+        initial_revision
+    );
+    assert_eq!(
+        state.status_revision("uninitialized", &current_status),
+        initial_revision
+    );
+
+    let repeated_revision = crate::manager::commit_agent_status_publication(
+        &state,
+        "uninitialized",
+        &current_status,
+        "Booting",
+    )
+    .expect("an exact committed publication should remain publishable");
+    assert_eq!(repeated_revision, initial_revision);
+
+    let newer_intent_revision = {
+        let _status = current_status.lock().unwrap();
+        state.reserve_status_intent("uninitialized", &current_status, "Booting")
+    };
+    assert!(newer_intent_revision > initial_revision);
+    let newer_publication_revision = crate::manager::commit_agent_status_publication(
+        &state,
+        "uninitialized",
+        &current_status,
+        "Booting",
+    )
+    .expect("same-label newer intent must follow the ordinary commit path");
+    assert!(newer_publication_revision > newer_intent_revision);
+    assert_ne!(newer_publication_revision, initial_revision);
+    assert_eq!(
+        state.status_intent_revision("uninitialized", &current_status),
+        newer_publication_revision
+    );
+    assert_eq!(
+        state.status_revision("uninitialized", &current_status),
+        newer_publication_revision
+    );
     drop(home);
 }
 
@@ -532,7 +598,15 @@ async fn provisional_status_arc_publishes_after_replacement_install() {
         "Processing...",
     )
     .expect("the installed provisional status should publish");
-    assert!(publication_revision > provisional_revision);
+    assert_eq!(publication_revision, provisional_revision);
+    assert_eq!(
+        state.status_intent_revision("claude-live", &current_status),
+        provisional_revision
+    );
+    assert_eq!(
+        state.status_revision("claude-live", &current_status),
+        provisional_revision
+    );
     // MockRuntime verifies the provisional Arc's publication decision. The
     // production Wry persistence boundary is covered by runtime publication tests.
     drop(home);

@@ -239,6 +239,7 @@ async fn failure_case(case: Case) {
             unpublished_failure: Some(cancelled),
             registration: (case == Case::PendingRegistration).then(|| publication.clone()),
             codex_launch_context: None,
+            startup_ready_wake: None,
         },
     );
     if case == Case::Unpublished {

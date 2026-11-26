@@ -47,6 +47,20 @@ pub enum TerminalBrokerError {
     RuntimeIo(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupScreenCommitResult {
+    Committed,
+    ScreenChanged,
+    InputChanged,
+    CommitRejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalReadinessObservation {
+    pub snapshot: TerminalSnapshot,
+    pub input_sequence: u64,
+}
+
 impl fmt::Display for TerminalBrokerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{self:?}")
@@ -1458,6 +1472,57 @@ impl TerminalSessionBroker {
             .await
     }
 
+    pub(crate) async fn readiness_observation(
+        &self,
+        session_id: &str,
+    ) -> Result<TerminalReadinessObservation, TerminalBrokerError> {
+        self.request(session_id, TerminalSessionMessage::ReadinessObservation)
+            .await
+    }
+
+    /// Runs a synchronous readiness commit only while the actor still owns the
+    /// exact canonical screen and input revision validated by the caller. The
+    /// actor cannot process output or a terminal input between comparison and
+    /// commit.
+    pub(crate) async fn commit_if_readiness_observation_current<F>(
+        &self,
+        expected: TerminalReadinessObservation,
+        commit: F,
+    ) -> Result<StartupScreenCommitResult, TerminalBrokerError>
+    where
+        F: FnOnce() -> bool + Send + 'static,
+    {
+        let session_id = expected.snapshot.session_id.clone();
+        self.request(&session_id, move |reply| {
+            TerminalSessionMessage::CommitIfReadinessObservationCurrent {
+                expected,
+                commit: Box::new(commit),
+                reply,
+            }
+        })
+        .await
+    }
+
+    /// Sends one privileged startup key only while the exact screen, input
+    /// revision, and caller-owned action proof remain current at actor admission.
+    pub(crate) async fn send_privileged_input_if_readiness_current(
+        &self,
+        expected: TerminalReadinessObservation,
+        bytes: Vec<u8>,
+        owner_is_current: Box<dyn FnOnce() -> bool + Send>,
+    ) -> Result<TerminalReadinessObservation, TerminalBrokerError> {
+        let session_id = expected.snapshot.session_id.clone();
+        self.request(&session_id, move |reply| {
+            TerminalSessionMessage::PrivilegedInputIfReadinessCurrent {
+                expected,
+                bytes,
+                owner_is_current,
+                reply,
+            }
+        })
+        .await
+    }
+
     pub async fn pause_runtime(
         &self,
         session_id: &str,
@@ -1917,6 +1982,18 @@ enum TerminalSessionMessage {
     BrokerState(BrokerReply<TerminalBrokerState>),
     NativeWriteReceiptsEnabled(BrokerReply<bool>),
     Snapshot(BrokerReply<TerminalSnapshot>),
+    ReadinessObservation(BrokerReply<TerminalReadinessObservation>),
+    CommitIfReadinessObservationCurrent {
+        expected: TerminalReadinessObservation,
+        commit: Box<dyn FnOnce() -> bool + Send>,
+        reply: BrokerReply<StartupScreenCommitResult>,
+    },
+    PrivilegedInputIfReadinessCurrent {
+        expected: TerminalReadinessObservation,
+        bytes: Vec<u8>,
+        owner_is_current: Box<dyn FnOnce() -> bool + Send>,
+        reply: BrokerReply<TerminalReadinessObservation>,
+    },
     Pause {
         session_id: String,
         runtime_generation: u64,
@@ -1997,6 +2074,7 @@ struct TerminalSessionActor {
     lease_epoch: u64,
     stream_sequence: u64,
     interaction_sequence: u64,
+    input_sequence: u64,
     activation_sequence: u64,
     resync_sequence: u64,
     snapshot_sequence: u64,
@@ -2063,6 +2141,7 @@ impl TerminalSessionActor {
             lease_epoch: initial_lease_epoch,
             stream_sequence: 0,
             interaction_sequence: 0,
+            input_sequence: 0,
             activation_sequence: 0,
             resync_sequence: 0,
             snapshot_sequence: 0,
@@ -2291,6 +2370,62 @@ impl TerminalSessionActor {
             TerminalSessionMessage::Snapshot(reply) => {
                 let snapshot = self.snapshot();
                 let _ = reply.send(Ok(snapshot));
+            }
+            TerminalSessionMessage::ReadinessObservation(reply) => {
+                let observation = self.readiness_observation();
+                let _ = reply.send(Ok(observation));
+            }
+            TerminalSessionMessage::CommitIfReadinessObservationCurrent {
+                expected,
+                commit,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    return;
+                }
+                let result = self
+                    .ensure_generation(expected.snapshot.runtime_generation)
+                    .map(|()| {
+                        if self.input_sequence != expected.input_sequence {
+                            StartupScreenCommitResult::InputChanged
+                        } else if self.readiness_observation().snapshot != expected.snapshot {
+                            StartupScreenCommitResult::ScreenChanged
+                        } else if commit() {
+                            StartupScreenCommitResult::Committed
+                        } else {
+                            StartupScreenCommitResult::CommitRejected
+                        }
+                    });
+                let _ = reply.send(result);
+            }
+            TerminalSessionMessage::PrivilegedInputIfReadinessCurrent {
+                expected,
+                bytes,
+                owner_is_current,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    return;
+                }
+                // Recheck caller ownership after queueing, at this serialized input boundary.
+                let result = if let Err(error) =
+                    self.ensure_generation(expected.snapshot.runtime_generation)
+                {
+                    Err(error)
+                } else if self.input_sequence != expected.input_sequence {
+                    Err(TerminalBrokerError::InvalidRequest("opposing_input"))
+                } else if self.readiness_observation().snapshot != expected.snapshot {
+                    Err(TerminalBrokerError::InvalidRequest(
+                        "startup_screen_changed",
+                    ))
+                } else if !owner_is_current() {
+                    Err(TerminalBrokerError::InvalidRequest("startup_owner_changed"))
+                } else {
+                    self.send_privileged_input(bytes)
+                        .await
+                        .map(|()| self.readiness_observation())
+                };
+                let _ = reply.send(result);
             }
             TerminalSessionMessage::Pause {
                 session_id,
@@ -2991,15 +3126,18 @@ impl TerminalSessionActor {
         Ok(())
     }
 
-    async fn send_runtime_input(&self, bytes: Vec<u8>) -> Result<(), TerminalBrokerError> {
+    async fn send_runtime_input(&mut self, bytes: Vec<u8>) -> Result<(), TerminalBrokerError> {
         self.send_runtime_input_with_lease(bytes, None).await
     }
 
     async fn send_runtime_input_with_lease(
-        &self,
+        &mut self,
         bytes: Vec<u8>,
         lease: Option<&mut wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
     ) -> Result<(), TerminalBrokerError> {
+        if !bytes.is_empty() {
+            self.input_sequence = self.input_sequence.saturating_add(1);
+        }
         let input_tx = self
             .runtime
             .as_ref()
@@ -3459,6 +3597,13 @@ impl TerminalSessionActor {
         );
         self.cached_snapshot = Some(snapshot.clone());
         snapshot
+    }
+
+    fn readiness_observation(&mut self) -> TerminalReadinessObservation {
+        TerminalReadinessObservation {
+            snapshot: self.snapshot(),
+            input_sequence: self.input_sequence,
+        }
     }
 
     fn broker_state(&self) -> TerminalBrokerState {

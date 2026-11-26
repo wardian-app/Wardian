@@ -339,6 +339,60 @@ impl AppState {
             .unwrap_or(0)
     }
 
+    /// Publishes the current value without superseding a different admitted
+    /// intent. Reuse a revision only when that exact intent is already committed.
+    pub fn commit_status_publication_revision(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+        published_status: &str,
+    ) -> Option<u64> {
+        let mut revisions = self
+            .status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = revisions.entry(session_id.to_string()).or_default();
+        let status_arc_id = Arc::as_ptr(current_status) as usize;
+        let existing = session
+            .by_arc
+            .get(&status_arc_id)
+            .filter(|entry| {
+                entry
+                    .owner
+                    .upgrade()
+                    .is_some_and(|owner| Arc::ptr_eq(&owner, current_status))
+            })
+            .map(|entry| {
+                (
+                    entry.intent_status.clone(),
+                    entry.intent_revision,
+                    entry.committed_revision,
+                )
+            });
+        if let Some((intent_status, intent_revision, committed_revision)) = existing {
+            if intent_status != published_status {
+                return None;
+            }
+            if committed_revision > 0 && intent_revision == committed_revision {
+                return Some(committed_revision);
+            }
+        }
+
+        // A same-label but newer intent remains newer. Commit a fresh
+        // publication revision instead of adopting that uncommitted attempt.
+        let next = session.next();
+        session.by_arc.insert(
+            status_arc_id,
+            StatusArcRevision {
+                owner: Arc::downgrade(current_status),
+                intent_revision: next,
+                intent_status: published_status.to_string(),
+                committed_revision: next,
+            },
+        );
+        Some(next)
+    }
+
     /// Records a value mutation; call while holding the exact status Arc lock.
     pub fn commit_status_revision(
         &self,
