@@ -314,6 +314,7 @@ struct EventPosition {
     coalesced: Vec<(u64, String)>,
     body: Result<Option<String>, ()>,
     commentary: Option<CommentaryPosition>,
+    mock_mirror: Option<super::mock_mirrors::ArchiveMirrorPosition>,
 }
 
 /// A display relation can keep both physical frames addressable without
@@ -416,12 +417,13 @@ struct ConversationPositions {
     artifacts: Vec<String>,
     rows: Vec<RowPosition>,
     commentary: HashMap<usize, usize>,
+    unique_mock_pairs: HashSet<String>,
     incomplete: bool,
 }
 
 impl ConversationPositions {
-    /// A request mirror may share its narrative with exactly one other event.
-    fn preceding_request_candidate(&self, position: usize) -> Option<&RowPosition> {
+    /// A mirror may share its narrative with exactly one other event.
+    fn preceding_mirror_candidate(&self, position: usize) -> Option<&RowPosition> {
         let current = self.rows.get(position)?;
         let prior = self.rows.get(position.checked_sub(1)?)?;
         if prior.narrative != current.narrative
@@ -437,6 +439,37 @@ impl ConversationPositions {
             return None;
         }
         Some(prior)
+    }
+
+    fn mock_pair_native_is_first(
+        &self,
+        first: &RowPosition,
+        second: &RowPosition,
+        owned: &Owned,
+        admission: Option<(&SourceAdmission, &str)>,
+    ) -> Option<bool> {
+        let (source, epoch) = admission?;
+        let first = self.events.frames[first.event].1.mock_mirror.as_ref()?;
+        let second = self.events.frames[second.event].1.mock_mirror.as_ref()?;
+        if first.identity_digest != second.identity_digest
+            || !self.unique_mock_pairs.contains(&first.identity_digest)
+        {
+            return None;
+        }
+        let (native, first_owns) = match (first.is_native(), second.is_native()) {
+            (true, false) => (first, true),
+            (false, true) => (second, false),
+            _ => return None,
+        };
+        native
+            .admits_native(
+                &owned.manifest.provider_session_ids,
+                &source.provider_source_key,
+                &source.path,
+                source.policy_generation,
+                epoch,
+            )
+            .then_some(first_owns)
     }
 
     fn refresh(
@@ -482,6 +515,7 @@ impl ConversationPositions {
                         .map(|reference| reference.map(str::to_owned))
                         .map_err(|_| ()),
                     commentary: CommentaryPosition::of(&event),
+                    mock_mirror: super::mock_mirrors::ArchiveMirrorPosition::of(&event),
                 })
             },
         )?;
@@ -561,12 +595,23 @@ impl ConversationPositions {
                 }
             }
             let mut seen = HashSet::new();
+            let mut mock_counts = HashMap::new();
             for (_, event) in &self.events.frames {
                 let reference = &event.identity;
                 if !seen.insert(reference) {
                     ambiguous.insert(reference);
                 }
+                if let Some(mirror) = &event.mock_mirror {
+                    *mock_counts
+                        .entry(mirror.identity_digest.as_str())
+                        .or_insert(0) += 1;
+                }
             }
+            self.unique_mock_pairs = mock_counts
+                .into_iter()
+                .filter(|(_, count)| *count == 2)
+                .map(|(identity, _)| identity.to_owned())
+                .collect();
             self.rows = self
                 .events
                 .frames
@@ -1370,22 +1415,38 @@ impl Positions {
                 }
                 let (mut event, mut record, mut turn) =
                     reader.read(row, context, source, epoch, page)?;
-                let mut request_mirror = None;
-                if event.provider == "codex"
-                    && event.role == Some(AgentChatRole::User)
-                    && record.event_refs.len() == 2
+                let mut mirror_alias = None;
+                let mut frontier_row = row;
+                let is_mock = event.provider == "mock";
+                if record.event_refs.len() == 2
+                    && (is_mock
+                        || (event.provider == "codex" && event.role == Some(AgentChatRole::User)))
                 {
-                    if let Some(prior) = index.preceding_request_candidate(position) {
+                    if let Some(prior) = index.preceding_mirror_candidate(position) {
                         let (first, first_record, first_turn) =
                             reader.read(prior, context, source, epoch, page)?;
-                        if framed_request_mirror(&first, &event) {
-                            // One display row, with both archive frames retained. The
-                            // earlier frame keeps the same cursor frontier in Older.
-                            request_mirror = Some(event.id);
-                            event = first;
-                            record = first_record;
-                            turn = first_turn;
-                            row = prior;
+                        let first_owns = if is_mock {
+                            index.mock_pair_native_is_first(prior, row, owned, source.zip(epoch))
+                        } else {
+                            framed_request_mirror(&first, &event).then_some(true)
+                        };
+                        if let Some(first_owns) = first_owns {
+                            let observation_id = if first_owns {
+                                let observed = std::mem::replace(&mut event, first);
+                                record = first_record;
+                                turn = first_turn;
+                                row = prior;
+                                observed.id
+                            } else {
+                                first.id
+                            };
+                            mirror_alias = Some(AgentChatAlias {
+                                observation_id,
+                                canonical_id: event.id.clone(),
+                            });
+                            // Detail stays bound to the visible frame. Older
+                            // advances past both physical frames.
+                            frontier_row = prior;
                             let _ = rows.next();
                         }
                     }
@@ -1409,14 +1470,8 @@ impl Positions {
                     }
                 }
                 visible.metadata["chat_archive_positioned"] = json!(true);
-                let (alias, covered_sequence) = if let Some(mirror) = request_mirror {
-                    (
-                        Some(AgentChatAlias {
-                            observation_id: mirror,
-                            canonical_id: event.id.clone(),
-                        }),
-                        None,
-                    )
+                let (alias, covered_sequence) = if let Some(alias) = mirror_alias {
+                    (Some(alias), None)
                 } else if let Some(other) = partner {
                     let (paired, _, paired_turn) =
                         reader.read(&index.rows[other], context, source, epoch, page)?;
@@ -1504,7 +1559,11 @@ impl Positions {
                         body_unavailable: visible.metadata["chat_body_unavailable"] == true,
                     });
                 }
-                frontier = Some(key);
+                frontier = Some(if frontier_row.event == row.event {
+                    key
+                } else {
+                    token(owned, index, frontier_row)
+                });
                 page.events.push(visible);
             }
         }

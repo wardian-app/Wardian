@@ -12,7 +12,7 @@ const RETIRED: &str = "_wardian_mock_retired_sequences";
 #[path = "mock_mirror_capture_tests.rs"]
 mod capture_tests;
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Identity {
     agent: String,
     source_key: String,
@@ -27,7 +27,7 @@ struct Identity {
     turn: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Native {
     identity: Identity,
     coordinate: String,
@@ -89,12 +89,7 @@ fn admitted(event: &AgentChatEvent, source: &ProviderLogCaptureState) -> bool {
     else {
         return false;
     };
-    let prefix = format!("source:{}:{epoch}:{start}:", event.session_id);
-    let coordinate = string(event, "chat_source_ref").and_then(|value| value.strip_prefix(&prefix));
-    let valid_coordinate = coordinate
-        .and_then(|value| value.split_once(':'))
-        .is_some_and(|(digest, ordinal)| storage::valid_ref(digest) && ordinal == "0");
-    valid_coordinate
+    exact_coordinate(event, &epoch, start)
         && event.metadata["chat_source_epoch"].as_str() == Some(epoch.as_str())
         && start < end
         && end <= source.committed_offset
@@ -104,6 +99,14 @@ fn admitted(event: &AgentChatEvent, source: &ProviderLogCaptureState) -> bool {
             .disabled_spans
             .iter()
             .any(|span| start < span.end && end > span.start)
+}
+
+fn exact_coordinate(event: &AgentChatEvent, epoch: &str, start: u64) -> bool {
+    let prefix = format!("source:{}:{epoch}:{start}:", event.session_id);
+    string(event, "chat_source_ref")
+        .and_then(|value| value.strip_prefix(&prefix))
+        .and_then(|value| value.split_once(':'))
+        .is_some_and(|(digest, ordinal)| storage::valid_ref(digest) && ordinal == "0")
 }
 
 /// Strip caller-supplied authority and attach only this pass's typed proofs.
@@ -243,6 +246,58 @@ fn source_admits(
             && source.policy_generation == binding.policy
             && admitted(event, source)
     })
+}
+
+/// Position-index evidence only. Frame loading still verifies both physical
+/// observations and the admitted byte interval before selection.
+#[derive(Debug)]
+pub(super) struct ArchiveMirrorPosition {
+    pub(super) identity_digest: String,
+    native: Option<Native>,
+}
+
+impl ArchiveMirrorPosition {
+    pub(super) fn of(event: &AgentChatEvent) -> Option<Self> {
+        if event.provider != "mock" {
+            return None;
+        }
+        if let Some(native) = native(event) {
+            if !exact_coordinate(event, &native.epoch, native.start) {
+                return None;
+            }
+            let identity_digest = storage::digest(&serde_json::to_vec(&native.identity).ok()?);
+            return Some(Self {
+                identity_digest,
+                native: Some(native),
+            });
+        }
+        let identity_digest = storage::digest(&serde_json::to_vec(&watch(event)?).ok()?);
+        Some(Self {
+            identity_digest,
+            native: None,
+        })
+    }
+
+    pub(super) fn is_native(&self) -> bool {
+        self.native.is_some()
+    }
+
+    pub(super) fn admits_native(
+        &self,
+        sessions: &[String],
+        source_key: &str,
+        path: &str,
+        policy: u64,
+        epoch: &str,
+    ) -> bool {
+        self.native.as_ref().is_some_and(|native| {
+            sessions.contains(&native.identity.session)
+                && native.identity.source_key == source_key
+                && native.identity.path == path
+                && native.policy == policy
+                && native.epoch == epoch
+        })
+    }
 }
 
 struct Observation<'a> {
