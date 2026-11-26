@@ -664,6 +664,10 @@ fn acquire_provider_log_batch_bounded(
         );
         offset += line.len() as u64;
     }
+    let claude_session = provider_source_key
+        .strip_prefix("claude:session:")
+        .filter(|session| path.file_stem().and_then(|stem| stem.to_str()) == Some(*session));
+    let receipts = crate::delivery::claude_mod::ChatPromptReceipts::default();
     let mut ordinals = std::collections::HashMap::<u64, usize>::new();
     let mut annotate = |event: &mut AgentChatEvent| {
         let Some(sequence) = event.sequence else {
@@ -676,6 +680,9 @@ fn acquire_provider_log_batch_bounded(
             // The nested legacy turn ID is available only in this actual row.
             // Preserve its bounded witness without retaining the raw transcript.
             super::chat::archive_identity::capture_legacy_identity(event, path, Some(raw));
+        }
+        if let Some(session) = claude_session {
+            receipts.annotate_owned_prompt(event, session, raw, false);
         }
         let ordinal = ordinals.entry(sequence).or_default();
         event.metadata["chat_source_ref"] =

@@ -1,8 +1,11 @@
-import { fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { committedChatFixture } from "../../test/committedChatFixture";
+import type { AgentChatEvent, AgentChatPage, ChatPresentationV1 } from "../../types";
+import { applyChatPage } from "./chatReadState";
 import { ChatTranscriptRow } from "./ChatTranscriptRows";
-import { deriveCommittedChatRows, mergeCommittedChatPresentation, useCommittedChatPresentation } from "./committedChatPresentation";
+import { chatTranscriptRowKey } from "./chatTurns";
+import { chatPresentationV1, deriveCommittedChatRows, mergeCommittedChatPresentation, useCommittedChatPresentation } from "./committedChatPresentation";
 import { retainedStepText } from "./CommittedTurn";
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn() }));
@@ -28,6 +31,73 @@ describe("committed turns", () => {
     view.rerender(<ChatTranscriptRow {...props} row={{ ...row }} onLoadStepDetail={load} />);
     expect(screen.getByRole("button", { name: /Worked.*2 steps/ })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", { name: "Hide output" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it.each([
+    { before: "delivered", after: "delivered", previewLabel: "Pending", capturedLabel: null },
+    { before: "delivered", after: null, previewLabel: "Pending", capturedLabel: null },
+    { before: "queued", after: null, previewLabel: "Queued", capturedLabel: null },
+    { before: null, after: null, previewLabel: null, capturedLabel: null },
+    { before: "failed", after: "failed", previewLabel: "Failed", capturedLabel: "Failed" },
+    { before: "cancelled", after: "cancelled", previewLabel: "Cancelled", capturedLabel: "Cancelled" },
+  ] as const)("retains the prompt DOM through capture with $before → $after", ({ before, after, previewLabel, capturedLabel }) => {
+    const { events: [sourcePrompt], presentation, page } = committedChatFixture();
+    const [item] = presentation.items;
+    const [turn] = presentation.turns;
+    const observation = { ...sourcePrompt, id: "preview:prompt", metadata: { chat_provisional: true } };
+    const unbridged = { ...sourcePrompt, id: "unbridged:prompt" };
+    const bridge = { admission_id: "prompt-admission", canonical_head: "a".repeat(64) };
+    const payload: ChatPresentationV1 = {
+      ...presentation, preview_bridge: bridge,
+      turns: [{ ...turn, status: "running", membership_complete: false, prefix_attributed: true, counts_complete: false,
+        references_complete: false, step_count: 0, answer_recorded: false, answer_item_keys: [], duration_ms: null }],
+      legacy_turns: [{ turn_key: "turn:unbridged", order_key: "0001", event_refs: [unbridged.id],
+        kind: "unmigrated", membership_complete: false }],
+    };
+    const preview: AgentChatPage = {
+      ...page, revision: "prompt-preview", recent_admission: bridge.admission_id, progress: "provisional",
+      events: [observation, unbridged],
+      presentation: { version: 1, payload: { ...payload, items: [{ ...item, provenance: "provisional",
+        admission_id: bridge.admission_id, submission_status: before, event_refs: [observation.id] }] } },
+    };
+    const captured: AgentChatPage = {
+      ...page, revision: "prompt-captured", events: [sourcePrompt, unbridged],
+      aliases: [{ observation_id: observation.id, canonical_id: sourcePrompt.id }],
+      presentation: { version: 1, payload: { ...payload, items: [{ ...item, submission_status: after }] } },
+    };
+    const renderRows = (events: AgentChatEvent[], current: AgentChatPage) =>
+      deriveCommittedChatRows(events, chatPresentationV1(current))
+        .map((row) => <ChatTranscriptRow key={chatTranscriptRowKey(row)} {...props} row={row} />);
+
+    const previewEvents = applyChatPage([], preview, "recent");
+    const view = render(<>{renderRows(previewEvents, preview)}</>);
+    const turnElement = screen.getByTestId("chat-committed-turn");
+    const promptSelector = `[data-chat-item-key="${item.item_key}"]`;
+    const prompt = turnElement.querySelector<HTMLElement>(promptSelector)!;
+    const message = within(prompt).getByRole("article", { name: "user message" });
+    const expectLabel = (label: string | null) => {
+      const status = within(prompt).queryByRole("status");
+      if (label === null) {
+        expect(status).toBeNull();
+      } else {
+        expect(within(prompt).getByText(label, { exact: true })).toBe(status);
+        expect(status).toBeVisible();
+      }
+      expect(screen.queryAllByRole("status").filter((element) => !turnElement.contains(element))).toHaveLength(0);
+    };
+    expect(turnElement).toHaveAttribute("data-turn-key", turn.turn_key);
+    expect(within(turnElement).getAllByRole("article", { name: "user message" })).toHaveLength(1);
+    expect(screen.getAllByText(sourcePrompt.text!)).toHaveLength(2);
+    expectLabel(previewLabel);
+
+    const capturedEvents = applyChatPage(previewEvents, captured, "recent");
+    expect(capturedEvents.map((event) => event.id)).toEqual([sourcePrompt.id, unbridged.id]);
+    view.rerender(<>{renderRows(capturedEvents, captured)}</>);
+    expect(screen.getByTestId("chat-committed-turn")).toBe(turnElement);
+    expect(turnElement.querySelector(promptSelector)).toBe(prompt);
+    expect(within(turnElement).getByRole("article", { name: "user message" })).toBe(message);
+    expect(screen.getAllByText(sourcePrompt.text!)).toHaveLength(2);
+    expectLabel(capturedLabel);
   });
 
   it("falls back for incomplete membership, unknown version and native previews", () => {
@@ -58,6 +128,29 @@ describe("committed turns", () => {
     const tagged = events.map((event) => ({ ...event, metadata: { ...event.metadata, chat_turn_key: presentation.turns[0].turn_key } }));
     expect(deriveCommittedChatRows(tagged, { ...presentation, items: presentation.items.slice(-2) })
       .some((row) => row.kind === "committed_turn")).toBe(false);
+  });
+
+  it("keeps a qualified Claude prompt beside producer-owned Earlier activity", () => {
+    const { events, presentation } = committedChatFixture();
+    const [turn] = presentation.turns;
+    const [item] = presentation.items;
+    const finalEvent = events[events.length - 1];
+    const [prompt, answer] = [events[0], finalEvent].map((event) => ({
+      ...event, provider: "claude", metadata: { ...event.metadata, chat_turn_key: turn.turn_key },
+    }));
+    const current: ChatPresentationV1 = {
+      ...presentation,
+      items: [item],
+      turns: [{ ...turn, references_complete: false, answer_item_keys: [] }],
+      legacy_turns: [{ turn_key: "earlier:answer", order_key: "0006", kind: "earlier_activity",
+        membership_complete: false, event_refs: [answer.id] }],
+    };
+    const rows = deriveCommittedChatRows([prompt, answer], current);
+    render(<>{rows.map((row) => <ChatTranscriptRow key={chatTranscriptRowKey(row)} {...props} row={row} />)}</>);
+    expect(within(screen.getByTestId("chat-committed-turn")).getByText(prompt.text!)).toBeVisible();
+    expect(screen.getAllByText("All 42 tests passed.")).toHaveLength(1);
+    const unaccounted = deriveCommittedChatRows([prompt, answer], { ...current, legacy_turns: [] });
+    expect(unaccounted.every((row) => row.kind !== "committed_turn")).toBe(true);
   });
 
   it("lets a proven running summary own the working indicator", () => {

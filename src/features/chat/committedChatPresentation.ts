@@ -87,6 +87,8 @@ export function deriveCommittedChatRows(
   const legacy = (rows: AgentChatEvent[]) => withTurnChangeSummaries(derivePresentedChatRows(rows.filter(shouldShowChatEvent), boundaries), { has_older_events: hasOlder });
   if (!presentation) return legacy(events);
   const byId = new Map(events.map((event) => [event.id, event]));
+  const earlierActivity = new Set(presentation.legacy_turns
+    .filter((turn) => turn.kind === "earlier_activity").flatMap((turn) => turn.event_refs));
   const owners = new Map<string, CommittedTurnRow>();
   for (const turn of presentation.turns) {
     const items = presentation.items.filter((item) => item.turn_key === turn.turn_key).sort((a, b) => a.order_key.localeCompare(b.order_key));
@@ -102,9 +104,10 @@ export function deriveCommittedChatRows(
       || legacyTurn.event_refs.some((id) => refs.has(id)))
       || presentation.items.some((item) => item.turn_key !== turn.turn_key && item.event_refs.some((id) => refs.has(id)))
       || presentation.state_event_refs.some((ref) => ref.turn_key !== turn.turn_key && refs.has(ref.event_id))) continue;
-    // A newer bounded page cannot upgrade just the tail while retained members
-    // of this same producer turn still lack metadata for that revision.
-    if (events.some((event) => event.metadata.chat_turn_key === turn.turn_key && !refs.has(event.id))) continue;
+    // A bounded page must account for other retained members. An explicit
+    // Earlier activity group already owns its rows in this producer revision.
+    if (events.some((event) => event.metadata.chat_turn_key === turn.turn_key
+      && !refs.has(event.id) && !earlierActivity.has(event.id))) continue;
     const members = events.filter((event) => refs.has(event.id));
     if (!members.length || [...refs].some((ref) => !byId.has(ref)) || members.some((event) =>
       !["codex", "claude"].includes(event.provider) || (!bridge && event.metadata.chat_provisional === true) || event.metadata.optimistic === true)) continue;

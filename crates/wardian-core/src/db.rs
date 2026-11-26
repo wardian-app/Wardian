@@ -1490,6 +1490,22 @@ pub fn native_delivery_with_conn(
     .optional()
 }
 
+/// Read only the phase of a producer-proven Claude prompt binding.
+pub fn claude_composer_delivery_phase(
+    conn: &Connection,
+    target: &str,
+    interaction: &str,
+    generation: u64,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT phase FROM native_deliveries
+         WHERE interaction_id = ?1 AND target_agent_id = ?2 AND generation = ?3",
+        params![interaction, target, generation],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 pub fn native_delivery_by_idempotency(
     sender_agent_id: Option<&str>,
     target_agent_id: &str,

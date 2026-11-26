@@ -16,6 +16,15 @@ const TONE: Record<ChatTurnStatus, string> = { running: "var(--color-wardian-pro
   incomplete: "var(--color-wardian-off)", unknown: "var(--color-wardian-off)" };
 const ICONS = { shell: Terminal, read: FileText, browser: Globe, edit: Pencil, tool: Wrench };
 
+function promptDeliveryLabel(item: ChatPresentedItem): string | null {
+  if (item.submission_status === "failed") return "Failed";
+  if (item.submission_status === "cancelled") return "Cancelled";
+  if (item.provenance !== "provisional" || !item.admission_id) return null;
+  // A delivered prompt is visible from its source while canonical capture catches up.
+  if (item.submission_status === "delivered") return "Pending";
+  return item.submission_status === "queued" ? "Queued" : null;
+}
+
 /** Render proven canonical membership identically in desktop and Remote Chat. */
 export function CommittedTurn({ row, ...props }: Omit<ChatTranscriptRowProps, "row"> & { row: CommittedTurnRow }) {
   const { turn, items, events } = row;
@@ -53,9 +62,18 @@ export function CommittedTurn({ row, ...props }: Omit<ChatTranscriptRowProps, "r
   });
   return <section className="min-w-0 space-y-3" data-testid="chat-committed-turn" data-turn-key={turn.turn_key}>
     {row.provisional ? <p className="text-xs text-muted" role="status">Provisional · history is updating</p> : null}
-    {items.filter((item) => item.kind === "prompt").map((item) => <div key={item.item_key}>
-      {messagesFor(item).map((event) => <div key={event.id} data-chat-anchor-key={chatEventDisplayKey(event)}><MessageRow event={event} linkHandling={props.linkHandling} onLoadDetail={loadBody} /></div>)}
-    </div>)}
+    {items.filter((item) => item.kind === "prompt").map((item) => {
+      const deliveryLabel = promptDeliveryLabel(item);
+      return <div key={item.item_key} data-chat-item-key={item.item_key}>
+        {messagesFor(item).map((event) => {
+          const displayKey = chatEventDisplayKey(event);
+          return <div key={displayKey} data-chat-anchor-key={displayKey}>
+            <MessageRow event={event} linkHandling={props.linkHandling} onLoadDetail={loadBody} />
+          </div>;
+        })}
+        {deliveryLabel ? <p className="ml-auto mt-1 w-fit rounded border border-wardian-light px-1.5 py-0.5 text-xs text-muted" role="status">{deliveryLabel}</p> : null}
+      </div>;
+    })}
     {prefix || work.length > 0 || turn.step_count > 0 ? <div className="min-w-0 rounded border border-wardian-light text-muted" data-testid="chat-turn-work">
       <button className="flex min-h-11 w-full min-w-0 items-center gap-2 px-2 text-left text-xs" data-chat-anchor-keys={JSON.stringify(anchorKeys)} aria-expanded={open} aria-controls={workId} onClick={toggleWork}>
         <ChevronRight className={`h-3.5 w-3.5 shrink-0 ${open ? "rotate-90" : ""}`} aria-hidden="true" />

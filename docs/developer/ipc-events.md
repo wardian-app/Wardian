@@ -422,6 +422,16 @@ open raw logs. Provider state evidence updates turn status through
 `state_event_refs`; it does not become assistant narration. Unknown assistant
 phase stays narration, and agent idle state does not imply completion.
 
+A source-backed Claude prompt may carry the existing `submission_status` field
+after the producer verifies the literal mod envelope and bound claim in the
+owned source. Before capture, `delivered` means the source is visible and the
+shared renderer shows Pending. A queued badge requires the mod's queue
+outcome. Capture clears these temporary states on the same source item.
+Terminal `failed` and `cancelled` outcomes remain attached after capture and
+reconnect. Latest canonical reads also refresh unsettled prompt receipts when
+the provider source and archive Head remain unchanged. The delivery selector
+stays producer-private. These states confer no paging, detail, or ACK authority.
+
 Step-tail references retain the existing generation, current-row and body-binding
 checks, then resolve the latest backing through the committed step owner. Reads
 fetch at most the final two existing body chunks and return a UTF-8-aligned
