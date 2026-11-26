@@ -418,9 +418,15 @@ pub(super) fn matching_record_index_with_candidates(
         && current.metadata["input_purpose"] == "request";
     let is_codex_user_mirror = provenance::is_codex_user_message_mirror(current);
     if current.metadata["provider_log"] == true && (is_codex_user_mirror || is_codex_user_request) {
+        // A verified replay can keep its pre-coordinate event ID. Follow that
+        // exact physical owner before considering the complementary observation.
+        let archived_event = matching_event_index(archived_events, current)?
+            .and_then(|index| archived_events.get(index));
         let exact_match = unique_match(
             records.iter().enumerate().filter_map(|(index, record)| {
-                record.event_refs.contains(&current.id).then_some(index)
+                (record.event_refs.contains(&current.id)
+                    || archived_event.is_some_and(|event| record.event_refs.contains(&event.id)))
+                .then_some(index)
             }),
             &format!("narrative ownership for event {}", current.id),
         )?;
@@ -459,10 +465,10 @@ pub(super) fn matching_record_index_with_candidates(
         // A historical text-derived mirror ID may be present as an alias in
         // an archive. Resolve its archived event first so native turn evidence
         // can prevent the alias from attaching a different turn's narrative.
-        let Some(archived_event_index) = matching_event_index(archived_events, current)? else {
+        let Some(archived_event) = archived_event else {
             return Ok(None);
         };
-        let archived_identity_ids = event_identity_ids(&archived_events[archived_event_index]);
+        let archived_identity_ids = event_identity_ids(archived_event);
         let Some(request_root_id) = current
             .metadata
             .get("request_root_id")

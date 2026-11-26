@@ -5958,6 +5958,32 @@ mod tests {
                     first.source_proof(),
                 )
                 .expect("publish first native batch through the normal archive path");
+            let conversation = state
+                .conversation_archive
+                .active_conversation_id(&context.agent_id)
+                .unwrap()
+                .unwrap();
+            let path =
+                wardian_core::paths::agent_conversation_dir(&context.agent_id, &conversation)
+                    .unwrap()
+                    .join("conversation.jsonl");
+            let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+                wardian_core::conversations::read_jsonl_records(&path).unwrap();
+            let owners = records
+                .iter()
+                .filter(|record| record.event_refs.contains(&legacy_id))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                owners.len(),
+                1,
+                "a bound replay keeps its original durable narrative owner"
+            );
+            assert_eq!(owners[0].seq, 1);
+            assert_eq!(
+                owners[0].event_refs.len(),
+                2,
+                "the native mirror joins that same owner"
+            );
             (first, legacy_id, None)
         };
 
