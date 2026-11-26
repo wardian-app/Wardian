@@ -136,7 +136,9 @@ the operation in the same transaction. The witness establishes the old
 attempt's pre-effect boundary. Launch still requires separate vacancy and
 ownership evidence spanning bootstrap and registration. Explicit recovery
 claims one new unqueued attempt and records the effective model and original
-attempt in the same transaction. The same lifecycle acquisition covers local
+attempt in the same transaction. Status and wait expose the current attempt ID.
+An identical request for a committed acceptance returns its audit receipt before
+worker admission. The same lifecycle acquisition covers local
 rollout materialization and is retargeted by provisional registration. Recovery
 renews the exact acquisition through detached owner preparation and verifies it
 at rollout materialization and provider start. The readiness watcher renews the
@@ -145,16 +147,17 @@ materialization only. Startup never queues work from a witness or replays an
 interrupted recovery attempt.
 
 After handoff the watcher signals lease loss to provisional attachment. The
-broker checks the exact acquisition under the lease-file lock before publishing
-the verified native binding and capabilities. The ledger verifies the same
-acquisition and native identity through the registration and name-claim commit.
-Successful durable registration permits input and Idle publication for the
-still-current captured runtime and input owner. That activation disarms captured
-cleanup and permits the readiness watcher to release. Before commit, failed
-registration leaves the accepted attempt consumed and quarantined. Failed
-activation after commit preserves the registered operation and saved identity.
-Both failures tear down only the captured runtime and retain the acquisition
-until expiry.
+broker checks the exact acquisition for the attachment writes and when it
+publishes the verified native binding and capabilities. The ledger checks the
+same acquisition and native identity through the registration and name-claim
+commit. The watcher renews the acquisition until activation qualifies the exact
+current runtime and input owner. Only that activation publishes input readiness,
+Idle status, and the captured PID. Activation also disarms captured cleanup and
+permits the watcher to release. A failed registration leaves the accepted attempt
+consumed and quarantined. Failed activation after commit preserves the registered
+operation and saved identity. Cleanup starts the retained TUI stop before waiting
+for the lifecycle lock and disposes the exact daemon after the TUI joins. A failed
+join retains both for explicit retry. Failure retains the acquisition until expiry.
 
 ## Codex launch authority
 

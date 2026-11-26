@@ -662,6 +662,64 @@ async fn recovery_lease_loss_rollback_leaves_replacement_generation_untouched() 
 }
 
 #[tokio::test]
+async fn recovery_rollback_starts_retained_stop_before_pause_waits_with_lifecycle() {
+    use crate::manager::codex_onboarding::CapturedRecoveryRuntime;
+    use crate::manager::codex_stop;
+    use crate::manager::RegistrationPublicationState;
+    use crate::state::terminal_session::TerminalRuntimeHandles;
+
+    let home = TestWardianHome::new_async().await;
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let id = "recovery-pause-race";
+    let (terminal, _reader) = tokio::sync::mpsc::channel(1);
+    let generation = state
+        .terminal_sessions
+        .start_or_replace_runtime(
+            id,
+            TerminalRuntimeHandles::new(terminal, |_| Ok(())),
+            wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+        )
+        .await
+        .unwrap();
+    let active = detachable_agent(id, "codex", Some(generation));
+    let lease = crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+        id, id, "codex", "", "fixture",
+    )
+    .unwrap();
+    let publication = Arc::new(RegistrationPublicationState::for_recovery(
+        lease.owner().clone(),
+        id.into(),
+        "fixture-native".into(),
+    ));
+    publication.mark_recovery_committed_for_test();
+    let captured = CapturedRecoveryRuntime::fixture(&active, 1, publication);
+    state.agents.lock().await.insert(id.into(), active);
+    let registration = codex_stop::prepare_stop(home.path(), id).unwrap();
+
+    let held = state.lock_agent_lifecycle(id).await;
+    let rollback = super::rollback_captured_recovery(app.handle(), &captured, registration);
+    tokio::pin!(rollback);
+    assert!(futures_util::poll!(&mut rollback).is_pending());
+    let pause = async {
+        let _guard = state.lock_agent_lifecycle(id).await;
+        codex_stop::await_quiescent(home.path(), id).await.unwrap();
+        assert!(state.terminal_sessions.broker_state(id).await.is_ok());
+    };
+    tokio::pin!(pause);
+    assert!(futures_util::poll!(&mut pause).is_pending());
+    drop(held);
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(rollback, pause)
+    })
+    .await
+    .expect("Pause and rollback waited on each other");
+    result.unwrap();
+    assert!(state.terminal_sessions.broker_state(id).await.is_err());
+}
+
+#[tokio::test]
 async fn recovery_activation_cleanup_preserves_successor_owner_and_terminal() {
     use crate::manager::codex_onboarding::RecoveryRuntimeCleanup;
     use crate::manager::RegistrationPublicationState;
@@ -823,10 +881,14 @@ async fn failed_detach_persistence_retains_error_roster_and_stop_fence() {
             .unwrap();
         *shell = "Error".into();
     }
-    let retain_error =
-        super::retain_failed_detached_roster(&state, "codex-provisional", &mut detached)
-            .await
-            .expect_err("blocked state destination should retain the failed entry in memory");
+    let retain_error = super::retain_failed_detached_roster(
+        &state,
+        "codex-provisional",
+        &mut detached.shell,
+        detached.order_index,
+    )
+    .await
+    .expect_err("blocked state destination should retain the failed entry in memory");
     assert!(!retain_error.is_empty());
     let agents = state.agents.lock().await;
     assert_eq!(

@@ -118,31 +118,6 @@ impl CapturedCodexStop {
 }
 
 impl NativeDeliveryBroker {
-    #[cfg(test)]
-    pub(crate) async fn install_recovery_cleanup_fixture(&self, id: &str, generation: u64) {
-        let (tx, mut incoming) = mpsc::channel(1);
-        let (stopped, observed) = tokio::sync::watch::channel(false);
-        self.sessions.lock().await.insert(
-            id.to_owned(),
-            NativeSessionHandle {
-                generation,
-                provider: "codex".into(),
-                capabilities: NativeTransportCapabilities::degraded("codex", "codex_app_server_ws"),
-                tx,
-                shared_codex: None,
-                codex_tui_runtime_generation: None,
-                stopped: Some(observed),
-            },
-        );
-        tokio::spawn(async move {
-            assert!(matches!(
-                incoming.recv().await,
-                Some(SessionCommand::Shutdown)
-            ));
-            stopped.send_replace(true);
-        });
-    }
-
     /// Bind a newly registered terminal to its exact prepared owner. Provider
     /// input can advance without a terminal, so these counters are not equal.
     pub(crate) async fn bind_codex_tui_runtime(
@@ -629,7 +604,7 @@ impl NativeDeliveryBroker {
                     "interactive attachment requires an unbound fresh owner",
                 ));
             }
-            let response = owner.finalize_interactive(tui_alive).await?;
+            let response = owner.finalize_interactive(tui_alive, publication).await?;
             let mut sessions = self.sessions.lock().await;
             let handle = sessions
                 .get_mut(agent_id)
@@ -1194,22 +1169,64 @@ mod lifecycle_tests;
 mod tests {
     use super::*;
 
+    impl NativeDeliveryBroker {
+        pub(crate) async fn install_recovery_cleanup_fixture(&self, id: &str, generation: u64) {
+            let (tx, mut incoming) = mpsc::channel(1);
+            let (stopped, observed) = tokio::sync::watch::channel(false);
+            self.sessions.lock().await.insert(
+                id.to_owned(),
+                NativeSessionHandle {
+                    generation,
+                    provider: "codex".into(),
+                    capabilities: NativeTransportCapabilities::degraded(
+                        "codex",
+                        "codex_app_server_ws",
+                    ),
+                    tx,
+                    shared_codex: None,
+                    codex_tui_runtime_generation: None,
+                    stopped: Some(observed),
+                },
+            );
+            tokio::spawn(async move {
+                assert!(matches!(
+                    incoming.recv().await,
+                    Some(SessionCommand::Shutdown)
+                ));
+                stopped.send_replace(true);
+            });
+        }
+    }
+
     #[tokio::test]
     async fn codex_recovery_attachment_publication_requires_live_exact_lease() {
-        exercise_recovery_attachment_publication(true, false).await;
+        exercise_recovery_attachment_publication(AttachmentCase::ExpireBeforeAttachment).await;
     }
 
     #[tokio::test]
     async fn codex_recovery_attachment_keeps_native_input_closed_before_commit() {
-        exercise_recovery_attachment_publication(false, false).await;
+        exercise_recovery_attachment_publication(AttachmentCase::Normal).await;
     }
 
     #[tokio::test]
     async fn codex_recovery_attachment_leaves_superseded_input_closed_after_commit() {
-        exercise_recovery_attachment_publication(false, true).await;
+        exercise_recovery_attachment_publication(AttachmentCase::SupersedeInput).await;
     }
 
-    async fn exercise_recovery_attachment_publication(expire: bool, supersede: bool) {
+    #[tokio::test]
+    async fn codex_recovery_renews_after_commit_and_refuses_activation_under_replacement_lease() {
+        exercise_recovery_attachment_publication(AttachmentCase::ReacquireBeforeActivation).await;
+    }
+
+    #[derive(PartialEq, Eq)]
+    enum AttachmentCase {
+        ExpireBeforeAttachment,
+        Normal,
+        SupersedeInput,
+        ReacquireBeforeActivation,
+    }
+
+    async fn exercise_recovery_attachment_publication(case: AttachmentCase) {
         use crate::manager::codex_onboarding::publish_recovery_readiness;
         use wardian_core::control::ProviderInputReadiness;
         use wardian_core::conversation_lease::{self, CodexRecoveryLeaseScope};
@@ -1257,7 +1274,7 @@ mod tests {
             NativeTransportCapabilities::degraded("codex", "codex_app_server_ws");
         let before = capabilities.clone();
         let mut published_identity = None;
-        if expire {
+        if case == AttachmentCase::ExpireBeforeAttachment {
             let mut leases = conversation_lease::load_leases_checked().unwrap();
             let exact = leases
                 .iter_mut()
@@ -1279,7 +1296,7 @@ mod tests {
             Some(&publication),
         );
         let binding = wardian_core::db::latest_native_session_binding(&agent_id).unwrap();
-        if expire {
+        if case == AttachmentCase::ExpireBeforeAttachment {
             assert!(
                 result.is_err(),
                 "an unsignaled expiry must prevent binding publication"
@@ -1301,7 +1318,7 @@ mod tests {
             client.receipt("owner_ready").is_err(),
             "native input must stay gated until the durable commit"
         );
-        if expire {
+        if case == AttachmentCase::ExpireBeforeAttachment {
             return;
         }
         assert!(client.settings_binding().is_err());
@@ -1336,7 +1353,43 @@ mod tests {
         // Durable commit itself is covered by the worker fixtures. Exercise
         // only the input step at that established publication state.
         publication.mark_recovery_committed_for_test();
-        let expected = if supersede {
+        let pause = if case == AttachmentCase::ReacquireBeforeActivation {
+            let set_expiry = |delta: chrono::Duration| {
+                let mut leases = conversation_lease::load_leases_checked().unwrap();
+                leases
+                    .iter_mut()
+                    .find(|entry| entry.owner() == *lease.owner())
+                    .unwrap()
+                    .expires_at = (chrono::Utc::now() + delta).to_rfc3339();
+                conversation_lease::save_leases(&leases).unwrap();
+            };
+            set_expiry(chrono::Duration::minutes(1));
+            publication.renew_recovery_lease().unwrap();
+            let refreshed = conversation_lease::load_leases_checked().unwrap();
+            let expiry = &refreshed
+                .iter()
+                .find(|entry| entry.owner() == *lease.owner())
+                .unwrap()
+                .expires_at;
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(expiry).unwrap()
+                    > (chrono::Utc::now() + chrono::Duration::minutes(2))
+            );
+            set_expiry(-chrono::Duration::seconds(1));
+            Some(
+                crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+                    &agent_id,
+                    "attachment",
+                    "codex",
+                    &native_id,
+                    "pause",
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        let expected = if case == AttachmentCase::SupersedeInput {
             state
                 .interactions
                 .start_provider_input_generation(&agent_id, ProviderInputReadiness::Booting, None)
@@ -1356,7 +1409,7 @@ mod tests {
             },
         )
         .await;
-        if supersede {
+        if case != AttachmentCase::Normal {
             assert!(published.is_err());
             assert_eq!(status, "Booting");
             assert_eq!(
@@ -1364,6 +1417,11 @@ mod tests {
                 Some(expected)
             );
             assert!(client.receipt("owner_ready").is_err());
+            if let Some(pause) = pause {
+                assert_ne!(pause.owner(), lease.owner());
+                assert!(publication.recovery_lease_lost());
+                assert!(publication.committed_recovery_native_id(&agent_id).is_ok());
+            }
         } else {
             published.unwrap();
             assert_eq!(status, "Idle");

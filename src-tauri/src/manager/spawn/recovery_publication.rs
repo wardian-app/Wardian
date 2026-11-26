@@ -8,6 +8,7 @@ use wardian_core::conversation_lease::{
 };
 
 const LEASE_LOST: &str = "Codex recovery lost its exact registration lease";
+const AWAITING_ACTIVATION: u8 = 0;
 const ACTIVATED: u8 = 1;
 const CLEANING_UP: u8 = 2;
 
@@ -15,8 +16,8 @@ pub(super) struct RecoveryPublication {
     owner: ConversationLeaseOwner,
     agent_id: String,
     native_id: String,
-    // Serialize watcher loss, cancellation, and durable success. This lock
-    // only covers synchronous persisted checks and the final SQLite commit.
+    // Serialize watcher loss, cancellation, durable success and activation.
+    // The lock covers synchronous effects while the exact lease is pinned.
     transition: Mutex<()>,
     lost: watch::Sender<bool>,
     runtime_outcome: AtomicU8,
@@ -57,19 +58,16 @@ impl RegistrationPublicationState {
         self.recovery.is_some()
     }
 
-    pub(crate) fn recovery_activated(&self) {
-        if let Some(recovery) = &self.recovery {
-            recovery.runtime_outcome.store(ACTIVATED, Ordering::Release);
-        }
-    }
-
     pub(crate) fn begin_recovery_cleanup(&self) {
         if let Some(recovery) = &self.recovery {
+            let _transition = recovery.lock();
             recovery
                 .runtime_outcome
                 .store(CLEANING_UP, Ordering::Release);
+            self.set_failed();
+        } else {
+            self.fail();
         }
-        self.fail();
     }
 
     pub(super) fn recovery_allows_release(&self) -> bool {
@@ -112,11 +110,6 @@ impl RegistrationPublicationState {
             .ok_or_else(|| "Exact Codex recovery has not committed registration".into())
     }
 
-    #[cfg(test)]
-    pub(crate) fn mark_recovery_committed_for_test(&self) {
-        self.set_committed();
-    }
-
     pub(crate) async fn wait_for_recovery_lease_loss(&self) {
         if let Some(recovery) = &self.recovery {
             let _ = recovery.lost.subscribe().wait_for(|lost| *lost).await;
@@ -152,16 +145,48 @@ impl RegistrationPublicationState {
         }
     }
 
+    /// The durable row is historical evidence. Current input can go ready
+    /// only while the same acquisition still excludes competing lifecycles.
+    pub(crate) fn with_recovery_activation(
+        &self,
+        activate: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let recovery = self
+            .recovery
+            .as_ref()
+            .ok_or("Missing Codex recovery registration")?;
+        let _transition = recovery.lock();
+        if *recovery.lost.borrow() {
+            return Err(LEASE_LOST.into());
+        }
+        if self.state() != Self::COMMITTED
+            || recovery.runtime_outcome.load(Ordering::Acquire) != AWAITING_ACTIVATION
+        {
+            return Err("Codex recovery is no longer awaiting activation".into());
+        }
+        match recovery.with_lease(|| {
+            activate()?;
+            recovery.runtime_outcome.store(ACTIVATED, Ordering::Release);
+            Ok(())
+        }) {
+            Ok(Some(result)) => result,
+            Ok(None) | Err(_) => Err(self.record_loss(recovery)),
+        }
+    }
+
     pub(crate) fn renew_recovery_lease(&self) -> Result<(), String> {
         let recovery = self
             .recovery
             .as_ref()
             .ok_or("Missing Codex recovery registration")?;
         let _transition = recovery.lock();
-        if self.state() != Self::PENDING {
-            // Successful publication intentionally permits the watcher to
-            // release. A later missing lease is therefore not a loss.
+        if self.state() == Self::FAILED
+            || recovery.runtime_outcome.load(Ordering::Acquire) != AWAITING_ACTIVATION
+        {
             return Ok(());
+        }
+        if *recovery.lost.borrow() {
+            return Err(LEASE_LOST.into());
         }
         match refresh_codex_recovery_lease_persisted(
             &recovery.owner,
@@ -176,7 +201,7 @@ impl RegistrationPublicationState {
         }
     }
 
-    /// Only a successful durable commit allows the watcher to release.
+    /// Keep the watcher through activation even after durable commit.
     pub(crate) fn commit_recovery_registration(
         &self,
         operation_id: &str,

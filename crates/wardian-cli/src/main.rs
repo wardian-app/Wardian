@@ -1,9 +1,5 @@
 mod agent_control;
 mod agent_spawn;
-use agent_spawn::{
-    handle_agent_spawn, handle_agent_spawn_recover, handle_agent_spawn_status,
-    handle_agent_spawn_wait,
-};
 mod args;
 mod artifact;
 mod automation_invoker;
@@ -283,18 +279,12 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
         Some(AgentCommand::ArchiveVacancy(args)) => agent_control::archive_vacancy(args),
         Some(AgentCommand::Pause { target }) => agent_control::pause(target),
         Some(AgentCommand::Resume { target }) => agent_control::resume(target),
-        Some(command @ AgentCommand::Spawn { .. }) => handle_agent_spawn(command, &args),
-        Some(AgentCommand::SpawnStatus { operation_id }) => handle_agent_spawn_status(operation_id),
-        Some(AgentCommand::SpawnWait {
-            operation_id,
-            timeout,
-        }) => handle_agent_spawn_wait(operation_id, timeout),
-        Some(AgentCommand::SpawnRecover {
-            operation_id,
-            expected_attempt,
-            expected_model,
-            action,
-        }) => handle_agent_spawn_recover(operation_id, expected_attempt, expected_model, *action),
+        Some(
+            command @ (AgentCommand::Spawn { .. }
+            | AgentCommand::SpawnStatus { .. }
+            | AgentCommand::SpawnWait { .. }
+            | AgentCommand::SpawnRecover { .. }),
+        ) => agent_spawn::dispatch(command, &args),
         Some(AgentCommand::Update {
             target,
             class,

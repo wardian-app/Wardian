@@ -43,9 +43,15 @@ struct Entry {
     prior_hold: Option<wardian_core::conversation_lease::ConversationLeaseOwner>,
     tree_exited: std::sync::atomic::AtomicBool,
     codex_owner: Option<crate::delivery::native_broker::CapturedCodexStop>,
+    recovery_owner: Option<RecoveryOwner>,
     writer_exit: Mutex<Option<Arc<crate::delivery::codex_shared::CodexThreadExit>>>,
     thread_id: Option<String>,
     executor: Option<tokio::runtime::Handle>,
+}
+
+struct RecoveryOwner {
+    broker: Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
+    generation: u64,
 }
 
 struct TerminalCleanup {
@@ -94,6 +100,7 @@ fn prepare_with_timeout(
         provider: "codex",
         prior_hold: None,
         codex_owner: None,
+        recovery_owner: None,
         executor: tokio::runtime::Handle::try_current().ok(),
     })
 }
@@ -106,10 +113,22 @@ pub(crate) struct StopRegistration {
     provider: &'static str,
     prior_hold: Option<wardian_core::conversation_lease::ConversationLeaseOwner>,
     codex_owner: Option<crate::delivery::native_broker::CapturedCodexStop>,
+    recovery_owner: Option<RecoveryOwner>,
     executor: Option<tokio::runtime::Handle>,
 }
 
 impl StopRegistration {
+    /// Dispose the exact provisional daemon only after this captured TUI joins.
+    /// A failed join retains this obligation with the same retryable stop.
+    pub(crate) fn with_recovery_owner(
+        mut self,
+        broker: Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
+        generation: u64,
+    ) -> Self {
+        self.recovery_owner = Some(RecoveryOwner { broker, generation });
+        self
+    }
+
     /// Transfer the exact native owner and creation gate before runtime capture.
     pub(crate) fn with_codex_owner(
         mut self,
@@ -144,7 +163,7 @@ impl StopRegistration {
     }
 
     /// Recovery's detached cleanup removes the exact terminal under the
-    /// lifecycle gate before this stop worker joins the captured child.
+    /// lifecycle gate, independently of the retained child join.
     pub(crate) fn without_terminal_cleanup(mut self) -> Self {
         self.terminal = None;
         self
@@ -184,6 +203,7 @@ impl StopRegistration {
             prior_hold: self.prior_hold,
             tree_exited: std::sync::atomic::AtomicBool::new(false),
             codex_owner: self.codex_owner,
+            recovery_owner: self.recovery_owner,
             writer_exit: Mutex::new(None),
             thread_id,
             executor: self.executor,
@@ -418,6 +438,11 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
                 } else {
                     stop_and_join(agent, worker.timeout, worker.provider == "pi")?;
                 }
+            }
+            if let Some(owner) = &worker.recovery_owner {
+                let executor = worker.executor.as_ref().ok_or("Codex recovery cleanup executor unavailable")?;
+                executor.block_on(owner.broker.dispose_codex_generation(&worker.keys[0].1, owner.generation))
+                    .map_err(|error| error.to_string())?;
             }
             let mut writer_exit = worker.writer_exit.lock().unwrap_or_else(|error| error.into_inner());
             if writer_exit.is_none() {

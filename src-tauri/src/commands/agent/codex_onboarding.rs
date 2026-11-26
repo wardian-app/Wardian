@@ -51,7 +51,9 @@ impl RecoveryPendingRegistration {
         }
         #[cfg(test)]
         if let Some((cleanup, reader_alive)) = self.fixture_capture {
-            match manager::codex_onboarding::require_recovery_reader_alive(&reader_alive) {
+            match self.publication.0.with_recovery_activation(|| {
+                manager::codex_onboarding::require_recovery_reader_alive(&reader_alive)
+            }) {
                 Ok(()) => cleanup.disarm(),
                 Err(error) => {
                     cleanup.finish(error).await;
@@ -77,8 +79,10 @@ impl RecoveryPendingRegistration {
             cleanup.finish(failure.into()).await;
         }
     }
+}
 
-    #[cfg(test)]
+#[cfg(test)]
+impl RecoveryPendingRegistration {
     pub(crate) fn fixture(publication: Arc<manager::RegistrationPublicationState>) -> Self {
         Self {
             publication: RegistrationPublicationAttempt(publication),
@@ -87,7 +91,6 @@ impl RecoveryPendingRegistration {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_fixture_capture(
         mut self,
         cleanup: manager::codex_onboarding::RecoveryRuntimeCleanup<tauri::test::MockRuntime>,
@@ -873,19 +876,26 @@ pub(crate) async fn rollback_captured_recovery<R: Runtime>(
     )
     .await
     {
-        Ok(detached) => (detached.map(|detached| detached.stop_guard), None),
-        Err(DetachProvisionalError::Persistence {
-            mut detached,
-            error,
-        }) => {
-            if let Some(shell) = detached.shell.as_mut() {
+        Ok(detached) => (
+            detached.map(|detached| detached.stop_guard.begin_stop()),
+            None,
+        ),
+        Err(DetachProvisionalError::Persistence { detached, error }) => {
+            let DetachedProvisionalCodex {
+                mut shell,
+                stop_guard,
+                order_index,
+                ..
+            } = detached;
+            let stop = stop_guard.begin_stop();
+            if let Some(shell) = shell.as_mut() {
                 super::replace_agent_status_incarnation(shell, "Error");
             }
-            let retained = retain_failed_detached_roster(&state, id, &mut detached)
+            let retained = retain_failed_detached_roster(&state, id, &mut shell, order_index)
                 .await
                 .err();
             let error = retained.map_or(error.clone(), |retained| format!("{error}; {retained}"));
-            (Some(detached.stop_guard), Some(error))
+            (Some(stop), Some(error))
         }
         Err(DetachProvisionalError::Infrastructure {
             registration,
@@ -902,17 +912,40 @@ pub(crate) async fn rollback_captured_recovery<R: Runtime>(
                 .map(|agent| {
                     let runtime = super::take_agent_runtime_for_termination(agent);
                     super::replace_agent_status_incarnation(agent, "Error");
-                    registration.capture(runtime)
+                    registration.capture(runtime).begin_stop()
                 });
             (stop, Some(error))
         }
     };
+    let (terminal_error, stop_error) =
+        finish_captured_recovery_stop(app, &state, id, capture.runtime_generation, stop).await;
+    if roster_error.is_none() && terminal_error.is_none() && stop_error.is_none() {
+        Ok(())
+    } else {
+        Err(manager::codex_onboarding::format_cleanup_errors(
+            "Codex recovery runtime cleanup",
+            roster_error,
+            terminal_error,
+            stop_error,
+        ))
+    }
+}
+
+async fn finish_captured_recovery_stop<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    id: &str,
+    generation: u64,
+    stop: Option<crate::manager::codex_stop::StopHandle>,
+) -> (Option<String>, Option<String>) {
+    // Pause can hold lifecycle while awaiting this stop. Start the retained
+    // worker before taking lifecycle again to remove only our terminal.
     use crate::state::terminal_session::TerminalBrokerError;
     let terminal_error = {
         let _lifecycle = state.lock_agent_lifecycle(id).await;
         match state
             .terminal_sessions
-            .terminate_and_remove_runtime(id, capture.runtime_generation)
+            .terminate_and_remove_runtime(id, generation)
             .await
         {
             Ok(())
@@ -924,22 +957,13 @@ pub(crate) async fn rollback_captured_recovery<R: Runtime>(
         }
     };
     let stop_error = if let Some(stop) = stop {
-        let result = stop.begin_stop().wait().await.err();
+        let result = stop.wait().await.err();
         let _ = app.emit("agents-updated", ());
         result
     } else {
         None
     };
-    if roster_error.is_none() && terminal_error.is_none() && stop_error.is_none() {
-        Ok(())
-    } else {
-        Err(manager::codex_onboarding::format_cleanup_errors(
-            "Codex recovery runtime cleanup",
-            roster_error,
-            terminal_error,
-            stop_error,
-        ))
-    }
+    (terminal_error, stop_error)
 }
 
 async fn persist_current_provisional_roster(state: &AppState) -> Result<(), String> {
@@ -1026,9 +1050,10 @@ async fn retain_failed_detached_codex(
         .map(|shell| shell.current_status.clone())
         .ok_or_else(|| "failed Codex roster shell was already retained".to_string())?;
     manager::set_agent_status(app, session_id, &status, "Error");
-    let roster_error = retain_failed_detached_roster(state, session_id, &mut detached)
-        .await
-        .err();
+    let roster_error =
+        retain_failed_detached_roster(state, session_id, &mut detached.shell, detached.order_index)
+            .await
+            .err();
     state
         .interactions
         .record_provider_input_state(
@@ -1061,7 +1086,8 @@ async fn retain_failed_detached_codex(
 async fn retain_failed_detached_roster(
     state: &AppState,
     session_id: &str,
-    detached: &mut DetachedProvisionalCodex,
+    shell: &mut Option<ActiveAgent>,
+    order_index: usize,
 ) -> Result<(), String> {
     loop {
         let _lifecycle = state.lock_agent_lifecycle(session_id).await;
@@ -1073,12 +1099,9 @@ async fn retain_failed_detached_roster(
                     let mut agents = state.agents.lock().await;
                     let mut order = state.agent_order.lock().await;
                     if !agents.contains_key(session_id) {
-                        let shell = detached
-                            .shell
-                            .take()
-                            .expect("checked detached provisional shell");
+                        let shell = shell.take().expect("checked detached provisional shell");
                         agents.insert(session_id.to_string(), shell);
-                        let index = detached.order_index.min(order.len());
+                        let index = order_index.min(order.len());
                         order.insert(index, session_id.to_string());
                     }
                     let snapshot = manager::state_configs_snapshot(&agents, &order);

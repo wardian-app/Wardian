@@ -399,12 +399,11 @@ pub(crate) fn spawn_codex_owner_at_lease_boundary<T>(
             .as_deref()
             .filter(|id| !id.is_empty())
             .ok_or("Codex recovery has no retargeted native identity")?;
-        heartbeat.ensure_codex_recovery_scope(
+        return heartbeat.with_exact_codex_recovery_effect(
             "start Codex recovery owner",
-            wardian_core::conversation_lease::CodexRecoveryLeaseScope::Exact {
-                agent_id: &spec.target_agent_id,
-                native_id,
-            },
+            &spec.target_agent_id,
+            native_id,
+            spawn,
         )?;
     }
     spawn()
@@ -688,6 +687,7 @@ impl CodexSharedOwner {
                         &mut || attachment::child_alive(&mut child),
                         initialization_deadline,
                         &observed_version,
+                        recovery_heartbeat.map(RecoveryRequestLease::Preparing),
                     ).await;
                     timings.reviewer_checkpoint = checkpoint_at.elapsed();
                     result?;
@@ -796,6 +796,7 @@ impl CodexSharedOwner {
     pub(crate) async fn finalize_interactive<F, Fut>(
         &self,
         mut tui_alive: F,
+        publication: Option<&crate::manager::RegistrationPublicationState>,
     ) -> Result<Value, CodexSharedError>
     where
         F: FnMut() -> Fut,
@@ -828,10 +829,23 @@ impl CodexSharedOwner {
             }
             attachment::child_alive(child)?;
             tui_alive().await?;
-            attachment::inject_initial_context(&self.client, &id, &self.initial_context).await?;
+            let lease = publication
+                .filter(|state| state.is_recovery())
+                .map(RecoveryRequestLease::Attaching);
+            attachment::inject_initial_context(&self.client, &id, &self.initial_context, lease)
+                .await?;
             attachment::child_alive(child)?;
             tui_alive().await?;
-            let response = self.client.resume_metadata(json!({"threadId":id})).await?;
+            let response = self
+                .client
+                .attachment_request(
+                    "thread/resume",
+                    json!({"threadId":id,"excludeTurns":true}),
+                    &id,
+                    lease,
+                    None,
+                )
+                .await?;
             if response["thread"]["id"].as_str() != Some(id.as_str()) {
                 return Err(CodexSharedError::unsupported(
                     "attachment resume changed thread identity",

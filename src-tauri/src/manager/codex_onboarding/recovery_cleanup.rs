@@ -53,11 +53,10 @@ impl<R: Runtime> RecoveryRuntimeCleanup<R> {
     }
 
     pub(crate) fn disarm(mut self) {
-        if let Some((identity, _, owner)) = self.capture.take() {
+        if let Some((_, _, owner)) = self.capture.take() {
             if let Some(mut owner) = owner {
                 owner.attached();
             }
-            identity.publication.recovery_activated();
         }
     }
 
@@ -80,66 +79,72 @@ impl<R: Runtime> RecoveryRuntimeCleanup<R> {
         identity.ready.store(false, Ordering::Release);
         let app = self.app.clone();
         Some(tauri::async_runtime::spawn(async move {
+            let registration = registration.with_recovery_owner(
+                app.state::<crate::state::AppState>()
+                    .native_delivery
+                    .clone(),
+                identity.provider_generation,
+            );
+            if let Some(mut owner) = owner {
+                // The captured stop owns disposal from here, even on failure.
+                owner.attached();
+            }
             if let Err(error) =
                 crate::commands::agent::rollback_captured_recovery(&app, &identity, registration)
                     .await
             {
-                failure.push_str(&format!("; captured TUI rollback failed: {error}"));
-            }
-            let native = match owner {
-                Some(owner) => owner.dispose().await,
-                None => app
-                    .state::<crate::state::AppState>()
-                    .native_delivery
-                    .dispose_codex_generation(&identity.session_id, identity.provider_generation)
-                    .await
-                    .map_err(|error| error.to_string()),
-            };
-            if let Err(error) = native {
-                failure.push_str(&format!("; native Codex cleanup retained: {error}"));
+                failure.push_str(&format!("; captured Codex rollback failed: {error}"));
             }
             failure
         }))
     }
+}
 
-    #[cfg(test)]
+#[cfg(test)]
+impl CapturedRecoveryRuntime {
+    pub(crate) fn fixture(
+        active: &crate::state::ActiveAgent,
+        provider_generation: u64,
+        publication: Arc<RegistrationPublicationState>,
+    ) -> Self {
+        Self {
+            session_id: active.config.lock().unwrap().session_id.clone(),
+            provider_generation,
+            runtime_generation: active.runtime_generation.unwrap(),
+            config: active.config.clone(),
+            publication,
+            ready: active
+                .watch_state
+                .lock()
+                .unwrap()
+                .codex_attachment_ready_flag(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<R: Runtime> RecoveryRuntimeCleanup<R> {
     pub(crate) fn fixture(
         app: AppHandle<R>,
         active: &crate::state::ActiveAgent,
         provider_generation: u64,
         publication: Arc<RegistrationPublicationState>,
     ) -> Self {
-        let session_id = active.config.lock().unwrap().session_id.clone();
+        let capture = CapturedRecoveryRuntime::fixture(active, provider_generation, publication);
         let state = app.state::<crate::state::AppState>();
         let stop = crate::manager::codex_stop::prepare_stop(
             &crate::utils::fs::get_wardian_home().unwrap(),
-            &session_id,
+            &capture.session_id,
         )
         .unwrap()
         .with_terminal_cleanup(state.terminal_sessions.clone())
         .unwrap();
         let owner = CodexAttachGuard::new(
             state.native_delivery.clone(),
-            session_id.clone(),
+            capture.session_id.clone(),
             provider_generation,
         );
-        Self::new(
-            app,
-            CapturedRecoveryRuntime {
-                session_id,
-                provider_generation,
-                runtime_generation: active.runtime_generation.unwrap(),
-                config: active.config.clone(),
-                publication,
-                ready: active
-                    .watch_state
-                    .lock()
-                    .unwrap()
-                    .codex_attachment_ready_flag(),
-            },
-            stop,
-            Some(owner),
-        )
+        Self::new(app, capture, stop, Some(owner))
     }
 }
 

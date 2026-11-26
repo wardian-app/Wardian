@@ -632,6 +632,31 @@ async fn timeout_retains_fence_even_if_child_later_exits_until_explicit_retry() 
 }
 
 #[tokio::test]
+async fn recovery_tui_join_failure_keeps_exact_native_owner_through_retry() {
+    let home = tempfile::tempdir().unwrap();
+    let id = "failed-recovery-tui";
+    let signals = Arc::new(Signals::default());
+    let broker = Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new());
+    broker.install_recovery_cleanup_fixture(id, 3).await;
+    let stop = prepare_with_timeout(home.path(), id, Duration::ZERO)
+        .unwrap()
+        .with_recovery_owner(broker.clone(), 3)
+        .capture(agent(id, &signals))
+        .begin_stop();
+    assert!(stop.wait().await.unwrap_err().contains("Timed out"));
+    assert!(broker.codex_owner_selected(id, 3).await);
+    assert!(await_quiescent(home.path(), id).await.is_err());
+    assert_eq!(signals.drops.load(Ordering::SeqCst), 0);
+
+    signals.exited.store(true, Ordering::SeqCst);
+    retry_stop(home.path(), id).unwrap();
+    stop.wait().await.unwrap();
+    await_quiescent(home.path(), id).await.unwrap();
+    assert!(!broker.codex_owner_selected(id, 3).await);
+    assert_eq!(signals.drops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn every_captured_runtime_for_same_key_must_exit_and_other_homes_are_independent() {
     let home = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();

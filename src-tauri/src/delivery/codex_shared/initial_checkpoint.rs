@@ -1,5 +1,8 @@
 //! Private saved-reviewer preparation before any ordinary TUI or input runtime.
-use super::super::{json, version, CodexSharedClient, CodexSharedError, Value, STARTUP_TIMEOUT};
+use super::super::{
+    json, version, CodexSharedClient, CodexSharedError, RecoveryRequestLease, Value,
+    STARTUP_TIMEOUT,
+};
 use super::{attachment, policy::ExpectedPolicy};
 use std::sync::atomic::Ordering;
 use tokio::sync::broadcast;
@@ -154,6 +157,7 @@ pub(super) async fn prepare_saved_resume(
     alive: &mut impl FnMut() -> Result<(), CodexSharedError>,
     deadline: tokio::time::Instant,
     observed_version: &str,
+    lease: Option<RecoveryRequestLease<'_>>,
 ) -> Result<(), CodexSharedError> {
     version::require_initial_checkpoint_version(observed_version)?;
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -162,7 +166,7 @@ pub(super) async fn prepare_saved_resume(
             "initial checkpoint startup budget exhausted before write",
         ));
     }
-    prepare_with_timeout(client, policy, id, alive, remaining).await
+    prepare_with_timeout(client, policy, id, alive, remaining, lease).await
 }
 
 async fn prepare_with_timeout(
@@ -171,13 +175,16 @@ async fn prepare_with_timeout(
     id: &str,
     alive: &mut impl FnMut() -> Result<(), CodexSharedError>,
     timeout: std::time::Duration,
+    lease: Option<RecoveryRequestLease<'_>>,
 ) -> Result<(), CodexSharedError> {
     tokio::time::timeout(timeout, async {
         private_client(client)?;
         alive()?;
         let mut events = client.initial_notifications.subscribe();
         let activity = client.initial_activity_sequence.load(Ordering::Acquire);
-        let response = client.resume_metadata(policy.initial_resume_params(id)).await?;
+        let mut params = policy.initial_resume_params(id);
+        params["excludeTurns"] = json!(true);
+        let response = client.attachment_request("thread/resume", params, id, lease, None).await?;
         private_client(client)?;
         alive()?;
         quiet_response(&response, id)?;
@@ -188,10 +195,10 @@ async fn prepare_with_timeout(
         }
         if needs_update {
             let fence = client.settings_sequence.load(Ordering::Acquire);
-            let request = client.request_with_fences(
+            let request = client.attachment_request(
                 "thread/settings/update",
                 json!({"threadId": id, "approvalsReviewer": "user"}),
-                Some(STARTUP_TIMEOUT), None, Some(activity),
+                id, lease, Some(activity),
             );
             tokio::pin!(request);
             let mut acknowledged = false;
@@ -221,7 +228,9 @@ async fn prepare_with_timeout(
                     }
                 }
             }
-            let response = client.resume_metadata(json!({"threadId": id})).await?;
+            let response = client.attachment_request(
+                "thread/resume", json!({"threadId": id, "excludeTurns": true}), id, lease, None,
+            ).await?;
             quiet_response(&response, id)?;
             policy.validate(&response)?;
         }
@@ -232,9 +241,9 @@ async fn prepare_with_timeout(
             return Err(CodexSharedError::uncertain("initial checkpoint activity changed before eviction"));
         }
         let fence = client.settings_sequence.load(Ordering::Acquire);
-        let request = client.request_with_fences(
+        let request = client.attachment_request(
             "thread/unsubscribe", json!({"threadId": id}),
-            Some(STARTUP_TIMEOUT), None, Some(activity),
+            id, lease, Some(activity),
         );
         tokio::pin!(request);
         let mut acknowledged = false;

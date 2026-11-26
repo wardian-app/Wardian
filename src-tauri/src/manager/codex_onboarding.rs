@@ -33,6 +33,7 @@ pub(super) struct CodexAttachmentCompletionContext {
     pub(super) session_id: String,
     pub(super) provider_generation: u64,
     pub(super) runtime_generation: u64,
+    pub(super) process_id: Option<u32>,
     pub(super) config_lock: Arc<std::sync::Mutex<AgentConfig>>,
     pub(super) current_status: Arc<std::sync::Mutex<String>>,
     pub(super) watch_state: Arc<std::sync::Mutex<AgentWatchState>>,
@@ -216,6 +217,7 @@ pub(crate) struct CodexAttachmentCompletion {
     session_id: String,
     provider_generation: u64,
     runtime_generation: u64,
+    process_id: Option<u32>,
     config_lock: Arc<std::sync::Mutex<AgentConfig>>,
     current_status: Arc<std::sync::Mutex<String>>,
     watch_state: Arc<std::sync::Mutex<AgentWatchState>>,
@@ -244,6 +246,7 @@ impl CodexAttachmentCompletion {
             session_id: context.session_id,
             provider_generation: context.provider_generation,
             runtime_generation: context.runtime_generation,
+            process_id: context.process_id,
             config_lock: context.config_lock,
             current_status: context.current_status,
             watch_state: context.watch_state,
@@ -548,7 +551,17 @@ impl CodexAttachmentCompletion {
             self.provider_generation,
             &client,
             publication,
-            || self.publish_ready_status(),
+            || {
+                self.publish_ready_status()?;
+                // The captured PID becomes durable only when the exact
+                // committed generation is cleared for provider input.
+                let _ = wardian_core::db::update_agent_status(
+                    &self.session_id,
+                    "Idle",
+                    self.process_id,
+                );
+                Ok(())
+            },
         )
         .await?;
         self.observe_turn_activity(client.observations());
@@ -660,7 +673,7 @@ pub(crate) async fn publish_recovery_readiness(
 ) -> Result<(), String> {
     state
         .interactions
-        .publish_current_provider_input_ready(session_id, generation, || {
+        .publish_recovery_provider_input_ready(session_id, generation, publication, || {
             client.activate_recovery_input(publication, publish_status)
         })
         .await

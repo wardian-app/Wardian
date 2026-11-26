@@ -257,6 +257,25 @@ struct StartupReadinessLeaseWake {
     dispatch: std::sync::Arc<dyn Fn() + Send + Sync>,
 }
 
+impl SpawnPublicationGate {
+    fn persist_spawned_process(&self, config: &AgentConfig, process_id: Option<u32>) {
+        if self
+            .registration
+            .as_ref()
+            .is_some_and(|state| state.is_recovery())
+        {
+            // Recovery still owes a durable commit and an exact activation.
+            // The offline CLI reads this summary even without the app owner.
+            return;
+        }
+        let _ = wardian_core::db::update_agent_status(
+            &config.session_id,
+            if config.is_off { "Off" } else { "Idle" },
+            process_id,
+        );
+    }
+}
+
 struct RecoveryLeaseHandoff {
     native_id: String,
     result: tokio::sync::oneshot::Sender<Result<(), String>>,
@@ -313,6 +332,10 @@ mod recovery_publication;
 
 #[cfg(test)]
 impl RegistrationPublicationState {
+    pub(crate) fn mark_recovery_committed_for_test(&self) {
+        self.set_committed();
+    }
+
     pub(crate) fn is_failed(&self) -> bool {
         self.state() == Self::FAILED
     }
@@ -2422,37 +2445,7 @@ async fn wake_after_startup_lease_release(
 }
 
 #[cfg(test)]
-pub(crate) fn start_recovery_registration_watcher_fixture<R: tauri::Runtime>(
-    lease: crate::commands::agent::RecoveryRegistrationLease,
-    config: &AgentConfig,
-    app: AppHandle<R>,
-    current_status: std::sync::Arc<std::sync::Mutex<String>>,
-    generation: u64,
-    publication: std::sync::Arc<RegistrationPublicationState>,
-) -> (
-    tokio::task::JoinHandle<()>,
-    tokio::sync::oneshot::Receiver<Result<(), String>>,
-) {
-    let (result, handoff) = tokio::sync::oneshot::channel();
-    let watcher = release_provider_spawn_lease_after_readiness(
-        lease.lease,
-        current_status,
-        config.session_id.clone(),
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        app,
-        generation,
-        SpawnPublicationGate {
-            registration: Some(publication),
-            recovery_heartbeat: Some(lease.heartbeat),
-            recovery_handoff: Some(RecoveryLeaseHandoff {
-                native_id: provider_spawn_session_identity(config).to_owned(),
-                result,
-            }),
-            ..Default::default()
-        },
-    );
-    (watcher, handoff)
-}
+pub(crate) use tests::start_recovery_registration_watcher_fixture;
 
 fn pty_status_event_policy_for_provider(provider_name: &str) -> ProviderStatusEventPolicy {
     match provider_name {
@@ -3436,18 +3429,24 @@ async fn spawn_agent_inner(
     if let Some(context) = codex_launch_context.as_deref() {
         context.revalidate()?;
     }
-    if let Some(heartbeat) = gate.recovery_heartbeat.as_deref() {
-        heartbeat.ensure_codex_recovery_scope(
-            "start Codex recovery TUI",
-            wardian_core::conversation_lease::CodexRecoveryLeaseScope::Exact {
-                agent_id: &config.session_id,
-                native_id: provider_spawn_session_identity(&config),
-            },
-        )?;
-    }
-    // Provider records written after this instant belong to this runtime.
-    let provider_launched_at_ms = chrono::Utc::now().timestamp_millis();
-    let child_result = pair.slave.spawn_command(cmd);
+    let launch = || {
+        // Provider records written after this instant belong to this runtime.
+        (
+            chrono::Utc::now().timestamp_millis(),
+            pair.slave.spawn_command(cmd),
+        )
+    };
+    let (provider_launched_at_ms, child_result) =
+        if let Some(heartbeat) = gate.recovery_heartbeat.as_deref() {
+            heartbeat.with_exact_codex_recovery_effect(
+                "start Codex recovery TUI",
+                &config.session_id,
+                provider_spawn_session_identity(&config),
+                launch,
+            )?
+        } else {
+            launch()
+        };
     let child = match child_result {
         Ok(child) => child,
         Err(error) => {
@@ -3518,12 +3517,7 @@ async fn spawn_agent_inner(
         })
     });
 
-    // Phase 2: Record/Update status in SQLite with the real PID
-    let _ = wardian_core::db::update_agent_status(
-        &config.session_id,
-        if config.is_off { "Off" } else { "Idle" },
-        process_id,
-    );
+    gate.persist_spawned_process(&config, process_id);
 
     #[cfg(windows)]
     let job_object = {
@@ -5748,6 +5742,7 @@ async fn spawn_agent_inner(
                 session_id: config.session_id.clone(),
                 provider_generation: attachment.generation,
                 runtime_generation,
+                process_id,
                 config_lock,
                 current_status: current_status.clone(),
                 watch_state,
@@ -5841,6 +5836,100 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+    }
+
+    pub(crate) fn start_recovery_registration_watcher_fixture<R: tauri::Runtime>(
+        lease: crate::commands::agent::RecoveryRegistrationLease,
+        config: &AgentConfig,
+        app: AppHandle<R>,
+        current_status: std::sync::Arc<std::sync::Mutex<String>>,
+        generation: u64,
+        publication: std::sync::Arc<RegistrationPublicationState>,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<Result<(), String>>,
+    ) {
+        let (result, handoff) = tokio::sync::oneshot::channel();
+        let watcher = release_provider_spawn_lease_after_readiness(
+            lease.lease,
+            current_status,
+            config.session_id.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            app,
+            generation,
+            SpawnPublicationGate {
+                registration: Some(publication),
+                recovery_heartbeat: Some(lease.heartbeat),
+                recovery_handoff: Some(RecoveryLeaseHandoff {
+                    native_id: provider_spawn_session_identity(config).to_owned(),
+                    result,
+                }),
+                ..Default::default()
+            },
+        );
+        (watcher, handoff)
+    }
+
+    #[tokio::test]
+    async fn recovery_provisional_spawn_does_not_publish_idle_or_pid_to_offline_cli() {
+        use wardian_core::db::{self, AgentUpsert};
+
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let config = AgentConfig {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            session_name: "provisional-recovery".into(),
+            provider: "codex".into(),
+            ..AgentConfig::default()
+        };
+        db::upsert_agent(&AgentUpsert {
+            session_id: &config.session_id,
+            session_name: &config.session_name,
+            description: "",
+            agent_class: "fixture",
+            provider: "codex",
+            workspace: None,
+            project: None,
+            is_off: false,
+            created_at: None,
+        })
+        .unwrap();
+        let lease = crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+            &config.session_id,
+            &config.session_name,
+            "codex",
+            "",
+            "fixture",
+        )
+        .unwrap();
+        let publication = SpawnPublicationGate {
+            registration: Some(std::sync::Arc::new(
+                RegistrationPublicationState::for_recovery(
+                    lease.owner().clone(),
+                    config.session_id.clone(),
+                    uuid::Uuid::new_v4().to_string(),
+                ),
+            )),
+            ..SpawnPublicationGate::default()
+        };
+        let lookup = || {
+            db::get_db_conn(|conn| {
+                Ok(wardian_core::identity::resolve_by_name_or_uuid(
+                    conn,
+                    &config.session_id,
+                )?)
+            })
+            .unwrap()
+        };
+
+        publication.persist_spawned_process(&config, Some(42_424));
+        let provisional = lookup();
+        assert_eq!(provisional.status, "unknown");
+        assert_eq!(provisional.pid, None);
+
+        SpawnPublicationGate::default().persist_spawned_process(&config, Some(42_424));
+        let ordinary = lookup();
+        assert_eq!(ordinary.status, "idle");
+        assert_eq!(ordinary.pid, Some(42_424));
     }
 
     fn pi_log_baseline(

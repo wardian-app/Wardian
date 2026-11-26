@@ -27,6 +27,8 @@ mod launch_model;
 mod owner;
 use owner::initial_checkpoint;
 mod proxy;
+mod recovery_wire;
+use recovery_wire::{RecoveryReadGate, RecoveryRequestLease};
 #[cfg(test)]
 mod startup_tests;
 mod stderr_capture;
@@ -45,6 +47,15 @@ type SocketWriter = Box<
 >;
 type PendingReply = oneshot::Sender<Result<Value, CodexSharedError>>;
 pub(super) const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Clone, Copy)]
+enum RequestAuthority<'a> {
+    Client(&'a crate::remote::client_messages::ClientSendAuthority),
+    Recovery {
+        lease: RecoveryRequestLease<'a>,
+        native_id: &'a str,
+    },
+}
 
 /// A request can be uncertain even when the socket write returned an error.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -382,7 +393,8 @@ impl Observation {
 pub struct CodexSharedClient {
     agent_id: String,
     generation: u64,
-    writer: Mutex<SocketWriter>,
+    writer: Mutex<Option<SocketWriter>>,
+    recovery_reads: Arc<RecoveryReadGate>,
     pending: Arc<StdMutex<HashMap<String, PendingReply>>>,
     observation: watch::Sender<Observation>,
     settings_sequence: Arc<AtomicU64>,
@@ -405,24 +417,6 @@ impl std::fmt::Debug for CodexSharedClient {
 impl CodexSharedClient {
     pub(super) fn identity(&self) -> (&str, u64) {
         (&self.agent_id, self.generation)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn unbound_input_test_client(
-        agent_id: &str,
-        generation: u64,
-    ) -> (Arc<Self>, tokio::io::DuplexStream) {
-        let (client, peer) = tokio::io::duplex(4096);
-        let socket = WebSocketStream::from_raw_socket(
-            client,
-            tokio_tungstenite::tungstenite::protocol::Role::Client,
-            None,
-        )
-        .await;
-        (
-            Self::from_connected(agent_id.to_owned(), generation, socket, None),
-            peer,
-        )
     }
 
     pub(crate) fn observations(&self) -> watch::Receiver<Observation> {
@@ -502,9 +496,11 @@ impl CodexSharedClient {
         let initial_sender = initial_notifications.clone();
         let initial_activity = initial_activity_sequence.clone();
         let proxy_stop = proxy.as_ref().map(proxy::OwnedProxy::stop_signal);
+        let recovery_reads = Arc::new(RecoveryReadGate::default());
+        let read_gate = recovery_reads.clone();
         let task = tokio::spawn(async move {
             let mut close_reason = "provider connection ended".to_owned();
-            while let Some(message) = reader.next().await {
+            while let Some(message) = read_gate.next(&mut reader).await {
                 let message = match message {
                     Ok(message) => message,
                     Err(error) => {
@@ -570,7 +566,8 @@ impl CodexSharedClient {
         Arc::new(Self {
             agent_id,
             generation,
-            writer: Mutex::new(Box::new(writer)),
+            writer: Mutex::new(Some(Box::new(writer))),
+            recovery_reads,
             pending,
             observation,
             settings_sequence,
@@ -637,6 +634,8 @@ impl CodexSharedClient {
         self.writer
             .lock()
             .await
+            .as_mut()
+            .ok_or_else(|| CodexSharedError::unsupported("provider writer unavailable"))?
             .send(Message::Text(
                 json!({"method":"initialized"}).to_string().into(),
             ))
@@ -852,6 +851,26 @@ impl CodexSharedClient {
             .await
     }
 
+    async fn attachment_request(
+        &self,
+        method: &str,
+        params: Value,
+        native_id: &str,
+        lease: Option<RecoveryRequestLease<'_>>,
+        initial_activity: Option<u64>,
+    ) -> Result<Value, CodexSharedError> {
+        let authority = lease.map(|lease| RequestAuthority::Recovery { lease, native_id });
+        self.request_with_fences_and_authority(
+            method,
+            params,
+            Some(STARTUP_TIMEOUT),
+            None,
+            initial_activity,
+            authority,
+        )
+        .await
+    }
+
     async fn request_with_optional_timeout(
         &self,
         method: &str,
@@ -902,7 +921,7 @@ impl CodexSharedClient {
         timeout: Option<Duration>,
         expected_activity: Option<&CodexTurnActivity>,
         initial_activity: Option<u64>,
-        client_send_authority: Option<&crate::remote::client_messages::ClientSendAuthority>,
+        authority: Option<RequestAuthority<'_>>,
     ) -> Result<Value, CodexSharedError> {
         if self.observation.borrow().closed {
             return Err(CodexSharedError::unsupported(
@@ -934,21 +953,29 @@ impl CodexSharedClient {
                     provider_boundary_crossed: false,
                 });
             }
-            let _authority_permit = match client_send_authority {
-                Some(authority) => {
+            let _authority_permit = match authority {
+                Some(RequestAuthority::Client(authority)) => {
                     Some(authority.acquire().await.map_err(|code| CodexSharedError {
                         code: code.to_string(),
                         message: code.to_string(),
                         provider_boundary_crossed: false,
                     })?)
                 }
-                None => None,
+                _ => None,
             };
             self.observation.send_modify(|state| {
                 state.task_receipts.issue(&id, method, &payload["params"]);
             });
+            let message = Message::Text(payload.to_string().into());
+            if let Some(RequestAuthority::Recovery { lease, native_id }) = authority {
+                return self
+                    .send_recovery_effect(&mut writer, lease, native_id, message)
+                    .await;
+            }
             writer
-                .send(Message::Text(payload.to_string().into()))
+                .as_mut()
+                .ok_or_else(|| CodexSharedError::unsupported("provider writer unavailable"))?
+                .send(message)
                 .await
                 .map_err(|_| {
                     CodexSharedError::uncertain("provider request write failed; not replayed")
@@ -1098,7 +1125,7 @@ impl CodexSharedClient {
                 Some(Duration::from_secs(30)),
                 None,
                 None,
-                client_send_authority,
+                client_send_authority.map(RequestAuthority::Client),
             )
             .await?;
         receipt.provider_turn_id = result["turn"]["id"].as_str().map(str::to_owned);
@@ -1197,7 +1224,9 @@ impl CodexSharedClient {
             proxy.stop();
         }
         let _ = tokio::time::timeout(Duration::from_secs(1), async {
-            self.writer.lock().await.close().await
+            if let Some(writer) = self.writer.lock().await.as_mut() {
+                let _ = writer.close().await;
+            }
         })
         .await;
         let mut reader_slot = self.reader.lock().await;
@@ -1247,6 +1276,176 @@ fn validate_endpoint(endpoint: &str) -> Result<(), CodexSharedError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl CodexSharedClient {
+        pub(crate) async fn unbound_input_test_client(
+            agent_id: &str,
+            generation: u64,
+        ) -> (Arc<Self>, tokio::io::DuplexStream) {
+            let (client, peer) = tokio::io::duplex(4096);
+            let socket = WebSocketStream::from_raw_socket(
+                client,
+                tokio_tungstenite::tungstenite::protocol::Role::Client,
+                None,
+            )
+            .await;
+            (
+                Self::from_connected(agent_id.to_owned(), generation, socket, None),
+                peer,
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_attachment_effects_recheck_lease_after_waiting_for_writer() {
+        use crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity;
+        use crate::manager::RegistrationPublicationState;
+        use wardian_core::conversation_lease::{self, CodexRecoveryLeaseScope};
+
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        for method in ["thread/inject_items", "thread/resume"] {
+            let agent_id = uuid::Uuid::new_v4().to_string();
+            let native_id = uuid::Uuid::new_v4().to_string();
+            let lease = acquire_agent_lifecycle_transition_lease_for_identity(
+                &agent_id,
+                "attachment",
+                "codex",
+                "",
+                "fixture",
+            )
+            .unwrap();
+            assert!(conversation_lease::refresh_codex_recovery_lease_persisted(
+                lease.owner(),
+                chrono::Duration::minutes(20),
+                CodexRecoveryLeaseScope::Attach {
+                    agent_id: &agent_id,
+                    native_id: &native_id
+                },
+            )
+            .unwrap());
+            let publication = RegistrationPublicationState::for_recovery(
+                lease.owner().clone(),
+                agent_id.clone(),
+                native_id.clone(),
+            );
+            let (client, peer) = CodexSharedClient::unbound_input_test_client(&agent_id, 1).await;
+            let mut peer = WebSocketStream::from_raw_socket(
+                peer,
+                tokio_tungstenite::tungstenite::protocol::Role::Server,
+                None,
+            )
+            .await;
+            let writer = client.writer.lock().await;
+            let effect = client.attachment_request(
+                method,
+                json!({"threadId": native_id}),
+                &native_id,
+                Some(RecoveryRequestLease::Attaching(&publication)),
+                None,
+            );
+            tokio::pin!(effect);
+            assert!(futures_util::poll!(&mut effect).is_pending());
+
+            let mut leases = conversation_lease::load_leases_checked().unwrap();
+            leases
+                .iter_mut()
+                .find(|entry| entry.owner() == *lease.owner())
+                .unwrap()
+                .expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+            conversation_lease::save_leases(&leases).unwrap();
+            let pause = acquire_agent_lifecycle_transition_lease_for_identity(
+                &agent_id,
+                "attachment",
+                "codex",
+                &native_id,
+                "pause",
+            )
+            .unwrap();
+            assert_ne!(pause.owner(), lease.owner());
+            assert!(!publication.recovery_lease_lost());
+            drop(writer);
+            let error = effect.await.unwrap_err();
+            assert!(!error.provider_boundary_crossed);
+            assert!(publication.recovery_lease_lost());
+            assert!(tokio::time::timeout(Duration::from_millis(35), peer.next())
+                .await
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_lease_loss_discards_buffered_attachment_bytes_on_close() {
+        use crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity;
+        use crate::manager::RegistrationPublicationState;
+        use tokio::io::AsyncReadExt;
+        use wardian_core::conversation_lease::{self, CodexRecoveryLeaseScope};
+
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        let native_id = uuid::Uuid::new_v4().to_string();
+        let lease = acquire_agent_lifecycle_transition_lease_for_identity(
+            &agent_id,
+            "attachment",
+            "codex",
+            "",
+            "fixture",
+        )
+        .unwrap();
+        assert!(conversation_lease::refresh_codex_recovery_lease_persisted(
+            lease.owner(),
+            chrono::Duration::minutes(20),
+            CodexRecoveryLeaseScope::Attach {
+                agent_id: &agent_id,
+                native_id: &native_id
+            },
+        )
+        .unwrap());
+        let publication = RegistrationPublicationState::for_recovery(
+            lease.owner().clone(),
+            agent_id.clone(),
+            native_id.clone(),
+        );
+        let (io, mut peer) = tokio::io::duplex(64);
+        let socket = WebSocketStream::from_raw_socket(
+            io,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let client = CodexSharedClient::from_connected(agent_id, 1, socket, None);
+        let write = client.attachment_request(
+            "thread/inject_items",
+            json!({"threadId": native_id, "data": "x".repeat(4_096)}),
+            &native_id,
+            Some(RecoveryRequestLease::Attaching(&publication)),
+            None,
+        );
+        tokio::pin!(write);
+        assert!(futures_util::poll!(&mut write).is_pending());
+
+        let mut leases = conversation_lease::load_leases_checked().unwrap();
+        leases
+            .iter_mut()
+            .find(|entry| entry.owner() == *lease.owner())
+            .unwrap()
+            .expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        conversation_lease::save_leases(&leases).unwrap();
+        let error = write.await.unwrap_err();
+        assert!(error.provider_boundary_crossed);
+        assert!(publication.recovery_lease_lost());
+
+        let mut received = Vec::new();
+        let (_, read) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(client.close(), peer.read_to_end(&mut received))
+        })
+        .await
+        .expect("abandoned private transport did not close");
+        assert_eq!(
+            read.unwrap(),
+            64,
+            "closing must not flush the buffered request tail"
+        );
+    }
 
     impl CodexSharedClient {
         /// Submit ordinary native input without presenting it as a canonical peer task.
