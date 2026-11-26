@@ -5719,7 +5719,6 @@ mod tests {
         }
         let session_header =
             serde_json::json!({"type":"session_meta","payload":{"id":"codex-session-one"}});
-        let first_contents = format!("{session_header}\n{}", first_lines.join("\n"));
         std::fs::write(&log_path, format!("{session_header}\n"))
             .expect("write first synthetic source extent");
 
