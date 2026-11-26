@@ -846,6 +846,15 @@ fn codex_restart_batch(
     batch
 }
 
+fn assert_archive_has_no_legacy_claims() {
+    assert!(read_capture_state("agent-1")
+        .unwrap()
+        .compatibility_claims
+        .is_none());
+    let (head, objects) = chat_read::locations("agent-1").unwrap();
+    assert!(!head.exists() && !objects.exists());
+}
+
 #[test]
 fn codex_committed_claim_recovers_at_eof_or_new_rows_after_repeated_postcursor_crashes() {
     for new_rows_before_recovery in [false, true] {
@@ -865,7 +874,7 @@ fn codex_committed_claim_recovers_at_eof_or_new_rows_after_repeated_postcursor_c
             )
             .unwrap_err();
         assert!(error.to_string().contains("after cursor"));
-        assert!(pending(&read_capture_state("agent-1").unwrap(), "agent-1").unwrap());
+        assert_archive_has_no_legacy_claims();
         assert_eq!(
             state
                 .provider_log_capture_state(
@@ -910,7 +919,7 @@ fn codex_committed_claim_recovers_at_eof_or_new_rows_after_repeated_postcursor_c
             error.to_string().contains("after cursor"),
             "recovery failed before cursor: {error}"
         );
-        assert!(pending(&read_capture_state("agent-1").unwrap(), "agent-1").unwrap());
+        assert_archive_has_no_legacy_claims();
         drop(restarted);
         let restarted = ConversationArchiveState::default();
         let eof = codex_restart_batch(&restarted, &context, &path);
@@ -925,7 +934,7 @@ fn codex_committed_claim_recovers_at_eof_or_new_rows_after_repeated_postcursor_c
                 eof.source_proof(),
             )
             .unwrap();
-        assert!(!pending(&read_capture_state("agent-1").unwrap(), "agent-1").unwrap());
+        assert_archive_has_no_legacy_claims();
         let before_replay = std::fs::read(directory.join("events.jsonl")).unwrap();
         let repeated_eof = codex_restart_batch(&restarted, &context, &path);
         restarted
@@ -976,8 +985,44 @@ fn codex_committed_claim_recovers_at_eof_or_new_rows_after_repeated_postcursor_c
                 .count(),
             1
         );
-        assert_canonical_alias(owner.metadata["chat_source_ref"].as_str().unwrap(), &old.id);
+        let owned = records
+            .iter()
+            .find(|record| record.event_refs.contains(&old.id))
+            .unwrap();
+        // The exact provider coordinate lives on the already-proved frame.
+        // The narrative references the physical frame that really exists.
+        assert_eq!(owned.event_refs.as_slice(), std::slice::from_ref(&old.id));
+        assert_archive_has_no_legacy_claims();
     }
+}
+
+fn seed_legacy_codex_claim(
+    context: &ConversationArchiveContext,
+    conversation: &str,
+    directory: &std::path::Path,
+    batch: &crate::commands::provider_log_acquisition::ProviderLogBatch,
+) {
+    let manifest = read_manifest(&directory.join("manifest.json")).unwrap();
+    let archived = read_jsonl_records(&directory.join("events.jsonl")).unwrap();
+    let records = read_jsonl_records(&directory.join("conversation.jsonl")).unwrap();
+    let mut checkpoint = read_capture_state(&context.agent_id).unwrap();
+    let (_, binding) = prepare(
+        Preparation {
+            context,
+            conversation_id: conversation,
+            manifest: manifest.as_ref(),
+            archived: &archived,
+            records: &records,
+            events: &batch.events,
+            previous: batch.previous.as_ref(),
+            next: &batch.next,
+            source_proof: batch.source_proof(),
+        },
+        &mut checkpoint,
+    )
+    .unwrap();
+    assert_eq!(binding.len(), 1);
+    assert!(pending(&checkpoint, &context.agent_id).unwrap());
 }
 
 #[test]
@@ -987,6 +1032,7 @@ fn codex_committed_recovery_rejects_changed_owners_policy_frames_and_ledgers_wit
         "kind",
         "tool-name",
         "tool-input",
+        "function-arguments",
         "tool-input-text",
         "role",
         "title",
@@ -1022,7 +1068,18 @@ fn codex_committed_recovery_rejects_changed_owners_policy_frames_and_ledgers_wit
         "missing-digest",
     ] {
         let (_guard, temp) = super::super::tests::isolated_home();
-        let (state, context, old, batch) = codex_fixture(temp.path());
+        let (state, context, old, batch) = if scenario == "function-arguments" {
+            codex_fixture_with_row(
+                temp.path(),
+                r#"{"type":"response_item","turn_id":"turn-1","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"pwd\"}"}}"#,
+            )
+        } else {
+            codex_fixture(temp.path())
+        };
+        let conversation = state.active_conversation_id_for_test("agent-1").unwrap();
+        let directory = conversation_dir("agent-1", &conversation).unwrap();
+        // Exercise the old seek reader on an explicitly prepared checkpoint.
+        seed_legacy_codex_claim(&context, &conversation, &directory, &batch);
         state.fail_compatibility_stage.store(4, Ordering::SeqCst);
         assert!(state
             .append_verified_provider_log_batch_with_context(
@@ -1035,8 +1092,6 @@ fn codex_committed_recovery_rejects_changed_owners_policy_frames_and_ledgers_wit
             .unwrap_err()
             .to_string()
             .contains("after cursor"));
-        let conversation = state.active_conversation_id_for_test("agent-1").unwrap();
-        let directory = conversation_dir("agent-1", &conversation).unwrap();
         let manifest = read_manifest(&directory.join("manifest.json")).unwrap();
         let mut archived: Vec<AgentChatEvent> =
             read_jsonl_records(&directory.join("events.jsonl")).unwrap();
@@ -1053,6 +1108,10 @@ fn codex_committed_recovery_rejects_changed_owners_policy_frames_and_ledgers_wit
             "tool-input" => {
                 archived[0].metadata["tool_input"] =
                     serde_json::json!({"command":"pwd", "timeout":20})
+            }
+            "function-arguments" => {
+                archived[0].metadata["tool_input"]["timeout"] = serde_json::json!(20);
+                assert_eq!(archived[0].command, old.command);
             }
             "tool-input-text" => {
                 archived[0].metadata["tool_input_text"] = serde_json::json!("foreign-arguments")
@@ -1222,7 +1281,7 @@ fn codex_committed_tool_claims_recover_at_eof_with_original_kind_and_body() {
             .unwrap_err()
             .to_string()
             .contains("after cursor"));
-        assert!(pending(&read_capture_state("agent-1").unwrap(), "agent-1").unwrap());
+        assert_archive_has_no_legacy_claims();
         assert_eq!(
             state
                 .provider_log_capture_state(
@@ -1242,30 +1301,6 @@ fn codex_committed_tool_claims_recover_at_eof_with_original_kind_and_body() {
         assert_eq!(owners[0].kind, old.kind);
         assert_eq!(owners[0].text, old.text);
         assert_eq!(owners[0].command, old.command);
-        if old.kind == AgentChatEventKind::ToolCall {
-            let mut changed = owners.clone();
-            changed[0].metadata["tool_input"]["timeout"] = serde_json::json!(20);
-            assert_eq!(changed[0].command, owners[0].command);
-            let manifest = read_manifest(&directory.join("manifest.json")).unwrap();
-            let records: Vec<ConversationNarrativeRecord> =
-                read_jsonl_records(&directory.join("conversation.jsonl")).unwrap();
-            let mut checkpoint = read_capture_state("agent-1").unwrap();
-            assert!(prepare(
-                Preparation {
-                    context: &context,
-                    conversation_id: &conversation,
-                    manifest: manifest.as_ref(),
-                    archived: &changed,
-                    records: &records,
-                    events: &[],
-                    previous: Some(&batch.next),
-                    next: &batch.next,
-                    source_proof: None,
-                },
-                &mut checkpoint
-            )
-            .is_err());
-        }
         drop(state);
         let restarted = ConversationArchiveState::default();
         let eof = codex_restart_batch(&restarted, &context, &temp.path().join("codex.jsonl"));
@@ -1280,7 +1315,7 @@ fn codex_committed_tool_claims_recover_at_eof_with_original_kind_and_body() {
                 eof.source_proof(),
             )
             .unwrap();
-        assert!(!pending(&read_capture_state("agent-1").unwrap(), "agent-1").unwrap());
+        assert_archive_has_no_legacy_claims();
         assert_eq!(
             std::fs::read(directory.join("events.jsonl")).unwrap(),
             before
@@ -1294,26 +1329,13 @@ fn codex_committed_tool_claims_recover_at_eof_with_original_kind_and_body() {
             std::fs::read(directory.join("conversation.jsonl")).unwrap(),
             narrative_before
         );
-        assert_eq!(records[0].event_refs.len(), 2);
         assert_eq!(
-            records[0]
-                .event_refs
-                .iter()
-                .filter(|id| *id == &old.id)
-                .count(),
-            1
+            records[0].event_refs.as_slice(),
+            std::slice::from_ref(&old.id)
         );
         assert_eq!(
-            records[0]
-                .event_refs
-                .iter()
-                .filter(|id| Some(id.as_str()) == owners[0].metadata["chat_source_ref"].as_str())
-                .count(),
-            1
-        );
-        assert_canonical_alias(
-            owners[0].metadata["chat_source_ref"].as_str().unwrap(),
-            &old.id,
+            owners[0].metadata["chat_source_ref"],
+            batch.events[0].metadata["chat_source_ref"]
         );
     }
 }

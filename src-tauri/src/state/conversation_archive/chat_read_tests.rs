@@ -364,6 +364,9 @@ fn seed_native_preview_timing_fixture_from_request(request_path: &Path) {
         if complete { "complete" } else { "pending" }
     );
     assert!(complete || capture.committed_offset < source_bytes);
+    // The opt-in timing harness still accepts the v2 seed receipt. Only
+    // this fixture reconstructs its legacy Head from the owned archive.
+    seed_legacy_candidate(&archive, &context);
     for _ in 0..4096 {
         if !archive.chat_projection.advance(agent_id).unwrap() {
             let reference = head(agent_id).unwrap().expect("published fixture head");
@@ -1683,6 +1686,7 @@ fn saved_archive_for_adoption_defer(
     archive
         .append_delivered_input_with_context(ctx.clone(), text, None)
         .unwrap();
+    seed_legacy_candidate(&archive, &ctx);
     let conversation = archive
         .active_conversation_id(&ctx.agent_id)
         .unwrap()
@@ -2941,21 +2945,22 @@ fn body_chunks_are_bounded_and_payload_changes_invalidate_old_continuations() {
 }
 
 #[test]
-fn cursor_failure_preserves_previous_head_and_retry_publishes_the_committed_batch() {
+fn cursor_failure_preserves_archive_prefix_and_restart_replays_once() {
     let (_guard, temp) = isolated_home();
     let archive = ConversationArchiveState::default();
     let mut ctx = ConversationArchiveContext::for_agent_id("agent-1", "codex");
     ctx.provider_source_key = Some("codex:session:one".into());
-    // This case requires native publication after cursor commit. An unowned
-    // saved source instead finishes through the bounded archive handoff.
     ctx.provider_session_ids = vec!["one".into()];
     archive
         .append_delivered_input_with_context(ctx.clone(), "previous", None)
         .unwrap();
-    let previous = head("agent-1").unwrap();
+    let conversation = archive.active_conversation_id("agent-1").unwrap().unwrap();
+    let directory = wardian_core::paths::agent_conversation_dir("agent-1", &conversation).unwrap();
+    let journals = ["events.jsonl", "conversation.jsonl"].map(|name| directory.join(name));
+    let previous = journals.each_ref().map(|path| fs::read(path).unwrap());
     let source = temp.path().join("provider.jsonl");
     fs::write(&source, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"one\"}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"new reply\"}}\n").unwrap();
-    let batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+    let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
         "agent-1",
         "codex",
         &source,
@@ -2964,24 +2969,61 @@ fn cursor_failure_preserves_previous_head_and_retry_publishes_the_committed_batc
         true,
     )
     .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(
+        &mut batch.events,
+        "codex",
+        &source,
+    );
     archive
         .fail_next_chat_cursor_commit
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    assert!(archive
+    let failure = archive
         .append_provider_log_batch_with_context(ctx.clone(), &batch.events, None, &batch.next)
-        .is_err());
-    assert_eq!(head("agent-1").unwrap(), previous);
+        .unwrap_err();
+    assert_eq!(failure.to_string(), "injected chat cursor commit failure");
     assert!(archive
         .provider_log_capture_state("agent-1", "codex:session:one")
         .unwrap()
         .is_none());
-    archive
-        .append_provider_log_batch_with_context(ctx.clone(), &batch.events, None, &batch.next)
+    let interrupted = journals.each_ref().map(|path| fs::read(path).unwrap());
+    for (after, before) in interrupted.iter().zip(previous) {
+        assert!(after.starts_with(&before) && after.len() > before.len());
+    }
+    let saved_events: Vec<AgentChatEvent> = read_jsonl_records(&journals[0]).unwrap();
+    assert_eq!(saved_events.len(), 2);
+
+    drop(archive);
+    let restarted = ConversationArchiveState::default();
+    restarted
+        .append_provider_log_batch_with_context(ctx, &batch.events, None, &batch.next)
         .unwrap();
-    assert!(super::super::chat_logical_index::source_proof(&ctx)
-        .unwrap()
-        .is_some());
-    assert_ne!(head("agent-1").unwrap(), previous);
+    assert_eq!(
+        restarted
+            .provider_log_capture_state("agent-1", "codex:session:one")
+            .unwrap(),
+        Some(batch.next)
+    );
+    assert_eq!(
+        restarted.active_conversation_id("agent-1").unwrap(),
+        Some(conversation)
+    );
+    let replayed_events: Vec<AgentChatEvent> = read_jsonl_records(&journals[0]).unwrap();
+    assert_eq!(replayed_events.len(), 2);
+    assert_eq!(replayed_events[0], saved_events[0]);
+    // A replay can enrich the framed observation's evidence. Its durable
+    // identity, body, and narrative ownership stay the same.
+    assert_eq!(replayed_events[1].id, saved_events[1].id);
+    assert_eq!(replayed_events[1].sequence, saved_events[1].sequence);
+    assert_eq!(replayed_events[1].text.as_deref(), Some("new reply"));
+    assert_eq!(
+        replayed_events[1].metadata["chat_source_ref"],
+        saved_events[1].metadata["chat_source_ref"]
+    );
+    assert_eq!(fs::read(&journals[1]).unwrap(), interrupted[1]);
+    assert!(!temp
+        .path()
+        .join("agents/agent-1/chat-read-objects")
+        .exists());
 }
 
 #[test]
@@ -5715,7 +5757,7 @@ fn provisional_qualified_pair_survives_restart_with_both_physical_aliases() {
 }
 
 #[test]
-fn normal_canonical_capture_groups_qualified_pair_without_rewriting_archive() {
+fn normal_archive_capture_groups_qualified_pair_without_rewriting_archive() {
     let (_guard, temp) = isolated_home();
     let path = temp.path().join("source.jsonl");
     let contents = format!(
@@ -5741,23 +5783,34 @@ fn normal_canonical_capture_groups_qualified_pair_without_rewriting_archive() {
     archive
         .append_provider_log_batch_with_context(ctx.clone(), &batch.events, None, &batch.next)
         .unwrap();
-    for _ in 0..16 {
-        if !archive.chat_projection.advance("agent-1").unwrap() {
-            break;
-        }
-    }
-    let page = read(&ctx, &snapshot, None, None, None).unwrap();
+    let recent = |archive: &ConversationArchiveState| {
+        let request = super::super::archive_chat::Request {
+            before: None,
+            revision: None,
+            detail: None,
+            limit: PAGE_ROWS,
+            logging_enabled: true,
+        };
+        let read_page = archive.archive_chat_reader(ctx.clone(), request).unwrap();
+        read_page().unwrap()
+    };
+    let page = recent(&archive);
     assert_eq!(page.events.len(), 1);
-    assert_eq!(page.aliases.len(), 2);
+    assert_eq!(page.events[0].id, physical[0].id);
+    assert_eq!(page.aliases.len(), 1);
+    assert_eq!(page.aliases[0].observation_id, physical[1].id);
+    assert_eq!(page.aliases[0].canonical_id, physical[0].id);
     let saved = archive.chat_events_for_agent("agent-1").unwrap();
     assert!(physical
         .iter()
         .all(|event| saved.iter().any(|row| row.id == event.id
             && row.metadata["chat_source_ref"] == event.metadata["chat_source_ref"])));
     drop(archive);
-    let restarted = read(&ctx, &snapshot, None, None, None).unwrap();
+    let restarted = recent(&ConversationArchiveState::default());
     assert_eq!(restarted.events[0].id, page.events[0].id);
     assert!(restarted.bytes_read < 2 * 1024 * 1024);
+    let (head, objects) = locations("agent-1").unwrap();
+    assert!(!head.exists() && !objects.exists());
 }
 
 #[test]
