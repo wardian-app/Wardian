@@ -444,6 +444,26 @@ does not retry provider work. These are process accounting counters, including
 device and pipe I/O, not disk throughput or a backfill phase diagnosis. They
 exclude descendant processes and contain no paths or provider text.
 
+`socket_wait_job` separately reports aggregate accounting from the owner's
+private Windows Job Object at the end of socket wait. It includes forwarded
+processes and exited job members, and reports process counts, CPU time in
+microseconds, and operation counts since launch. The field is `null` when
+accounting is unavailable. It contains no process identifiers or paths.
+
+Codex can gate its listener on a cold private state-index backfill. On Windows,
+the owner can wait at most 60 seconds beyond the ordinary socket deadline
+while it observes strictly advancing checkpoints from that launch's initially
+absent private state database. Checkpoints must come from the same file
+identity. After a stale or unavailable observation, a fresh checkpoint
+establishes a new timing baseline and a further advance qualifies for grace.
+The last advance must be less than 20 seconds old when socket presence is
+observed after the ordinary deadline. Each probe holds the home preparation
+guards until its read ends. On timeout or cancellation the owner can reap its
+child and release the owner gate while the guards still fence replacement.
+Ready waits for any outstanding read within the hard cap and still observes
+cancellation and child exit before handing off to the proxy. The numeric
+`socket_wait_backfill_advances` field reports advances without cursor paths.
+
 The ordinary TUI startup overlay also sets
 `check_for_update_on_startup = false` so an interactive update notice cannot
 block attachment. The guarded journal restores the prior setting after the TUI
