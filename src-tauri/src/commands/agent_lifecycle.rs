@@ -534,6 +534,18 @@ impl PendingRuntime {
         self.registration.take()
     }
 
+    pub(super) fn retain_recovery_owner(
+        &mut self,
+        broker: std::sync::Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
+        generation: u64,
+    ) {
+        let registration = self
+            .registration
+            .take()
+            .expect("prepared Codex stop registration");
+        self.registration = Some(registration.with_recovery_owner(broker, generation));
+    }
+
     pub(super) fn take_runtime(&mut self) -> crate::state::ActiveAgent {
         self.runtime.take().expect("pending runtime installed once")
     }

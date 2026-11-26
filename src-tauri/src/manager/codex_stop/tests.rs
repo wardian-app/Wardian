@@ -657,6 +657,142 @@ async fn recovery_tui_join_failure_keeps_exact_native_owner_through_retry() {
 }
 
 #[tokio::test]
+async fn early_recovery_pty_setup_abort_keeps_native_owner_until_captured_join() {
+    let home = tempfile::tempdir().unwrap();
+    let id = "recovery-before-pty-reader";
+    let signals = Arc::new(Signals::default());
+    let broker = Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new());
+    broker.install_recovery_cleanup_fixture(id, 3).await;
+    let stop = prepare_with_timeout(home.path(), id, Duration::ZERO)
+        .unwrap()
+        .with_recovery_owner(broker.clone(), 3);
+    let mut starting = crate::manager::codex_shared::StartingCodexTui::new(
+        Box::new(FakeChild(signals.clone())),
+        Some((broker.clone(), id.into(), 3)),
+    );
+    starting.retain_recovery_stop(
+        AgentConfig {
+            session_id: id.into(),
+            provider: "codex".into(),
+            ..Default::default()
+        },
+        stop,
+    );
+    drop(starting);
+    assert!(await_quiescent(home.path(), id)
+        .await
+        .unwrap_err()
+        .contains("Timed out"));
+    assert!(broker.codex_owner_selected(id, 3).await);
+    assert_eq!(signals.drops.load(Ordering::SeqCst), 0);
+    signals.exited.store(true, Ordering::SeqCst);
+    retry_stop(home.path(), id).unwrap();
+    await_quiescent(home.path(), id).await.unwrap();
+    assert!(!broker.codex_owner_selected(id, 3).await);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn recovery_stop_joins_contained_descendant_after_launcher_exit_before_native_stop() {
+    exercise_recovery_contained_shutdown(false).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn pause_stop_verifies_contained_descendant_without_a_prior_hold() {
+    exercise_recovery_contained_shutdown(true).await;
+}
+
+#[cfg(windows)]
+async fn exercise_recovery_contained_shutdown(pause: bool) {
+    use crate::delivery::codex_shared::test_support::{stop_fixture, WriterCase};
+    use std::os::windows::io::AsRawHandle;
+    use winapi::{
+        shared::winerror::WAIT_TIMEOUT,
+        um::{
+            processthreadsapi::TerminateProcess, synchapi::WaitForSingleObject,
+            winbase::WAIT_OBJECT_0,
+        },
+    };
+
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let home = tempfile::tempdir().unwrap();
+    let _env = LeaseHome::set(home.path());
+    let id = "recovery-contained-tree";
+    let (job, mut child, _pty, descendant) =
+        crate::utils::process::test_contained_pty_tree(home.path()).await;
+    let child_handle = child.as_raw_handle().unwrap();
+    assert_ne!(unsafe { TerminateProcess(child_handle as _, 0) }, 0);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while child.try_wait().unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        unsafe { WaitForSingleObject(descendant.as_raw_handle() as _, 0) },
+        WAIT_TIMEOUT
+    );
+
+    let broker = Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new());
+    let mut runtime = agent(id, &Arc::new(Signals::default()));
+    runtime.process_id = child.process_id();
+    runtime.child_process = Some(child);
+    runtime.job_object = Some(job);
+    let registration = prepare_stop(home.path(), id).unwrap();
+    if pause {
+        let thread_id = "recovery-thread";
+        let fixture = stop_fixture(home.path(), id, 3, thread_id, WriterCase::Owned).await;
+        runtime.config.lock().unwrap().resume_session = Some(thread_id.into());
+        runtime.runtime_generation = Some(7);
+        broker
+            .install_stop_test_owner(id, 3, Some(7), fixture.owner.clone())
+            .await;
+        let owner = broker.capture_codex_stop(id, Some(7)).await.unwrap();
+        let stop = registration
+            .with_codex_owner(owner)
+            .unwrap()
+            .capture(runtime)
+            .begin_stop();
+        stop.wait().await.unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(descendant.as_raw_handle() as _, 0) },
+            WAIT_OBJECT_0
+        );
+        assert!(
+            stop.0.tree_exited.load(Ordering::Acquire),
+            "ordinary Pause did not verify its contained terminal tree"
+        );
+        fixture.cleanup().await;
+    } else {
+        let observed = Arc::new(AtomicBool::new(false));
+        let tree_exited = observed.clone();
+        broker
+            .install_observed_recovery_cleanup_fixture(id, 3, move || {
+                tree_exited.store(
+                    unsafe { WaitForSingleObject(descendant.as_raw_handle() as _, 0) }
+                        == WAIT_OBJECT_0,
+                    Ordering::Release,
+                );
+            })
+            .await;
+        registration
+            .with_recovery_owner(broker.clone(), 3)
+            .capture(runtime)
+            .begin_stop()
+            .wait()
+            .await
+            .unwrap();
+        assert!(
+            observed.load(Ordering::Acquire),
+            "native shutdown preceded contained-tree exit"
+        );
+    }
+    assert!(!broker.codex_owner_selected(id, 3).await);
+}
+
+#[tokio::test]
 async fn every_captured_runtime_for_same_key_must_exit_and_other_homes_are_independent() {
     let home = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();

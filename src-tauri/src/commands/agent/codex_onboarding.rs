@@ -169,7 +169,7 @@ pub(super) async fn register_new_agent(
         } else {
             manager::RegistrationPublicationState::default()
         }));
-    let (active_agent, mut completion) = spawn_for_registration(
+    let (mut active_agent, mut completion) = spawn_for_registration(
         pending,
         app,
         &config,
@@ -189,6 +189,10 @@ pub(super) async fn register_new_agent(
             .await);
         };
         completion.retain_recovery_publication(publication.0.clone());
+        active_agent.retain_recovery_owner(
+            state.native_delivery.clone(),
+            completion.transfer_recovery_owner_to_stop(),
+        );
     }
     let registered_config = active_agent.config.clone();
     let registered_generation = active_agent.runtime_generation;
@@ -425,7 +429,16 @@ pub(super) async fn commit_registered_agent(
     let lifecycle = state.lock_agent_lifecycle(session_id).await;
     let mut agents = state.agents.lock().await;
     let mut order = state.agent_order.lock().await;
-    let pending = install_registered_agent(&mut agents, &mut order, session_id, pending, placement);
+    let mut pending =
+        install_registered_agent(&mut agents, &mut order, session_id, pending, placement);
+    let recovery = completion
+        .as_ref()
+        .is_some_and(|completion| completion.recovery_is_pending());
+    if let Some(completion) = completion.as_mut().filter(|_| recovery) {
+        // The roster now owns the TUI. Its cleanup token must survive even
+        // if the first persistence attempt fails or the future is dropped.
+        completion.set_stop_registration(pending.take_registration());
+    }
     drop(order);
     drop(agents);
 
@@ -437,6 +450,7 @@ pub(super) async fn commit_registered_agent(
     };
     let mut pending = match persisted {
         Ok(()) => pending,
+        Err(error) if recovery => return Err((pending, error)),
         Err(error) => {
             let pending = if let Some(runtime_generation) = codex_runtime_generation {
                 rollback_failed_provisional_codex_install(
@@ -472,7 +486,7 @@ pub(super) async fn commit_registered_agent(
                 "provisional Codex runtime became stale before publication".into(),
             ));
         }
-        if let Some(completion) = completion.as_mut() {
+        if let Some(completion) = completion.as_mut().filter(|_| !recovery) {
             completion.set_stop_registration(pending.take_registration());
         }
         drop(lifecycle);

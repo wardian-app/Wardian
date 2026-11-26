@@ -1171,6 +1171,16 @@ mod tests {
 
     impl NativeDeliveryBroker {
         pub(crate) async fn install_recovery_cleanup_fixture(&self, id: &str, generation: u64) {
+            self.install_observed_recovery_cleanup_fixture(id, generation, || {})
+                .await;
+        }
+
+        pub(crate) async fn install_observed_recovery_cleanup_fixture(
+            &self,
+            id: &str,
+            generation: u64,
+            on_shutdown: impl FnOnce() + Send + 'static,
+        ) {
             let (tx, mut incoming) = mpsc::channel(1);
             let (stopped, observed) = tokio::sync::watch::channel(false);
             self.sessions.lock().await.insert(
@@ -1193,6 +1203,7 @@ mod tests {
                     incoming.recv().await,
                     Some(SessionCommand::Shutdown)
                 ));
+                on_shutdown();
                 stopped.send_replace(true);
             });
         }

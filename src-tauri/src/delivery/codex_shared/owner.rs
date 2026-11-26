@@ -626,7 +626,8 @@ impl CodexSharedOwner {
             }
             let proxy_connect_at = std::time::Instant::now();
             let client = CodexSharedClient::connect_proxy(
-                spec.target_agent_id.clone(), spec.generation, proxy_command, &socket, &mut cancelled,
+                spec.target_agent_id.clone(), spec.generation, proxy_command, &socket,
+                recovery_heartbeat.is_some(), &mut cancelled,
             ).await?;
             timings.proxy_connect = proxy_connect_at.elapsed();
             connected = Some(client.clone());

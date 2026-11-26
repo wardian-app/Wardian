@@ -3429,6 +3429,24 @@ async fn spawn_agent_inner(
     if let Some(context) = codex_launch_context.as_deref() {
         context.revalidate()?;
     }
+    let recovery_stop = if gate
+        .registration
+        .as_ref()
+        .is_some_and(|state| state.is_recovery())
+    {
+        let attachment = codex_attachment
+            .as_ref()
+            .ok_or("Recovery has no prepared Codex owner")?;
+        let recovery_home =
+            crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
+        Some(
+            super::codex_stop::prepare_stop(&recovery_home, &config.session_id)?
+                .with_recovery_terminal_cleanup(app_state.terminal_sessions.clone())?
+                .with_recovery_owner(app_state.native_delivery.clone(), attachment.generation),
+        )
+    } else {
+        None
+    };
     let launch = || {
         // Provider records written after this instant belong to this runtime.
         (
@@ -3482,7 +3500,11 @@ async fn spawn_agent_inner(
             )
         }),
     );
-    if publication == SpawnPublication::Synchronous {
+    let recovery_starting = recovery_stop.is_some();
+    if let Some(registration) = recovery_stop {
+        child.retain_recovery_stop(config.clone(), registration);
+    }
+    if publication == SpawnPublication::Synchronous || recovery_starting {
         if let Some(guard) = codex_attach_guard.as_mut() {
             // StartingCodexTui now owns joined PTY + owner cleanup on every error.
             guard.attached();
@@ -3520,7 +3542,7 @@ async fn spawn_agent_inner(
     gate.persist_spawned_process(&config, process_id);
 
     #[cfg(windows)]
-    let job_object = {
+    let mut job_object = {
         if contained_job.is_some() {
             contained_job
         } else if app_process_supervisor_active() {
@@ -3539,6 +3561,10 @@ async fn spawn_agent_inner(
             None
         }
     };
+    #[cfg(windows)]
+    if recovery_starting {
+        child.retain_recovery_job(job_object.take());
+    }
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -3587,11 +3613,22 @@ async fn spawn_agent_inner(
     } else {
         terminal_runtime
     };
-    let runtime_generation = app_state
-        .terminal_sessions
-        .start_or_replace_runtime(&config.session_id, terminal_runtime, initial_geometry)
-        .await
-        .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
+    let terminal_sessions = &app_state.terminal_sessions;
+    let runtime_generation = if recovery_starting {
+        terminal_sessions
+            .start_or_replace_runtime_captured(
+                &config.session_id,
+                terminal_runtime,
+                initial_geometry,
+                |generation| child.retain_terminal(terminal_sessions.clone(), generation),
+            )
+            .await
+    } else {
+        terminal_sessions
+            .start_or_replace_runtime(&config.session_id, terminal_runtime, initial_geometry)
+            .await
+    }
+    .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
     child
         .runtime(app_state.terminal_sessions.clone(), runtime_generation)
         .await?;
@@ -5715,6 +5752,8 @@ async fn spawn_agent_inner(
             .await
             .map_err(|_| "Codex recovery lease watcher ended before handoff".to_string())??;
     }
+    #[cfg(windows)]
+    let job_object = job_object.or_else(|| child.take_recovery_job());
     let active = ActiveAgent {
         config: config_lock.clone(),
         child_process: Some(child.attached()),

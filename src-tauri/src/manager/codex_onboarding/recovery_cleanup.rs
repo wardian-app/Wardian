@@ -1,11 +1,10 @@
-use super::{
-    AgentConfig, AppHandle, Arc, AtomicBool, CodexAttachGuard, Manager, Ordering, Runtime,
-};
+use super::{AgentConfig, AppHandle, Arc, AtomicBool, Ordering, Runtime};
 use crate::manager::{codex_stop::StopRegistration, RegistrationPublicationState};
+#[cfg(test)]
+use tauri::Manager;
 
 pub(crate) struct CapturedRecoveryRuntime {
     pub(crate) session_id: String,
-    pub(crate) provider_generation: u64,
     pub(crate) runtime_generation: u64,
     pub(crate) config: Arc<std::sync::Mutex<AgentConfig>>,
     pub(crate) publication: Arc<RegistrationPublicationState>,
@@ -19,7 +18,6 @@ impl CapturedRecoveryRuntime {
     ) -> Self {
         Self {
             session_id: completion.session_id.clone(),
-            provider_generation: completion.provider_generation,
             runtime_generation: completion.runtime_generation,
             config: completion.config_lock.clone(),
             publication,
@@ -32,11 +30,7 @@ impl CapturedRecoveryRuntime {
 /// Dropping a pending worker schedules the same exact cleanup as a failure.
 pub(crate) struct RecoveryRuntimeCleanup<R: Runtime = tauri::Wry> {
     app: AppHandle<R>,
-    capture: Option<(
-        CapturedRecoveryRuntime,
-        StopRegistration,
-        Option<CodexAttachGuard>,
-    )>,
+    capture: Option<(CapturedRecoveryRuntime, StopRegistration)>,
 }
 
 impl<R: Runtime> RecoveryRuntimeCleanup<R> {
@@ -44,58 +38,40 @@ impl<R: Runtime> RecoveryRuntimeCleanup<R> {
         app: AppHandle<R>,
         identity: CapturedRecoveryRuntime,
         registration: StopRegistration,
-        owner: Option<CodexAttachGuard>,
     ) -> Self {
         Self {
             app,
-            capture: Some((identity, registration, owner)),
+            capture: Some((identity, registration)),
         }
     }
 
     pub(crate) fn disarm(mut self) {
-        if let Some((_, _, owner)) = self.capture.take() {
-            if let Some(mut owner) = owner {
-                owner.attached();
-            }
+        drop(self.capture.take());
+    }
+
+    pub(crate) async fn finish(self, failure: String) -> String {
+        match self.cancel().await {
+            Ok(()) => failure,
+            Err(error) => format!("{failure}; captured Codex rollback failed: {error}"),
         }
     }
 
-    pub(crate) async fn finish(mut self, mut failure: String) -> String {
-        if let Some(task) = self.schedule(failure.clone()) {
-            match task.await {
-                Ok(cleanup) => return cleanup,
-                Err(error) => failure.push_str(&format!("; captured cleanup task failed: {error}")),
-            }
+    pub(super) async fn cancel(mut self) -> Result<(), String> {
+        if let Some(task) = self.schedule() {
+            task.await
+                .map_err(|error| format!("captured cleanup task failed: {error}"))?
+        } else {
+            Ok(())
         }
-        failure
     }
 
-    fn schedule(
-        &mut self,
-        mut failure: String,
-    ) -> Option<tauri::async_runtime::JoinHandle<String>> {
-        let (identity, registration, owner) = self.capture.take()?;
+    fn schedule(&mut self) -> Option<tauri::async_runtime::JoinHandle<Result<(), String>>> {
+        let (identity, registration) = self.capture.take()?;
         identity.publication.begin_recovery_cleanup();
         identity.ready.store(false, Ordering::Release);
         let app = self.app.clone();
         Some(tauri::async_runtime::spawn(async move {
-            let registration = registration.with_recovery_owner(
-                app.state::<crate::state::AppState>()
-                    .native_delivery
-                    .clone(),
-                identity.provider_generation,
-            );
-            if let Some(mut owner) = owner {
-                // The captured stop owns disposal from here, even on failure.
-                owner.attached();
-            }
-            if let Err(error) =
-                crate::commands::agent::rollback_captured_recovery(&app, &identity, registration)
-                    .await
-            {
-                failure.push_str(&format!("; captured Codex rollback failed: {error}"));
-            }
-            failure
+            crate::commands::agent::rollback_captured_recovery(&app, &identity, registration).await
         }))
     }
 }
@@ -104,12 +80,10 @@ impl<R: Runtime> RecoveryRuntimeCleanup<R> {
 impl CapturedRecoveryRuntime {
     pub(crate) fn fixture(
         active: &crate::state::ActiveAgent,
-        provider_generation: u64,
         publication: Arc<RegistrationPublicationState>,
     ) -> Self {
         Self {
             session_id: active.config.lock().unwrap().session_id.clone(),
-            provider_generation,
             runtime_generation: active.runtime_generation.unwrap(),
             config: active.config.clone(),
             publication,
@@ -130,7 +104,7 @@ impl<R: Runtime> RecoveryRuntimeCleanup<R> {
         provider_generation: u64,
         publication: Arc<RegistrationPublicationState>,
     ) -> Self {
-        let capture = CapturedRecoveryRuntime::fixture(active, provider_generation, publication);
+        let capture = CapturedRecoveryRuntime::fixture(active, publication);
         let state = app.state::<crate::state::AppState>();
         let stop = crate::manager::codex_stop::prepare_stop(
             &crate::utils::fs::get_wardian_home().unwrap(),
@@ -138,23 +112,25 @@ impl<R: Runtime> RecoveryRuntimeCleanup<R> {
         )
         .unwrap()
         .with_terminal_cleanup(state.terminal_sessions.clone())
-        .unwrap();
-        let owner = CodexAttachGuard::new(
-            state.native_delivery.clone(),
-            capture.session_id.clone(),
-            provider_generation,
-        );
-        Self::new(app, capture, stop, Some(owner))
+        .unwrap()
+        .with_recovery_owner(state.native_delivery.clone(), provider_generation);
+        Self::new(app, capture, stop)
     }
 }
 
 impl<R: Runtime> Drop for RecoveryRuntimeCleanup<R> {
     fn drop(&mut self) {
-        if let Some(task) = self.schedule("Codex recovery activation was abandoned".into()) {
+        if let Some(task) = self.schedule() {
             tauri::async_runtime::spawn(async move {
-                if let Ok(message) = task.await {
-                    crate::manager::log_debug(&format!("[WARDIAN] {message}"));
-                }
+                let problem = task
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result)
+                    .err();
+                crate::manager::log_debug(&match problem {
+                    Some(error) => format!("[WARDIAN] Codex recovery activation was abandoned; captured cleanup retained: {error}"),
+                    None => "[WARDIAN] Codex recovery activation was abandoned".into(),
+                });
             });
         }
     }

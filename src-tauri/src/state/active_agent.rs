@@ -35,6 +35,35 @@ pub struct ActiveAgent {
     pub job_object: Option<crate::utils::process::RuntimeProcessJob>,
 }
 
+impl ActiveAgent {
+    /// Build an unpublished shell for the exact stop registry before terminal
+    /// setup has produced the regular runtime's watch and telemetry handles.
+    pub(crate) fn for_starting_codex_cleanup(config: AgentConfig) -> Self {
+        let watch = AgentWatchState::new(config.session_id.clone(), 0, 0);
+        watch.set_codex_attachment_ready(false);
+        Self {
+            config: Arc::new(Mutex::new(config)),
+            child_process: None,
+            background_processes: Vec::new(),
+            memory_capability: None,
+            runtime_generation: None,
+            process_id: None,
+            query_count: Default::default(),
+            init_timestamp: Default::default(),
+            last_query_timestamp: Default::default(),
+            current_status: Arc::new(Mutex::new("Booting".into())),
+            last_status_at: Default::default(),
+            watch_state: Arc::new(Mutex::new(watch)),
+            terminal_title: Default::default(),
+            last_output_at: Default::default(),
+            log_path: Default::default(),
+            log_last_modified: Default::default(),
+            #[cfg(windows)]
+            job_object: None,
+        }
+    }
+}
+
 impl Drop for ActiveAgent {
     fn drop(&mut self) {
         // Safety net: if the agent is dropped without explicit termination

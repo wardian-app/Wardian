@@ -27,6 +27,7 @@ mod launch_model;
 mod owner;
 use owner::initial_checkpoint;
 mod proxy;
+mod proxy_input;
 mod recovery_wire;
 use recovery_wire::{RecoveryReadGate, RecoveryRequestLease};
 #[cfg(test)]

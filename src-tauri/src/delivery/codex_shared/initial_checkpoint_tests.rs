@@ -1,5 +1,6 @@
 //! Wardian protocol regressions; synthetic transport is not stock persistence proof.
 use super::*;
+use crate::delivery::codex_shared::STARTUP_TIMEOUT;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

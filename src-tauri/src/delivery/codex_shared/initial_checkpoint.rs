@@ -1,7 +1,6 @@
 //! Private saved-reviewer preparation before any ordinary TUI or input runtime.
 use super::super::{
     json, version, CodexSharedClient, CodexSharedError, RecoveryRequestLease, Value,
-    STARTUP_TIMEOUT,
 };
 use super::{attachment, policy::ExpectedPolicy};
 use std::sync::atomic::Ordering;

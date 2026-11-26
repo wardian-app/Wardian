@@ -58,15 +58,24 @@ struct TerminalCleanup {
     broker: Arc<TerminalSessionBroker>,
     executor: tokio::runtime::Handle,
     generation: u64,
+    remove: bool,
 }
 
 impl TerminalCleanup {
     fn terminate(&self, agent_id: &str) -> Result<(), String> {
-        match self
-            .executor
-            .block_on(self.broker.terminate_runtime(agent_id, self.generation))
-        {
+        match self.executor.block_on(async {
+            if self.remove {
+                self.broker
+                    .terminate_and_remove_runtime(agent_id, self.generation)
+                    .await
+            } else {
+                self.broker
+                    .terminate_runtime(agent_id, self.generation)
+                    .await
+            }
+        }) {
             Ok(()) | Err(TerminalBrokerError::SessionNotFound) => Ok(()),
+            Err(TerminalBrokerError::StaleRuntimeGeneration { .. }) if self.remove => Ok(()),
             Err(error) => Err(format!(
                 "Cannot terminate captured Codex terminal generation {}; fence retained: {error}",
                 self.generation
@@ -97,6 +106,7 @@ fn prepare_with_timeout(
         key: key(home, agent_id)?,
         timeout,
         terminal: None,
+        remove_terminal: false,
         provider: "codex",
         prior_hold: None,
         codex_owner: None,
@@ -110,6 +120,7 @@ pub(crate) struct StopRegistration {
     key: Key,
     timeout: Duration,
     terminal: Option<(Arc<TerminalSessionBroker>, tokio::runtime::Handle)>,
+    remove_terminal: bool,
     provider: &'static str,
     prior_hold: Option<wardian_core::conversation_lease::ConversationLeaseOwner>,
     codex_owner: Option<crate::delivery::native_broker::CapturedCodexStop>,
@@ -162,6 +173,14 @@ impl StopRegistration {
         Ok(self)
     }
 
+    pub(crate) fn with_recovery_terminal_cleanup(
+        mut self,
+        broker: Arc<TerminalSessionBroker>,
+    ) -> Result<Self, String> {
+        self.remove_terminal = true;
+        self.with_terminal_cleanup(broker)
+    }
+
     /// Recovery's detached cleanup removes the exact terminal under the
     /// lifecycle gate, independently of the retained child join.
     pub(crate) fn without_terminal_cleanup(mut self) -> Self {
@@ -188,6 +207,7 @@ impl StopRegistration {
                 broker,
                 executor,
                 generation,
+                remove: self.remove_terminal,
             })
         });
         let entry = Arc::new(Entry {
@@ -433,7 +453,9 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
                     terminal.terminate(&worker.keys[0].1)?;
                 }
                 worker.terminal_complete.store(true, std::sync::atomic::Ordering::Release);
-                if worker.prior_hold.is_some() {
+                if worker.recovery_owner.is_some() {
+                    stop_recovery_runtime(&worker, agent)?;
+                } else if worker.prior_hold.is_some() || worker.codex_owner.is_some() {
                     stop_held_runtime(&worker, agent)?;
                 } else {
                     stop_and_join(agent, worker.timeout, worker.provider == "pi")?;
@@ -495,6 +517,21 @@ fn log_retained_writer_hold() {
     crate::manager::log_debug(
         "[WARDIAN] Codex prior-session hold retained: terminal exit does not prove the exact thread writer exited; inspect writer ownership before operator release",
     );
+}
+
+fn stop_recovery_runtime(entry: &Entry, agent: &mut ActiveAgent) -> Result<(), String> {
+    #[cfg(windows)]
+    if !entry.tree_exited.load(std::sync::atomic::Ordering::Acquire)
+        && agent.job_object.as_ref().is_some_and(|job| {
+            !job.contained_from_launch()
+                || agent.child_process.is_none()
+                || !agent.background_processes.is_empty()
+                || entry.executor.is_none()
+        })
+    {
+        return Err("Could not verify the captured Codex tree; runtime and owner retained".into());
+    }
+    stop_held_runtime(entry, agent)
 }
 
 fn stop_held_runtime(entry: &Entry, agent: &mut ActiveAgent) -> Result<(), String> {

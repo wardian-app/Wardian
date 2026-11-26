@@ -267,6 +267,18 @@ impl CodexAttachmentCompletion {
         self.recovery_publication = Some(publication);
     }
 
+    pub(crate) fn recovery_is_pending(&self) -> bool {
+        self.recovery_publication.is_some()
+    }
+
+    /// The pending TUI stop owns this exact daemon from before installation.
+    pub(crate) fn transfer_recovery_owner_to_stop(&mut self) -> u64 {
+        if let Some(mut guard) = self.cleanup_guard.take() {
+            guard.attached();
+        }
+        self.provider_generation
+    }
+
     pub(crate) fn set_stop_registration(
         &mut self,
         registration: Option<crate::manager::codex_stop::StopRegistration>,
@@ -278,7 +290,6 @@ impl CodexAttachmentCompletion {
                     self.app.clone(),
                     identity,
                     registration,
-                    self.cleanup_guard.take(),
                 ));
             }
             (_, registration) => self.stop_registration = registration,
@@ -616,6 +627,14 @@ impl CodexAttachmentCompletion {
     }
 
     pub(crate) async fn cancel(mut self) -> Result<(), String> {
+        if let Some(cleanup) = self.recovery_cleanup.take() {
+            return cleanup.cancel().await;
+        }
+        if self.recovery_is_pending() {
+            // Installation did not happen. PendingRuntime joins the child
+            // and disposes this daemon through its own stop registration.
+            return Ok(());
+        }
         let owner_cleanup = self.dispose_owner().await.err();
         let rollback = cancellation_requires_rollback(self.stop_registration.is_some())
             .then(|| {

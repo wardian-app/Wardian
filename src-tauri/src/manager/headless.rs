@@ -1425,16 +1425,17 @@ async fn obtain_session_id_inner(
         let agent_codex_home =
             crate::utils::codex_home::resolve_managed_home(&wardian_home, agent_id)?;
 
-        if let Some(heartbeat) = recovery_heartbeat {
-            heartbeat.ensure_codex_recovery_scope(
+        let materialized = if let Some(heartbeat) = recovery_heartbeat {
+            heartbeat.with_exact_codex_recovery_effect(
                 "materialize Codex recovery rollout",
-                CodexRecoveryLeaseScope::Exact {
-                    agent_id,
-                    native_id: "",
-                },
-            )?;
-        }
-        match materialize_codex_session_rollout(&agent_codex_home, cwd) {
+                agent_id,
+                "",
+                || materialize_codex_session_rollout(&agent_codex_home, cwd),
+            )?
+        } else {
+            materialize_codex_session_rollout(&agent_codex_home, cwd)
+        };
+        match materialized {
                 Ok(session_id) => {
                     let mut identity_config = config.cloned().unwrap_or_else(|| AgentConfig {
                         provider: provider_name.to_string(),

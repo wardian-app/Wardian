@@ -128,6 +128,7 @@ async fn published_spawn_and_clone_keep_incarnation_when_name_promotion_fails() 
         let mut active = test_active_agent(&id);
         let child_exited = Arc::new(AtomicBool::new(false));
         active.child_process = Some(Box::new(FakeChild {
+            refuse_stop: false,
             exited: child_exited.clone(),
         }));
         let expected = active.config.clone();
@@ -298,10 +299,14 @@ async fn rename_json_failure_and_failed_sql_rollback_retain_bound_disposition() 
 #[derive(Debug, Clone)]
 struct FakeChild {
     exited: Arc<AtomicBool>,
+    refuse_stop: bool,
 }
 
 impl portable_pty::ChildKiller for FakeChild {
     fn kill(&mut self) -> std::io::Result<()> {
+        if self.refuse_stop {
+            return Err(std::io::Error::other("fixture TUI has not exited"));
+        }
         self.exited.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -381,6 +386,7 @@ fn detachable_agent(
         config: Arc::new(Mutex::new(config)),
         child_process: Some(Box::new(FakeChild {
             exited: Arc::new(AtomicBool::new(true)),
+            refuse_stop: false,
         })),
         background_processes: Vec::new(),
         memory_capability: None,
@@ -518,6 +524,55 @@ async fn provisional_install_rejects_an_undurable_roster() {
     let cleanup = pending.stop_after_failure(error).await;
     assert!(!cleanup.is_empty());
     unsafe { std::env::set_var("WARDIAN_HOME", home.path()) };
+}
+
+#[tokio::test]
+async fn recovery_initial_roster_write_failure_retains_native_until_tui_exit() {
+    use crate::manager::{
+        codex_onboarding::RecoveryRuntimeCleanup, codex_stop, RegistrationPublicationState,
+    };
+
+    let home = TestWardianHome::new_async().await;
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let id = "recovery-roster-write-failure";
+    let mut active = detachable_agent(id, "codex", Some(7));
+    let exited = Arc::new(AtomicBool::new(false));
+    active.child_process = Some(Box::new(FakeChild {
+        exited: exited.clone(),
+        refuse_stop: true,
+    }));
+    let lease = crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+        id, id, "codex", "", "fixture",
+    )
+    .unwrap();
+    let publication = Arc::new(RegistrationPublicationState::for_recovery(
+        lease.owner().clone(),
+        id.into(),
+        "fixture-native".into(),
+    ));
+    let cleanup = RecoveryRuntimeCleanup::fixture(app.handle().clone(), &active, 3, publication);
+    state.agents.lock().await.insert(id.into(), active);
+    state.agent_order.lock().await.push(id.into());
+    state
+        .native_delivery
+        .install_recovery_cleanup_fixture(id, 3)
+        .await;
+    std::fs::create_dir_all(home.path().join("settings/state.json")).unwrap();
+
+    let persistence = super::persist_provisional_codex_roster(&state, id, Some(7))
+        .await
+        .unwrap_err();
+    let failure = cleanup.finish(persistence).await;
+    assert!(failure.contains("fixture TUI has not exited"));
+    assert!(state.native_delivery.codex_owner_selected(id, 3).await);
+    assert!(codex_stop::await_quiescent(home.path(), id).await.is_err());
+
+    exited.store(true, Ordering::Release);
+    codex_stop::retry_stop(home.path(), id).unwrap();
+    codex_stop::await_quiescent(home.path(), id).await.unwrap();
+    assert!(!state.native_delivery.codex_owner_selected(id, 3).await);
 }
 
 #[tokio::test]
@@ -694,7 +749,7 @@ async fn recovery_rollback_starts_retained_stop_before_pause_waits_with_lifecycl
         "fixture-native".into(),
     ));
     publication.mark_recovery_committed_for_test();
-    let captured = CapturedRecoveryRuntime::fixture(&active, 1, publication);
+    let captured = CapturedRecoveryRuntime::fixture(&active, publication);
     state.agents.lock().await.insert(id.into(), active);
     let registration = codex_stop::prepare_stop(home.path(), id).unwrap();
 

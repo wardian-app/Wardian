@@ -74,6 +74,15 @@ impl CodexSharedClient {
         native_id: &str,
         message: Message,
     ) -> Result<(), CodexSharedError> {
+        if self
+            .proxy
+            .as_ref()
+            .is_some_and(|proxy| !proxy.recovery_writer)
+        {
+            return Err(CodexSharedError::unsupported(
+                "recovery proxy writer unavailable",
+            ));
+        }
         let mut transport = writer
             .take()
             .ok_or_else(|| CodexSharedError::unsupported("provider writer unavailable"))?;
