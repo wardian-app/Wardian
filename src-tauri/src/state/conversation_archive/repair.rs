@@ -349,6 +349,18 @@ pub(super) fn matching_record_index(
     matching_record_index_with_candidates(records, current, archived_events, &[])
 }
 
+fn framed_observation(event: &AgentChatEvent) -> Option<(&str, &str, u64, u64)> {
+    let source = event.metadata["chat_source_ref"]
+        .as_str()
+        .filter(|id| !id.is_empty())?;
+    let epoch = event.metadata["chat_source_epoch"]
+        .as_str()
+        .filter(|id| !id.is_empty())?;
+    let start = event.metadata["chat_source_start"].as_u64()?;
+    let end = event.metadata["chat_source_end"].as_u64()?;
+    (start < end).then_some((source, epoch, start, end))
+}
+
 pub(super) fn matching_record_index_with_candidates(
     records: &[ConversationNarrativeRecord],
     current: &AgentChatEvent,
@@ -420,12 +432,17 @@ pub(super) fn matching_record_index_with_candidates(
     if current.metadata["provider_log"] == true && (is_codex_user_mirror || is_codex_user_request) {
         // A verified replay can keep its pre-coordinate event ID. Follow that
         // exact physical owner before considering the complementary observation.
-        let archived_event = matching_event_index(archived_events, current)?
-            .and_then(|index| archived_events.get(index));
+        let framed_owner = if let Some(frame) = framed_observation(current) {
+            matching_event_index(archived_events, current)?
+                .and_then(|index| archived_events.get(index))
+                .filter(|event| framed_observation(event) == Some(frame))
+        } else {
+            None
+        };
         let exact_match = unique_match(
             records.iter().enumerate().filter_map(|(index, record)| {
                 (record.event_refs.contains(&current.id)
-                    || archived_event.is_some_and(|event| record.event_refs.contains(&event.id)))
+                    || framed_owner.is_some_and(|event| record.event_refs.contains(&event.id)))
                 .then_some(index)
             }),
             &format!("narrative ownership for event {}", current.id),
@@ -465,10 +482,10 @@ pub(super) fn matching_record_index_with_candidates(
         // A historical text-derived mirror ID may be present as an alias in
         // an archive. Resolve its archived event first so native turn evidence
         // can prevent the alias from attaching a different turn's narrative.
-        let Some(archived_event) = archived_event else {
+        let Some(archived_event_index) = matching_event_index(archived_events, current)? else {
             return Ok(None);
         };
-        let archived_identity_ids = event_identity_ids(archived_event);
+        let archived_identity_ids = event_identity_ids(&archived_events[archived_event_index]);
         let Some(request_root_id) = current
             .metadata
             .get("request_root_id")

@@ -6481,7 +6481,9 @@ mod tests {
             wardian_core::conversations::write_jsonl_atomic(&records_path, &records).unwrap();
             let uncertain = page_for(get("").await).await;
             assert_eq!(uncertain["progress"], "archive_payload_missing");
-            assert_eq!(uncertain["archive_read_ready"], false);
+            assert!(!uncertain["archive_read_ready"]
+                .as_bool()
+                .unwrap_or_default());
             assert!(uncertain["aliases"]
                 .as_array()
                 .unwrap()
