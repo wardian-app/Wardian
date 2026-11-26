@@ -1483,7 +1483,7 @@ pub(crate) fn decorate_forward_provider_log_events(
     attach_incremental_legacy_aliases(events, provider, path);
 }
 
-fn attach_archive_bound_provider_log_retry_aliases(
+pub(crate) fn attach_archive_bound_provider_log_retry_aliases(
     archive: &crate::state::conversation_archive::ConversationArchiveState,
     context: &ConversationArchiveContext,
     events: &mut [AgentChatEvent],

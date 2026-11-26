@@ -1371,7 +1371,10 @@ impl Positions {
                 let (mut event, mut record, mut turn) =
                     reader.read(row, context, source, epoch, page)?;
                 let mut request_mirror = None;
-                if event.provider == "codex" && event.role == Some(AgentChatRole::User) {
+                if event.provider == "codex"
+                    && event.role == Some(AgentChatRole::User)
+                    && record.event_refs.len() == 2
+                {
                     if let Some(prior) = index.preceding_request_candidate(position) {
                         let (first, first_record, first_turn) =
                             reader.read(prior, context, source, epoch, page)?;
@@ -1747,6 +1750,14 @@ impl Positions {
 }
 
 fn framed_request_mirror(first: &AgentChatEvent, second: &AgentChatEvent) -> bool {
+    // RowReader has already admitted each interval separately. Native and
+    // archive ordering may differ when capture replays a historical mirror.
+    let precedes = |left: &AgentChatEvent, right: &AgentChatEvent| {
+        left.metadata["chat_source_end"]
+            .as_u64()
+            .zip(right.metadata["chat_source_start"].as_u64())
+            .is_some_and(|(end, start)| end <= start)
+    };
     [first, second].into_iter().all(|event| {
         event.metadata["generated"] != true
             && event.metadata["archive_adoption"].is_null()
@@ -1756,10 +1767,7 @@ fn framed_request_mirror(first: &AgentChatEvent, second: &AgentChatEvent) -> boo
             && event.metadata["chat_source_epoch"].is_string()
     }) && first.metadata["chat_source_ref"] != second.metadata["chat_source_ref"]
         && first.metadata["chat_source_epoch"] == second.metadata["chat_source_epoch"]
-        && first.metadata["chat_source_end"]
-            .as_u64()
-            .zip(second.metadata["chat_source_start"].as_u64())
-            .is_some_and(|(end, start)| end <= start)
+        && (precedes(first, second) || precedes(second, first))
         && crate::providers::chat_transcript::codex_user_mirror_pair(first, second)
 }
 

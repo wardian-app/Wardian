@@ -5707,11 +5707,16 @@ mod tests {
                 .to_string(),
             ]
         };
-        let first_lines = turn_lines(
+        let mut first_lines = turn_lines(
             "provider-turn-old",
             "native-message-old",
             "Legacy synthetic request",
         );
+        if !original_event_msg_seed {
+            let mut request: serde_json::Value = serde_json::from_str(&first_lines[1]).unwrap();
+            request["payload"].as_object_mut().unwrap().remove("id");
+            first_lines[1] = request.to_string();
+        }
         let session_header =
             serde_json::json!({"type":"session_meta","payload":{"id":"codex-session-one"}});
         let first_contents = format!("{session_header}\n{}", first_lines.join("\n"));
@@ -5837,17 +5842,29 @@ mod tests {
                 .expect("replay the earlier native request against the retained mirror");
             (first, legacy_id, original_seed_json)
         } else {
-            let mut legacy = crate::providers::chat_transcript::normalize_chat_lines(
+            let mut first = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
                 "synthetic-codex-agent",
                 "codex",
-                first_contents.lines(),
+                &log_path,
+                source_key,
+                Some(initial.next),
+                true,
             )
-            .into_iter()
-            .find(|event| {
-                event.source.as_deref() == Some("response_item")
-                    && event.text.as_deref() == Some("Legacy synthetic request")
-            })
-            .expect("normalize the original pre-coordinate Codex archive record");
+            .expect("capture first synthetic turn");
+            crate::commands::chat::decorate_forward_provider_log_events(
+                &mut first.events,
+                "codex",
+                &log_path,
+            );
+            let mut legacy = first
+                .events
+                .iter()
+                .find(|event| {
+                    event.source.as_deref() == Some("response_item")
+                        && event.text.as_deref() == Some("Legacy synthetic request")
+                })
+                .unwrap()
+                .clone();
             assert_eq!(
                 legacy.kind,
                 wardian_core::models::chat::AgentChatEventKind::Message
@@ -5868,44 +5885,30 @@ mod tests {
             let legacy_sequence = legacy
                 .sequence
                 .expect("legacy record retains its original source sequence");
-            legacy.metadata["provider_log"] = serde_json::json!(true);
-            legacy.metadata["log_path"] = serde_json::json!(log_path.to_string_lossy().to_string());
+            for key in [
+                "chat_source_ref",
+                "chat_source_start",
+                "chat_source_end",
+                "chat_source_epoch",
+                "provider_log_row_offset",
+                "chat_compatibility_legacy_id",
+                "chat_compatibility_source_sequence",
+                "legacy_event_ids",
+            ] {
+                legacy.metadata.as_object_mut().unwrap().remove(key);
+            }
             legacy.metadata["chat_legacy_source_sequence"] = serde_json::json!(legacy_sequence);
-            assert!(
-                [
-                    "chat_source_ref",
-                    "chat_source_start",
-                    "chat_source_end",
-                    "chat_source_epoch",
-                    "provider_log_row_offset",
-                    "chat_compatibility_legacy_id",
-                    "chat_compatibility_source_sequence",
-                ]
-                .iter()
-                .all(|key| legacy
-                    .metadata
-                    .get(*key)
-                    .is_none_or(|value| value.is_null())),
-                "pre-coordinate archive fixture carries no current native source binding"
-            );
             state
                 .conversation_archive
                 .append_chat_events_with_context(context.clone(), std::slice::from_ref(&legacy))
                 .expect("append historical Codex identity through the normal archive writer");
-            let mut first = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
-                "synthetic-codex-agent",
-                "codex",
-                &log_path,
-                source_key,
-                Some(initial.next),
-                true,
-            )
-            .expect("capture first synthetic turn");
-            crate::commands::chat::decorate_forward_provider_log_events(
+            crate::commands::chat::attach_archive_bound_provider_log_retry_aliases(
+                &state.conversation_archive,
+                &context,
                 &mut first.events,
-                "codex",
                 &log_path,
-            );
+            )
+            .unwrap();
             for event in first.events.iter().filter(|event| {
                 event.kind == wardian_core::models::chat::AgentChatEventKind::Message
             }) {
