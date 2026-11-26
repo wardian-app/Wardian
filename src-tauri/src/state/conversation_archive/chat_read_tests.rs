@@ -2004,13 +2004,16 @@ fn cold_saved_latest_closed_and_foreign_source_cannot_bind() {
     assert!(!ConversationArchiveState::default()
         .bootstrap_saved_chat(&context())
         .unwrap());
-    assert!(head("agent-1").unwrap().is_some());
+    let retained = head("agent-1").unwrap();
+    assert!(retained.is_some());
     archive
         .rollover_agent(
             "agent-1",
             wardian_core::conversations::ConversationBoundaryReason::Clear,
         )
         .unwrap();
+    assert_eq!(head("agent-1").unwrap(), retained);
+    archive.chat_projection.invalidate("agent-1").unwrap();
     assert!(!ConversationArchiveState::default()
         .bootstrap_saved_chat(&context())
         .unwrap());
@@ -5846,7 +5849,7 @@ pub(super) fn finish_projection(
 ) {
     seed_legacy_candidate(archive, context);
     for _ in 0..128 {
-        if !archive.chat_projection.advance("agent-1").unwrap() {
+        if !archive.chat_projection.advance(&context.agent_id).unwrap() {
             return;
         }
     }
@@ -10085,6 +10088,7 @@ fn canonical_assistant_stream_final_joins_across_acquisition_batches_and_restart
         archive
             .append_provider_log_batch_with_context(ctx.clone(), &first.events, None, &first.next)
             .unwrap();
+        finish_projection(&archive, &ctx);
         let before = read(&ctx, &snapshot, None, None, None).unwrap();
         assert!(before.events.iter().any(|event| event.id == live.id));
         let mut completion = json!({"type":source});
@@ -10124,6 +10128,7 @@ fn canonical_assistant_stream_final_joins_across_acquisition_batches_and_restart
                 &second.next,
             )
             .unwrap();
+        seed_legacy_candidate(&archive, &ctx);
         let mut pending = true;
         for _ in 0..32 {
             pending = archive.chat_projection.advance(&agent).unwrap();

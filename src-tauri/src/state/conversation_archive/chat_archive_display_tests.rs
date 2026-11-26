@@ -711,6 +711,7 @@ fn archive_display_source_free_replay_advances_across_restart_and_stays_quiet() 
             .unwrap()
             .is_none()
     );
+    super::super::tests::seed_legacy_candidate(&archive, &context);
     let mut warm_settled = false;
     for _ in 0..256 {
         if !archive.chat_projection.advance("agent-1").unwrap() {
