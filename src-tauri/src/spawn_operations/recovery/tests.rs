@@ -58,6 +58,86 @@ fn preparing_operation(home: &TestWardianHome, name: &str, arm_fence: bool) -> (
 }
 
 #[tokio::test]
+async fn uncertain_spawn_status_and_wait_expose_the_same_exact_attempt() {
+    let home = TestWardianHome::new_async().await;
+    let (request, _) = preparing_operation(&home, "observer-attempt", true);
+    agent_spawn::recover_after_owner_acquired().unwrap();
+    let status = agent_spawn::get(&request.operation_id).unwrap().unwrap();
+    let (observed, timed_out, _) =
+        crate::spawn_operations::wait_for_operation(&request.operation_id, 5_000)
+            .await
+            .unwrap();
+    assert!(!timed_out);
+    assert_eq!(observed, status);
+    assert_eq!(status.state, AgentSpawnState::OutcomeUnknown);
+    assert_eq!(
+        serde_json::to_value(status).unwrap()["attempt_id"],
+        request.expected_attempt_id
+    );
+}
+
+#[tokio::test]
+async fn committed_spawn_recovery_replays_without_worker_admission() {
+    let home = TestWardianHome::new_async().await;
+    let (request, agent_id) = preparing_operation(&home, "receipt-before-slot", true);
+    agent_spawn::recover_after_owner_acquired().unwrap();
+    let plan = recovery::plan_launch(&request).unwrap();
+    let lease = agent::acquire_agent_lifecycle_transition_lease_for_identity(
+        &agent_id,
+        "receipt-before-slot",
+        "codex",
+        "",
+        "recovery-fixture",
+    )
+    .unwrap();
+    let acceptance = recovery::claim_recovery_launch(&request, &plan, &lease).unwrap();
+    let slots = Arc::new(Semaphore::new(1));
+    let held = slots.clone().acquire_owned().await.unwrap();
+    for _ in 0..2 {
+        let replay = replay_or_admit_launch(slots.clone(), request.clone(), async |_, _| {
+            panic!("a committed receipt cannot start another worker")
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&replay).unwrap(),
+            serde_json::to_vec(&acceptance).unwrap()
+        );
+    }
+    assert_eq!(slots.available_permits(), 0);
+    drop(held);
+    assert_eq!(
+        replay_or_admit_launch(slots.clone(), request.clone(), async |_, _| {
+            panic!("an available slot cannot make a committed receipt launch again")
+        })
+        .await,
+        Ok(acceptance.clone())
+    );
+    for mismatch in [
+        Request {
+            expected_attempt_id: acceptance.accepted_attempt_id,
+            ..request.clone()
+        },
+        Request {
+            expected_model: ORIGINAL_MODEL.into(),
+            ..request.clone()
+        },
+        Request {
+            action: Action::FinalizeRegistered,
+            ..request.clone()
+        },
+    ] {
+        let error = replay_or_admit_launch(slots.clone(), mismatch, async |_, _| {
+            panic!("a changed request cannot reach worker admission")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "spawn_recovery_receipt_mismatch");
+    }
+    assert_eq!(slots.available_permits(), 1);
+}
+
+#[tokio::test]
 async fn spawn_recovery_seals_only_a_proved_startup_pre_effect_cut() {
     let home = TestWardianHome::new_async().await;
     let (pre_effect, agent_id) = preparing_operation(&home, "before-fence", true);

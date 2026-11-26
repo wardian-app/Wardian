@@ -106,6 +106,8 @@ pub struct AgentSpawnOperation {
     pub provider: String,
     pub class: String,
     pub state: AgentSpawnState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -842,26 +844,25 @@ fn load_plan_with_conn(
     let Some(operation) = load_operation_with_conn(conn, operation_id)? else {
         return Ok(None);
     };
-    let (request_json, provider_session_id, attempt_id, prepared_workspace, first_native_session_id, first_native_published): (
+    let (request_json, provider_session_id, prepared_workspace, first_native_session_id, first_native_published): (
         String,
-        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
         bool,
     ) = conn.query_row(
-        "SELECT request_json, provider_session_id, attempt_id, prepared_workspace, first_native_session_id, first_native_published
+        "SELECT request_json, provider_session_id, prepared_workspace, first_native_session_id, first_native_published
              FROM agent_spawn_operations WHERE operation_id = ?1",
         params![operation_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     )?;
     let request = serde_json::from_str(&request_json)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     Ok(Some(AgentSpawnPlan {
+        attempt_id: operation.attempt_id.clone(),
         operation,
         request,
         provider_session_id,
-        attempt_id,
         prepared_workspace,
         first_native_session_id,
         first_native_published,
@@ -874,7 +875,7 @@ fn load_operation_with_conn(
 ) -> rusqlite::Result<Option<AgentSpawnOperation>> {
     conn.query_row(
         "SELECT operation_id, planned_agent_id, session_name, provider, class,
-                state, created_at, updated_at, error_code, error_message
+                state, created_at, updated_at, error_code, error_message, attempt_id
          FROM agent_spawn_operations WHERE operation_id = ?1",
         params![operation_id],
         |row| {
@@ -889,6 +890,7 @@ fn load_operation_with_conn(
                 updated_at: row.get(7)?,
                 error_code: row.get(8)?,
                 error_message: row.get(9)?,
+                attempt_id: row.get(10)?,
             })
         },
     )

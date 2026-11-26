@@ -2,6 +2,8 @@ use super::persisted_roster;
 use crate::commands::agent::{self, PreparedAgentSpawn, RecoveryBootstrap};
 use crate::state::AppState;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use wardian_core::agent_spawn::recovery::{
     self, Admission, Blocker, Finalized, LaunchAccepted, RegistrationEvidence, Request,
 };
@@ -104,6 +106,37 @@ pub(crate) async fn recover(state: &AppState, request: Request) -> Result<Finali
     })
     .await
     .map_err(|_| evidence_unavailable())?
+}
+
+/// An exact committed acceptance is an observer result. It never authorizes
+/// another worker, even when all worker slots are occupied.
+pub(super) async fn replay_or_admit_launch(
+    slots: Arc<Semaphore>,
+    request: Request,
+    admit: impl AsyncFnOnce(OwnedSemaphorePermit, Request) -> Result<LaunchAccepted, Blocker>,
+) -> Result<LaunchAccepted, Blocker> {
+    if let Some(receipt) = committed_launch_receipt(&request).await? {
+        return Ok(receipt);
+    }
+    let admission = match slots.try_acquire_owned() {
+        Ok(permit) => admit(permit, request.clone()).await,
+        Err(_) => Err(Blocker::new(
+            "spawn_recovery_worker_unavailable",
+            "A durable spawn worker is not available.",
+        )),
+    };
+    match admission {
+        Ok(receipt) => Ok(receipt),
+        // An identical concurrent caller can commit after the first lookup.
+        Err(error) => committed_launch_receipt(&request).await?.ok_or(error),
+    }
+}
+
+async fn committed_launch_receipt(request: &Request) -> Result<Option<LaunchAccepted>, Blocker> {
+    let request = request.clone();
+    tokio::task::spawn_blocking(move || recovery::committed_launch_receipt(&request))
+        .await
+        .map_err(|_| evidence_unavailable())?
 }
 
 /// Authorize only a vacant witnessed identity. The worker inherits the same

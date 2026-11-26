@@ -569,8 +569,9 @@ Every CLI spawn uses a durable operation key. The default command waits up to
 60 seconds for registration and preserves the normal agent JSON output. Use
 `--wait-timeout <duration>` to choose a shorter observation window. If the wait
 ends first, the error includes the operation key and a `spawn-status` command.
-`spawn-status` reads the current operation; `spawn-wait` observes it for up to
-60 seconds. `--async` returns the operation receipt immediately.
+`spawn-status` reads the current operation. `spawn-wait` observes it for up to
+60 seconds. Both include `operation.attempt_id` once an attempt exists.
+`--async` returns the operation receipt immediately.
 
 Reuse `--operation-id <uuid>` with the same provider, class, name, workspace,
 model, and reasoning effort when retrying an uncertain submission. The key is
@@ -619,9 +620,10 @@ wardian agent spawn-recover <operation-id> --expected-attempt <attempt-id> --exp
 ```
 
 A successful response reports an `accepted_attempt_id` and `effective_model`.
-Use `spawn-status` to check registration. A witnessed operation can be accepted
-once, and startup never replays an interrupted recovery attempt. Legacy
-uncertain attempts and occupied identities stay blocked.
+Use `spawn-status` to check registration. If the acceptance reply was lost,
+repeat the original action, attempt ID, and model to retrieve the same receipt.
+A witnessed operation can launch once, and startup never replays an interrupted
+recovery attempt. Legacy uncertain attempts and occupied identities stay blocked.
 
 Legacy spawn, clone, or rename can report `[agent-name-ownership-pending]`
 after publication. The error includes the stable agent and attempt IDs. Keep

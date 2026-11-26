@@ -79,28 +79,22 @@ pub(crate) async fn recover_launch(
 > {
     use wardian_core::agent_spawn::recovery::Blocker;
     tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let permit = state
-            .spawn_operation_slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| {
-                Blocker::new(
-                    "spawn_recovery_worker_unavailable",
-                    "A durable spawn worker is not available.",
-                )
-            })?;
-        let (receipt, prepared, bootstrap) = recovery::admit_launch(&state, request).await?;
-        let outcome = WorkerOutcomeGuard {
-            operation_id: receipt.operation_id.clone(),
-            attempt_id: receipt.accepted_attempt_id.clone(),
-            terminal: false,
-        };
-        tauri::async_runtime::spawn(async move {
-            let _permit = permit;
-            launch_operation(app, outcome, prepared, Some(bootstrap)).await;
-        });
-        Ok(receipt)
+        let slots = app.state::<AppState>().spawn_operation_slots.clone();
+        recovery::replay_or_admit_launch(slots, request, |permit, request| async move {
+            let state = app.state::<AppState>();
+            let (receipt, prepared, bootstrap) = recovery::admit_launch(&state, request).await?;
+            let outcome = WorkerOutcomeGuard {
+                operation_id: receipt.operation_id.clone(),
+                attempt_id: receipt.accepted_attempt_id.clone(),
+                terminal: false,
+            };
+            tauri::async_runtime::spawn(async move {
+                let _permit = permit;
+                launch_operation(app, outcome, prepared, Some(bootstrap)).await;
+            });
+            Ok(receipt)
+        })
+        .await
     })
     .await
     .map_err(|_| {

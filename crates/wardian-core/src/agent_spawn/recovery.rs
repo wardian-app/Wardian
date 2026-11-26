@@ -256,6 +256,56 @@ fn read_receipt(conn: &Connection, request: &Request) -> Result<Option<Finalized
     }))
 }
 
+/// Reproduce the committed launch acceptance without inspecting live state or
+/// consuming another worker slot. Only the original request can replay it.
+pub fn committed_launch_receipt(request: &Request) -> Result<Option<LaunchAccepted>, Blocker> {
+    validate_request(request)?;
+    crate::db::get_db_conn(|conn| {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
+        Ok(read_launch_receipt(&tx, request))
+    })
+    .map_err(|_| storage_unavailable())?
+}
+
+fn read_launch_receipt(
+    conn: &Connection,
+    request: &Request,
+) -> Result<Option<LaunchAccepted>, Blocker> {
+    let stored: Option<(String, String, String, Option<String>)> = conn
+        .query_row(
+            "SELECT a.original_attempt_id, a.accepted_attempt_id, a.effective_model, o.planned_agent_id
+             FROM agent_spawn_codex_launch_audit a LEFT JOIN agent_spawn_operations o
+               ON o.operation_id = a.operation_id
+             WHERE a.operation_id = ?1",
+            [&request.operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((original_attempt_id, accepted_attempt_id, effective_model, agent_id)) = stored else {
+        // A committed finalization also excludes new launch admission.
+        let _ = read_receipt(conn, request)?;
+        return Ok(None);
+    };
+    if request.action != Action::LaunchIfAbsent
+        || request.expected_attempt_id != original_attempt_id
+        || request.expected_model != effective_model
+    {
+        return Err(Blocker::new(
+            "spawn_recovery_receipt_mismatch",
+            "The committed recovery belongs to a different action, attempt, or model.",
+        ));
+    }
+    Ok(Some(LaunchAccepted {
+        schema: crate::control::CONTROL_SCHEMA,
+        operation_id: request.operation_id.clone(),
+        original_attempt_id,
+        accepted_attempt_id,
+        agent_id: agent_id.ok_or_else(storage_unavailable)?,
+        action: Action::LaunchIfAbsent,
+        effective_model,
+    }))
+}
+
 fn read_uncertain(conn: &Connection, request: &Request) -> Result<AgentSpawnPlan, Blocker> {
     let plan = load_plan_with_conn(conn, &request.operation_id)?.ok_or_else(|| {
         Blocker::new(
