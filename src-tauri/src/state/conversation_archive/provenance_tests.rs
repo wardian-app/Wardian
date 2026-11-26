@@ -1276,12 +1276,14 @@ fn claude_assistant_mirror_projection_requires_unique_native_message() {
     .unwrap();
     assert_eq!(distinct_turns.len(), 2);
 
+    let mut other_block = observation("native-2", true, "msg-1");
+    other_block.text = Some("different text within the same native message ID".into());
     let ambiguous_native = provenance::merge_current_capture(
         Vec::new(),
         vec![
             observation("watch", false, "msg-1"),
             observation("native-1", true, "msg-1"),
-            observation("native-2", true, "msg-1"),
+            other_block,
         ],
     )
     .unwrap();

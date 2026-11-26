@@ -1,11 +1,13 @@
 //! Exact recent-owner continuity across the preview/canonical representation switch.
 use super::*;
+use std::time::Duration;
 use wardian_core::models::chat::AgentChatAlias;
 use wardian_core::models::chat_presentation::{
     ChatPresentation, ChatPresentationV1, ChatPreviewBridge, ChatPreviewBridgeReplacement,
 };
 
 const REVISION_TAG: &str = ":preview-bridge-v1:";
+pub(super) const ROLLOVER_HOLD_LIMIT: Duration = Duration::from_secs(10);
 
 /// The legacy reader appends unindexed native rows after canonical rows. Restore
 /// their physical order before certifying a range, so an earlier lifecycle row
@@ -561,8 +563,10 @@ pub(super) fn continue_canonical(
             "bound source scope retired",
         ));
     }
-    let rollover = binding.generation != published.generation
-        || if let Some(previous) = &binding.rollover {
+    let predecessor = if binding.generation != published.generation {
+        Some(binding.generation.as_str())
+    } else {
+        binding.rollover.as_ref().and_then(|previous| {
             reads_generation(
                 &mut store,
                 &published.agent_id,
@@ -570,9 +574,10 @@ pub(super) fn continue_canonical(
                 requested_revision,
                 &previous.generation,
             )
-        } else {
-            false
-        };
+            .then_some(previous.generation.as_str())
+        })
+    };
+    let rollover = predecessor.is_some();
     if !rollover && page.generation.as_deref() != Some(published.generation.as_str()) {
         if ordinary_recent && has_native_source_generation(snapshot, &mut store, page, &published)?
         {
@@ -613,12 +618,13 @@ pub(super) fn continue_canonical(
             "canonical revision changed",
         ));
     }
-    let current = cache
+    let mut current = cache
         .lock()
         .map_err(|_| io::Error::other("recent owner poisoned"))?;
-    if current.global_boundaries > 0
-        || current.boundaries.contains_key(&snapshot.session_id)
-        || !current.slots.iter().any(|slot| {
+    let slot = (current.global_boundaries == 0
+        && !current.boundaries.contains_key(&snapshot.session_id))
+    .then(|| {
+        current.slots.iter_mut().find(|slot| {
             slot.agent_id == snapshot.session_id
                 && slot.admission == admission
                 && slot.published
@@ -633,12 +639,14 @@ pub(super) fn continue_canonical(
                 && slot.runtime.ptr_eq(&Arc::downgrade(runtime))
                 && slot.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
         })
-    {
+    })
+    .flatten();
+    let Some(slot) = slot else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "bound admission retired",
         ));
-    }
+    };
     page.bytes_read += bytes + store.bytes + 2 * HEAD_BYTES as usize;
     page.records_decoded += store.objects;
     let Some(mut value) = value else {
@@ -666,9 +674,32 @@ pub(super) fn continue_canonical(
             page.recent_admission = None;
             page.reset = false;
             page.older_page = false;
-            page.presentation = if rollover {
+            page.presentation = if let Some(predecessor) = predecessor {
                 // Until the active reader proves the replacement aliases, the
                 // same physical source has no new presentation or authority.
+                let now = Instant::now();
+                if slot
+                    .rollover_hold
+                    .as_ref()
+                    .is_none_or(|hold| hold.predecessor != predecessor)
+                {
+                    slot.rollover_hold = Some(RolloverHold {
+                        predecessor: predecessor.to_owned(),
+                        since: now,
+                        reported: false,
+                    });
+                }
+                let hold = slot.rollover_hold.as_mut().unwrap();
+                let elapsed = now.duration_since(hold.since);
+                let report = elapsed >= ROLLOVER_HOLD_LIMIT && !hold.reported;
+                hold.reported |= report;
+                drop(current);
+                if report {
+                    crate::utils::logging::log_debug(&format!(
+                        "[Chat] Bound generation rollover awaiting exact successor aliases: agent={} admission={} predecessor={} successor={} elapsed_ms={}",
+                        snapshot.session_id, admission, predecessor, published.generation, elapsed.as_millis()
+                    ));
+                }
                 page.progress = "indexing".into();
                 page.generation = Some(published.generation.clone());
                 None

@@ -2,7 +2,7 @@
 //!
 //! IDs and verified aliases identify observations. Text, timestamps and tail
 //! sequence numbers are deliberately not identity evidence.
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 
 use serde_json::Value;
@@ -756,46 +756,50 @@ pub fn merge_current_capture(
     Ok(archived)
 }
 
-/// Collapse Claude's uniquely identified provider/watch mirror while
-/// keeping both observation IDs. A missing or ambiguous native match remains
-/// visible.
+/// Fold Watch replays into the one native observation that owns their Claude
+/// message ID in this scope. A missing or ambiguous native owner remains visible.
 pub(super) fn collapse_claude_stream_watch_mirrors(
     events: &mut Vec<AgentChatEvent>,
-) -> Vec<(String, String)> {
+) -> Vec<(String, Vec<String>)> {
+    let mut mirrors_by_native = BTreeMap::<usize, Vec<usize>>::new();
+    for (mirror_index, mirror) in events.iter().enumerate() {
+        if !is_claude_watch_mirror(mirror) {
+            continue;
+        }
+        let mut matches = events
+            .iter()
+            .enumerate()
+            .filter(|(_, native)| claude_native_message_matches(mirror, native));
+        let Some((native_index, native)) = matches.next() else {
+            continue;
+        };
+        // Establish a unique native owner before checking body integrity.
+        // Equal text cannot select among multiple native observations.
+        if matches.next().is_none()
+            && claude_text_identity(mirror)
+                .zip(claude_text_identity(native))
+                .is_some_and(|(mirror, native)| mirror == native)
+        {
+            mirrors_by_native
+                .entry(native_index)
+                .or_default()
+                .push(mirror_index);
+        }
+    }
+
     let mut removed = BTreeSet::new();
-    let mut pairs = Vec::new();
-
-    for mirror_index in 0..events.len() {
-        if removed.contains(&mirror_index) || !is_claude_watch_mirror(&events[mirror_index]) {
-            continue;
-        }
-        let native_matches: Vec<usize> = (0..events.len())
-            .filter(|&native_index| {
-                native_index != mirror_index
-                    && !removed.contains(&native_index)
-                    && is_claude_stream_watch_pair(&events[mirror_index], &events[native_index])
-            })
-            .collect();
-        if native_matches.len() != 1 {
-            continue;
-        }
-        let native_index = native_matches[0];
-        let mirror_matches: Vec<usize> = (0..events.len())
-            .filter(|&candidate_index| {
-                candidate_index != native_index
-                    && !removed.contains(&candidate_index)
-                    && is_claude_stream_watch_pair(&events[candidate_index], &events[native_index])
-            })
-            .collect();
-        if mirror_matches.len() != 1 {
-            continue;
-        }
-
+    let mut relations = Vec::new();
+    for (native_index, mirrors) in mirrors_by_native {
         let mut canonical = events[native_index].clone();
-        retain_provider_observation_ids(&mut canonical, &events[mirror_index]);
-        pairs.push((canonical.id.clone(), events[mirror_index].id.clone()));
+        let mut members = vec![canonical.id.clone()];
+        for mirror_index in mirrors {
+            let mirror = &events[mirror_index];
+            retain_provider_observation_ids(&mut canonical, mirror);
+            members.push(mirror.id.clone());
+            removed.insert(mirror_index);
+        }
+        relations.push((canonical.id.clone(), members));
         events[native_index] = canonical;
-        removed.insert(mirror_index);
     }
 
     if !removed.is_empty() {
@@ -805,7 +809,7 @@ pub(super) fn collapse_claude_stream_watch_mirrors(
             .filter_map(|(index, event)| (!removed.contains(&index)).then_some(event))
             .collect();
     }
-    pairs
+    relations
 }
 
 fn is_claude_watch_mirror(event: &AgentChatEvent) -> bool {
@@ -821,9 +825,8 @@ fn is_claude_watch_mirror(event: &AgentChatEvent) -> bool {
             .is_some_and(|turn_id| !turn_id.trim().is_empty())
 }
 
-fn is_claude_stream_watch_pair(mirror: &AgentChatEvent, native: &AgentChatEvent) -> bool {
-    is_claude_watch_mirror(mirror)
-        && native.provider == "claude"
+fn claude_native_message_matches(mirror: &AgentChatEvent, native: &AgentChatEvent) -> bool {
+    native.provider == "claude"
         && native.kind == AgentChatEventKind::Message
         && native.role == Some(AgentChatRole::Assistant)
         && native.source.as_deref() == Some("stream_json")
@@ -837,9 +840,6 @@ fn is_claude_stream_watch_pair(mirror: &AgentChatEvent, native: &AgentChatEvent)
                 (Some(left), Some(right)) => left == right,
                 _ => true,
             })
-        && claude_text_identity(mirror)
-            .zip(claude_text_identity(native))
-            .is_some_and(|(mirror, native)| mirror == native)
 }
 
 /// Collapse only Codex's identityless assistant stream mirror when the

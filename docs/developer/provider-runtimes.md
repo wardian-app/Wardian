@@ -209,15 +209,25 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 ### Chat observation identity
 
 Claude assistant narration can arrive through live `stream_json` and its
-provider log. The committed Chat projection reconciles a unique pair with the
-same agent, native message ID, and complete text, preserving the provider-log
-row and aliasing the live observation to it. Conflicting explicit provider
-session or archive identities, different message IDs, and ambiguous pairs stay
-separate. Reconciliation runs before bounded display headers discard Watch
-provenance. Before externalizing a large narration body, the archive writer
-preserves its full-text SHA-256 and byte length for the same comparison.
-Excerpts cannot establish body identity; older artifacts without this evidence
-stay separate. Physical archive records remain inspectable.
+provider log. The committed Chat projection resolves each Watch observation
+to a unique provider-log row by agent scope and native message ID. It checks
+complete-body integrity after resolving the owner. Conflicting scope, missing
+or ambiguous native ownership, and conflicting or unverified bodies leave the
+observations separate. Multiple Watch observations of one verified native row
+keep that row's position and publish their recent IDs as bounded aliases.
+Before externalizing a large narration body, the archive writer retains its
+full-text SHA-256 and byte length for the integrity check. Physical archive
+records remain inspectable.
+
+The turn index uses the physical Claude row for membership. A newly published
+native closure bounds an already visible turn. Later lifecycle observations
+remain separate activity, and unresolved gaps within the turn still block
+qualification.
+
+On a same-source generation change, a bound Chat reader holds its displayed
+view until a successor proves exact aliases. If the hold reaches ten seconds,
+the next poll records the predecessor, successor, and elapsed time in
+`<wardian-home>/wardian_debug.log`. The diagnostic is emitted once per hold.
 
 ### Peer delivery mod
 

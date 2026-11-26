@@ -1612,7 +1612,11 @@ impl Index {
     ) -> io::Result<Option<PageMembers>> {
         // This field is a producer certificate, not an arbitrary list of text
         // aliases. The caller supplies only admitted canonical display rows.
-        let ids = if let Some(members) = event.metadata.get("chat_display_member_ids") {
+        let display_members = event
+            .metadata
+            .get("chat_display_member_ids")
+            .filter(|_| !super::chat_read::claude_native_with_watch_aliases(event));
+        let ids = if let Some(members) = display_members {
             let Some(members) = members
                 .as_array()
                 .filter(|members| !members.is_empty() && members.len() <= 2)

@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -35,6 +36,7 @@ pub(crate) const PAGE_ROWS: usize = 80;
 pub(crate) const PREVIEW_BYTES: usize = 1024;
 pub(crate) const BODY_BYTES: usize = 16 * 1024;
 const HEAD_BYTES: u64 = 4096;
+const CLAUDE_WATCH_ALIAS_BYTES: usize = 4096;
 pub(crate) const POLICY_BYTES: u64 = 32 * 1024;
 pub(crate) const IPC_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_REVALIDATED_SOURCE_IDS: usize = 8;
@@ -503,9 +505,16 @@ struct RecentSlot {
     headers: Vec<AgentChatEvent>,
     coverage: Vec<RecentCoverage>,
     binding: Option<preview_bridge::Binding>,
+    rollover_hold: Option<RolloverHold>,
     certification: u64,
     native_source: Option<crate::commands::chat_recent_database::Source>,
     charge: usize,
+}
+
+struct RolloverHold {
+    predecessor: String,
+    since: Instant,
+    reported: bool,
 }
 
 impl RecentSlot {
@@ -720,6 +729,7 @@ impl ProjectionOwner {
             headers: Vec::new(),
             coverage: Vec::new(),
             binding: None,
+            rollover_hold: None,
             certification: 0,
             charge: 1024
                 + snapshot.session_id.len()
@@ -1480,6 +1490,15 @@ impl ProjectionOwner {
                             .map_or(0, preview_bridge::Binding::charge),
                     ) + next_binding.charge();
                     slot.binding = Some(next_binding);
+                    if slot.rollover_hold.as_ref().is_some_and(|hold| {
+                        handoff.presentation.as_ref().is_some_and(|presentation| {
+                            presentation.payload["preview_bridge"]["replaces"]["generation"]
+                                .as_str()
+                                == Some(hold.predecessor.as_str())
+                        })
+                    }) {
+                        slot.rollover_hold = None;
+                    }
                     handoff.bytes_read +=
                         page.bytes_read + canonical.as_ref().map_or(0, |(_, bytes)| *bytes);
                     if slot.charge > IPC_BYTES {
@@ -2581,14 +2600,30 @@ impl ProjectionOwner {
     ) -> io::Result<()> {
         // Reconcile complete, admitted observations before header clipping loses
         // Watch provenance. Keep physical archives intact and carry the exact
-        // pair into the published row so loaded live IDs can be replaced.
+        // aliases into the published row so loaded live IDs can be replaced.
         let claude_relations: HashMap<_, _> =
             super::provenance::collapse_claude_stream_watch_mirrors(&mut candidate.events)
                 .into_iter()
-                .map(|(native, watch)| {
+                .map(|(native, members)| {
+                    // Preserve the latest exact Watch IDs within the immutable
+                    // row budget. The canonical identity is always retained.
+                    let mut bytes = 0;
+                    let mut retained = Vec::new();
+                    for member in members.into_iter().skip(1).rev() {
+                        bytes += serde_json::to_string(&member)
+                            .expect("string serialization is infallible")
+                            .len()
+                            + 1;
+                        if bytes > CLAUDE_WATCH_ALIAS_BYTES {
+                            break;
+                        }
+                        retained.push(member);
+                    }
+                    retained.push(native.clone());
+                    retained.reverse();
                     let relation = super::chat_logical_index::Relation {
                         id: native.clone(),
-                        members: vec![native.clone(), watch],
+                        members: retained,
                     };
                     (native, relation)
                 })
@@ -3508,6 +3543,19 @@ fn display_event(mut row: Row, reference: &str) -> AgentChatEvent {
         }
     }
     row.event
+}
+
+/// A verified Claude Watch relation aliases the native row for display.
+/// Watch observations have no physical turn membership.
+pub(super) fn claude_native_with_watch_aliases(event: &AgentChatEvent) -> bool {
+    use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
+    event.provider == "claude"
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::Assistant)
+        && event.metadata["_wardian_canonical_row"] == true
+        && event.metadata["provider_log"] == true
+        && event.metadata["chat_source_ref"].as_str() == Some(event.id.as_str())
+        && event.metadata["chat_display_physical_id"].as_str() == Some(event.id.as_str())
 }
 
 pub(super) fn page(
