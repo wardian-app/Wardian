@@ -11,11 +11,7 @@
     "state::conversation_archive::chat_read::preview_projection::tests::eighty_native_rows_over_many_new_turns_fit_the_shared_projection_read_budget": 20,
     "timeout_propagates_instead_of_returning_persisted_success": 20,
     "delivery::pi_bridge::startup_tests::close_cancels_every_startup_phase_without_revival": 15,
-    "manager::spawn::pi_startup_tests::pi_handshake_timeout_is_a_terminal_startup_failure": 15,
-    "manager::spawn::tests::startup_queue_wake_waits_for_readiness_and_lease_then_dispatches_once": 15,
     "state::conversation_archive::chat_read::cold_bootstrap::archive_display_tests::archive_display_source_free_replay_advances_across_restart_and_stays_quiet": 15,
-    "state::conversation_archive::chat_read::tests::controlled_legacy_codex_projected_group_lands_on_older_page_with_recent_loaded": 15,
-    "mcp::tests::a_stalled_output_writer_is_detached_only_after_the_drain_deadline": 15,
-    "unread_stdout_does_not_keep_the_direct_server_alive": 15
+    "state::conversation_archive::chat_read::tests::controlled_legacy_codex_projected_group_lands_on_older_page_with_recent_loaded": 15
   }
 }
