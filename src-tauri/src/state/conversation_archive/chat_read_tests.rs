@@ -1302,6 +1302,31 @@ fn unknown_delivered_input_remains_unresolved_after_native_provider_adoption() {
         .find(|row| row.metadata["generated"] == true)
         .unwrap();
     let context = ConversationArchiveContext::for_agent_id("agent-1", "antigravity");
+    let read_archive = archive
+        .archive_chat_reader(
+            context.clone(),
+            super::super::archive_chat::Request {
+                before: None,
+                revision: None,
+                detail: None,
+                limit: 8,
+                logging_enabled: false,
+            },
+        )
+        .unwrap();
+    let archive_page = read_archive().unwrap();
+    assert!(archive_page.archive_read_ready, "{}", archive_page.progress);
+    let retained = archive_page
+        .events
+        .iter()
+        .find(|row| row.id == canonical_input.id)
+        .unwrap();
+    assert_eq!(retained.provider, "unknown");
+    assert_eq!(retained.metadata["input_origin"], "agent_input");
+    assert!(retained.metadata.get("chat_source_ref").is_none());
+    assert!(archive_page.aliases.is_empty());
+    assert!(!locations("agent-1").unwrap().1.exists());
+    finish_projection(&archive, &context);
     let page = read(&context, &snapshot(&context), None, None, None).unwrap();
     let input = page
         .events
@@ -1819,6 +1844,9 @@ fn archive_adoption_defer_native_proof_preserves_head_work_and_input_fence() {
         .active_conversation_id(&ctx.agent_id)
         .unwrap()
         .unwrap();
+    let archive_fence = archive.archive_input_fence(&ctx, Some(&path)).unwrap();
+    assert!(archive_fence.is_some());
+    seed_legacy_candidate(&archive, &ctx);
     let owner = &archive.chat_projection;
     let before_work = owner.test_work_snapshot(&ctx.agent_id).unwrap();
     assert!(before_work.is_some());
@@ -1833,6 +1861,7 @@ fn archive_adoption_defer_native_proof_preserves_head_work_and_input_fence() {
     );
     assert_eq!(fs::read(&head_path).unwrap(), before_head);
     assert!(input_fence(&ctx, Some(&path)).unwrap() == before_fence);
+    assert!(archive.archive_input_fence(&ctx, Some(&path)).unwrap() == archive_fence);
 }
 
 #[test]

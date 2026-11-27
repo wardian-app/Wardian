@@ -224,6 +224,7 @@ fn saved_page_in_scope(
         .append_chat_events_with_context(context.clone(), events)
         .unwrap();
     if !retire_first {
+        super::super::tests::seed_legacy_candidate(&archive, context);
         while archive.chat_projection.advance("agent-1").unwrap() {}
     }
     let conversation = archive.active_conversation_id("agent-1").unwrap().unwrap();
@@ -819,7 +820,7 @@ fn archive_display_upgrades_ready_committed_head_without_explicit_retire() {
     assert_eq!(
         rows.len(),
         1,
-        "ordinary background bootstrap must upgrade a ready persisted head"
+        "legacy bootstrap must upgrade a ready retained head"
     );
     assert!(rows[0].id.starts_with("archive-display:"));
 }
