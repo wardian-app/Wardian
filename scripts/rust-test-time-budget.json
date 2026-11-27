@@ -1,24 +1,21 @@
 {
   "default_seconds": 10,
   "allow": {
-    "manager::telemetry::background_capture_tests::ordinary_off_registration_lookup_and_follow_up_capture_without_chat_read": 120,
-    "manager::telemetry::background_capture_tests::ordinary_live_deeper_history_covers_full_recent_cohort": 100,
-    "manager::telemetry::background_capture_tests::ordinary_off_provisional_recent_page_becomes_admitted_after_capture": 60,
-    "state::conversation_archive::chat_read::tests::source_revalidation_retains_loaded_pair_outside_h1_pages_and_restores_raw_rows_after_late_c": 40,
-    "state::conversation_archive::chat_read::preview_projection::tests::eighty_native_rows_over_many_new_turns_fit_the_shared_projection_read_budget": 40,
-    "remote::gateway::tests::remote_chat_gateway_returns_repeated_codex_turns_after_legacy_archive_identity": 35,
+    "manager::spawn::pi_startup_tests::uncertain_pi_stop_keeps_exclusion_until_later_observed_exit": 140,
+    "manager::spawn::pi_startup_tests::stale_pi_startup_failure_cannot_stop_or_publish_into_replacement": 95,
     "commands::automation::tests::automation_run_summary_repeated_inbox_reads_reuse_large_snapshot": 35,
-    "remote::gateway::tests::remote_chat_gateway_preserves_original_event_msg_legacy_identity": 35,
     "delivery::opencode_http::owner::tests::event_stream_body_outlives_request_deadline_but_headers_remain_bounded": 25,
-    "state::conversation_archive::chat_read::cold_bootstrap::archive_display_tests::archive_display_source_free_replay_advances_across_restart_and_stays_quiet": 25,
-    "manager::telemetry::background_capture_tests::ordinary_collector_drains_audited_archive_adoption_after_quiet_source_replacement": 20,
-    "state::conversation_archive::chat_read::tests::controlled_legacy_codex_projected_group_lands_on_older_page_with_recent_loaded": 20,
-    "timeout_propagates_instead_of_returning_persisted_success": 20,
+    "state::conversation_archive::chat_read::tests::source_revalidation_retains_loaded_pair_outside_h1_pages_and_restores_raw_rows_after_late_c": 25,
     "commands::change_snapshot::tests::snapshots_stay_within_their_measured_budgets": 20,
     "delivery::codex_shared::owner::initial_checkpoint::tests::submitted_only_wrong_or_missing_events_and_conflicts_do_not_complete_preparation": 20,
-    "manager::telemetry::background_capture_tests::canonical_mock_headers_wait_for_source_renewal_qualification": 15,
-    "manager::telemetry::background_capture_tests::cold_saved_off_archive_bootstraps_without_new_capture_events": 15,
+    "state::conversation_archive::chat_read::preview_projection::tests::eighty_native_rows_over_many_new_turns_fit_the_shared_projection_read_budget": 20,
+    "timeout_propagates_instead_of_returning_persisted_success": 20,
     "delivery::pi_bridge::startup_tests::close_cancels_every_startup_phase_without_revival": 15,
-    "commands::chat::tests::codex_commentary_loader_persists_one_show_answer_across_reopen": 15
+    "manager::spawn::pi_startup_tests::pi_handshake_timeout_is_a_terminal_startup_failure": 15,
+    "manager::spawn::tests::startup_queue_wake_waits_for_readiness_and_lease_then_dispatches_once": 15,
+    "state::conversation_archive::chat_read::cold_bootstrap::archive_display_tests::archive_display_source_free_replay_advances_across_restart_and_stays_quiet": 15,
+    "state::conversation_archive::chat_read::tests::controlled_legacy_codex_projected_group_lands_on_older_page_with_recent_loaded": 15,
+    "mcp::tests::a_stalled_output_writer_is_detached_only_after_the_drain_deadline": 15,
+    "unread_stdout_does_not_keep_the_direct_server_alive": 15
   }
 }
