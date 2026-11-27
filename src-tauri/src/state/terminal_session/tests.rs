@@ -1900,19 +1900,25 @@ async fn shutdown_timeout_aborts_actor_and_cancels_pending_calls() {
     timer.wait_for_sleep(Duration::from_secs(2)).await;
     timer.fire(Duration::from_secs(2)).await;
 
-    terminate
-        .await
-        .expect("terminate task")
-        .expect("timed abort");
-    let _ = release.send(());
-    assert!(matches!(
-        blocked_input.await.expect("blocked input task"),
-        Err(TerminalBrokerError::RuntimeTerminated)
-    ));
-    assert!(matches!(
-        pending_state.await.expect("pending state task"),
-        Err(TerminalBrokerError::RuntimeTerminated)
-    ));
+    // Returning from terminate only requests cancellation. Keep the actor gated
+    // until both queued replies have observed the actor being dropped.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        terminate
+            .await
+            .expect("terminate task")
+            .expect("timed abort");
+        assert!(matches!(
+            blocked_input.await.expect("blocked input task"),
+            Err(TerminalBrokerError::RuntimeTerminated)
+        ));
+        assert!(matches!(
+            pending_state.await.expect("pending state task"),
+            Err(TerminalBrokerError::RuntimeTerminated)
+        ));
+    })
+    .await
+    .expect("shutdown should cancel queued calls while the actor is still blocked");
+    drop(release);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
