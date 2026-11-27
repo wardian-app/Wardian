@@ -821,7 +821,10 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
     if progress.narrative_before == 0 && progress.event_before == 0 {
         if let Some(index) = progress.archive_display.as_mut() {
             index.qualify_narratives(progress.events.length);
-            if !store.checkpoint_due() {
+            for _ in 0..PAGE_ROWS {
+                if !index.narrative_pending() || activation_full(&store, &changes) {
+                    break;
+                }
                 let updates = index.activate_narratives(&mut store, 2)?;
                 apply_archive_display_updates(&mut store, &mut published, updates, &mut changes)?;
             }
@@ -837,12 +840,18 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
             .filter(|proof| proof.narrative_complete)
         {
             published.logical.qualify_narratives(proof.watermark);
-            if !store.checkpoint_due() {
+            for _ in 0..PAGE_ROWS {
+                if !published.logical.narrative_pending() || activation_full(&store, &changes) {
+                    break;
+                }
                 let updates = published.logical.activate_narratives(&mut store, 2)?;
                 apply_logical_updates(&mut store, &mut published, updates, &mut changes)?;
             }
         }
-        if !store.checkpoint_due() {
+        for _ in 0..PAGE_ROWS {
+            if !published.logical.pending() || activation_full(&store, &changes) {
+                break;
+            }
             let updates = published.logical.activate(&mut store, 2)?;
             apply_logical_updates(&mut store, &mut published, updates, &mut changes)?;
         }

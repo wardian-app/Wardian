@@ -5,6 +5,7 @@ use std::{
     io,
     sync::{Arc, Mutex},
 };
+use wardian_core::durability::Durable;
 
 use crate::providers::chat_transcript::codex_user_mirror_pair;
 use serde::{Deserialize, Serialize};
@@ -1984,7 +1985,7 @@ impl ConversationArchiveState {
             std::fs::OpenOptions::new()
                 .write(true)
                 .open(dir.join(file))?
-                .sync_data()?;
+                .durable_sync_data()?;
         }
         self.deferred_receipt_summaries
             .lock()

@@ -12,6 +12,10 @@ name = "replacement_roster_barrier_holder"
 path = "tests/fixtures/replacement_roster_barrier_holder.rs"
 harness = false
 
+[features]
+# Skip flush-to-disk calls; enabled only through dev-dependencies.
+test-skip-fsync = []
+
 [dependencies]
 async-trait = "0.1"
 chrono = { workspace = true }

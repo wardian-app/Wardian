@@ -1,3 +1,4 @@
+use crate::durability::Durable;
 use serde::Serialize;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -79,7 +80,7 @@ pub(crate) fn stage_bytes_atomic_with_hook(
         .open(&tmp_path)?;
     file.write_all(bytes)?;
     hook.check(AtomicFaultPoint::BeforeTempSync(role))?;
-    file.sync_all()?;
+    file.durable_sync_all()?;
     hook.check(AtomicFaultPoint::AfterTempSync(role))?;
     Ok(tmp_path)
 }
@@ -100,7 +101,7 @@ pub(crate) fn replace_staged_atomic_durable_with_hook(
     #[cfg(not(windows))]
     if let Some(parent) = to.parent() {
         hook.check(AtomicFaultPoint::BeforeParentSync(role))?;
-        fs::File::open(parent)?.sync_all()?;
+        fs::File::open(parent)?.durable_sync_all()?;
         hook.check(AtomicFaultPoint::AfterParentSync(role))?;
     }
     Ok(())

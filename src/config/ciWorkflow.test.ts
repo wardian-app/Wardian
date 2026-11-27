@@ -96,7 +96,7 @@ describe("CI workflow contract", () => {
       "node --test scripts/rust-toolchain.test.mjs",
       "cargo clippy --workspace --all-targets -- -D warnings",
       "cargo fmt --all -- --check",
-      "cargo test --workspace --all-targets -- --test-threads=1",
+      "node scripts/rust-test-time-budget.mjs cargo test --workspace --all-targets -- --test-threads=1",
       "cargo test --workspace --doc -- --test-threads=1",
       "cargo check --workspace",
       "node --test scripts/native-e2e-windows-supervisor.test.mjs",

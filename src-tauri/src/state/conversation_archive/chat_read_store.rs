@@ -3,6 +3,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use wardian_core::durability::Durable;
 
 pub(super) use super::storage::{digest, valid_ref};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -100,6 +101,11 @@ pub(super) struct Store {
     write_objects: Cell<usize>,
     write_bytes: Cell<usize>,
     pending: Option<PendingNodes>,
+    /// Checkpoint writers only: immutable objects already read from disk and
+    /// validated in this checkpoint. A hit is still charged to the budget; it
+    /// only skips the repeated open. Its size is bounded by `byte_limit`, since
+    /// every entry was charged. Readers revalidate every read.
+    verified: Option<HashMap<String, Vec<u8>>>,
 }
 
 impl Store {
@@ -114,6 +120,7 @@ impl Store {
             write_objects: Cell::new(0),
             write_bytes: Cell::new(0),
             pending: None,
+            verified: None,
         }
     }
 
@@ -140,6 +147,7 @@ impl Store {
         let mut store = Self::bounded_writer(dir);
         let ram_limit = 2 * store.byte_limit + PENDING_ENTRY_RAM * store.object_limit;
         store.pending = Some(PendingNodes::new(ram_limit, store.object_limit));
+        store.verified = Some(HashMap::new());
         store
     }
 
@@ -188,6 +196,18 @@ impl Store {
             }
             return Ok(bytes);
         }
+        if let Some(bytes) = self
+            .verified
+            .as_ref()
+            .and_then(|cache| cache.get(reference))
+        {
+            let len = bytes.len();
+            if len > limit || len > self.byte_limit.saturating_sub(self.bytes) {
+                return Err(io::Error::other("chat read byte budget exhausted"));
+            }
+            self.bytes += len;
+            return Ok(bytes.clone());
+        }
         let mut file = fs::File::open(self.dir.join(reference))?;
         let len = usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?;
         if len > limit || len > self.byte_limit.saturating_sub(self.bytes) {
@@ -200,6 +220,9 @@ impl Store {
         result?;
         if bytes.len() != len || digest(&bytes) != reference {
             return Err(io::Error::other("chat read object changed"));
+        }
+        if let Some(cache) = self.verified.as_mut() {
+            cache.insert(reference.to_owned(), bytes.clone());
         }
         Ok(bytes)
     }
@@ -270,7 +293,7 @@ impl Store {
             .create_new(true)
             .open(&staging)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        file.durable_sync_all()?;
         drop(file);
         fs::rename(staging, target)?;
         Ok(reference)

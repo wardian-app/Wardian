@@ -111,6 +111,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWi
 anyhow = "1"
 tokio = { version = "1.49.0", features = ["test-util"] }
 tauri = { version = "=2.12.5", features = ["test"] }
+wardian-core = { path = "../crates/wardian-core", features = ["test-skip-fsync"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 uds_windows = "1.2.1"
