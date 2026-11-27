@@ -1,6 +1,7 @@
 //! Public model types for agent-owned conversation archives.
 
 use crate::atomic_file::{replace_file, tmp_path_for};
+use crate::durability::Durable;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -579,7 +580,7 @@ pub fn write_jsonl_atomic<T: Serialize>(path: &Path, records: &[T]) -> io::Resul
     {
         let mut file = fs::File::create(&tmp_path)?;
         write_jsonl_to_writer(&mut file, records)?;
-        file.sync_all()?;
+        file.durable_sync_all()?;
     }
     replace_file(&tmp_path, path)
 }

@@ -6,6 +6,7 @@ use wardian_core::archive_vacancy::{
     MAX_VACANCY_LINE_BYTES,
 };
 use wardian_core::control::{ArchiveVacancyRequest, ArchiveVacancyResponse, CONTROL_SCHEMA};
+use wardian_core::durability::Durable;
 
 fn invalid(reason: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, reason.into())
@@ -117,9 +118,9 @@ impl ConversationArchiveState {
                 .read(true)
                 .write(true)
                 .open(directory.join("vacancies.jsonl"))?
-                .sync_all()?;
+                .durable_sync_all()?;
             #[cfg(unix)]
-            fs::File::open(&directory)?.sync_all()?;
+            fs::File::open(&directory)?.durable_sync_all()?;
         }
         // A retired adoption stays retired. Clearing this diagnostic permits
         // the ordinary authorization path to re-grant the exact native range.

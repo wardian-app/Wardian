@@ -2,6 +2,7 @@ use super::models::{
     ArtifactIndexEntryV1, ArtifactIndexV1, ArtifactManifestV1, ArtifactOriginV1,
     ArtifactReviewStatus, ArtifactVersionV1, ARTIFACT_SCHEMA_V1,
 };
+use crate::durability::Durable;
 use crate::{
     atomic_file::{cleanup_atomic_temps, write_bytes_atomic_durable, write_json_atomic},
     paths::is_safe_path_component,
@@ -354,7 +355,7 @@ impl ArtifactStore {
         match OpenOptions::new().create_new(true).write(true).open(&path) {
             Ok(mut file) => {
                 file.write_all(bytes)?;
-                file.sync_all()?;
+                file.durable_sync_all()?;
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 let existing = fs::read(&path)?;

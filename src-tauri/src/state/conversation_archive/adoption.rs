@@ -5,6 +5,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
+use wardian_core::durability::Durable;
 
 use serde::{Deserialize, Serialize};
 use wardian_core::{
@@ -317,7 +318,7 @@ fn sync_authorization(grant: &Grant) -> io::Result<()> {
         .read(true)
         .write(true)
         .open(history_path(&grant.agent_id)?)?
-        .sync_all()
+        .durable_sync_all()
 }
 
 fn append_audit(grant: &Grant) -> io::Result<()> {
@@ -344,13 +345,13 @@ fn append_audit(grant: &Grant) -> io::Result<()> {
     }
     let mut file = options.open(&path)?;
     file.write_all(&bytes)?;
-    file.sync_all()?;
+    file.durable_sync_all()?;
     #[cfg(unix)]
     File::open(
         path.parent()
             .ok_or_else(|| invalid("audit parent missing"))?,
     )?
-    .sync_all()?;
+    .durable_sync_all()?;
     Ok(())
 }
 
@@ -703,11 +704,11 @@ pub(super) fn sync_record_bodies(
             .read(true)
             .write(true)
             .open(artifacts.join(name))?
-            .sync_all()?;
+            .durable_sync_all()?;
     }
     #[cfg(unix)]
     if artifacts.exists() {
-        File::open(artifacts)?.sync_all()?;
+        File::open(artifacts)?.durable_sync_all()?;
     }
     Ok(())
 }
@@ -726,7 +727,7 @@ fn sync_archive(grant: &Grant) -> io::Result<()> {
             .write(true)
             .open(directory.join(name))
         {
-            Ok(file) => file.sync_all()?,
+            Ok(file) => file.durable_sync_all()?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
@@ -735,8 +736,8 @@ fn sync_archive(grant: &Grant) -> io::Result<()> {
         .read(true)
         .write(true)
         .open(storage::index_path(&grant.agent_id)?)?
-        .sync_all()?;
+        .durable_sync_all()?;
     #[cfg(unix)]
-    File::open(&directory)?.sync_all()?;
+    File::open(&directory)?.durable_sync_all()?;
     Ok(())
 }

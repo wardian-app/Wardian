@@ -162,6 +162,13 @@
         "crates/wardian-core/src/telemetry/sources/pi.rs::parse_delta",
         "crates/wardian-core/src/telemetry/store.rs::save_source_state"
       ]
+    },
+    {
+      "reason": "Test-process flush opt-out (#1831). `Durable` is reached only through its methods (`.durable_sync_all()`) after a `use` import, which the token search does not count. `skip_flushes_in_test_process` is, by design, called only by the test-only fixture lock in src-tauri and exists only with the dev-dependency feature `test-skip-fsync`.",
+      "entries": [
+        "crates/wardian-core/src/durability.rs::Durable",
+        "crates/wardian-core/src/durability.rs::skip_flushes_in_test_process"
+      ]
     }
   ]
 }

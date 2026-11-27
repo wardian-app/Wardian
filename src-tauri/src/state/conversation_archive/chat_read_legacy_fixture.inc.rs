@@ -2426,12 +2426,18 @@ impl ProjectionOwner {
                 .filter(|proof| proof.narrative_complete)
             {
                 head.logical.qualify_narratives(proof.watermark);
-                if !store.checkpoint_due() {
+                for _ in 0..PAGE_ROWS {
+                    if !head.logical.narrative_pending() || activation_full(&store, &changes) {
+                        break;
+                    }
                     let updates = head.logical.activate_narratives(&mut store, 2)?;
                     apply_logical_updates(&mut store, &mut head, updates, &mut changes)?;
                 }
             }
-            if !store.checkpoint_due() {
+            for _ in 0..PAGE_ROWS {
+                if !head.logical.pending() || activation_full(&store, &changes) {
+                    break;
+                }
                 let updates = head.logical.activate(&mut store, 2)?;
                 apply_logical_updates(&mut store, &mut head, updates, &mut changes)?;
             }
@@ -2765,6 +2771,13 @@ fn stable_commentary_relation(
         }
     }
     Ok(relation)
+}
+
+/// Logical activation pages share one checkpoint until its object budget or a
+/// page of changed rows is reached. Each checkpoint is a full publication, so
+/// one small page per checkpoint made activation cost a checkpoint per row.
+fn activation_full(store: &Store, changes: &HashMap<String, String>) -> bool {
+    store.checkpoint_due() || changes.len() >= PAGE_ROWS
 }
 
 fn apply_logical_updates(

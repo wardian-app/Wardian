@@ -60,9 +60,16 @@ export function selectPlan(plan, only) {
   return only ? plan.filter((step) => step.category === only) : plan;
 }
 
+const TEST_TIME_BUDGET = 'node scripts/rust-test-time-budget.mjs ';
+
 function execute(command) {
   let result;
-  if (command.startsWith('cargo ') && process.env.WARDIAN_RUST_CACHE_TARGET) {
+  if (command.startsWith(TEST_TIME_BUDGET)) {
+    // The wrapper routes its cargo invocation through the same cache target or
+    // compiler admission as a bare cargo step.
+    const args = [resolve('scripts/rust-test-time-budget.mjs'), ...command.slice(TEST_TIME_BUDGET.length).split(/\s+/)];
+    result = spawnSync(process.execPath, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit', windowsHide: true });
+  } else if (command.startsWith('cargo ') && process.env.WARDIAN_RUST_CACHE_TARGET) {
     const invocation = cargoInvocation(command.slice(6).split(/\s+/));
     result = spawnSync(invocation.program, invocation.args, { cwd: invocation.cwd, env: invocation.env, stdio: 'inherit', windowsHide: true });
   } else {

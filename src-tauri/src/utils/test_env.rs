@@ -2,7 +2,12 @@ fn wardian_test_env_mutex() -> &'static tokio::sync::Mutex<()> {
     use std::sync::OnceLock;
 
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    LOCK.get_or_init(|| {
+        // Every Wardian-home fixture takes this lock, so this is the one
+        // place a test process opts out of flush-to-disk calls.
+        wardian_core::durability::skip_flushes_in_test_process();
+        tokio::sync::Mutex::new(())
+    })
 }
 
 /// Serializes synchronous tests that share process environment or database state.

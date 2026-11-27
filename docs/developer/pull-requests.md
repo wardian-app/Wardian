@@ -21,10 +21,11 @@ the canonical `AGENTS.md`.
 1. Inspect the branch, base, and complete diff. Preserve unrelated work and
    keep one issue's changes per PR. Reuse the matching tracking issue, or
    create one when none exists; this is part of the authorized publication.
-2. Run [local CI verification](./ci-verification.md). Narrow reruns to the
-   affected category when appropriate. Resolve failures or establish an exact
-   base reproduction before recording a limitation; never report an unrun
-   check as passing.
+2. Iterate with focused tests: the test names, module, or `--only` category
+   your change touches. Run the full [local CI verification](./ci-verification.md)
+   once, on the final candidate, after review fixes. Resolve failures or
+   establish an exact base reproduction before recording a limitation; never
+   report an unrun check as passing.
 3. Use Wardian's `autoreview` workflow when it is available to obtain an
    independent local-agent verdict; otherwise obtain that verdict through a
    reviewer agent. Address blocking findings and record the verdict and
@@ -40,9 +41,12 @@ the canonical `AGENTS.md`.
    [screenshot documentation](./screenshot-documentation.md) for UI changes.
 6. Verify the published head, issue link, rendered body, and mergeability.
    Monitor all applicable hosted CI checks through completion on that exact
-   commit. Investigate failures, make the necessary corrections, repeat affected
-   local verification and review, then push and monitor the new commit. An older
-   commit's green checks do not validate a newer commit.
+   commit. Investigate failures, make the necessary corrections, rerun the
+   focused tests for what changed, then push and monitor the new commit. Hosted
+   CI is the full run for every pushed commit: do not repeat the full local gate
+   after a fix, an amend, or a rebase onto a newer `main`. Re-review only when
+   the fix changes behavior the review covered. An older commit's green checks
+   do not validate a newer commit.
 7. Finish only after all applicable checks have completed successfully and the
    repository's four readiness conditions hold. Record intentional skips and
    their reasons separately; do not count them as passes. Pending, queued,
