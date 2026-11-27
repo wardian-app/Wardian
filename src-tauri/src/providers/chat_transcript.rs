@@ -2895,12 +2895,14 @@ pub(crate) fn codex_display_evidence(event: &AgentChatEvent) -> Option<(String, 
     Some((key, side))
 }
 
+#[cfg(test)]
 /// Digest the complete evidence before the bounded source reader clips string metadata.
 pub(crate) fn codex_display_identity_sha256(event: &AgentChatEvent) -> Option<String> {
     let (evidence, _) = codex_display_evidence(event)?;
     Some(codex_display_sha256(&evidence))
 }
 
+#[cfg(test)]
 /// Reuse a digest produced by the bounded native reader after its fields have
 /// been clipped. Call only after native source ownership has been validated.
 pub(crate) fn codex_display_evidence_from_bounded_header(

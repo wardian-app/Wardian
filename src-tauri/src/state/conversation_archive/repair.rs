@@ -7,7 +7,8 @@ use std::{
 use wardian_core::conversations::{
     append_index_upsert, append_jsonl_record, read_jsonl_records, write_json_atomic,
     write_jsonl_atomic, ConversationInputOrigin, ConversationNarrativeRecord,
-    ConversationRecordKind, ConversationSourceRecord, ConversationTurnRecord,
+    ConversationRecordKind, ConversationSourceRecord, ConversationTextArtifactProof,
+    ConversationTurnRecord,
 };
 use wardian_core::models::chat::AgentChatEvent;
 use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
@@ -348,6 +349,18 @@ pub(super) fn matching_record_index(
     matching_record_index_with_candidates(records, current, archived_events, &[])
 }
 
+fn framed_observation(event: &AgentChatEvent) -> Option<(&str, &str, u64, u64)> {
+    let source = event.metadata["chat_source_ref"]
+        .as_str()
+        .filter(|id| !id.is_empty())?;
+    let epoch = event.metadata["chat_source_epoch"]
+        .as_str()
+        .filter(|id| !id.is_empty())?;
+    let start = event.metadata["chat_source_start"].as_u64()?;
+    let end = event.metadata["chat_source_end"].as_u64()?;
+    (start < end).then_some((source, epoch, start, end))
+}
+
 pub(super) fn matching_record_index_with_candidates(
     records: &[ConversationNarrativeRecord],
     current: &AgentChatEvent,
@@ -417,9 +430,20 @@ pub(super) fn matching_record_index_with_candidates(
         && current.metadata["input_purpose"] == "request";
     let is_codex_user_mirror = provenance::is_codex_user_message_mirror(current);
     if current.metadata["provider_log"] == true && (is_codex_user_mirror || is_codex_user_request) {
+        // A verified replay can keep its pre-coordinate event ID. Follow that
+        // exact physical owner before considering the complementary observation.
+        let framed_owner = if let Some(frame) = framed_observation(current) {
+            matching_event_index(archived_events, current)?
+                .and_then(|index| archived_events.get(index))
+                .filter(|event| framed_observation(event) == Some(frame))
+        } else {
+            None
+        };
         let exact_match = unique_match(
             records.iter().enumerate().filter_map(|(index, record)| {
-                record.event_refs.contains(&current.id).then_some(index)
+                (record.event_refs.contains(&current.id)
+                    || framed_owner.is_some_and(|event| record.event_refs.contains(&event.id)))
+                .then_some(index)
             }),
             &format!("narrative ownership for event {}", current.id),
         )?;
@@ -1088,6 +1112,26 @@ fn restore_event_text_metadata(
         if !artifact_refs.is_empty() {
             record.text = None;
             record.artifact_refs = artifact_refs;
+            if let [reference] = record.artifact_refs.as_slice() {
+                if event.text.is_none() {
+                    // Recovery can carry the event writer's proof for the
+                    // same owned reference. Reading the artifact here would
+                    // only establish its current bytes, not what was written.
+                    record.text_artifact_proof = event
+                        .metadata
+                        .get("text_artifact_proof")
+                        .and_then(|value| {
+                            serde_json::from_value::<ConversationTextArtifactProof>(value.clone())
+                                .ok()
+                        })
+                        .filter(|proof| {
+                            &proof.reference == reference
+                                && proof.bytes > 0
+                                && proof.sha256.len() == 64
+                                && proof.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        });
+                }
+            }
         }
     }
     if let Some(excerpt) = event.metadata["text_excerpt"].as_str() {

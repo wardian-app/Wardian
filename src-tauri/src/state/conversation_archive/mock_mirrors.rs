@@ -12,7 +12,7 @@ const RETIRED: &str = "_wardian_mock_retired_sequences";
 #[path = "mock_mirror_capture_tests.rs"]
 mod capture_tests;
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Identity {
     agent: String,
     source_key: String,
@@ -27,7 +27,7 @@ struct Identity {
     turn: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Native {
     identity: Identity,
     coordinate: String,
@@ -62,7 +62,7 @@ fn identity(context: &ConversationArchiveContext, event: &AgentChatEvent) -> Opt
         || uuid::Uuid::parse_str(incarnation).is_err()
         || observation.len() > 128
         || !observation.starts_with(&format!("{incarnation}:"))
-        || !chat_read_store::valid_ref(payload)
+        || !storage::valid_ref(payload)
     {
         return None;
     }
@@ -82,20 +82,14 @@ fn identity(context: &ConversationArchiveContext, event: &AgentChatEvent) -> Opt
 }
 
 fn admitted(event: &AgentChatEvent, source: &ProviderLogCaptureState) -> bool {
-    let epoch =
-        chat_read_store::digest(&serde_json::to_vec(&source.native_identity).unwrap_or_default());
+    let epoch = storage::digest(&serde_json::to_vec(&source.native_identity).unwrap_or_default());
     let Some((start, end)) = event.metadata["chat_source_start"]
         .as_u64()
         .zip(event.metadata["chat_source_end"].as_u64())
     else {
         return false;
     };
-    let prefix = format!("source:{}:{epoch}:{start}:", event.session_id);
-    let coordinate = string(event, "chat_source_ref").and_then(|value| value.strip_prefix(&prefix));
-    let valid_coordinate = coordinate
-        .and_then(|value| value.split_once(':'))
-        .is_some_and(|(digest, ordinal)| chat_read_store::valid_ref(digest) && ordinal == "0");
-    valid_coordinate
+    exact_coordinate(event, &epoch, start)
         && event.metadata["chat_source_epoch"].as_str() == Some(epoch.as_str())
         && start < end
         && end <= source.committed_offset
@@ -105,6 +99,14 @@ fn admitted(event: &AgentChatEvent, source: &ProviderLogCaptureState) -> bool {
             .disabled_spans
             .iter()
             .any(|span| start < span.end && end > span.start)
+}
+
+fn exact_coordinate(event: &AgentChatEvent, epoch: &str, start: u64) -> bool {
+    let prefix = format!("source:{}:{epoch}:{start}:", event.session_id);
+    string(event, "chat_source_ref")
+        .and_then(|value| value.strip_prefix(&prefix))
+        .and_then(|value| value.split_once(':'))
+        .is_some_and(|(digest, ordinal)| storage::valid_ref(digest) && ordinal == "0")
 }
 
 /// Strip caller-supplied authority and attach only this pass's typed proofs.
@@ -218,7 +220,7 @@ fn describes(binding: &Identity, event: &AgentChatEvent) -> bool {
         )
         && observation
         && binding.observation.len() <= 128
-        && chat_read_store::valid_ref(&binding.payload)
+        && storage::valid_ref(&binding.payload)
         && uuid::Uuid::parse_str(&binding.incarnation)
             .is_ok_and(|uuid| !uuid.is_nil() && uuid.to_string() == binding.incarnation)
         && event.session_id == binding.agent
@@ -244,6 +246,58 @@ fn source_admits(
             && source.policy_generation == binding.policy
             && admitted(event, source)
     })
+}
+
+/// Position-index evidence only. Frame loading still verifies both physical
+/// observations and the admitted byte interval before selection.
+#[derive(Debug)]
+pub(super) struct ArchiveMirrorPosition {
+    pub(super) identity_digest: String,
+    native: Option<Native>,
+}
+
+impl ArchiveMirrorPosition {
+    pub(super) fn of(event: &AgentChatEvent) -> Option<Self> {
+        if event.provider != "mock" {
+            return None;
+        }
+        if let Some(native) = native(event) {
+            if !exact_coordinate(event, &native.epoch, native.start) {
+                return None;
+            }
+            let identity_digest = storage::digest(&serde_json::to_vec(&native.identity).ok()?);
+            return Some(Self {
+                identity_digest,
+                native: Some(native),
+            });
+        }
+        let identity_digest = storage::digest(&serde_json::to_vec(&watch(event)?).ok()?);
+        Some(Self {
+            identity_digest,
+            native: None,
+        })
+    }
+
+    pub(super) fn is_native(&self) -> bool {
+        self.native.is_some()
+    }
+
+    pub(super) fn admits_native(
+        &self,
+        sessions: &[String],
+        source_key: &str,
+        path: &str,
+        policy: u64,
+        epoch: &str,
+    ) -> bool {
+        self.native.as_ref().is_some_and(|native| {
+            sessions.contains(&native.identity.session)
+                && native.identity.source_key == source_key
+                && native.identity.path == path
+                && native.policy == policy
+                && native.epoch == epoch
+        })
+    }
 }
 
 struct Observation<'a> {
@@ -661,7 +715,7 @@ mod tests {
             disabled_spans: Vec::new(),
             open_disabled_from: None,
         };
-        let epoch = chat_read_store::digest(&serde_json::to_vec(&source.native_identity).unwrap());
+        let epoch = storage::digest(&serde_json::to_vec(&source.native_identity).unwrap());
         let coordinate = format!("source:mirror-agent:{epoch}:10:{}:0", "b".repeat(64));
         let identity = Identity {
             agent: context.agent_id.clone(),

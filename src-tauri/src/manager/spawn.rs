@@ -2859,10 +2859,6 @@ async fn spawn_agent_inner(
 
     let live_conversation_started_at =
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    app_state
-        .conversation_archive
-        .begin_live_conversation(&config.session_id, &live_conversation_started_at)
-        .map_err(|error| format!("Failed to establish chat conversation boundary: {error}"))?;
 
     crate::commands::terminal::log_terminal_runtime_diagnostics_once();
 

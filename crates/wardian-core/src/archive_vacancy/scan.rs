@@ -41,6 +41,7 @@ const NARRATIVE: &[&str] = &[
     "event_refs",
     "source_refs",
     "artifact_refs",
+    "text_artifact_proof",
 ];
 const EVENT: &[&str] = &[
     "id",
@@ -450,8 +451,7 @@ impl Snapshot {
             "conversation_identity",
         )?;
         for row in snapshot.rows("conversation.jsonl", seq)? {
-            keys(&row.value, NARRATIVE, seq)?;
-            let record: ConversationNarrativeRecord = typed(&row.value, seq)?;
+            let record = snapshot.narrative(&row.value, seq)?;
             require(
                 record.schema == 1 && record.seq > 0,
                 seq,
@@ -565,8 +565,7 @@ impl Snapshot {
                 continue;
             }
             let payload = &event.value["metadata"]["archive_record"];
-            keys(payload, NARRATIVE, seq)?;
-            let record: ConversationNarrativeRecord = typed(payload, seq)?;
+            let record = snapshot.narrative(payload, seq)?;
             require(
                 record.schema == 1 && record.seq > 0,
                 seq,
@@ -903,8 +902,7 @@ impl Snapshot {
             let owner = self.event_owner(id, seq)?;
             if metadata.get("archive_record").is_some() {
                 require(metadata["generated"] == true, seq, "structured_evidence")?;
-                keys(&metadata["archive_record"], NARRATIVE, seq)?;
-                let record: ConversationNarrativeRecord = typed(&metadata["archive_record"], seq)?;
+                let record = self.narrative(&metadata["archive_record"], seq)?;
                 require(
                     record.schema == 1 && record.seq > 0,
                     seq,
@@ -1091,6 +1089,32 @@ impl Snapshot {
             )?;
         }
         Ok(())
+    }
+
+    fn narrative(&self, value: &Value, seq: u64) -> io::Result<ConversationNarrativeRecord> {
+        keys(value, NARRATIVE, seq)?;
+        let record: ConversationNarrativeRecord = typed(value, seq)?;
+        if let Some(proof) = value.get("text_artifact_proof") {
+            keys(proof, &["reference", "bytes", "sha256"], seq)?;
+            let proof = record
+                .text_artifact_proof
+                .as_ref()
+                .ok_or_else(|| conflict(seq, "structured_evidence"))?;
+            require(
+                record.text.is_none() && record.artifact_refs.contains(&proof.reference),
+                seq,
+                "structured_evidence",
+            )?;
+            let body = body_path(&proof.reference, seq)?;
+            require(
+                self.inventory.get(&body).is_some_and(|(bytes, digest)| {
+                    *bytes == proof.bytes && hex(digest) == proof.sha256
+                }),
+                seq,
+                "bodies_resolved",
+            )?;
+        }
+        Ok(record)
     }
 
     pub(super) fn stable(&self, seq: u64) -> io::Result<()> {

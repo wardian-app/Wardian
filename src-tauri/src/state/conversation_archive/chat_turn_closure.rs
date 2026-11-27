@@ -129,16 +129,6 @@ impl Receipt {
             self.start, self.end, self.sequence, self.source_ref
         )
     }
-
-    pub(super) fn status(&self) -> &AgentChatStatus {
-        &self.status
-    }
-    pub(super) fn complete(&self) -> bool {
-        self.complete
-    }
-    pub(super) fn partial(&self) -> bool {
-        self.partial
-    }
 }
 
 /// Attach only within an entirely admitted source interval. Privacy gaps never
@@ -188,15 +178,5 @@ pub(super) fn attach(
     Ok(changed)
 }
 
-pub(super) fn for_request(
-    scope: &super::chat_turn_index::Scope<'_>,
-    event: &AgentChatEvent,
-) -> Option<Receipt> {
-    let receipt: Receipt = serde_json::from_value(event.metadata[METADATA_KEY].clone()).ok()?;
-    (receipt.matches_request(event)
-        && scope.source_key == Some(receipt.source_key.as_str())
-        && scope
-            .source_epoch
-            .is_none_or(|epoch| epoch == receipt.source_epoch))
-    .then_some(receipt)
-}
+#[cfg(test)]
+include!("chat_turn_closure_legacy_fixture.inc.rs");

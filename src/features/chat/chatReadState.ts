@@ -135,6 +135,13 @@ export function boundChatEvents(events: AgentChatEvent[], direction: ChatWindowD
 }
 
 export function chatReadProgress(progress: string, hasRows = true): string | null {
+  if (progress === "archive_empty") return "No authorized archive records are available.";
+  if (progress === "archive_history_unverified") return "Earlier history could not be verified in the archive.";
+  if (progress === "archive_scope_unavailable") return "No archive matches this conversation.";
+  if (progress === "archive_catalog_unavailable") return "Saved archive records exist, but their conversation list could not be verified.";
+  if (progress === "archive_payload_missing") return "Some messages are missing from the verified archive.";
+  if (progress === "archive_tail_pending") return "The latest archive record is still being written.";
+  if (progress === "logging_disabled") return "Conversation logging is disabled. Only archived messages are shown.";
   if (progress === "ready") return null;
   if (progress === "provisional") return hasRows ? "Recent messages available. History is updating."
     : "No public message in the recent window yet. History is updating.";

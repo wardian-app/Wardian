@@ -741,11 +741,6 @@ pub(crate) async fn save_shell_settings_for_state(
     let _boundary = state
         .conversation_capture_policy_lock
         .begin_lifecycle_boundary();
-    let _recent_boundary = state
-        .conversation_archive
-        .chat_projection
-        .recent_boundary(None)
-        .map_err(|error| error.to_string())?;
     let _policy_guard = state.conversation_capture_policy_lock.lock().await;
 
     // A disable boundary is observed before the setting changes. Bytes that

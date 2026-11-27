@@ -194,9 +194,8 @@ another page. History can continue updating in the background while recent
 messages remain visible. On first open, submitted messages remain visible while
 Chat waits for its first usable history page.
 
-Explicit full-history inspection still returns the complete recorded
-conversation. Background turn-completion evidence also continues to use full
-transcripts while Chat opens and pages through its recent window.
+Explicit full-history inspection returns the recorded conversation. Background
+turn completion follows capture progress independently of opening Chat.
 
 Older pages replace the newer end once the loaded window reaches its limit.
 Updates preserve the older rows you are reading. **Jump to latest** returns to
@@ -218,14 +217,15 @@ summaries. A truncated input is labelled as a preview; **Show full details**
 opens the original tool arguments. Clear empties the desktop Chat view and
 rejects earlier reads and submission acknowledgements.
 
-Chat is a view of the backend-owned archive and admitted provider source.
-Loading and updating this view does not resend prompts or require an archive
-repair command. A submitted prompt remains visible until its exact committed
-archive row is confirmed. Identical text alone cannot confirm it.
+Chat reads the conversation archive and its owned artifacts. A submitted
+prompt remains visible until its exact committed archive row is confirmed.
+Identical text alone cannot confirm it. Turning off conversation logging
+stops new capture while keeping previously authorized archive history
+readable.
 
-When an owned provider source is reconciled, older captured messages retain
-their original entries. If source ownership cannot be verified, history can
-remain updating while recent admitted messages stay visible.
+When an owned provider source is reconciled, older captured messages keep
+their original entries. If Wardian cannot verify a source or artifact, it
+reports the unavailable history and keeps the archive files in place.
 
 ### Terminal ownership
 

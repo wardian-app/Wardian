@@ -4,18 +4,13 @@ use super::{
     AppState, ConversationBoundaryReason, ConversationLoggingSetting, PendingConversationBoundary,
 };
 
-/// Retire live Chat before publishing the durable lifecycle boundary.
+/// Publish the durable conversation boundary when logging is enabled.
 pub(super) fn finalize_conversation_boundary(
     state: &AppState,
     session_id: &str,
     boundary_reason: ConversationBoundaryReason,
     pending: &PendingConversationBoundary,
 ) -> std::io::Result<Option<wardian_core::conversations::ConversationIndexEntry>> {
-    if boundary_reason == ConversationBoundaryReason::Clear {
-        state
-            .conversation_archive
-            .retire_live_conversation(session_id)?;
-    }
     if pending.effective_logging == ConversationLoggingSetting::Enabled {
         if !state
             .conversation_archive

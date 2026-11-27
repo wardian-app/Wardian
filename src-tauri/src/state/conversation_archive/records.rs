@@ -65,6 +65,7 @@ pub fn narrative_from_chat_event(
         event_refs: vec![event.id.clone()],
         source_refs: event.source.iter().cloned().collect(),
         artifact_refs: Vec::new(),
+        text_artifact_proof: None,
     })
 }
 
@@ -293,6 +294,7 @@ pub fn narrative_from_delivered_input(
             .map(|sender| vec![format!("agent:{sender}")])
             .unwrap_or_default(),
         artifact_refs: Vec::new(),
+        text_artifact_proof: None,
     }
 }
 
@@ -324,6 +326,7 @@ pub fn lifecycle_record(
         event_refs: Vec::new(),
         source_refs: Vec::new(),
         artifact_refs: Vec::new(),
+        text_artifact_proof: None,
     }
 }
 

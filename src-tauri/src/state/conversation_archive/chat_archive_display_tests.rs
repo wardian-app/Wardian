@@ -136,6 +136,9 @@ fn drain_capture(archive: &ConversationArchiveState, context: &ConversationArchi
 }
 
 fn begin_recount(archive: &ConversationArchiveState, context: &ConversationArchiveContext) -> Head {
+    // A production archive append no longer publishes a legacy Candidate.
+    // Seed the retired path only in this compatibility fixture.
+    super::super::tests::seed_legacy_candidate(archive, context);
     while archive.chat_projection.advance(&context.agent_id).unwrap() {}
     assert!(archive
         .chat_projection
@@ -221,6 +224,7 @@ fn saved_page_in_scope(
         .append_chat_events_with_context(context.clone(), events)
         .unwrap();
     if !retire_first {
+        super::super::tests::seed_legacy_candidate(&archive, context);
         while archive.chat_projection.advance("agent-1").unwrap() {}
     }
     let conversation = archive.active_conversation_id("agent-1").unwrap().unwrap();
@@ -708,6 +712,7 @@ fn archive_display_source_free_replay_advances_across_restart_and_stays_quiet() 
             .unwrap()
             .is_none()
     );
+    super::super::tests::seed_legacy_candidate(&archive, &context);
     let mut warm_settled = false;
     for _ in 0..256 {
         if !archive.chat_projection.advance("agent-1").unwrap() {
@@ -815,7 +820,7 @@ fn archive_display_upgrades_ready_committed_head_without_explicit_retire() {
     assert_eq!(
         rows.len(),
         1,
-        "ordinary background bootstrap must upgrade a ready persisted head"
+        "legacy bootstrap must upgrade a ready retained head"
     );
     assert!(rows[0].id.starts_with("archive-display:"));
 }
@@ -1022,9 +1027,12 @@ fn archive_display_handoff_retires_without_resurrecting_warm_state() {
             assert!(!archive.bootstrap_saved_chat(&context).unwrap());
             assert_eq!(head("agent-1").unwrap(), before);
         } else {
+            let before = head("agent-1").unwrap();
             archive
                 .rollover_agent("agent-1", ConversationBoundaryReason::Clear)
                 .unwrap();
+            assert_eq!(head("agent-1").unwrap(), before);
+            archive.chat_projection.invalidate("agent-1").unwrap();
             assert!(head("agent-1").unwrap().is_none());
         }
         assert!(!archive.chat_projection.has_pending_capture_work("agent-1"));

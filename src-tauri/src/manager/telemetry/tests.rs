@@ -1389,7 +1389,7 @@ fn gemini_assistant_text_records_watch_transcript() {
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
+async fn recent_gemini_version_bound_file_watch_cannot_supply_archive_payloads() {
     let home = crate::control::test_support::TestWardianHome::new_async().await;
     let state = AppState::new();
     let session = "recent-gemini-file";
@@ -1412,34 +1412,18 @@ async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
     let (parsed, source) = super::read_log_with_watch_source(&path, "gemini").unwrap();
     assert_eq!(parsed, content);
     super::record_latest_gemini_with_source(&snap, &parsed, source);
-    assert!(
-        snap.watch_state
-            .lock()
-            .unwrap()
-            .recent_file_source()
-            .is_some(),
-        "the actual completed normal message is bound"
-    );
+    let bound = snap
+        .watch_state
+        .lock()
+        .unwrap()
+        .recent_file_source()
+        .expect("the actual completed normal message is bound")
+        .0
+        .clone();
+    assert!(bound.valid().unwrap());
     crate::commands::agent::provider_log_tests::register_capture_test_agent(&state, &config, agent)
         .await
         .unwrap();
-    let gate = state
-        .conversation_archive
-        .test_agent_archive_gate(session)
-        .unwrap();
-    let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    let holder = std::thread::spawn(move || {
-        let _guard = gate.lock().unwrap();
-        locked_tx.send(()).unwrap();
-        release_rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap();
-    });
-    locked_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .unwrap();
-    crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
     let page = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
@@ -1454,30 +1438,26 @@ async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
     )
     .await
     .unwrap();
-    assert_eq!(page.events.len(), 1);
-    assert_eq!(
-        page.events[0].text.as_deref(),
-        Some("Gemini current answer")
-    );
+    assert!(page.events.is_empty());
+    assert!(page.revision.starts_with("archive1:"));
     assert!(
-        page.recent_admission.is_some()
+        page.recent_admission.is_none()
             && page.revalidated_ids.is_none()
             && page.next_before.is_none()
     );
-    release_tx.send(()).unwrap();
-    holder.join().unwrap();
     assert!(state
         .conversation_archive
         .chat_events_for_agent(session)
         .unwrap()
         .is_empty());
-    // Same-inode truncate/regrow cannot keep the old admitted Watch body.
+    // Same-inode truncate/regrow invalidates even the old Watch observation.
     std::fs::write(&path, content.replace("current", "changed")).unwrap();
+    assert!(!bound.valid().unwrap());
     let retired = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
         None,
-        Some(page.revision),
+        Some(page.revision.clone()),
         None,
         None,
         crate::commands::chat::RecentChatRead {
@@ -1487,11 +1467,13 @@ async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
     )
     .await
     .unwrap();
-    assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
+    assert!(retired.events.is_empty() && retired.recent_admission.is_none());
+    assert_eq!(retired.revision, page.revision);
     // A different inode with identical source bytes also cannot reuse it.
     let (parsed, source) = super::read_log_with_watch_source(&path, "gemini").unwrap();
+    let rebound_source = source.clone().unwrap();
     super::record_latest_gemini_with_source(&snap, &parsed, source);
-    crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
+    assert!(rebound_source.valid().unwrap());
     let rebound = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
@@ -1506,12 +1488,11 @@ async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        rebound.events[0].text.as_deref(),
-        Some("Gemini changed answer")
-    );
+    assert!(rebound.events.is_empty() && rebound.recent_admission.is_none());
+    assert_eq!(rebound.revision, page.revision);
     std::fs::rename(&path, path.with_extension("retained")).unwrap();
-    std::fs::write(&path, content).unwrap();
+    std::fs::write(&path, &parsed).unwrap();
+    assert!(!rebound_source.valid().unwrap());
     let replaced = crate::commands::chat::load_agent_chat_page_with_preview_for_state(
         &state,
         session.into(),
@@ -1526,7 +1507,8 @@ async fn recent_gemini_normal_file_watch_is_version_bound_before_archive_io() {
     )
     .await
     .unwrap();
-    assert!(replaced.reset && replaced.events.is_empty() && replaced.recent_admission.is_none());
+    assert!(replaced.events.is_empty() && replaced.recent_admission.is_none());
+    assert_eq!(replaced.revision, page.revision);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1534,26 +1534,65 @@ fn real_pi_changed_ids_repair_one_row_and_existing_double_rows() {
             .unwrap()
             .unwrap();
         let dir = conversation_dir(&context.agent_id, &id).unwrap();
+        let events_path = dir.join("events.jsonl");
+        let narrative_path = dir.join("conversation.jsonl");
         if double {
-            // Seed the exact post-#1167/pre-boundary failure: both ordinary
-            // old/new event IDs and narrative rows have already been appended.
+            // Seed old and refreshed physical frames with separate owners.
             let mut records: Vec<ConversationNarrativeRecord> =
-                read_jsonl_records(&dir.join("conversation.jsonl")).unwrap();
+                read_jsonl_records(&narrative_path).unwrap();
             for (index, event) in current.iter().enumerate() {
-                let mut unaliased = event.clone();
-                unaliased
+                let mut retained = event.clone();
+                retained
                     .metadata
                     .as_object_mut()
                     .unwrap()
                     .remove("legacy_event_ids");
-                append_jsonl_record(&dir.join("events.jsonl"), &unaliased).unwrap();
-                records.push(narrative_from_chat_event(&unaliased, index as u64 + 3).unwrap());
+                append_jsonl_record(&events_path, &retained).unwrap();
+                records.push(narrative_from_chat_event(&retained, index as u64 + 3).unwrap());
             }
-            write_jsonl_atomic(&dir.join("conversation.jsonl"), &records).unwrap();
+            write_jsonl_atomic(&narrative_path, &records).unwrap();
+            let physical_frames = || {
+                let frames: Vec<AgentChatEvent> = read_jsonl_records(&events_path).unwrap();
+                frames
+                    .into_iter()
+                    .map(|mut frame| {
+                        // The enrichment phase can publish turn and alias metadata
+                        // while preserving the identity and body of every frame.
+                        frame.turn_id = None;
+                        let metadata = frame.metadata.as_object_mut().unwrap();
+                        metadata.remove("legacy_event_ids");
+                        metadata.remove("request_root_id");
+                        frame
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let frames_before = physical_frames();
+            let error = archive
+                .append_chat_events_with_context(context.clone(), &current)
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("multiple durable owners"));
+            assert_eq!(physical_frames(), frames_before);
+            let owners: Vec<ConversationNarrativeRecord> =
+                read_jsonl_records(&narrative_path).unwrap();
+            assert_eq!(owners.len(), legacy.len());
+            for (index, owner) in owners.iter().enumerate() {
+                assert_eq!(owner.seq, index as u64 + 1);
+                assert_eq!(owner.text, legacy[index].text);
+                assert_eq!(
+                    owner.event_refs,
+                    [legacy[index].id.clone(), current[index].id.clone()]
+                );
+            }
+            // Restart after the common owner has become durable.
+            ConversationArchiveState::default()
+                .append_chat_events_with_context(context.clone(), &current)
+                .unwrap();
+        } else {
+            archive
+                .append_chat_events_with_context(context.clone(), &current)
+                .unwrap();
         }
-        archive
-            .append_chat_events_with_context(context.clone(), &current)
-            .unwrap();
         let restarted = ConversationArchiveState::default();
         let events = restarted.chat_events_for_agent(&context.agent_id).unwrap();
         assert_eq!(events.len(), 2);
@@ -1564,8 +1603,45 @@ fn real_pi_changed_ids_repair_one_row_and_existing_double_rows() {
         assert_eq!(records[0].seq, 1);
         assert_eq!(records[0].request_root_id.as_deref(), Some("ec1b3195"));
         assert!(records[0].event_refs.contains(&legacy[0].id));
-        assert!(records[0].event_refs.contains(&current[0].id));
-        let before = std::fs::read(dir.join("conversation.jsonl")).unwrap();
+        assert!(events[0].metadata["legacy_event_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(current[0].id)));
+        if double {
+            assert!(records[0].event_refs.contains(&current[0].id));
+            assert_eq!(
+                events[0].metadata[provenance::REFRESHED_OBSERVATIONS],
+                serde_json::json!([{"version": 1, "sequence": 1, "removed_id": current[0].id}])
+            );
+        } else {
+            assert_eq!(
+                records[0].event_refs.as_slice(),
+                std::slice::from_ref(&legacy[0].id)
+            );
+            assert!(events[0].metadata[provenance::REFRESHED_OBSERVATIONS].is_null());
+        }
+        let read = restarted
+            .archive_chat_reader(
+                context.clone(),
+                archive_chat::Request {
+                    before: None,
+                    revision: None,
+                    detail: None,
+                    limit: 8,
+                    logging_enabled: false,
+                },
+            )
+            .unwrap();
+        let page = read().unwrap();
+        assert!(page.archive_read_ready, "{}", page.progress);
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| &event.id)
+                .collect::<Vec<_>>(),
+            legacy.iter().map(|event| &event.id).collect::<Vec<_>>()
+        );
+        let before = std::fs::read(&narrative_path).unwrap();
         assert_eq!(
             restarted
                 .append_chat_events_with_context(context.clone(), &current)
@@ -1579,10 +1655,7 @@ fn real_pi_changed_ids_repair_one_row_and_existing_double_rows() {
             0,
             "older adapter cannot undo enrichment"
         );
-        assert_eq!(
-            before,
-            std::fs::read(dir.join("conversation.jsonl")).unwrap()
-        );
+        assert_eq!(before, std::fs::read(&narrative_path).unwrap());
         let turns = restarted
             .turn_records_for_conversations(&restarted.list(Some("agent-1"), false).unwrap())
             .unwrap();

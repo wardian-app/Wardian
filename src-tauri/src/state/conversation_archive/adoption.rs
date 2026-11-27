@@ -178,7 +178,7 @@ fn restrictions(
         "unknown_before": source.unknown_before_offset,
         "disabled": source.disabled_spans, "open_disabled": source.open_disabled_from,
     })).map_err(io::Error::other)?;
-    Ok(super::chat_read_store::digest(&bytes))
+    Ok(super::storage::digest(&bytes))
 }
 
 fn current_fingerprint(
@@ -216,8 +216,8 @@ fn current_fingerprint(
             "archive adoption source policy disagrees with original privacy receipt",
         ));
     }
-    Ok(super::chat_read_store::digest(
-        &serde_json::to_vec(&(restrictions, super::chat_read_store::digest(&bytes)))
+    Ok(super::storage::digest(
+        &serde_json::to_vec(&(restrictions, super::storage::digest(&bytes)))
             .map_err(io::Error::other)?,
     ))
 }
@@ -652,12 +652,7 @@ impl ConversationArchiveState {
             batch.next_cursor,
         );
         if let Some(candidate) = candidate {
-            if !self
-                .chat_projection
-                .defer_archive_adoption(&candidate.context, &candidate.conversation_id)?
-            {
-                self.publish_chat_candidate(candidate)?;
-            }
+            self.reconcile_archived_candidate(candidate)?;
         }
         #[cfg(all(test, feature = "adoption-throughput"))]
         profile::mark(&grant.agent_id, "adoption_appended", batch.next_cursor);

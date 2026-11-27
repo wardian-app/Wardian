@@ -57,6 +57,84 @@ beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
 
 describe("owned archive reads in the desktop Chat hook", () => {
+  it("refreshes positioned detail in Older and keeps typed presentation on unchanged", async () => {
+    const generation = "a".repeat(64);
+    const revision = (digit: string) => `archive1:${generation}:${digit.repeat(64)}`;
+    const positioned = (shape: Partial<AgentChatPage>) => page({ generation, progress: "ready", ...shape });
+    const presentation = { version: 1, payload: { turns: [], items: [], state_event_refs: [], legacy_turns: [], detail: null } };
+    const older = { ...assistant("binding", 1), metadata: {
+      chat_archive_positioned: true, chat_body_binding: "first", chat_detail_ref: "first-ref",
+    } };
+    const updated = { ...older, text: "new verified preview", metadata: {
+      ...older.metadata, chat_body_binding: "second", chat_detail_ref: "second-ref",
+    } };
+    const recent = { ...assistant("recent", 2), metadata: { chat_archive_positioned: true } };
+    let snapshot = positioned({ revision: revision("b"), events: [recent], next_before: "older" });
+    const loader = vi.fn<ChatPageLoader>(async (request) => request.cursor
+      ? positioned({ revision: revision("b"), older_page: true, events: [older], next_before: "frontier" })
+      : snapshot);
+    const hook = renderHook(({ reload }) => useChatPages(SESSION, loader, INTERVAL, reload), { initialProps: { reload: 0 } });
+    try {
+      await tick();
+      await act(async () => { await hook.result.current.loadOlder(); });
+      snapshot = positioned({ revision: revision("c"), events: [updated, recent], presentation, next_before: "recent-frontier" });
+      hook.rerender({ reload: 1 });
+      await tick();
+      expect.soft(hook.result.current.events[0]?.metadata.chat_detail_ref).toBe("second-ref");
+      expect.soft(hook.result.current.events[0]?.text).toBe("new verified preview");
+      expect(hook.result.current.page?.next_before).toBe("frontier");
+      snapshot = positioned({ revision: revision("c"), unchanged: true });
+      hook.rerender({ reload: 2 });
+      await tick();
+      expect(hook.result.current.page?.presentation).toEqual(presentation);
+      expect(hook.result.current.page?.next_before).toBe("frontier");
+      expect(hook.result.current.browsingOlder).toBe(true);
+    } finally { hook.unmount(); }
+  });
+
+  it("settles empty archive polls and replaces a stale Older frontier with the verified Recent page", async () => {
+    const generation = "a".repeat(64);
+    const revision = `archive1:${generation}:${"b".repeat(64)}`;
+    const empty = page({
+      conversation_id: null, generation: null, archive_read_ready: false,
+      revision: "archive1:archive_empty", progress: "archive_empty",
+    });
+    const positioned = (name: string, sequence: number): AgentChatEvent => ({
+      ...assistant(name, sequence), metadata: { chat_archive_positioned: true },
+    });
+    const recent = page({
+      generation, revision, progress: "ready", events: [positioned("original", 2)],
+      next_before: "old-archive-frontier",
+    });
+    const reset = page({
+      generation, revision: `archive1:${generation}:${"c".repeat(64)}`,
+      progress: "ready", reset: true, events: [positioned("verified-recent", 3)],
+      next_before: "verified-archive-frontier",
+    });
+    let reads = 0;
+    const loader = vi.fn<ChatPageLoader>(async (request) => {
+      expect(request.revalidateIds).toBeUndefined();
+      return request.cursor ? reset : reads++ < 2 ? empty : recent;
+    });
+    const hook = renderHook(() => useChatPages(SESSION, loader, INTERVAL, 0));
+    try {
+      await tick();
+      await tick(100);
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.page?.progress).toBe("archive_empty");
+      await tick(100);
+      expect(hook.result.current.events.map(({ text }) => text)).toEqual(["original"]);
+      await act(async () => { await hook.result.current.loadOlder(); });
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.events.map(({ text }) => text)).toEqual(["verified-recent"]);
+      expect(hook.result.current.page?.next_before).toBe("verified-archive-frontier");
+      expect(hook.result.current.browsingOlder).toBe(false);
+      noNativeRenewal(loader);
+    } finally {
+      hook.unmount();
+    }
+  });
+
   it("automatically replaces a cold capture-stop miss with grouped archive rows, Older and lazy bodies without native renewal", async () => {
     const recent = assistant("recent", 20, "Recent archive header");
     const older = assistant("older", 10, "Older archive header");

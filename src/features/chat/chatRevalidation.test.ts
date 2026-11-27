@@ -9,6 +9,7 @@ import {
   MAX_CHAT_REVALIDATION_COHORT_ROWS,
   MAX_CHAT_REVALIDATION_PHYSICAL_MEMBERS_PER_ROW,
   MAX_CHAT_REVALIDATION_WINDOW_IDS,
+  archiveStepDisplayRevision,
   chatNeedsRevalidation,
   chatPageScopeAllowsOrdinaryRead,
   chatPageScopeRelation,
@@ -412,6 +413,38 @@ describe("bounded Chat source revalidation", () => {
       { ...pending, generation: "other-positive-hint" },
     ]) expect(chatPageScopeRelation(prior, archive, [], false)).not.toBe("bootstrap");
     expect(chatPageScopeRelation(pending, { ...archive, detail: { event_id: group.id, text: "body", next: null, complete: true } }, [], false)).not.toBe("bootstrap");
+  });
+
+  it("recognizes a positioned partial page without granting native renewal", () => {
+    const generation = "a".repeat(64);
+    const event = { ...sourceEvent(19), metadata: { chat_archive_positioned: true } };
+    const page: AgentChatPage = {
+      ...scope, generation, revision: `archive1:${generation}:${"b".repeat(64)}`,
+      archive_read_ready: false, progress: "archive_tail_pending", events: [event],
+    };
+    expect(isArchiveReadPage(page)).toBe(true);
+    expect(chatNeedsRevalidation(page, page, true)).toBe(false);
+    const hash = "d".repeat(64);
+    const ref = `step:archive1:${hash}:1:${hash}:2:${hash}:${hash}:${hash}:${hash}`;
+    expect(archiveStepDisplayRevision(page, ref)).toBe(`archive1:${generation}:${hash}`);
+    expect(archiveStepDisplayRevision(page, "step:read")).toBeUndefined();
+    expect(isArchiveReadPage({ ...page, generation: "c".repeat(64) })).toBe(false);
+    expect(isArchiveReadPage({ ...page, progress: "ownership_pending" })).toBe(false);
+    expect(isArchiveReadPage({
+      ...page, events: [{ ...event, metadata: { ...event.metadata, chat_source_epoch: "foreign" } }],
+    })).toBe(false);
+    const empty: AgentChatPage = {
+      ...scope, conversation_id: null, generation: null, source_epoch: null, events: [],
+      next_before: null, progress: "archive_empty", revision: "archive1:archive_empty",
+    };
+    expect(chatPageScopeRelation(empty, empty)).toBe("canonical");
+    for (const progress of ["archive_catalog_unavailable", "archive_tail_pending"]) {
+      const unavailable = { ...empty, progress, revision: `archive1:${progress}` };
+      expect(chatPageScopeRelation(empty, unavailable)).toBe("canonical");
+      expect(chatPageScopeRelation(unavailable, page)).toBe("bootstrap");
+    }
+    expect(chatPageScopeRelation(empty, page)).toBe("bootstrap");
+    expect(chatPageScopeRelation(page, empty)).toBe("changed");
   });
 
   it("rejects malformed archive claims and retires qualification or generation transitions", () => {
