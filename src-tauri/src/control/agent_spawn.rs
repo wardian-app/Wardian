@@ -154,6 +154,25 @@ pub(super) async fn dispatch(
             ok_json(&operation_response(operation, timed_out, deadline, app).await?)
         }
 
+        ControlRequest::AgentSpawnRecover { request } => {
+            use wardian_core::agent_spawn::recovery::{Action, Response};
+            let state = app.state::<AppState>();
+            let recovered = match request.action {
+                Action::FinalizeRegistered => {
+                    crate::spawn_operations::recovery::recover(&state, request)
+                        .await
+                        .map(Response::Finalized)
+                }
+                Action::LaunchIfAbsent => {
+                    crate::spawn_operations::recover_launch(app.clone(), request)
+                        .await
+                        .map(Response::LaunchAccepted)
+                }
+            }
+            .map_err(|error| ControlError::coded(error.code, error.message))?;
+            ok_json(&recovered)
+        }
+
         _ => unreachable!("spawn dispatch receives only spawn requests"),
     }
 }

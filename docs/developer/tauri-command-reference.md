@@ -75,45 +75,21 @@ composer submissions.
 ## Chat (`commands/chat.rs`)
 
 - `load_agent_chat_page`
+- `load_agent_chat_transcript`
 
-Ordinary reads use the existing `sessionId`, optional `cursor`, `revision`, and
-`detailRef` arguments. Source renewal uses that same command with a required
-`revision` and `revalidateIds`; omit `cursor` and `detailRef` for renewal. The
-array contains one to eight backend-issued source observation IDs, each no
-longer than 512 UTF-8 bytes. The backend validates the raw list before
-deduplication and source I/O.
+Pass `sessionId` for Recent. `recentPreview: true` reads from the same owned
+archive scope. Pass a returned `cursor` and `revision` for Older or a returned
+`detailRef` for the next UTF-8 body chunk. Revisions and references are opaque.
+A reference that cannot be verified against the archive returns a reset or an
+explicit unavailable result. Legacy projection references require a reset.
+Archive reads do not renew unarchived native observation IDs.
 
-Aware recent reads may also send optional `previewBackingIds`: zero to eight
-literal displayed IDs, each at most 512 UTF-8 bytes. These scoped hints let the
-producer issue exact preview aliases and grant no renewal, Older or detail
-authority. Omitted hints preserve existing client behavior. Do not send them
-on cursor, detail or renewal reads.
+The full-transcript command returns complete saved event payloads, including
+owned text artifacts. It reports unavailable history when it cannot verify
+the complete archived scope.
 
-Renewal returns the existing `AgentChatPage` metadata envelope. A successful
-response includes `revalidated_ids` for the complete requested set. Missing or
-partial acknowledgement, an incomplete source index, or a changed head does
-not authorize a partial window update. Renewal does not fetch neighboring
-history or expand detail bodies; ordinary cursor and detail reads retain their
-existing behavior. See [IPC event and DTO contracts](./ipc-events.md#chat-row-revalidation)existing behavior. Canonical pages with a null source epoch use ordinary
-paging when their canonical identity matches and no loaded native evidence is
-present. An incomplete first-page projection can admit its first complete page
-only before committed rows or an older frontier exist. See [IPC event and DTO
-contracts](./ipc-events.md#ordinary-canonical-reads-and-first-page-bootstrap)
-and the [internal revalidation contract](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-26-chat-row-revalidation.md).
-
-Recent pages may include `presentation.payload.preview_bridge` with the exact
-recent admission and published canonical Head. Only the producer can issue this
-continuity proof. Its aliases replace preview backing atomically without a
-client scope reset. A bridge with `recent_admission` still present grants no
-Older cursor, detail read or revalidation ACK. A running turn's separate
-`prefix_attributed` certificate does not imply `membership_complete`; counts
-and references remain incomplete until their respective canonical evidence.
-Missing heads, unsupported providers and unproven membership keep the legacy
-path. Retiring the recent admission also retires its identity binding.
-Within a bound source view, unqualified turns remain producer-owned legacy
-groups; their later qualification preserves source order. A forced retraction
-keeps that open view on the legacy path until it is reopened. Revisions remain
-opaque and must be forwarded unchanged, including on Older and detail reads.
+The standalone read-only verifier is described in
+[offline legacy Chat verification](./state-management.md#offline-legacy-chat-verification).
 
 ## Classes (`commands/class.rs`)
 

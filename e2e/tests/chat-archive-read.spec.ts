@@ -5,7 +5,7 @@ import type { AgentChatEvent, AgentChatPage } from "../../src/types";
 
 // Exercises the real remote UI and shared archive classifier with synthetic HTTP
 // pages. Native import/ownership and body durability are backend regression tests.
-test("stopped capture automatically opens a complete archive with Older and owned detail", async ({ page }) => {
+test("Chat opens saved history and owned detail while logging is disabled", async ({ page }) => {
   const agent = {
     session_id: "archive-fixture", session_name: "Saved Conversation", agent_class: "Coder",
     provider: "codex", workspace: "<agent-workspace>", status: "Off", latest_text: null,
@@ -14,17 +14,19 @@ test("stopped capture automatically opens a complete archive with Older and owne
     id, session_id: agent.session_id, provider: "codex", kind: "message", role: "assistant",
     text, title: null, status: null, turn_id: `turn-${sequence}`, source: "provider_log",
     command: null, exit_code: null, path: null, language: null,
-    created_at: "2026-01-01T00:00:00Z", sequence, metadata: {},
+    created_at: "2026-01-01T00:00:00Z", sequence, metadata: { chat_archive_positioned: true },
   });
   const answer = row("archive-display:answer", "The authorized interval is saved in conversation history.", 10);
   answer.metadata = {
+    ...answer.metadata,
     chat_display_member_ids: ["source:historical-public", "source:historical-completion"],
     chat_detail_ref: "owned-answer:0", chat_body_binding: "owned-answer-body",
   };
+  const generation = "a".repeat(64);
   const initial: AgentChatPage = {
-    session_id: agent.session_id, conversation_id: "saved-conversation", generation: "saved-generation",
-    source_epoch: null, archive_read_ready: true, revision: "saved-revision", unchanged: false,
-    reset: false, progress: "capture_source_replaced", aliases: [
+    session_id: agent.session_id, conversation_id: "saved-conversation", generation,
+    source_epoch: null, archive_read_ready: true, revision: `archive1:${generation}:${"b".repeat(64)}`, unchanged: false,
+    reset: false, progress: "logging_disabled", aliases: [
       { observation_id: "source:historical-public", canonical_id: answer.id },
       { observation_id: "source:historical-completion", canonical_id: answer.id },
     ], removed_ids: [], detail: null, bytes_read: 0, records_decoded: 0,
@@ -43,7 +45,8 @@ test("stopped capture automatically opens a complete archive with Older and owne
       let response: AgentChatPage;
       if (traffic.length === 1) {
         response = { ...initial, conversation_id: null, generation: null, archive_read_ready: false,
-          revision: "pending", events: [], aliases: [], next_before: null };
+          progress: "archive_tail_pending", revision: "archive1:archive_tail_pending",
+          events: [], aliases: [], next_before: null };
       } else if (url.searchParams.has("detail")) {
         expect(url.searchParams.get("detail")).toBe("owned-answer:0");
         response = { ...initial, events: [], aliases: [], next_before: null,
@@ -75,7 +78,7 @@ test("stopped capture automatically opens a complete archive with Older and owne
   await page.goto("/remote", { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: "Open Saved Conversation details" }).click();
   await expect(page.getByText(answer.text!, { exact: true })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText(/History capture is paused because the provider log was replaced/)).toBeVisible();
+  await expect(page.getByText("Conversation logging is disabled. Only archived messages are shown.")).toBeVisible();
   await expect(page.getByText(answer.text!, { exact: true })).toHaveCount(1);
   expect(traffic.some((url) => url.searchParams.has("detail"))).toBe(false);
   await page.getByRole("button", { name: "Show full details", exact: true }).click();
@@ -91,6 +94,6 @@ test("stopped capture automatically opens a complete archive with Older and owne
   const screenshotDir = process.env.WARDIAN_ARCHIVE_READ_SCREENSHOT_DIR;
   if (screenshotDir) {
     fs.mkdirSync(screenshotDir, { recursive: true });
-    await page.screenshot({ path: path.join(screenshotDir, "archive-readable-capture-stopped.png"), animations: "disabled" });
+    await page.screenshot({ path: path.join(screenshotDir, "archive-readable-logging-disabled.png"), animations: "disabled" });
   }
 });

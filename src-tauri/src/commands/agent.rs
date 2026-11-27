@@ -9,7 +9,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::conversations::{ConversationBoundaryReason, ConversationLoggingSetting};
 use wardian_core::models::{
@@ -26,7 +25,9 @@ mod codex_onboarding;
 #[path = "agent/config_persistence.rs"]
 mod config_persistence;
 mod conversation_boundary;
+mod lifecycle_heartbeat;
 use conversation_boundary::finalize_conversation_boundary;
+pub(crate) use lifecycle_heartbeat::LifecycleLeaseHeartbeat;
 #[path = "agent/settings.rs"]
 mod settings;
 pub(crate) use settings::{
@@ -54,7 +55,11 @@ use agent_naming::{
     validate_agent_name,
 };
 use codex_onboarding::register_new_agent;
-pub(crate) use codex_onboarding::rollback_provisional_codex;
+#[cfg(test)]
+pub(crate) use codex_onboarding::RecoveryPendingRegistration;
+pub(crate) use codex_onboarding::{
+    rollback_captured_recovery, rollback_provisional_codex, RegisteredAgentSpawn,
+};
 use name_claims::{
     abort_failed_rename, existing_spawn_session_names, release_spawn_name_reservation,
     reserve_rename_session_name, reserve_spawn_session_name, LegacyNameClaimGuard,
@@ -62,8 +67,11 @@ use name_claims::{
 };
 pub(crate) use removal::recover_bound_removals;
 use removal::remove_agent;
+#[cfg(test)]
+pub(crate) use spawn::bootstrap_prepared_agent_spawn;
 pub(crate) use spawn::{
     launch_prepared_agent_spawn, planned_provider_session_id, prepare_durable_agent_spawn,
+    prepare_recovery_launch, PreparedAgentSpawn, RecoveryBootstrap, RecoveryRegistrationLease,
 };
 use spawn::{new_agent_identity_plan, prepare_agent_spawn};
 use worktree_enable::resolve_agent_worktree_source;
@@ -243,106 +251,6 @@ impl DeletedAgentReferenceCleanup {
 }
 
 const LIFECYCLE_LEASE_DURATION: chrono::Duration = chrono::Duration::minutes(20);
-const LIFECYCLE_LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Keeps a long lifecycle operation from outliving the persisted exclusion
-/// lease that protects it. If renewal fails, callers must stop before the next
-/// destructive or replacement step rather than continuing without ownership.
-struct LifecycleLeaseHeartbeat {
-    owner: wardian_core::conversation_lease::ConversationLeaseOwner,
-    active: Arc<AtomicBool>,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl LifecycleLeaseHeartbeat {
-    fn start(owner: wardian_core::conversation_lease::ConversationLeaseOwner) -> Self {
-        let active = Arc::new(AtomicBool::new(true));
-        let active_for_task = Arc::clone(&active);
-        let owner_for_task = owner.clone();
-        let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let mut heartbeat = tokio::time::interval_at(
-                tokio::time::Instant::now() + LIFECYCLE_LEASE_HEARTBEAT_INTERVAL,
-                LIFECYCLE_LEASE_HEARTBEAT_INTERVAL,
-            );
-
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => break,
-                    _ = heartbeat.tick() => {
-                        let now = chrono::Utc::now();
-                        match renew_agent_lifecycle_transition_lease(&owner_for_task, now) {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                active_for_task.store(false, Ordering::Release);
-                                manager::log_debug(&format!(
-                                    "[WARDIAN] lifecycle lease was lost before renewal for {} {}",
-                                    owner_for_task.owner_kind, owner_for_task.owner_id
-                                ));
-                                break;
-                            }
-                            Err(error) => {
-                                active_for_task.store(false, Ordering::Release);
-                                manager::log_debug(&format!(
-                                    "[WARDIAN] lifecycle lease renewal failed for {} {}: {error}",
-                                    owner_for_task.owner_kind, owner_for_task.owner_id
-                                ));
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        Self {
-            owner,
-            active,
-            shutdown: Some(shutdown),
-            task,
-        }
-    }
-
-    fn ensure_active(&self, operation: &str) -> Result<(), String> {
-        if !self.active.load(Ordering::Acquire) {
-            return Err(format!(
-                "cannot {operation} agent because its lifecycle conversation lease was lost"
-            ));
-        }
-
-        // A periodic heartbeat is not enough at a destructive boundary: renew
-        // synchronously so this exact acquisition remains fenced for the next
-        // lifecycle mutation even if a background renewal failed moments ago.
-        match renew_agent_lifecycle_transition_lease(&self.owner, chrono::Utc::now()) {
-            Ok(true) => Ok(()),
-            Ok(false) | Err(_) => {
-                self.active.store(false, Ordering::Release);
-                Err(format!(
-                    "cannot {operation} agent because its lifecycle conversation lease was lost"
-                ))
-            }
-        }
-    }
-
-    async fn stop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        self.task.abort();
-        let _ = (&mut self.task).await;
-    }
-}
-
-impl Drop for LifecycleLeaseHeartbeat {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        self.task.abort();
-    }
-}
-
 struct ReplacementSpawnLease {
     lease: wardian_core::conversation_lease::PersistedConversationLeaseGuard,
     unpublished_failure: Arc<AtomicBool>,
@@ -423,7 +331,7 @@ fn acquire_agent_lifecycle_transition_lease(
 
 /// Metadata deletion retries acquire the existing lifecycle authority directly
 /// from a sealed identity, without reconstructing a roster or provider config.
-fn acquire_agent_lifecycle_transition_lease_for_identity(
+pub(crate) fn acquire_agent_lifecycle_transition_lease_for_identity(
     agent_id: &str,
     name: &str,
     provider: &str,
@@ -2329,6 +2237,7 @@ pub async fn spawn_agent(
         &app,
         Some(name_reservation.owner_id.clone()),
         None,
+        None,
     )
     .await
     .map(|registered| registered.config);
@@ -2506,6 +2415,7 @@ pub async fn clone_agent(
             placement: AgentOrderPlacement::After(&source_session_id),
             emit_roster_update: false,
         },
+        None,
         None,
     )
     .await

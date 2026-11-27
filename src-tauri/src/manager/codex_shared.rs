@@ -234,6 +234,12 @@ pub(crate) struct StartingCodexTui {
         Arc<crate::state::terminal_session::TerminalSessionBroker>,
         u64,
     )>,
+    recovery_stop: Option<(
+        wardian_core::models::AgentConfig,
+        super::codex_stop::StopRegistration,
+    )>,
+    #[cfg(windows)]
+    recovery_job: Option<crate::utils::process::RuntimeProcessJob>,
 }
 
 impl StartingCodexTui {
@@ -245,7 +251,31 @@ impl StartingCodexTui {
             child: Some(child),
             owner,
             runtime: None,
+            recovery_stop: None,
+            #[cfg(windows)]
+            recovery_job: None,
         }
+    }
+
+    pub(super) fn retain_recovery_stop(
+        &mut self,
+        config: wardian_core::models::AgentConfig,
+        registration: super::codex_stop::StopRegistration,
+    ) {
+        self.recovery_stop = Some((config, registration));
+    }
+
+    #[cfg(windows)]
+    pub(super) fn retain_recovery_job(
+        &mut self,
+        job: Option<crate::utils::process::RuntimeProcessJob>,
+    ) {
+        self.recovery_job = job;
+    }
+
+    #[cfg(windows)]
+    pub(super) fn take_recovery_job(&mut self) -> Option<crate::utils::process::RuntimeProcessJob> {
+        self.recovery_job.take()
     }
 
     pub(super) fn process_id(&self) -> Option<u32> {
@@ -273,9 +303,8 @@ impl StartingCodexTui {
         broker: Arc<crate::state::terminal_session::TerminalSessionBroker>,
         runtime_generation: u64,
     ) -> Result<(), String> {
+        self.retain_terminal(broker, runtime_generation);
         if let Some((owner_broker, agent_id, provider_generation)) = &self.owner {
-            // Retain cleanup before binding can fail or be cancelled.
-            self.runtime = Some((broker, runtime_generation));
             owner_broker
                 .bind_codex_tui_runtime(agent_id, *provider_generation, runtime_generation)
                 .await
@@ -284,15 +313,45 @@ impl StartingCodexTui {
         Ok(())
     }
 
+    pub(super) fn retain_terminal(
+        &mut self,
+        broker: Arc<crate::state::terminal_session::TerminalSessionBroker>,
+        runtime_generation: u64,
+    ) {
+        if self.owner.is_some() {
+            self.runtime = Some((broker, runtime_generation));
+        }
+    }
+
     pub(crate) fn attached(mut self) -> Box<dyn portable_pty::Child + Send> {
         self.owner = None;
         self.runtime = None;
+        drop(self.recovery_stop.take());
         self.child
             .take()
             .expect("starting PTY child retained until attachment")
     }
 
     fn cleanup(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        if let Some((config, registration)) = self.recovery_stop.take() {
+            let mut runtime = crate::state::ActiveAgent::for_starting_codex_cleanup(config);
+            runtime.process_id = self.process_id();
+            runtime.child_process = self.child.take();
+            runtime.runtime_generation = self.runtime.take().map(|(_, generation)| generation);
+            #[cfg(windows)]
+            {
+                runtime.job_object = self.recovery_job.take();
+            }
+            drop(self.owner.take());
+            let stopped = registration.capture(runtime).begin_stop();
+            return Some(tokio::spawn(async move {
+                if let Err(error) = stopped.wait().await {
+                    crate::utils::logging::log_debug(&format!(
+                        "Codex starting TUI cleanup retained: {error}"
+                    ));
+                }
+            }));
+        }
         let (broker, agent_id, generation) = self.owner.take()?;
         let mut child = self.child.take()?;
         let runtime = self.runtime.take();

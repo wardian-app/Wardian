@@ -1,7 +1,8 @@
 use super::*;
 use crate::commands::chat::{AgentArchiveCaptureSnapshot, ArchiveCaptureResult};
 use crate::commands::provider_log_acquisition::{self, ProviderLogBatch};
-use std::io::Write;
+use std::{io::Write, path::PathBuf};
+use wardian_core::models::chat::AgentChatPage;
 
 struct Fixture {
     home: crate::control::test_support::TestWardianHome,
@@ -152,49 +153,45 @@ impl Fixture {
             )
     }
 
-    fn settled_headers(&self) -> Vec<serde_json::Value> {
-        for _ in 0..16 {
-            if !self
-                .archive
-                .chat_projection
-                .advance(&self.context.agent_id)
-                .unwrap()
-            {
-                break;
-            }
-        }
-        let reference = chat_read::head(&self.context.agent_id).unwrap().unwrap();
-        let (_, objects) = chat_read::locations(&self.context.agent_id).unwrap();
-        let mut store = chat_read_store::Store::new(&objects);
-        let head: serde_json::Value = store.read(&reference).unwrap();
-        assert_eq!(head["progress"], "ready");
-        let root: Option<String> = serde_json::from_value(head["root"].clone()).unwrap();
-        store
-            .page(&root, None, 80)
-            .unwrap()
-            .into_iter()
-            .map(|(_, reference)| store.read(&reference).unwrap())
-            .filter(|row: &serde_json::Value| row["event"]["role"] == "assistant")
-            .collect()
+    fn page(&self, archive: &ConversationArchiveState) -> AgentChatPage {
+        self.read_page(archive, 80, None)
     }
 
-    fn assert_single_native_owner(&self) {
-        let headers = self.settled_headers();
-        assert_eq!(headers.len(), 1);
-        assert_eq!(
-            headers[0]["event"]["id"],
-            headers[0]["event"]["metadata"]["chat_source_ref"]
-        );
-        let reference = chat_read::head(&self.context.agent_id).unwrap().unwrap();
-        let (_, objects) = chat_read::locations(&self.context.agent_id).unwrap();
-        let head: serde_json::Value = chat_read_store::Store::new(&objects)
-            .read(&reference)
+    fn read_page(
+        &self,
+        archive: &ConversationArchiveState,
+        limit: usize,
+        before: Option<String>,
+    ) -> AgentChatPage {
+        let read = archive
+            .archive_chat_reader(
+                self.context.clone(),
+                super::super::archive_chat::Request {
+                    before,
+                    revision: None,
+                    detail: None,
+                    limit,
+                    logging_enabled: true,
+                },
+            )
             .unwrap();
-        let directory = conversation_dir(
-            &self.context.agent_id,
-            head["conversation_id"].as_str().unwrap(),
-        )
-        .unwrap();
+        read().unwrap()
+    }
+
+    fn archive_directory(&self) -> PathBuf {
+        let conversation = self
+            .archive
+            .active_conversation_id(&self.context.agent_id)
+            .unwrap()
+            .unwrap();
+        conversation_dir(&self.context.agent_id, &conversation).unwrap()
+    }
+
+    fn assert_single_native_owner(&self, archive: &ConversationArchiveState) {
+        let page = self.page(archive);
+        assert_eq!(page.progress, "ready");
+        let conversation = page.conversation_id.as_deref().unwrap();
+        let directory = conversation_dir(&self.context.agent_id, conversation).unwrap();
         let events: Vec<AgentChatEvent> =
             read_jsonl_records(&directory.join("events.jsonl")).unwrap();
         let native = events
@@ -219,12 +216,35 @@ impl Fixture {
         assert!(
             owners[0].event_refs.contains(&native.id) && owners[0].event_refs.contains(&watch.id)
         );
+        let visible = page
+            .events
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::Assistant))
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(visible, [native.id.as_str()]);
+        assert!(page
+            .aliases
+            .iter()
+            .any(|alias| { alias.observation_id == watch.id && alias.canonical_id == native.id }));
         let restarted = ConversationArchiveState::default();
-        assert!(!restarted.bootstrap_saved_chat(&self.context).unwrap());
+        let cold = self.page(&restarted);
         assert_eq!(
-            chat_read::head(&self.context.agent_id).unwrap().as_deref(),
-            Some(reference.as_str())
+            cold.events
+                .iter()
+                .map(|event| &event.id)
+                .collect::<Vec<_>>(),
+            page.events
+                .iter()
+                .map(|event| &event.id)
+                .collect::<Vec<_>>()
         );
+        assert_eq!(
+            serde_json::to_value(&cold.aliases).unwrap(),
+            serde_json::to_value(&page.aliases).unwrap()
+        );
+        let (head, objects) = chat_read::locations(&self.context.agent_id).unwrap();
+        assert!(!head.exists() && !objects.exists());
         assert!(self.home.path().exists());
     }
 }
@@ -241,15 +261,53 @@ fn actual_acquisition_joins_each_publication_order_and_survives_restart() {
         fixture.commit(&batch).unwrap();
         fixture.append_watch();
         fixture.append_watch(); // The later EOF/empty batch must be idempotent.
-        fixture.assert_single_native_owner();
+        fixture.assert_single_native_owner(&fixture.archive);
     }
 }
 
 #[test]
-fn failed_cursor_commit_preserves_the_old_watch_head_until_retry() {
+fn actual_archive_older_advances_past_both_mirror_frames() {
+    let fixture = Fixture::new();
+    let mut older = fixture
+        .watch
+        .events
+        .iter()
+        .find(|event| event.role == Some(AgentChatRole::Assistant))
+        .unwrap()
+        .clone();
+    older.id = "earlier-owned-assistant".into();
+    older.text = Some("Earlier unrelated body".into());
+    older.turn_id = Some("earlier-turn".into());
+    older.metadata = json!({});
+    fixture
+        .archive
+        .append_chat_events_with_context(fixture.context.clone(), &[older])
+        .unwrap();
+    fixture.append_watch();
+    fixture.append_raw(&fixture.raw);
+    fixture.commit(&fixture.acquire()).unwrap();
+
+    let recent = fixture.read_page(&fixture.archive, 1, None);
+    assert_eq!(recent.events.len(), 1);
+    assert_eq!(recent.aliases.len(), 1);
+    assert_eq!(recent.events[0].id, recent.aliases[0].canonical_id);
+    let before = recent.next_before.expect("older archived page");
+    let older = fixture.read_page(&ConversationArchiveState::default(), 1, Some(before));
+    assert!(older.older_page && !older.reset);
+    assert_eq!(older.events[0].id, "earlier-owned-assistant");
+    assert!(older.next_before.is_none());
+}
+
+#[test]
+fn failed_cursor_commit_keeps_the_watch_frame_until_native_retry() {
     let fixture = Fixture::new();
     fixture.append_watch();
-    let before = chat_read::head(&fixture.context.agent_id).unwrap();
+    let journal = fixture.archive_directory().join("events.jsonl");
+    let before: Vec<AgentChatEvent> = read_jsonl_records(&journal).unwrap();
+    let watch = before
+        .iter()
+        .find(|event| event.metadata[WATCH].is_object())
+        .unwrap();
     fixture.append_raw(&fixture.raw);
     let batch = fixture.acquire();
     fixture
@@ -257,7 +315,11 @@ fn failed_cursor_commit_preserves_the_old_watch_head_until_retry() {
         .fail_next_chat_cursor_commit
         .store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(fixture.commit(&batch).is_err());
-    assert_eq!(chat_read::head(&fixture.context.agent_id).unwrap(), before);
+    let interrupted: Vec<AgentChatEvent> = read_jsonl_records(&journal).unwrap();
+    assert_eq!(
+        interrupted.iter().find(|event| event.id == watch.id),
+        Some(watch)
+    );
     let source = fixture
         .archive
         .provider_log_capture_state(
@@ -269,7 +331,7 @@ fn failed_cursor_commit_preserves_the_old_watch_head_until_retry() {
     assert!(source.committed_offset < batch.next.committed_offset);
     fixture.commit(&batch).unwrap();
     fixture.append_watch();
-    fixture.assert_single_native_owner();
+    fixture.assert_single_native_owner(&fixture.archive);
 }
 
 #[test]
@@ -279,13 +341,18 @@ fn actual_duplicate_receipts_do_not_advance_the_native_cursor() {
     fixture.append_raw(&fixture.raw);
     fixture.append_raw(&fixture.raw);
     let batch = fixture.acquire();
-    let before = chat_read::head(&fixture.context.agent_id).unwrap();
+    let journals =
+        ["events.jsonl", "conversation.jsonl"].map(|name| fixture.archive_directory().join(name));
+    let before = journals.each_ref().map(|path| std::fs::read(path).unwrap());
     assert!(fixture
         .commit(&batch)
         .unwrap_err()
         .to_string()
         .contains("ambiguous Mock mirror"));
-    assert_eq!(chat_read::head(&fixture.context.agent_id).unwrap(), before);
+    assert_eq!(
+        journals.each_ref().map(|path| std::fs::read(path).unwrap()),
+        before
+    );
     let source = fixture
         .archive
         .provider_log_capture_state(
@@ -306,7 +373,15 @@ fn actual_conflicting_payload_does_not_collapse_the_watch_observation() {
     fixture.append_raw(&conflicting);
     fixture.commit(&fixture.acquire()).unwrap();
     fixture.append_watch();
-    assert_eq!(fixture.settled_headers().len(), 2);
+    let page = fixture.page(&fixture.archive);
+    assert_eq!(
+        page.events
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::Assistant))
+            .count(),
+        2
+    );
+    assert!(page.aliases.is_empty());
 }
 
 #[test]
@@ -323,7 +398,8 @@ fn interrupted_narrative_reconciliation_recovers_on_append_and_restart() {
         // The observation remains independently capturable while the native
         // cursor is uncommitted, creating the two legitimate audit narratives.
         fixture.append_watch();
-        let before = chat_read::head(&fixture.context.agent_id).unwrap();
+        let narrative = fixture.archive_directory().join("conversation.jsonl");
+        let before = std::fs::read(&narrative).unwrap();
         fixture
             .archive
             .fail_compatibility_stage
@@ -333,7 +409,7 @@ fn interrupted_narrative_reconciliation_recovers_on_append_and_restart() {
             .unwrap_err()
             .to_string()
             .contains("failure after events"));
-        assert_eq!(chat_read::head(&fixture.context.agent_id).unwrap(), before);
+        assert_eq!(std::fs::read(&narrative).unwrap(), before);
         let restarted = restart.then(ConversationArchiveState::default);
         let archive = restarted.as_ref().unwrap_or(&fixture.archive);
         let watch_only = fixture
@@ -350,15 +426,6 @@ fn interrupted_narrative_reconciliation_recovers_on_append_and_restart() {
                 fixture.watch.watch_mirrors.as_ref(),
             )
             .unwrap();
-        for _ in 0..16 {
-            if !archive
-                .chat_projection
-                .advance(&fixture.context.agent_id)
-                .unwrap()
-            {
-                break;
-            }
-        }
-        fixture.assert_single_native_owner();
+        fixture.assert_single_native_owner(archive);
     }
 }

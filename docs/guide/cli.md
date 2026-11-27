@@ -569,8 +569,9 @@ Every CLI spawn uses a durable operation key. The default command waits up to
 60 seconds for registration and preserves the normal agent JSON output. Use
 `--wait-timeout <duration>` to choose a shorter observation window. If the wait
 ends first, the error includes the operation key and a `spawn-status` command.
-`spawn-status` reads the current operation; `spawn-wait` observes it for up to
-60 seconds. `--async` returns the operation receipt immediately.
+`spawn-status` reads the current operation. `spawn-wait` observes it for up to
+60 seconds. Both include `operation.attempt_id` once an attempt exists.
+`--async` returns the operation receipt immediately.
 
 Reuse `--operation-id <uuid>` with the same provider, class, name, workspace,
 model, and reasoning effort when retrying an uncertain submission. The key is
@@ -592,6 +593,37 @@ roster discrepancy; it does not promise provider input readiness.
 `outcome_unknown` means Wardian could not prove whether launch completed. Check
 the roster and operation status before taking further action; a new key would
 create a separate spawn.
+
+For a Codex attempt that already reached live registration, the local desktop
+owner can finalize the durable metadata. Supply the exact operation, attempt,
+and configured model from the original operation evidence.
+
+```bash
+wardian agent spawn-recover <operation-id> --expected-attempt <attempt-id> --expected-model <model> --action finalize-registered
+```
+
+For a new finalization, the desktop must still own the same idle native
+runtime and have a matching saved roster, SQLite summary, and name claim. A
+restart keeps saved `outcome_unknown` rows out of automatic restore, so
+installing a build with this command cannot recover an already uncertain
+registration from its saved row. An exact retry of a completed finalization
+returns its audit receipt, including the confirmed model, even after a restart.
+The command preserves the original request and attempt evidence.
+
+For a fully prepared Codex attempt interrupted before launch authorization,
+exclusive startup can record the pre-effect evidence required by
+`launch-if-absent`. Use the same operation ID and the interrupted attempt ID.
+Supply the exact model for the new attempt.
+
+```bash
+wardian agent spawn-recover <operation-id> --expected-attempt <attempt-id> --expected-model <model> --action launch-if-absent
+```
+
+A successful response reports an `accepted_attempt_id` and `effective_model`.
+Use `spawn-status` to check registration. If the acceptance reply was lost,
+repeat the original action, attempt ID, and model to retrieve the same receipt.
+A witnessed operation can launch once, and startup never replays an interrupted
+recovery attempt. Legacy uncertain attempts and occupied identities stay blocked.
 
 Legacy spawn, clone, or rename can report `[agent-name-ownership-pending]`
 after publication. The error includes the stable agent and attempt IDs. Keep

@@ -1342,7 +1342,7 @@ pub async fn obtain_session_id(
     agent_class: Option<&str>,
     config: Option<&AgentConfig>,
 ) -> Result<String, String> {
-    obtain_session_id_inner(cwd, agent_class, config, None, None).await
+    obtain_session_id_inner(cwd, agent_class, config, None, None, None).await
 }
 
 pub(crate) async fn obtain_session_id_with_codex_context(
@@ -1351,6 +1351,7 @@ pub(crate) async fn obtain_session_id_with_codex_context(
     config: Option<&AgentConfig>,
     codex_launch_context: &crate::utils::codex_home::CodexLaunchContext,
     operation: Option<(&str, &str)>,
+    recovery_heartbeat: Option<&crate::commands::agent::LifecycleLeaseHeartbeat>,
 ) -> Result<String, String> {
     obtain_session_id_inner(
         cwd,
@@ -1358,6 +1359,7 @@ pub(crate) async fn obtain_session_id_with_codex_context(
         config,
         Some(codex_launch_context),
         operation,
+        recovery_heartbeat,
     )
     .await
 }
@@ -1368,7 +1370,9 @@ async fn obtain_session_id_inner(
     config: Option<&AgentConfig>,
     codex_launch_context: Option<&crate::utils::codex_home::CodexLaunchContext>,
     operation: Option<(&str, &str)>,
+    recovery_heartbeat: Option<&crate::commands::agent::LifecycleLeaseHeartbeat>,
 ) -> Result<String, String> {
+    use wardian_core::conversation_lease::CodexRecoveryLeaseScope;
     let provider_name = config.map(|c| c.provider.as_str()).unwrap_or("claude");
     let provider = ProviderFactory::resolve(provider_name)?;
     crate::providers::readiness::ensure_provider_available_for_launch(provider_name)?;
@@ -1388,6 +1392,15 @@ async fn obtain_session_id_inner(
             let Some(session_id) = bootstrap_session_id else {
                 return Err("Codex bootstrap identity is missing".to_string());
             };
+            if let Some(heartbeat) = recovery_heartbeat {
+                heartbeat.ensure_codex_recovery_scope(
+                    "prepare Codex recovery rollout",
+                    CodexRecoveryLeaseScope::Exact {
+                        agent_id: session_id,
+                        native_id: "",
+                    },
+                )?;
+            }
             let habitat = prepare_habitat_workspace(cwd, class_name, session_id)?;
             let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
             let _preparation =
@@ -1412,7 +1425,17 @@ async fn obtain_session_id_inner(
         let agent_codex_home =
             crate::utils::codex_home::resolve_managed_home(&wardian_home, agent_id)?;
 
-        match materialize_codex_session_rollout(&agent_codex_home, cwd) {
+        let materialized = if let Some(heartbeat) = recovery_heartbeat {
+            heartbeat.with_exact_codex_recovery_effect(
+                "materialize Codex recovery rollout",
+                agent_id,
+                "",
+                || materialize_codex_session_rollout(&agent_codex_home, cwd),
+            )?
+        } else {
+            materialize_codex_session_rollout(&agent_codex_home, cwd)
+        };
+        match materialized {
                 Ok(session_id) => {
                     let mut identity_config = config.cloned().unwrap_or_else(|| AgentConfig {
                         provider: provider_name.to_string(),
@@ -1422,10 +1445,14 @@ async fn obtain_session_id_inner(
                     log_debug("[WARDIAN-DEBUG] Materialized a fresh local Codex session rollout.");
                     return Ok(session_id);
                 }
+                Err(error) if recovery_heartbeat.is_some() => return Err(error),
                 Err(error) => log_debug(&format!(
                     "[WARDIAN-DEBUG] Codex session rollout materialization unavailable; using legacy bootstrap: {error}"
                 )),
             }
+    }
+    if recovery_heartbeat.is_some() {
+        return Err("Guarded recovery requires local Codex rollout materialization".into());
     }
     let codex_bootstrap = if provider_name == "codex" {
         let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;

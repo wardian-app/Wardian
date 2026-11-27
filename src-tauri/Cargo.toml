@@ -5,6 +5,7 @@ description = "Where local agent work becomes visible, durable, and malleable."
 authors = ["Tan Gemicioglu"]
 edition = "2021"
 build = "build.rs"
+default-run = "Wardian"
 license = "MIT"
 repository = "https://github.com/wardian-app/Wardian"
 homepage = "https://wardian.org"
@@ -21,6 +22,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [[bin]]
 name = "Wardian"
 path = "src/main.rs"
+
+[[bin]]
+name = "wardian-chat-cache-admin"
+path = "src/bin/chat_cache_admin.rs"
 
 [features]
 adoption-throughput = []
@@ -77,7 +82,7 @@ socket2 = "0.6.3"
 [target.'cfg(windows)'.dependencies]
 junction = "1"
 win32job = "2.0.3"
-winapi = { version = "0.3.9", features = ["processthreadsapi", "winnt", "handleapi", "jobapi", "jobapi2", "fileapi"] }
+winapi = { version = "0.3.9", features = ["processthreadsapi", "winnt", "handleapi", "jobapi", "jobapi2", "fileapi", "namedpipeapi"] }
 windows = { version = "0.58.0", features = [
     "Win32_Foundation",
     "Win32_UI_Shell", 
@@ -106,6 +111,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWi
 anyhow = "1"
 tokio = { version = "1.49.0", features = ["test-util"] }
 tauri = { version = "=2.12.5", features = ["test"] }
+wardian-core = { path = "../crates/wardian-core", features = ["test-skip-fsync"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 uds_windows = "1.2.1"

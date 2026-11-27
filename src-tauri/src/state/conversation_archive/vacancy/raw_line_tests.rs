@@ -426,3 +426,26 @@ fn capture_replays_the_same_protected_body_before_appending_a_tail() {
     );
     validate_vacancies(&f.directory, &f.conversation_id).unwrap();
 }
+
+#[test]
+fn vacancy_rejects_a_changed_archive_artifact_proof() {
+    let fixture = fixture_with_text(true);
+    let mut records = fixture.records.clone();
+    let proof = records
+        .iter_mut()
+        .find(|record| record.seq == 2)
+        .unwrap()
+        .text_artifact_proof
+        .as_mut()
+        .unwrap();
+    proof.sha256 = "0".repeat(64);
+    conversations::write_jsonl_atomic(&fixture.directory.join("conversation.jsonl"), &records)
+        .unwrap();
+
+    let report = inspect_vacancy(&fixture.directory, &fixture.conversation_id, 3).unwrap();
+    assert!(!report.eligible);
+    assert!(report
+        .rules
+        .iter()
+        .any(|rule| rule.rule == "bodies_resolved" && !rule.passed));
+}

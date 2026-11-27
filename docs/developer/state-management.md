@@ -86,6 +86,59 @@ still compares its expected cursor before archive publication and commits the
 next cursor only after publication succeeds. Retries repair durable observations
 and deduplicate them under the existing provenance rules.
 
+### Archive-backed Chat reads
+
+Desktop and Remote Chat read the conversation archive directly. The per-agent
+catalog and owned manifests bind the eligible conversation scope. An in-memory
+index retains byte positions, row identity proofs and turn ranges. Recent,
+Older and preview seek the framed event and narrative records they return.
+Detail reads use the same ownership proof and an inline or owned artifact byte
+position. The first read after restart rebuilds the index. An unfinished JSONL
+frame stays unread until its newline commits it.
+
+The archive writer records a reference-only receipt when it coalesces a
+provider observation into an already archived delivered input. A narrative
+reference without its own frame requires that exact same-record receipt.
+Complete page readiness includes a bounded probe of declared artifacts.
+Larger cohorts can return verified rows while reporting unverified history.
+An exact archived tool invocation and result can provide a typed step with
+separate bounded input and output. The ordinary body reference can page through
+both fields.
+
+Chat reads do not capture, repair or write. Logging disabled preserves access
+to previously authorized archived records within the same scope. Missing or
+ambiguous proof is reported by the reader. Archive cursors rebind only when the
+selected ownership scope and anchor record still match. A legacy projection
+cursor or detail reference requires a fresh archive page.
+
+### Offline legacy Chat verification
+
+Legacy object data remains in place for inspection. Normal Chat does not
+require the legacy object directory. This build exposes no app migration,
+collection, quarantine or restore commands for this legacy store.
+
+The offline `wardian-chat-cache-admin` binary verifies an explicitly supplied
+copy without launching Tauri or constructing `AppState`. It requires an
+existing absolute `--home` and a safe `--agent-id`. Build it with the Rust
+cache launcher, then invoke it directly:
+
+```bash
+npm run rust:cache -- cargo build -p Wardian --bin wardian-chat-cache-admin
+<rust-cache-root>/launcher-targets/<repo-key>/<worktree-key>/debug/wardian-chat-cache-admin verify-archive --home <absolute-offline-copy> --agent-id <agent-id> --dry-run
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_RUST_CACHE_ROOT = '<absolute-rust-cache-root>'
+npm run rust:cache -- cargo build -p Wardian --bin wardian-chat-cache-admin
+& '<rust-cache-root>\launcher-targets\<repo-key>\<worktree-key>\debug\wardian-chat-cache-admin.exe' verify-archive --home '<absolute-offline-copy>' --agent-id '<agent-id>' --dry-run
+```
+
+Verification compares measured legacy objects and owned archive payloads.
+Its report keeps deletion blocked even when the measured subset matches.
+The CLI rejects `--apply`.
+
 ## Startup restoration and configuration ownership
 
 Rename, reorder, and worktree enable/assign/disable acquire the cross-process

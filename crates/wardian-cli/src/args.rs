@@ -1403,6 +1403,12 @@ pub struct ArchiveVacancyArgs {
     pub approval_text: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SpawnRecoveryAction {
+    FinalizeRegistered,
+    LaunchIfAbsent,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
     /// Show one agent, or the managed session when no target is supplied.
@@ -1493,6 +1499,16 @@ pub enum AgentCommand {
         operation_id: String,
         #[arg(long, default_value = "60s")]
         timeout: String,
+    },
+    /// Ask the current desktop owner to recover an exact uncertain Codex spawn.
+    SpawnRecover {
+        operation_id: String,
+        #[arg(long)]
+        expected_attempt: String,
+        #[arg(long)]
+        expected_model: String,
+        #[arg(long, value_enum)]
+        action: SpawnRecoveryAction,
     },
     /// Update live agent configuration without restarting the provider process.
     Update {
@@ -2966,6 +2982,39 @@ mod tests {
             args.command,
             Some(AgentCommand::SpawnWait { operation_id: ref parsed, ref timeout })
                 if parsed == operation_id && timeout == "12s"
+        ));
+    }
+
+    #[test]
+    fn spawn_recovery_requires_action_attempt_and_exact_model_arguments() {
+        let operation = "b060d2ae-270d-4adc-a373-cbb2802d9c70";
+        let attempt = "b060d2ae-270d-4adc-a373-cbb2802d9c71";
+        let required = ["wardian", "agent", "spawn-recover", operation];
+        let flags = [
+            ["--action", "finalize-registered"],
+            ["--expected-attempt", attempt],
+            ["--expected-model", "fixture-model"],
+        ];
+        for missing in 0..flags.len() {
+            let args = required.into_iter().chain(
+                flags
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != missing)
+                    .flat_map(|(_, pair)| pair.iter().copied()),
+            );
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let cli =
+            Cli::try_parse_from(required.into_iter().chain(flags.into_iter().flatten())).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!()
+        };
+        assert!(matches!(args.command,
+            Some(AgentCommand::SpawnRecover {
+                operation_id, expected_attempt, expected_model,
+                action: SpawnRecoveryAction::FinalizeRegistered,
+            }) if operation_id == operation && expected_attempt == attempt && expected_model == "fixture-model"
         ));
     }
 

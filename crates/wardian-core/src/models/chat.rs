@@ -58,7 +58,7 @@ pub struct AgentChatEvent {
 }
 
 /// Bounded display headers shared by desktop and the authenticated remote API.
-/// Cursors and detail references are opaque and pinned to immutable objects.
+/// Cursors and detail references are opaque and pinned to producer evidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentChatPage {
     pub session_id: String,
@@ -68,7 +68,7 @@ pub struct AgentChatPage {
     /// Trusted ephemeral recent-preview owner; grants no canonical or ACK authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent_admission: Option<String>,
-    /// Complete scope-bound saved archive read while native capture is stopped.
+    /// Complete scope-bound read of saved archive records.
     /// Grants archive paging/detail only, never native admission or renewal.
     #[serde(default, skip_serializing_if = "is_false")]
     pub archive_read_ready: bool,

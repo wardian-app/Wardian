@@ -5,6 +5,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
+use wardian_core::durability::Durable;
 
 use serde::{Deserialize, Serialize};
 use wardian_core::{
@@ -178,7 +179,7 @@ fn restrictions(
         "unknown_before": source.unknown_before_offset,
         "disabled": source.disabled_spans, "open_disabled": source.open_disabled_from,
     })).map_err(io::Error::other)?;
-    Ok(super::chat_read_store::digest(&bytes))
+    Ok(super::storage::digest(&bytes))
 }
 
 fn current_fingerprint(
@@ -216,8 +217,8 @@ fn current_fingerprint(
             "archive adoption source policy disagrees with original privacy receipt",
         ));
     }
-    Ok(super::chat_read_store::digest(
-        &serde_json::to_vec(&(restrictions, super::chat_read_store::digest(&bytes)))
+    Ok(super::storage::digest(
+        &serde_json::to_vec(&(restrictions, super::storage::digest(&bytes)))
             .map_err(io::Error::other)?,
     ))
 }
@@ -317,7 +318,7 @@ fn sync_authorization(grant: &Grant) -> io::Result<()> {
         .read(true)
         .write(true)
         .open(history_path(&grant.agent_id)?)?
-        .sync_all()
+        .durable_sync_all()
 }
 
 fn append_audit(grant: &Grant) -> io::Result<()> {
@@ -344,13 +345,13 @@ fn append_audit(grant: &Grant) -> io::Result<()> {
     }
     let mut file = options.open(&path)?;
     file.write_all(&bytes)?;
-    file.sync_all()?;
+    file.durable_sync_all()?;
     #[cfg(unix)]
     File::open(
         path.parent()
             .ok_or_else(|| invalid("audit parent missing"))?,
     )?
-    .sync_all()?;
+    .durable_sync_all()?;
     Ok(())
 }
 
@@ -652,12 +653,7 @@ impl ConversationArchiveState {
             batch.next_cursor,
         );
         if let Some(candidate) = candidate {
-            if !self
-                .chat_projection
-                .defer_archive_adoption(&candidate.context, &candidate.conversation_id)?
-            {
-                self.publish_chat_candidate(candidate)?;
-            }
+            self.reconcile_archived_candidate(candidate)?;
         }
         #[cfg(all(test, feature = "adoption-throughput"))]
         profile::mark(&grant.agent_id, "adoption_appended", batch.next_cursor);
@@ -708,11 +704,11 @@ pub(super) fn sync_record_bodies(
             .read(true)
             .write(true)
             .open(artifacts.join(name))?
-            .sync_all()?;
+            .durable_sync_all()?;
     }
     #[cfg(unix)]
     if artifacts.exists() {
-        File::open(artifacts)?.sync_all()?;
+        File::open(artifacts)?.durable_sync_all()?;
     }
     Ok(())
 }
@@ -731,7 +727,7 @@ fn sync_archive(grant: &Grant) -> io::Result<()> {
             .write(true)
             .open(directory.join(name))
         {
-            Ok(file) => file.sync_all()?,
+            Ok(file) => file.durable_sync_all()?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
@@ -740,8 +736,8 @@ fn sync_archive(grant: &Grant) -> io::Result<()> {
         .read(true)
         .write(true)
         .open(storage::index_path(&grant.agent_id)?)?
-        .sync_all()?;
+        .durable_sync_all()?;
     #[cfg(unix)]
-    File::open(&directory)?.sync_all()?;
+    File::open(&directory)?.durable_sync_all()?;
     Ok(())
 }

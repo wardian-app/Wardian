@@ -230,7 +230,7 @@ fn aware_open_defers_qualification_and_native_selectors_bind_the_same_admission(
             captured.source_proof(),
         )
         .unwrap();
-    super::tests::finish_projection(&archive);
+    super::tests::finish_projection(&archive, &context);
     let canonical_ref = head("agent-1").unwrap().unwrap();
     let mut canonical_reader = store("agent-1").unwrap();
     let published: Head = canonical_reader.read(&canonical_ref).unwrap();
@@ -1148,7 +1148,7 @@ fn normalized_running_source_closes_in_place_and_replacement_retracts_the_bridge
             batch.source_proof(),
         )
         .unwrap();
-    super::tests::finish_projection(&archive);
+    super::tests::finish_projection(&archive, &context);
     let owner = &archive.chat_projection;
     let runtime = Arc::new(Mutex::new("Processing".into()));
     let receipt = owner.begin_recent(&source, &runtime).unwrap();
@@ -1229,14 +1229,14 @@ fn normalized_running_source_closes_in_place_and_replacement_retracts_the_bridge
     );
     archive
         .append_verified_provider_log_batch_with_context(
-            context,
+            context.clone(),
             &closed.events,
             Some(&batch.next),
             &closed.next,
             closed.source_proof(),
         )
         .unwrap();
-    super::tests::finish_projection(&archive);
+    super::tests::finish_projection(&archive, &context);
     source.current_status = "Idle".into();
     let completed = owner.recent_reader_with_hints(
         source.clone(),
@@ -1431,7 +1431,7 @@ fn native_source_index_generation_preserves_canonical_preview_binding_and_proven
             batch.source_proof(),
         )
         .unwrap();
-    super::tests::finish_projection(&archive);
+    super::tests::finish_projection(&archive, &context);
     let canonical_ref = head("agent-1").unwrap().unwrap();
     let canonical: Head = store("agent-1").unwrap().read(&canonical_ref).unwrap();
     let mut canonical_reader = store("agent-1").unwrap();
@@ -1667,14 +1667,14 @@ fn passive_bound_recent_refresh_keeps_empty_continuity_for_unchanged_and_unquali
         );
         archive
             .append_verified_provider_log_batch_with_context(
-                context,
+                context.clone(),
                 &batch.events,
                 None,
                 &batch.next,
                 batch.source_proof(),
             )
             .unwrap();
-        super::tests::finish_projection(&archive);
+        super::tests::finish_projection(&archive, &context);
         let owner = &archive.chat_projection;
         let runtime = Arc::new(Mutex::new("Idle".into()));
         let receipt = owner.begin_recent(&source, &runtime).unwrap();
@@ -2832,7 +2832,7 @@ fn native_status_only_closure_enriches_the_owned_request_after_restart() {
             live.source_proof(),
         )
         .unwrap();
-    super::tests::finish_projection(&archive);
+    super::tests::finish_projection(&archive, &context);
     // The live recent preview can still contain an uncommitted mirror. Demand
     // canonical history explicitly; preview identity is a separate capability.
     let canonical_page = || {
@@ -2898,7 +2898,7 @@ fn native_status_only_closure_enriches_the_owned_request_after_restart() {
             closed.source_proof(),
         )
         .unwrap();
-    super::tests::finish_projection(&restarted);
+    super::tests::finish_projection(&restarted, &context);
     assert_eq!(
         fs::read(directory.join("conversation.jsonl")).unwrap(),
         records_before
@@ -3084,7 +3084,7 @@ fn normalized_codex_mirrors_keep_canonical_presentation_on_public_recent_reads()
             batch.source_proof(),
         )
         .unwrap();
-    super::tests::finish_projection(&archive);
+    super::tests::finish_projection(&archive, &context);
     // The preview identity bridge is deferred. Exercise a canonical history
     // demand using the cursor issued by the existing bounded canonical reader.
     let head_ref = head("agent-1").unwrap().unwrap();
@@ -3307,7 +3307,7 @@ fn claude_preview_qualifies_with_captured_large_bookkeeping_and_a_provisional_ta
             captured.source_proof(),
         )
         .unwrap();
-    super::tests::finish_projection(&archive);
+    super::tests::finish_projection(&archive, &context);
     let settle_native = || {
         for _ in 0..16 {
             if !advance_source_index(&source).unwrap() {

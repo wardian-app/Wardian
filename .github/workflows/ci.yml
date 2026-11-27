@@ -118,7 +118,7 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Test
         # local-verify: backend
-        run: cargo test --workspace --all-targets -- --test-threads=1
+        run: node scripts/rust-test-time-budget.mjs cargo test --workspace --all-targets -- --test-threads=1
 
       - name: Run Rust documentation tests
         # local-verify: backend

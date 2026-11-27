@@ -81,7 +81,7 @@ investigation and must not be hidden by changing the fixture expectation.
 ## Changing verification
 
 Edit the marked commands in `.github/workflows/ci.yml`, then update and run
-`src/verify-ci.test.ts`. Keep documentation tests in the sequence when changing
+`src/config/ciWorkflow.test.ts`. Keep documentation tests in the sequence when changing
 Cargo target flags. Add invalid-input cases when extending the runner syntax;
 do not infer a default category from malformed input.
 

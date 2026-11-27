@@ -354,17 +354,20 @@ pub(super) async fn inject_initial_context(
     client: &CodexSharedClient,
     id: &str,
     context: &str,
+    lease: Option<RecoveryRequestLease<'_>>,
 ) -> Result<(), CodexSharedError> {
     // This observed ID is not yet a client binding. Acknowledged developer
     // context materializes a fresh rollout without submitting a model turn.
     let result = client
-        .request_with_timeout(
+        .attachment_request(
             "thread/inject_items",
             json!({
                 "threadId":id,"items":[{"type":"message","role":"developer",
                 "content":[{"type":"input_text","text":context}]}]
             }),
-            STARTUP_TIMEOUT,
+            id,
+            lease,
+            None,
         )
         .await?;
     if result != json!({}) {

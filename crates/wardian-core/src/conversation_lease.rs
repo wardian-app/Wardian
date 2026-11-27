@@ -391,6 +391,18 @@ pub fn load_leases_checked() -> Result<Vec<ConversationLease>, String> {
     Ok(file.leases)
 }
 
+/// Run a read-only inspection while the ordinary cross-process lease writers
+/// are excluded. The callback must not acquire a conversation lease.
+pub(crate) fn inspect_leases_locked<T>(
+    inspect: impl FnOnce(&[ConversationLease]) -> T,
+) -> Result<T, String> {
+    let _process_guard = LEASE_FILE_LOCK
+        .lock()
+        .map_err(|_| "conversation lease lock poisoned".to_string())?;
+    let _file_guard = acquire_lease_file_lock()?;
+    Ok(inspect(&load_leases_checked()?))
+}
+
 pub fn save_leases(leases: &[ConversationLease]) -> std::io::Result<()> {
     let path = lease_path()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no wardian home"))?;
@@ -559,6 +571,112 @@ pub fn renew_lease_owner_persisted(
     save_leases(&leases)
         .map_err(|error| format!("failed to save conversation lease renewal: {error}"))?;
     Ok(true)
+}
+
+/// The witnessed launch can change native scope once, from empty to its new
+/// rollout. Clock and conflict checks share the file-locked renewal.
+pub enum CodexRecoveryLeaseScope<'a> {
+    Current,
+    Exact {
+        agent_id: &'a str,
+        native_id: &'a str,
+    },
+    Attach {
+        agent_id: &'a str,
+        native_id: &'a str,
+    },
+}
+
+pub fn refresh_codex_recovery_lease_persisted(
+    owner: &ConversationLeaseOwner,
+    duration: chrono::Duration,
+    scope: CodexRecoveryLeaseScope<'_>,
+) -> Result<bool, String> {
+    let _process_guard = LEASE_FILE_LOCK
+        .lock()
+        .map_err(|_| "conversation lease lock poisoned".to_string())?;
+    let _file_guard = acquire_lease_file_lock()?;
+    let mut leases = load_leases_checked()?;
+    let now = chrono::Utc::now();
+    let Some((index, target)) = active_codex_recovery_lease(&leases, owner, scope, now) else {
+        return Ok(false);
+    };
+    let target = target.to_owned();
+    let lease = &mut leases[index];
+    lease.resume_session = target;
+    lease.heartbeat_at = now.to_rfc3339();
+    lease.expires_at = (now + duration).to_rfc3339();
+    save_leases(&leases)
+        .map_err(|error| format!("failed to save Codex recovery lease refresh: {error}"))?;
+    Ok(true)
+}
+
+/// Fence synchronous publication until its commit. The callback must not
+/// acquire a conversation lease.
+pub fn with_exact_codex_recovery_lease<T>(
+    owner: &ConversationLeaseOwner,
+    agent_id: &str,
+    native_id: &str,
+    publish: impl FnOnce(chrono::DateTime<chrono::Utc>) -> T,
+) -> Result<Option<T>, String> {
+    inspect_leases_locked(|leases| {
+        active_codex_recovery_lease(
+            leases,
+            owner,
+            CodexRecoveryLeaseScope::Exact {
+                agent_id,
+                native_id,
+            },
+            chrono::Utc::now(),
+        )
+        .and_then(|(index, _)| parse_rfc3339_utc(&leases[index].expires_at))
+        .map(publish)
+    })
+}
+
+fn active_codex_recovery_lease<'a>(
+    leases: &'a [ConversationLease],
+    owner: &ConversationLeaseOwner,
+    scope: CodexRecoveryLeaseScope<'a>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(usize, &'a str)> {
+    let index = leases
+        .iter()
+        .position(|lease| lease_matches_owner(lease, owner))?;
+    let current = &leases[index];
+    if current.owner_kind != "agent_lifecycle"
+        || current.mode != "lifecycle_transition"
+        || current.provider != "codex"
+        || !parse_rfc3339_utc(&current.expires_at).is_some_and(|expiry| expiry > now)
+    {
+        return None;
+    }
+    let target = match scope {
+        CodexRecoveryLeaseScope::Current => current.resume_session.as_str(),
+        CodexRecoveryLeaseScope::Exact {
+            agent_id,
+            native_id,
+        } if current.agent_id == agent_id && current.resume_session == native_id => native_id,
+        CodexRecoveryLeaseScope::Attach {
+            agent_id,
+            native_id,
+        } if current.agent_id == agent_id
+            && current.resume_session.is_empty()
+            && !native_id.is_empty() =>
+        {
+            native_id
+        }
+        _ => return None,
+    };
+    if leases.iter().enumerate().any(|(other_index, other)| {
+        other_index != index
+            && (lease_conflicts(other, &current.agent_id, target, now)
+                || (other.mode == "uncertain_previous_provider"
+                    && other.agent_id == current.agent_id))
+    }) {
+        return None;
+    }
+    Some((index, target))
 }
 
 /// Atomically retarget an exact active lifecycle acquisition to the provider

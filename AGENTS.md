@@ -12,7 +12,7 @@ linked from here — do not copy them back into this file.
 
 ## ✅ Pre-Commit Checklist
 
-1. **Validate**: `npm run verify:ci` (narrow with `--only <frontend|backend|docs>`). It reads the authoritative steps from `.github/workflows/ci.yml`.
+1. **Validate**: iterate with focused tests, then run `npm run verify:ci` once on the final candidate (narrow with `--only <frontend|backend|docs>`). It reads the authoritative steps from `.github/workflows/ci.yml`. Hosted CI covers later fixes and rebases; do not rerun the full local gate for them.
 2. **Document**: a new spec in `docs/specs/` for strategic decisions; update the affected guide in `docs/guide/` or `docs/developer/`, checking [`docs-maintenance.md`](docs/developer/docs-maintenance.md) for release notes, public links, and screenshot refresh; JSDoc or Rust docstrings on public APIs and complex logic.
 3. **Check safety**: no API keys, credentials, or `.env` files staged; `git status` shows only intended files; semantic commit message.
 
@@ -62,6 +62,8 @@ Write a test at the **lowest** layer that can prove the behavior:
 | Real provider E2E | opt-in env vars | provider spawn and token behavior | — |
 
 If a browser E2E test needs a higher layer to be meaningful, wrap it in `test.skip(...)` with a `// @native-only` or `// @real-provider-only` comment so the gap is explicit and machine-readable rather than silently absent.
+
+Fewer, cheaper tests. Add a test only for behavior no existing test pins; extend the existing test otherwise. Do not write tests that restate the implementation. Use the smallest fixture that crosses the boundary under test. CI fails any Rust test over its budget in [`scripts/rust-test-time-budget.json`](scripts/rust-test-time-budget.json); make the test cheaper rather than raising its entry.
 
 **Screenshots** are feature-specific PR evidence, not CI artifacts: capture only the interaction or state your PR changed, write it under `e2e/screenshots/<feature>/<timestamp>/`, and embed it in the PR body as an HTTPS image. `npm run check:frontend-screenshot` fails frontend PRs without one; a local path is not enough. Upload with the `gh attach` extension against the linked issue — see [`docs/developer/screenshot-documentation.md`](docs/developer/screenshot-documentation.md#pr-evidence-upload-cli).
 

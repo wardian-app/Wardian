@@ -31,7 +31,7 @@ pub(crate) fn persisted_identity_plan(
 }
 
 pub(crate) struct PreparedAgentSpawn {
-    pub(super) config: AgentConfig,
+    pub(crate) config: AgentConfig,
     actual_resume: Option<String>,
     bootstrap_provider_session: bool,
     codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
@@ -90,6 +90,36 @@ pub(crate) fn prepare_durable_agent_spawn(
     request: wardian_core::agent_spawn::AgentSpawnRequest,
     plan: wardian_core::agent_spawn::AgentSpawnPlan,
 ) -> Result<PreparedAgentSpawn, String> {
+    let mut prepared = prepare_durable_config(request, &plan)?;
+    let attempt_id = plan
+        .attempt_id
+        .as_deref()
+        .ok_or_else(|| "durable spawn operation has no active attempt".to_string())?;
+    if !wardian_core::agent_spawn::set_prepared_identity(
+        &plan.operation.operation_id,
+        attempt_id,
+        &prepared.config.agent_class,
+        &prepared.config.folder,
+    )? {
+        return Err("durable spawn operation lost its preparation claim".into());
+    }
+    if prepared.config.provider == "codex" {
+        let descriptor = capture_codex_context(&mut prepared)?;
+        if !wardian_core::agent_spawn::record_launch_context(
+            &plan.operation.operation_id,
+            attempt_id,
+            &descriptor,
+        )? {
+            return Err("durable spawn operation lost its policy preparation claim".into());
+        }
+    }
+    Ok(prepared)
+}
+
+fn prepare_durable_config(
+    request: wardian_core::agent_spawn::AgentSpawnRequest,
+    plan: &wardian_core::agent_spawn::AgentSpawnPlan,
+) -> Result<PreparedAgentSpawn, String> {
     let mut config_override = AgentConfig {
         provider: request.provider.clone(),
         ..Default::default()
@@ -110,36 +140,53 @@ pub(crate) fn prepare_durable_agent_spawn(
     };
     let identity = persisted_identity_plan(
         &request.provider,
-        plan.operation.agent_id,
-        plan.provider_session_id,
+        plan.operation.agent_id.clone(),
+        plan.provider_session_id.clone(),
     );
-    let mut prepared = prepare_agent_spawn(spawn_request, identity, plan.operation.agent_name)?;
-    let attempt_id = plan
-        .attempt_id
-        .as_deref()
-        .ok_or_else(|| "durable spawn operation has no active attempt".to_string())?;
-    if !wardian_core::agent_spawn::set_prepared_identity(
-        &plan.operation.operation_id,
-        attempt_id,
-        &prepared.config.agent_class,
-        &prepared.config.folder,
-    )? {
-        return Err("durable spawn operation lost its preparation claim".into());
-    }
-    if prepared.config.provider == "codex" {
-        let context = crate::utils::codex_home::CodexLaunchContext::capture(&prepared.config)
-            .map_err(|_| "Codex launch policy or source could not be captured".to_string())?;
-        let descriptor = context.descriptor_json()?;
-        if !wardian_core::agent_spawn::record_launch_context(
-            &plan.operation.operation_id,
-            attempt_id,
-            &descriptor,
-        )? {
-            return Err("durable spawn operation lost its policy preparation claim".into());
-        }
-        prepared.codex_launch_context = Some(std::sync::Arc::new(context));
+    prepare_agent_spawn(spawn_request, identity, plan.operation.agent_name.clone())
+}
+
+fn capture_codex_context(prepared: &mut PreparedAgentSpawn) -> Result<String, String> {
+    let context = crate::utils::codex_home::CodexLaunchContext::capture(&prepared.config)
+        .map_err(|_| "Codex launch policy or source could not be captured".to_string())?;
+    let descriptor = context.descriptor_json()?;
+    prepared.codex_launch_context = Some(std::sync::Arc::new(context));
+    Ok(descriptor)
+}
+
+pub(crate) fn prepare_recovery_launch(
+    witness: &wardian_core::agent_spawn::recovery::WitnessedLaunch,
+    model: &str,
+) -> Result<PreparedAgentSpawn, String> {
+    let plan = &witness.plan;
+    let mut request = plan.request.clone();
+    request.model = Some(model.to_owned());
+    let mut prepared = prepare_durable_config(request, plan)?;
+    if prepared.config.session_id != plan.operation.agent_id
+        || prepared.config.session_name != plan.operation.agent_name
+        || prepared.config.agent_class != plan.operation.class
+        || Some(prepared.config.folder.as_str()) != plan.prepared_workspace.as_deref()
+        || prepared.config.provider != "codex"
+        || prepared.config.model.as_deref() != Some(model)
+        || !prepared.bootstrap_provider_session
+        || prepared.actual_resume.is_some()
+        || capture_codex_context(&mut prepared)? != witness.launch_context_json
+    {
+        return Err("The prepared Codex launch no longer matches the witnessed inputs.".into());
     }
     Ok(prepared)
+}
+
+pub(crate) struct RecoveryBootstrap {
+    pub lease: wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+    pub roster: wardian_core::agent_replacement::AgentRosterBarrier,
+    pub lifecycle: tokio::sync::OwnedMutexGuard<()>,
+    pub heartbeat: std::sync::Arc<LifecycleLeaseHeartbeat>,
+}
+
+pub(crate) struct RecoveryRegistrationLease {
+    pub lease: wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+    pub heartbeat: std::sync::Arc<LifecycleLeaseHeartbeat>,
 }
 
 pub(crate) async fn launch_prepared_agent_spawn(
@@ -148,6 +195,7 @@ pub(crate) async fn launch_prepared_agent_spawn(
     app: &AppHandle,
     legacy_name_claim_owner: Option<String>,
     durable_operation: Option<(String, String)>,
+    recovery: Option<RecoveryBootstrap>,
 ) -> Result<super::codex_onboarding::RegisteredAgentSpawn, String> {
     if let Some(owner_id) = legacy_name_claim_owner.as_deref() {
         wardian_core::agent_spawn::begin_legacy_name_effects(
@@ -155,8 +203,73 @@ pub(crate) async fn launch_prepared_agent_spawn(
             &prepared.config.session_id,
         )?;
     }
+    let inherited_lease =
+        bootstrap_prepared_agent_spawn(&mut prepared, durable_operation.as_ref(), recovery).await?;
+    let session_name = prepared.config.session_name.clone();
+    register_new_agent(
+        prepared.config,
+        prepared.actual_resume,
+        state,
+        app,
+        AgentRegistrationOptions {
+            clone_name_base: None,
+            reserved_session_name: Some(&session_name),
+            name_claim_owner_id: legacy_name_claim_owner.as_deref(),
+            placement: configured_new_agent_order_placement(),
+            emit_roster_update: true,
+        },
+        prepared.codex_launch_context,
+        inherited_lease,
+    )
+    .await
+}
+
+/// Materialize and record the native identity before handing the acquisition
+/// to provisional registration. The recovery branch cannot run Codex exec.
+pub(crate) async fn bootstrap_prepared_agent_spawn(
+    prepared: &mut PreparedAgentSpawn,
+    durable_operation: Option<&(String, String)>,
+    recovery: Option<RecoveryBootstrap>,
+) -> Result<Option<RecoveryRegistrationLease>, String> {
+    use wardian_core::conversation_lease::CodexRecoveryLeaseScope;
+    let recovery_only = recovery.is_some();
+    let recovery = if let Some(RecoveryBootstrap {
+        lease,
+        roster,
+        lifecycle,
+        heartbeat,
+    }) = recovery
+    {
+        let context = prepared
+            .codex_launch_context
+            .as_ref()
+            .ok_or("The recovery launch context is unavailable")?;
+        context.revalidate()?;
+        let mut lease = lease;
+        heartbeat.ensure_codex_recovery_scope(
+            "bootstrap Codex recovery",
+            CodexRecoveryLeaseScope::Exact {
+                agent_id: &prepared.config.session_id,
+                native_id: "",
+            },
+        )?;
+        manager::spawn::check_provider_spawn_candidates(&prepared.config)?;
+        lease.retain_on_drop();
+        Some(RecoveryBootstrap {
+            lease,
+            roster,
+            lifecycle,
+            heartbeat,
+        })
+    } else {
+        None
+    };
     if prepared.bootstrap_provider_session {
-        let cwd = crate::utils::fs::resolve_cwd(&prepared.config.folder, "");
+        let cwd = if recovery_only {
+            crate::utils::fs::validate_exact_spawn_workspace(&prepared.config.folder)?
+        } else {
+            crate::utils::fs::resolve_cwd(&prepared.config.folder, "")
+        };
         let provider_session_id = if let Some(context) = prepared.codex_launch_context.as_ref() {
             manager::headless::obtain_session_id_with_codex_context(
                 &cwd,
@@ -164,8 +277,10 @@ pub(crate) async fn launch_prepared_agent_spawn(
                 Some(&prepared.config),
                 context,
                 durable_operation
-                    .as_ref()
                     .map(|(operation_id, attempt_id)| (operation_id.as_str(), attempt_id.as_str())),
+                recovery
+                    .as_ref()
+                    .map(|recovery| recovery.heartbeat.as_ref()),
             )
             .await
         } else {
@@ -177,7 +292,7 @@ pub(crate) async fn launch_prepared_agent_spawn(
             .await
         }
         .map_err(|error| format!("Failed to initialize the provider session: {error}"))?;
-        if let Some((operation_id, attempt_id)) = durable_operation.as_ref() {
+        if let Some((operation_id, attempt_id)) = durable_operation {
             if !wardian_core::agent_spawn::record_provider_session_id(
                 operation_id,
                 attempt_id,
@@ -193,20 +308,18 @@ pub(crate) async fn launch_prepared_agent_spawn(
         prepared.actual_resume = Some(provider_session_id);
     }
 
-    let session_name = prepared.config.session_name.clone();
-    register_new_agent(
-        prepared.config,
-        prepared.actual_resume,
-        state,
-        app,
-        AgentRegistrationOptions {
-            clone_name_base: None,
-            reserved_session_name: Some(&session_name),
-            name_claim_owner_id: legacy_name_claim_owner.as_deref(),
-            placement: configured_new_agent_order_placement(),
-            emit_roster_update: true,
+    // Provisional registration acquires both barriers again. Persisted
+    // exclusion survives that handoff and is retargeted to the native ID.
+    Ok(recovery.map(
+        |RecoveryBootstrap {
+             lease,
+             roster,
+             lifecycle,
+             heartbeat,
+         }| {
+            drop(roster);
+            drop(lifecycle);
+            RecoveryRegistrationLease { lease, heartbeat }
         },
-        prepared.codex_launch_context,
-    )
-    .await
+    ))
 }

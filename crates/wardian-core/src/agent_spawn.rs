@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 mod legacy_names;
+pub mod recovery;
 mod removal;
 pub(crate) use legacy_names::delete_removed_agent_claims;
 pub use legacy_names::{
@@ -105,6 +106,8 @@ pub struct AgentSpawnOperation {
     pub provider: String,
     pub class: String,
     pub state: AgentSpawnState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,6 +164,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     ensure_spawn_column(conn, "first_native_generation", "INTEGER")?;
     ensure_spawn_column(conn, "first_native_allowed_generation", "INTEGER")?;
     ensure_spawn_column(conn, "first_native_published", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_spawn_column(conn, "codex_pre_effect_fence_version", "INTEGER")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_spawn_queue
          ON agent_spawn_operations(state, created_at, operation_id)",
@@ -186,6 +190,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
     legacy_names::migrate(conn)?;
+    recovery::migrate(conn)?;
     Ok(())
 }
 
@@ -340,6 +345,7 @@ pub fn recover_after_owner_acquired() -> Result<Vec<String>, String> {
         // unconsumed old-owner permission before restore can allocate one again.
         tx.execute("UPDATE agent_spawn_operations SET first_native_allowed_generation = NULL
             WHERE first_native_session_id IS NULL", [])?;
+        recovery::record_pre_effect_witnesses(&tx, &now)?;
         tx.execute(
             "UPDATE agent_spawn_operations
              SET state = 'outcome_unknown', updated_at = ?1,
@@ -429,8 +435,14 @@ pub fn record_launch_context(
 ) -> Result<bool, String> {
     crate::db::get_db_conn(|conn| {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        // Codex has only captured launch inputs here. The worker must still
+        // win mark_launching before materializing a thread or starting Codex.
         let changed = conn.execute(
-            "UPDATE agent_spawn_operations SET launch_context_json = ?3, updated_at = ?4
+            "UPDATE agent_spawn_operations SET launch_context_json = ?3, updated_at = ?4,
+                 codex_pre_effect_fence_version = CASE
+                     WHEN provider = 'codex' AND length(prepared_workspace) > 0
+                         AND provider_session_id IS NULL THEN 1
+                 END
              WHERE operation_id = ?1 AND attempt_id = ?2 AND state = 'preparing'",
             params![operation_id, attempt_id, descriptor_json, now],
         )?;
@@ -522,6 +534,54 @@ pub fn mark_registered(
     attempt_id: &str,
     provider_session_id: Option<&str>,
 ) -> Result<bool, String> {
+    mark_registered_if_active(operation_id, attempt_id, provider_session_id, |_, _| {
+        Ok(true)
+    })
+    .map(|committed| committed.unwrap_or(false))
+}
+
+/// Verify the captured Codex acquisition under the lease-file lock, then hold
+/// that exclusion through the ordinary registration and name-claim commit.
+/// None means the exact lease cannot authorize publication.
+pub fn mark_codex_recovery_registered(
+    operation_id: &str,
+    attempt_id: &str,
+    owner: &crate::conversation_lease::ConversationLeaseOwner,
+    agent_id: &str,
+    native_id: &str,
+) -> Result<Option<bool>, String> {
+    match crate::conversation_lease::with_exact_codex_recovery_lease(
+        owner,
+        agent_id,
+        native_id,
+        |expiry| {
+            mark_registered_if_active(
+                operation_id,
+                attempt_id,
+                Some(native_id),
+                |tx, planned_agent| {
+                    let exact: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM agent_spawn_codex_launch_audit
+                     WHERE operation_id=?1 AND accepted_attempt_id=?2 AND lease_acquisition_id=?3)",
+                        params![operation_id, attempt_id, owner.acquisition_id],
+                        |row| row.get(0),
+                    )?;
+                    Ok(exact && planned_agent == agent_id && expiry > chrono::Utc::now())
+                },
+            )
+        },
+    ) {
+        Ok(Some(result)) => result,
+        Ok(None) | Err(_) => Ok(None),
+    }
+}
+
+fn mark_registered_if_active(
+    operation_id: &str,
+    attempt_id: &str,
+    provider_session_id: Option<&str>,
+    still_active: impl FnOnce(&Connection, &str) -> rusqlite::Result<bool>,
+) -> Result<Option<bool>, String> {
     crate::db::get_db_conn(|conn| {
         let tx = conn.unchecked_transaction()?;
         let Some((agent_id, name, provider, class, expected_provider_session_id, state)) = tx
@@ -542,13 +602,13 @@ pub fn mark_registered(
             .optional()?
         else {
             tx.commit()?;
-            return Ok(false);
+            return Ok(Some(false));
         };
         if state != "launching"
             || expected_provider_session_id.as_deref() != provider_session_id
         {
             tx.commit()?;
-            return Ok(false);
+            return Ok(Some(false));
         }
         let persisted = tx
             .query_row(
@@ -567,7 +627,7 @@ pub fn mark_registered(
                 || persisted_class.as_deref() != Some(class.as_str())
         }) {
             tx.commit()?;
-            return Ok(false);
+            return Ok(Some(false));
         }
         let owned_claim: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_name_claims
@@ -577,7 +637,7 @@ pub fn mark_registered(
         )?;
         if !owned_claim {
             tx.commit()?;
-            return Ok(false);
+            return Ok(Some(false));
         }
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let changed = tx.execute(
@@ -599,8 +659,11 @@ pub fn mark_registered(
                 .into());
             }
         }
+        if changed == 1 && !still_active(&tx, &agent_id)? {
+            return Ok(None);
+        }
         tx.commit()?;
-        Ok(changed == 1)
+        Ok(Some(changed == 1))
     })
     .map_err(|error| error.to_string())
 }
@@ -781,26 +844,25 @@ fn load_plan_with_conn(
     let Some(operation) = load_operation_with_conn(conn, operation_id)? else {
         return Ok(None);
     };
-    let (request_json, provider_session_id, attempt_id, prepared_workspace, first_native_session_id, first_native_published): (
+    let (request_json, provider_session_id, prepared_workspace, first_native_session_id, first_native_published): (
         String,
-        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
         bool,
     ) = conn.query_row(
-        "SELECT request_json, provider_session_id, attempt_id, prepared_workspace, first_native_session_id, first_native_published
+        "SELECT request_json, provider_session_id, prepared_workspace, first_native_session_id, first_native_published
              FROM agent_spawn_operations WHERE operation_id = ?1",
         params![operation_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     )?;
     let request = serde_json::from_str(&request_json)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     Ok(Some(AgentSpawnPlan {
+        attempt_id: operation.attempt_id.clone(),
         operation,
         request,
         provider_session_id,
-        attempt_id,
         prepared_workspace,
         first_native_session_id,
         first_native_published,
@@ -813,7 +875,7 @@ fn load_operation_with_conn(
 ) -> rusqlite::Result<Option<AgentSpawnOperation>> {
     conn.query_row(
         "SELECT operation_id, planned_agent_id, session_name, provider, class,
-                state, created_at, updated_at, error_code, error_message
+                state, created_at, updated_at, error_code, error_message, attempt_id
          FROM agent_spawn_operations WHERE operation_id = ?1",
         params![operation_id],
         |row| {
@@ -828,6 +890,7 @@ fn load_operation_with_conn(
                 updated_at: row.get(7)?,
                 error_code: row.get(8)?,
                 error_message: row.get(9)?,
+                attempt_id: row.get(10)?,
             })
         },
     )
@@ -1282,6 +1345,29 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        assert_eq!(
+            mark_registered_if_active(
+                &operation_id,
+                &attempt,
+                Some("provider-session"),
+                |_, _| Ok(false)
+            )
+            .unwrap(),
+            None,
+        );
+        assert_eq!(
+            get(&operation_id).unwrap().unwrap().state,
+            AgentSpawnState::Launching
+        );
+        let owner = crate::db::get_db_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT owner_kind FROM agent_name_claims WHERE session_name = 'Registered'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?)
+        })
+        .unwrap();
+        assert_eq!(owner, "operation");
         assert!(!mark_registered(
             &operation_id,
             &uuid::Uuid::new_v4().to_string(),

@@ -6,11 +6,13 @@ import { holdsBoundChatWindow, qualifiedChatPreviewBridge } from "./chatPreviewI
 import { applyChatPage, canAdmitOlderChatPage, chatRecentRefreshDelay, type ChatWindowDirection } from "./chatReadState";
 import {
   ChatRevalidationError,
+  archiveStepDisplayRevision,
   chatNeedsRevalidation,
   chatPageScopeAllowsOrdinaryRead,
   chatPageScopeRelation,
   chatRevalidationKey,
   isArchiveReadPage,
+  isPositionedArchiveReset,
   revalidateChatWindow,
 } from "./chatRevalidation";
 
@@ -69,12 +71,15 @@ function patchLoadedChatMembers(current: AgentChatEvent[], next: AgentChatPage):
   const loaded = new Map(current.map((event) => [event.id, event]));
   const aliases = next.aliases.filter((alias) => loaded.has(alias.observation_id));
   const observations = new Map(aliases.map((alias) => [alias.canonical_id, alias.observation_id]));
+  const positioned = !next.reset && isArchiveReadPage(next);
   const events = next.events.flatMap((event) => {
     const old = loaded.get(event.id) ?? loaded.get(observations.get(event.id) ?? "");
     if (!old || event.session_id !== next.session_id) return [];
     const oldBinding = old.metadata.chat_body_binding;
     const binding = event.metadata.chat_body_binding;
-    // A conflicting body identity cannot overwrite a readable prefix.
+    if (positioned && old.id === event.id && old.metadata.chat_archive_positioned === true
+      && (binding !== oldBinding || event.metadata.chat_body_unavailable === true)) return [event];
+    // An unproved conflicting body identity cannot overwrite a readable prefix.
     if (oldBinding !== undefined && binding !== undefined && oldBinding !== binding) return [];
     const metadata = { ...old.metadata, ...event.metadata };
     if (old.metadata.chat_body_pending === false) metadata.chat_body_pending = false;
@@ -273,7 +278,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
           if (previous && scopeRelation === "unknown") {
             throw new ChatRevalidationError("Chat source scope is incomplete. The current window and history position were kept; retry Chat.");
           }
-          if (previous && scopeRelation === "changed") {
+          if (previous && (scopeRelation === "changed" || isPositionedArchiveReset(next))) {
             settleOlderDemand();
             olderCursor.current = null;
             windowDirection.current = "recent";
@@ -308,9 +313,12 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
             if (epoch !== scope.current || requestedWindow !== windowVersion.current) return;
             forceRecentRead.current = false;
             setEvents(patched);
-            const updated = { ...latest.current!, revision: next.revision, progress: next.progress, presentation: next.presentation,
-              events: next.events, aliases: next.aliases, removed_ids: next.removed_ids,
-              archive_read_ready: isArchiveReadPage(next) ? true : undefined,
+            const retainedPresentation = next.unchanged && isArchiveReadPage(next);
+            const updated = { ...latest.current!, revision: next.revision, progress: next.progress,
+              presentation: retainedPresentation ? latest.current!.presentation : next.presentation,
+              events: retainedPresentation ? latest.current!.events : next.events,
+              aliases: next.aliases, removed_ids: next.removed_ids,
+              archive_read_ready: next.archive_read_ready === true && isArchiveReadPage(next) ? true : undefined,
               next_before: olderCursor.current?.before ?? latest.current!.next_before };
             latest.current = updated; setPage(updated); setError(null);
             failedReadDirection.current = "recent";
@@ -324,7 +332,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
               recentBetweenOlder.current = true;
               // Empty index work is an intermediate response to the same user demand.
               const updated = { ...latest.current!, progress: next.progress,
-                archive_read_ready: isArchiveReadPage(next) ? true : undefined };
+                archive_read_ready: next.archive_read_ready === true && isArchiveReadPage(next) ? true : undefined };
               latest.current = updated; setPage(updated);
             } else {
               if (next.reset && next.older_page === true && ordinaryCompatible) {
@@ -346,7 +354,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
                 setEvents(candidate);
                 const updated = { ...latest.current!, revision: next.revision, progress: next.progress, presentation: next.presentation,
                   events: next.events, aliases: next.aliases, removed_ids: next.removed_ids,
-                  archive_read_ready: isArchiveReadPage(next) ? true : undefined,
+                  archive_read_ready: next.archive_read_ready === true && isArchiveReadPage(next) ? true : undefined,
                   next_before: olderCursor.current?.before ?? latest.current!.next_before };
                 latest.current = updated; setPage(updated); setError(null);
               } else {
@@ -377,7 +385,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
               latest.current = updated; setPage(updated);
             } else if (latest.current) {
               const updated = { ...latest.current, progress: next.progress,
-                archive_read_ready: isArchiveReadPage(next) ? true : undefined,
+                archive_read_ready: next.archive_read_ready === true && isArchiveReadPage(next) ? true : undefined,
                 bytes_read: next.bytes_read, records_decoded: next.records_decoded };
               latest.current = updated; setPage(updated);
             }
@@ -512,6 +520,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
     const source = latest.current?.source_epoch;
     const admission = latest.current?.recent_admission;
     const revision = latest.current?.revision;
+    const detailRevision = step ? archiveStepDisplayRevision(latest.current, detailRef) ?? revision : revision;
     const archiveRead = latest.current !== null && isArchiveReadPage(latest.current);
     const requestedWindow = windowVersion.current;
     const currentScope = () => epoch === scope.current && requestedWindow === windowVersion.current
@@ -537,7 +546,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
         ...(qualifiedChatPreviewBridge(latest.current) ? { revision: latest.current!.revision } : {}) });
       if (!currentScope() || next.generation !== generation || next.conversation_id !== conversation
         || next.source_epoch !== source || next.recent_admission !== admission || next.session_id !== sessionId
-        || isArchiveReadPage(next) !== archiveRead || (step ? next.revision !== revision || chatPresentationV1(next)?.detail?.revision !== revision : !next.detail)) {
+        || isArchiveReadPage(next) !== archiveRead || (step ? next.revision !== detailRevision || chatPresentationV1(next)?.detail?.revision !== detailRevision : !next.detail)) {
         throw new Error("Conversation changed during detail read");
       }
       return next;
