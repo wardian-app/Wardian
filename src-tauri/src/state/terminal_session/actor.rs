@@ -96,6 +96,7 @@ enum TerminalRuntimeInput {
 #[derive(Clone)]
 pub struct TerminalRuntimeHandles {
     input_tx: TerminalRuntimeInput,
+    external_input_ready: Option<Arc<AtomicBool>>,
     resize: Arc<ResizeHandler>,
     ignore_scrollback_erase: bool,
     reset_parser_on_scrollback_erase: bool,
@@ -227,6 +228,7 @@ impl TerminalRuntimeHandles {
     {
         Self {
             input_tx: TerminalRuntimeInput::Legacy(input_tx),
+            external_input_ready: None,
             resize: Arc::new(resize),
             ignore_scrollback_erase: false,
             reset_parser_on_scrollback_erase: false,
@@ -244,6 +246,7 @@ impl TerminalRuntimeHandles {
     {
         Self {
             input_tx: TerminalRuntimeInput::Acknowledged(input_tx),
+            external_input_ready: None,
             resize: Arc::new(resize),
             ignore_scrollback_erase: false,
             reset_parser_on_scrollback_erase: false,
@@ -252,6 +255,13 @@ impl TerminalRuntimeHandles {
 
     fn acknowledges_native_writes(&self) -> bool {
         matches!(&self.input_tx, TerminalRuntimeInput::Acknowledged(_))
+    }
+
+    /// Block external writes to this provisional runtime while allowing its
+    /// generation-scoped terminal handshake responses.
+    pub(crate) fn gate_external_input(mut self, ready: Arc<AtomicBool>) -> Self {
+        self.external_input_ready = Some(ready);
+        self
     }
 
     /// Keeps the broker's canonical history when a provider emits ED3.
@@ -872,7 +882,20 @@ impl TerminalSessionBroker {
         runtime: TerminalRuntimeHandles,
         geometry: TerminalGeometry,
     ) -> Result<u64, TerminalBrokerError> {
-        self.start_or_replace_session(session_id, Some(runtime), geometry, &[])
+        self.start_or_replace_runtime_captured(session_id, runtime, geometry, |_| {})
+            .await
+    }
+
+    /// Give a retained startup guard the actual generation before the actor
+    /// becomes reachable or replacement cleanup can suspend this call.
+    pub(crate) async fn start_or_replace_runtime_captured(
+        &self,
+        session_id: &str,
+        runtime: TerminalRuntimeHandles,
+        geometry: TerminalGeometry,
+        capture: impl FnOnce(u64),
+    ) -> Result<u64, TerminalBrokerError> {
+        self.start_or_replace_session(session_id, Some(runtime), geometry, &[], capture)
             .await
     }
 
@@ -888,7 +911,7 @@ impl TerminalSessionBroker {
             .spawn_geometry(session_id)
             .await?
             .unwrap_or(TerminalGeometry { cols: 80, rows: 24 });
-        self.start_or_replace_session(session_id, None, geometry, output)
+        self.start_or_replace_session(session_id, None, geometry, output, |_| {})
             .await
     }
 
@@ -898,6 +921,7 @@ impl TerminalSessionBroker {
         runtime: Option<TerminalRuntimeHandles>,
         geometry: TerminalGeometry,
         initial_output: &[u8],
+        capture: impl FnOnce(u64),
     ) -> Result<u64, TerminalBrokerError> {
         validate_id(session_id, "session_id")?;
         let geometry = clamp_geometry(geometry, TerminalClientKind::Desktop);
@@ -919,6 +943,7 @@ impl TerminalSessionBroker {
             let initial_lease_epoch = previous.as_ref().map_or(0, |handle| {
                 handle.lease_epoch.load(Ordering::SeqCst).saturating_add(1)
             });
+            capture(runtime_generation);
             let handle = self.spawn_actor(
                 session_id.to_string(),
                 runtime_generation,
@@ -1100,6 +1125,7 @@ impl TerminalSessionBroker {
             .tx
             .blocking_send(TerminalSessionMessage::PrivilegedInput {
                 bytes,
+                runtime_generation: Some(runtime_generation),
                 reply: reply_tx,
             })
             .map_err(|_| TerminalBrokerError::RuntimeTerminated)?;
@@ -1272,7 +1298,11 @@ impl TerminalSessionBroker {
         bytes: Vec<u8>,
     ) -> Result<(), TerminalBrokerError> {
         self.request(session_id, move |reply| {
-            TerminalSessionMessage::PrivilegedInput { bytes, reply }
+            TerminalSessionMessage::PrivilegedInput {
+                bytes,
+                runtime_generation: None,
+                reply,
+            }
         })
         .await
     }
@@ -1942,6 +1972,7 @@ enum TerminalSessionMessage {
     },
     PrivilegedInput {
         bytes: Vec<u8>,
+        runtime_generation: Option<u64>,
         reply: BrokerReply<()>,
     },
     ComposerInput {
@@ -2279,8 +2310,12 @@ impl TerminalSessionActor {
                 let result = self.resize_compatibility(geometry).await;
                 let _ = reply.send(result);
             }
-            TerminalSessionMessage::PrivilegedInput { bytes, reply } => {
-                let result = self.send_privileged_input(bytes).await;
+            TerminalSessionMessage::PrivilegedInput {
+                bytes,
+                runtime_generation,
+                reply,
+            } => {
+                let result = self.send_privileged_input(bytes, runtime_generation).await;
                 let _ = reply.send(result);
             }
             TerminalSessionMessage::ComposerInput {
@@ -2421,7 +2456,7 @@ impl TerminalSessionActor {
                 } else if !owner_is_current() {
                     Err(TerminalBrokerError::InvalidRequest("startup_owner_changed"))
                 } else {
-                    self.send_privileged_input(bytes)
+                    self.send_privileged_input(bytes, None)
                         .await
                         .map(|()| self.readiness_observation())
                 };
@@ -2991,7 +3026,7 @@ impl TerminalSessionActor {
         if let Some(reason) = self.validate_active_lease(&request.lease) {
             return Ok(self.rejected_decision(reason));
         }
-        if self.input_sender_paused {
+        if self.input_sender_paused || self.external_input_blocked() {
             return Ok(self.rejected_decision(TerminalLeaseRejectionReason::RuntimeUnavailable));
         }
         if !request.bytes.is_empty() {
@@ -3066,15 +3101,26 @@ impl TerminalSessionActor {
         if let Some(reason) = self.compatibility_rejection() {
             return Ok(self.rejected_decision(reason));
         }
+        if self.external_input_blocked() {
+            return Ok(self.rejected_decision(TerminalLeaseRejectionReason::RuntimeUnavailable));
+        }
         if !bytes.is_empty() {
             self.send_runtime_input(bytes).await?;
         }
         Ok(self.accepted_decision())
     }
 
-    async fn send_privileged_input(&mut self, bytes: Vec<u8>) -> Result<(), TerminalBrokerError> {
+    async fn send_privileged_input(
+        &mut self,
+        bytes: Vec<u8>,
+        runtime_generation: Option<u64>,
+    ) -> Result<(), TerminalBrokerError> {
         if self.runtime_state != TerminalRuntimeState::Live {
             return Err(TerminalBrokerError::RuntimeUnavailable);
+        }
+        if self.external_input_blocked() {
+            let generation = runtime_generation.ok_or(TerminalBrokerError::RuntimeUnavailable)?;
+            self.ensure_generation(generation)?;
         }
         if !bytes.is_empty() {
             self.send_runtime_input(bytes).await?;
@@ -3120,10 +3166,18 @@ impl TerminalSessionActor {
         if self.runtime_state != TerminalRuntimeState::Live
             || self.runtime.is_none()
             || self.input_sender_paused
+            || self.external_input_blocked()
         {
             return Err(TerminalBrokerError::RuntimeUnavailable);
         }
         Ok(())
+    }
+
+    fn external_input_blocked(&self) -> bool {
+        self.runtime
+            .as_ref()
+            .and_then(|runtime| runtime.external_input_ready.as_ref())
+            .is_some_and(|ready| !ready.load(Ordering::Acquire))
     }
 
     async fn send_runtime_input(&mut self, bytes: Vec<u8>) -> Result<(), TerminalBrokerError> {
@@ -3749,5 +3803,39 @@ fn validate_id(value: &str, field: &'static str) -> Result<(), TerminalBrokerErr
         Err(TerminalBrokerError::InvalidRequest(field))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod captured_registration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn terminal_registration_captures_generation_before_abort_after_publication() {
+        let broker = TerminalSessionBroker::default();
+        let session_id = "captured-startup";
+        let deferred = broker.deferred_geometries.lock().await;
+        let (writer, _reader) = mpsc::channel(1);
+        let mut captured = None;
+        let mut start = Box::pin(broker.start_or_replace_runtime_captured(
+            session_id,
+            TerminalRuntimeHandles::new(writer, |_| Ok(())),
+            TerminalGeometry { cols: 80, rows: 24 },
+            |generation| captured = Some(generation),
+        ));
+        assert!(futures_util::poll!(&mut start).is_pending());
+        let published = broker.broker_state(session_id).await.unwrap();
+        assert_eq!(published.runtime_state, TerminalRuntimeState::Live);
+        drop(start);
+        assert_eq!(captured, Some(published.runtime_generation));
+        drop(deferred);
+        broker
+            .terminate_and_remove_runtime(session_id, captured.unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(
+            broker.broker_state(session_id).await,
+            Err(TerminalBrokerError::SessionNotFound)
+        ));
     }
 }

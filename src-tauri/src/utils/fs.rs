@@ -2333,6 +2333,16 @@ pub fn validate_directory_path(path: &str) -> bool {
 
 /// Validates a path to ensure it is within allowed boundaries (e.g. wardian home or project roots).
 /// Prevents directory traversal attacks.
+/// Recovery must use the same prepared directory even if the path changed.
+pub(crate) fn validate_exact_spawn_workspace(folder: &str) -> Result<std::path::PathBuf, String> {
+    let expected = std::path::Path::new(folder);
+    let resolved = validate_workspace_path(expected)?;
+    if !expected.is_absolute() || expected != resolved || !resolved.is_dir() {
+        return Err("The witnessed workspace is no longer the same directory path".into());
+    }
+    Ok(resolved)
+}
+
 pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()

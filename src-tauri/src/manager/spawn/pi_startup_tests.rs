@@ -238,8 +238,7 @@ async fn failure_case(case: Case) {
             pi_bridge: Some(plan.owner()),
             unpublished_failure: Some(cancelled),
             registration: (case == Case::PendingRegistration).then(|| publication.clone()),
-            codex_launch_context: None,
-            startup_ready_wake: None,
+            ..Default::default()
         },
     );
     if case == Case::Unpublished {

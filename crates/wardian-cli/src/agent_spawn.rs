@@ -4,10 +4,25 @@ use super::{
 };
 use std::time::Duration;
 
-pub(super) fn handle_agent_spawn(
-    command: &AgentCommand,
-    args: &AgentArgs,
-) -> Result<String, CliError> {
+pub(super) fn dispatch(command: &AgentCommand, args: &AgentArgs) -> Result<String, CliError> {
+    match command {
+        AgentCommand::Spawn { .. } => handle_agent_spawn(command, args),
+        AgentCommand::SpawnStatus { operation_id } => handle_agent_spawn_status(operation_id),
+        AgentCommand::SpawnWait {
+            operation_id,
+            timeout,
+        } => handle_agent_spawn_wait(operation_id, timeout),
+        AgentCommand::SpawnRecover {
+            operation_id,
+            expected_attempt,
+            expected_model,
+            action,
+        } => handle_agent_spawn_recover(operation_id, expected_attempt, expected_model, *action),
+        _ => unreachable!("spawn dispatch receives only spawn commands"),
+    }
+}
+
+fn handle_agent_spawn(command: &AgentCommand, args: &AgentArgs) -> Result<String, CliError> {
     let AgentCommand::Spawn {
         provider,
         class,
@@ -114,7 +129,7 @@ pub(super) fn handle_agent_spawn(
     }
 }
 
-pub(super) fn handle_agent_spawn_status(operation_id: &str) -> Result<String, CliError> {
+fn handle_agent_spawn_status(operation_id: &str) -> Result<String, CliError> {
     let operation_id = canonical_spawn_operation_id(operation_id)?;
     let response = live::agent_spawn_operation(&operation_id)
         .map_err(|error| spawn_operation_error(error, &operation_id))?;
@@ -123,10 +138,7 @@ pub(super) fn handle_agent_spawn_status(operation_id: &str) -> Result<String, Cl
         .map_err(|error| CliError::generic(error.to_string()))
 }
 
-pub(super) fn handle_agent_spawn_wait(
-    operation_id: &str,
-    timeout: &str,
-) -> Result<String, CliError> {
+fn handle_agent_spawn_wait(operation_id: &str, timeout: &str) -> Result<String, CliError> {
     let operation_id = canonical_spawn_operation_id(operation_id)?;
     let timeout = parse_timeout(timeout)?;
     if timeout.as_millis() > u128::from(wardian_core::agent_spawn::MAX_OBSERVER_WAIT_MS) {
@@ -145,6 +157,31 @@ pub(super) fn handle_agent_spawn_wait(
 
 fn canonical_spawn_operation_id(operation_id: &str) -> Result<String, CliError> {
     wardian_core::agent_spawn::canonical_operation_id(operation_id).map_err(CliError::generic)
+}
+
+fn handle_agent_spawn_recover(
+    operation_id: &str,
+    expected_attempt_id: &str,
+    expected_model: &str,
+    action: crate::args::SpawnRecoveryAction,
+) -> Result<String, CliError> {
+    use crate::args::SpawnRecoveryAction;
+    use wardian_core::agent_spawn::recovery::{self, Action, Request};
+    let request = Request {
+        operation_id: operation_id.to_owned(),
+        expected_attempt_id: expected_attempt_id.to_owned(),
+        expected_model: expected_model.to_owned(),
+        action: match action {
+            SpawnRecoveryAction::FinalizeRegistered => Action::FinalizeRegistered,
+            SpawnRecoveryAction::LaunchIfAbsent => Action::LaunchIfAbsent,
+        },
+    };
+    recovery::validate_request(&request)
+        .map_err(|error| CliError::backend(ExitCode::Generic, error.code, error.message))?;
+    let response = live::agent_spawn_recover(request).map_err(control_error)?;
+    serde_json::to_string(&response)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| CliError::generic(error.to_string()))
 }
 
 fn spawn_operation_error(error: std::io::Error, operation_id: &str) -> CliError {

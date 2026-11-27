@@ -1567,18 +1567,27 @@ pub fn latest_native_session_binding(
     target_agent_id: &str,
 ) -> Result<Option<NativeSessionBinding>, Box<dyn std::error::Error>> {
     get_db_conn(|conn| {
-        conn.query_row(
-            "SELECT binding_json FROM native_session_bindings
-             WHERE target_agent_id = ?1 ORDER BY generation DESC LIMIT 1",
-            params![target_agent_id],
-            |row| {
-                let json: String = row.get(0)?;
-                serde_json::from_str(&json).map_err(to_sql_error)
-            },
-        )
-        .optional()
-        .map_err(Into::into)
+        Ok(latest_native_session_binding_with_conn(
+            conn,
+            target_agent_id,
+        )?)
     })
+}
+
+pub(crate) fn latest_native_session_binding_with_conn(
+    conn: &Connection,
+    target_agent_id: &str,
+) -> rusqlite::Result<Option<NativeSessionBinding>> {
+    conn.query_row(
+        "SELECT binding_json FROM native_session_bindings
+             WHERE target_agent_id = ?1 ORDER BY generation DESC LIMIT 1",
+        params![target_agent_id],
+        |row| {
+            let json: String = row.get(0)?;
+            serde_json::from_str(&json).map_err(to_sql_error)
+        },
+    )
+    .optional()
 }
 
 pub fn append_native_delivery_evidence(

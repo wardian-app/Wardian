@@ -102,6 +102,7 @@ fn operation_completion_uses_the_original_registration_incarnation() {
         config: original.config.lock().unwrap().clone(),
         config_handle: original.config.clone(),
         runtime_generation: original.runtime_generation,
+        recovery: None,
     };
     assert!(registered.matches(&original));
     let mut replacement = test_active_agent("planned-agent");
@@ -127,6 +128,7 @@ async fn published_spawn_and_clone_keep_incarnation_when_name_promotion_fails() 
         let mut active = test_active_agent(&id);
         let child_exited = Arc::new(AtomicBool::new(false));
         active.child_process = Some(Box::new(FakeChild {
+            refuse_stop: false,
             exited: child_exited.clone(),
         }));
         let expected = active.config.clone();
@@ -297,10 +299,14 @@ async fn rename_json_failure_and_failed_sql_rollback_retain_bound_disposition() 
 #[derive(Debug, Clone)]
 struct FakeChild {
     exited: Arc<AtomicBool>,
+    refuse_stop: bool,
 }
 
 impl portable_pty::ChildKiller for FakeChild {
     fn kill(&mut self) -> std::io::Result<()> {
+        if self.refuse_stop {
+            return Err(std::io::Error::other("fixture TUI has not exited"));
+        }
         self.exited.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -380,6 +386,7 @@ fn detachable_agent(
         config: Arc::new(Mutex::new(config)),
         child_process: Some(Box::new(FakeChild {
             exited: Arc::new(AtomicBool::new(true)),
+            refuse_stop: false,
         })),
         background_processes: Vec::new(),
         memory_capability: None,
@@ -520,6 +527,55 @@ async fn provisional_install_rejects_an_undurable_roster() {
 }
 
 #[tokio::test]
+async fn recovery_initial_roster_write_failure_retains_native_until_tui_exit() {
+    use crate::manager::{
+        codex_onboarding::RecoveryRuntimeCleanup, codex_stop, RegistrationPublicationState,
+    };
+
+    let home = TestWardianHome::new_async().await;
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let id = "recovery-roster-write-failure";
+    let mut active = detachable_agent(id, "codex", Some(7));
+    let exited = Arc::new(AtomicBool::new(false));
+    active.child_process = Some(Box::new(FakeChild {
+        exited: exited.clone(),
+        refuse_stop: true,
+    }));
+    let lease = crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+        id, id, "codex", "", "fixture",
+    )
+    .unwrap();
+    let publication = Arc::new(RegistrationPublicationState::for_recovery(
+        lease.owner().clone(),
+        id.into(),
+        "fixture-native".into(),
+    ));
+    let cleanup = RecoveryRuntimeCleanup::fixture(app.handle().clone(), &active, 3, publication);
+    state.agents.lock().await.insert(id.into(), active);
+    state.agent_order.lock().await.push(id.into());
+    state
+        .native_delivery
+        .install_recovery_cleanup_fixture(id, 3)
+        .await;
+    std::fs::create_dir_all(home.path().join("settings/state.json")).unwrap();
+
+    let persistence = super::persist_provisional_codex_roster(&state, id, Some(7))
+        .await
+        .unwrap_err();
+    let failure = cleanup.finish(persistence).await;
+    assert!(failure.contains("fixture TUI has not exited"));
+    assert!(state.native_delivery.codex_owner_selected(id, 3).await);
+    assert!(codex_stop::await_quiescent(home.path(), id).await.is_err());
+
+    exited.store(true, Ordering::Release);
+    codex_stop::retry_stop(home.path(), id).unwrap();
+    codex_stop::await_quiescent(home.path(), id).await.unwrap();
+    assert!(!state.native_delivery.codex_owner_selected(id, 3).await);
+}
+
+#[tokio::test]
 async fn provisional_commit_releases_roster_maps_while_barrier_is_busy() {
     let home = TestWardianHome::new_async().await;
     let state = Arc::new(AppState::new());
@@ -642,6 +698,165 @@ async fn provisional_commit_releases_roster_maps_while_barrier_is_busy() {
 }
 
 #[tokio::test]
+async fn recovery_lease_loss_rollback_leaves_replacement_generation_untouched() {
+    let (home, state) = seeded_detach_state().await;
+    let id = "codex-provisional";
+    let captured = crate::manager::codex_stop::prepare_stop(home.path(), id).unwrap();
+    let replacement = detachable_agent(id, "codex", Some(8));
+    let replacement_config = replacement.config.clone();
+    state.agents.lock().await.insert(id.into(), replacement);
+    assert!(matches!(
+        super::detach_provisional_codex(&state, id, 7, captured).await,
+        Ok(None)
+    ));
+    let agents = state.agents.lock().await;
+    let current = agents.get(id).unwrap();
+    assert_eq!(current.runtime_generation, Some(8));
+    assert!(Arc::ptr_eq(&current.config, &replacement_config));
+    assert!(current.child_process.is_some());
+}
+
+#[tokio::test]
+async fn recovery_rollback_starts_retained_stop_before_pause_waits_with_lifecycle() {
+    use crate::manager::codex_onboarding::CapturedRecoveryRuntime;
+    use crate::manager::codex_stop;
+    use crate::manager::RegistrationPublicationState;
+    use crate::state::terminal_session::TerminalRuntimeHandles;
+
+    let home = TestWardianHome::new_async().await;
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let id = "recovery-pause-race";
+    let (terminal, _reader) = tokio::sync::mpsc::channel(1);
+    let generation = state
+        .terminal_sessions
+        .start_or_replace_runtime(
+            id,
+            TerminalRuntimeHandles::new(terminal, |_| Ok(())),
+            wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+        )
+        .await
+        .unwrap();
+    let active = detachable_agent(id, "codex", Some(generation));
+    let lease = crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+        id, id, "codex", "", "fixture",
+    )
+    .unwrap();
+    let publication = Arc::new(RegistrationPublicationState::for_recovery(
+        lease.owner().clone(),
+        id.into(),
+        "fixture-native".into(),
+    ));
+    publication.mark_recovery_committed_for_test();
+    let captured = CapturedRecoveryRuntime::fixture(&active, publication);
+    state.agents.lock().await.insert(id.into(), active);
+    let registration = codex_stop::prepare_stop(home.path(), id).unwrap();
+
+    let held = state.lock_agent_lifecycle(id).await;
+    let rollback = super::rollback_captured_recovery(app.handle(), &captured, registration);
+    tokio::pin!(rollback);
+    assert!(futures_util::poll!(&mut rollback).is_pending());
+    let pause = async {
+        let _guard = state.lock_agent_lifecycle(id).await;
+        codex_stop::await_quiescent(home.path(), id).await.unwrap();
+        assert!(state.terminal_sessions.broker_state(id).await.is_ok());
+    };
+    tokio::pin!(pause);
+    assert!(futures_util::poll!(&mut pause).is_pending());
+    drop(held);
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(rollback, pause)
+    })
+    .await
+    .expect("Pause and rollback waited on each other");
+    result.unwrap();
+    assert!(state.terminal_sessions.broker_state(id).await.is_err());
+}
+
+#[tokio::test]
+async fn recovery_activation_cleanup_preserves_successor_owner_and_terminal() {
+    use crate::manager::codex_onboarding::RecoveryRuntimeCleanup;
+    use crate::manager::RegistrationPublicationState;
+    use crate::state::terminal_session::TerminalRuntimeHandles;
+
+    let _home = TestWardianHome::new_async().await;
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let id = "codex-recovery-successor";
+    let geometry = wardian_core::models::TerminalGeometry { cols: 80, rows: 24 };
+    let (old_tx, _old_rx) = tokio::sync::mpsc::channel(1);
+    let generation = state
+        .terminal_sessions
+        .start_or_replace_runtime(
+            id,
+            TerminalRuntimeHandles::new(old_tx, |_| Ok(())),
+            geometry,
+        )
+        .await
+        .unwrap();
+    let prior = detachable_agent(id, "codex", Some(generation));
+    let lease = crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+        id, id, "codex", "", "fixture",
+    )
+    .unwrap();
+    let publication = Arc::new(RegistrationPublicationState::for_recovery(
+        lease.owner().clone(),
+        id.into(),
+        "fixture-native".into(),
+    ));
+    publication.mark_recovery_committed_for_test();
+    let captured =
+        RecoveryRuntimeCleanup::fixture(app.handle().clone(), &prior, 1, publication.clone());
+    let (successor_tx, _successor_rx) = tokio::sync::mpsc::channel(1);
+    let new_generation = state
+        .terminal_sessions
+        .start_or_replace_runtime(
+            id,
+            TerminalRuntimeHandles::new(successor_tx, |_| Ok(())),
+            geometry,
+        )
+        .await
+        .unwrap();
+    let successor = detachable_agent(id, "codex", Some(new_generation));
+    let successor_config = successor.config.clone();
+    let successor_status = successor.current_status.clone();
+    state.agents.lock().await.insert(id.into(), successor);
+    state
+        .native_delivery
+        .install_recovery_cleanup_fixture(id, 2)
+        .await;
+
+    let failure = "fixture activation found a successor";
+    assert_eq!(captured.finish(failure.into()).await, failure);
+    assert!(publication.committed_recovery_native_id(id).is_ok());
+    {
+        let agents = state.agents.lock().await;
+        let current = &agents[id];
+        assert_eq!(current.runtime_generation, Some(new_generation));
+        assert!(Arc::ptr_eq(&current.config, &successor_config));
+        assert!(Arc::ptr_eq(&current.current_status, &successor_status));
+        assert!(current.child_process.is_some());
+    }
+    assert_eq!(
+        state
+            .terminal_sessions
+            .broker_state(id)
+            .await
+            .unwrap()
+            .runtime_generation,
+        new_generation
+    );
+    assert!(state.native_delivery.codex_owner_selected(id, 2).await);
+    state
+        .native_delivery
+        .dispose_codex_generation(id, 2)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn detach_persists_current_roster_and_keeps_other_provider_changes_scoped() {
     let (home, state) = seeded_detach_state().await;
     let registration = crate::manager::codex_stop::prepare_stop(home.path(), "codex-provisional")
@@ -721,10 +936,14 @@ async fn failed_detach_persistence_retains_error_roster_and_stop_fence() {
             .unwrap();
         *shell = "Error".into();
     }
-    let retain_error =
-        super::retain_failed_detached_roster(&state, "codex-provisional", &mut detached)
-            .await
-            .expect_err("blocked state destination should retain the failed entry in memory");
+    let retain_error = super::retain_failed_detached_roster(
+        &state,
+        "codex-provisional",
+        &mut detached.shell,
+        detached.order_index,
+    )
+    .await
+    .expect_err("blocked state destination should retain the failed entry in memory");
     assert!(!retain_error.is_empty());
     let agents = state.agents.lock().await;
     assert_eq!(

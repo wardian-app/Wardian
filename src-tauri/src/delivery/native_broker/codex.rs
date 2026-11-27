@@ -6,6 +6,47 @@ use crate::delivery::codex_shared::{
 };
 use std::time::Duration;
 
+fn publish_codex_tui_binding(
+    client: &super::super::codex_shared::CodexSharedClient,
+    observed_version: &str,
+    capabilities: &mut NativeTransportCapabilities,
+    response: &serde_json::Value,
+    publish_identity: impl FnOnce(&str) -> Result<(), CodexSharedError>,
+    publication: Option<&crate::manager::RegistrationPublicationState>,
+) -> Result<CodexSharedReceipt, CodexSharedError> {
+    let id = response["thread"]["id"]
+        .as_str()
+        .ok_or_else(|| CodexSharedError::unsupported("attachment identity absent"))?;
+    let (agent_id, generation) = client.identity();
+    let publish = || {
+        publish_identity(id)?;
+        // Hold the exact startup lease across this synchronous boundary.
+        let recovery = publication.is_some_and(|state| state.is_recovery());
+        client.bind_with_input_gate(response, recovery)?;
+        let negotiated = NativeProviderProtocol::CodexAppServer.capabilities(observed_version);
+        let binding = NativeSessionBinding {
+            target_agent_id: agent_id.to_owned(),
+            generation,
+            provider: "codex".into(),
+            transport: "codex_app_server_ws".into(),
+            provider_session_id: Some(id.to_owned()),
+            capabilities: negotiated.clone(),
+            observed_at: now(),
+        };
+        wardian_core::db::upsert_native_session_binding(&binding).map_err(|_| {
+            CodexSharedError::unsupported("cannot persist attached native owner binding")
+        })?;
+        *capabilities = negotiated;
+        client.attached_receipt()
+    };
+    match publication {
+        Some(publication) => publication
+            .with_recovery_attachment(agent_id, id, publish)
+            .map_err(CodexSharedError::unsupported)?,
+        None => publish(),
+    }
+}
+
 /// Retain the exact owner and its creation gate through captured TUI shutdown.
 /// Dropping before runtime capture merely releases the gate; the registry still
 /// owns the live process. After capture the retained stop worker owns this token.
@@ -301,13 +342,15 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         spec: NativeSessionSpec,
     ) -> Result<Arc<CodexSharedOwner>, CodexSharedError> {
-        self.create_shared_codex_with_context(spec, None).await
+        self.create_shared_codex_with_context(spec, None, None)
+            .await
     }
 
     async fn create_shared_codex_with_context(
         self: &Arc<Self>,
         spec: NativeSessionSpec,
         codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+        recovery_heartbeat: Option<Arc<crate::commands::agent::LifecycleLeaseHeartbeat>>,
     ) -> Result<Arc<CodexSharedOwner>, CodexSharedError> {
         // Capture disposal revisions before the first await or detached spawn.
         let request = self
@@ -323,7 +366,13 @@ impl NativeDeliveryBroker {
             let agent_id = spec.target_agent_id.clone();
             let generation = spec.generation;
             let started = broker
-                .create_shared_codex_inner(spec, codex_launch_context, reply.closed(), request)
+                .create_shared_codex_inner(
+                    spec,
+                    codex_launch_context,
+                    recovery_heartbeat.as_deref(),
+                    reply.closed(),
+                    request,
+                )
                 .await;
             let created = started.as_ref().is_ok_and(|(_, created)| *created);
             if reply.send(started.map(|(owner, _)| owner)).is_err() && created {
@@ -339,6 +388,7 @@ impl NativeDeliveryBroker {
         &self,
         spec: NativeSessionSpec,
         codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+        recovery_heartbeat: Option<&crate::commands::agent::LifecycleLeaseHeartbeat>,
         cancelled: impl std::future::Future<Output = ()>,
         request: CodexCreationRequest,
     ) -> Result<(Arc<CodexSharedOwner>, bool), CodexSharedError> {
@@ -432,12 +482,25 @@ impl NativeDeliveryBroker {
                 .reject_start
                 .load(std::sync::atomic::Ordering::Acquire)
             {
-                self.codex_creation_test
-                    .start_attempts
-                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                return Err(CodexSharedError::unsupported("test owner-start sentinel"));
+                return crate::delivery::codex_shared::spawn_codex_owner_at_lease_boundary(
+                    &spec,
+                    recovery_heartbeat,
+                    || {
+                        self.codex_creation_test
+                            .start_attempts
+                            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        Err("test owner-start sentinel".into())
+                    },
+                )
+                .map_err(CodexSharedError::unsupported);
             }
-            CodexSharedOwner::start(&spec, codex_launch_context, cancellation).await
+            CodexSharedOwner::start(
+                &spec,
+                codex_launch_context,
+                recovery_heartbeat,
+                cancellation,
+            )
+            .await
         };
         let owner = match start.await {
             Ok(owner) => owner,
@@ -507,9 +570,10 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         spec: NativeSessionSpec,
         codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+        recovery_heartbeat: Option<Arc<crate::commands::agent::LifecycleLeaseHeartbeat>>,
     ) -> Result<CodexTuiAttachment, CodexSharedError> {
         Ok(self
-            .create_shared_codex_with_context(spec, codex_launch_context)
+            .create_shared_codex_with_context(spec, codex_launch_context, recovery_heartbeat)
             .await?
             .attachment
             .clone())
@@ -523,6 +587,7 @@ impl NativeDeliveryBroker {
         generation: u64,
         tui_alive: F,
         publish_identity: impl FnOnce(&str) -> Result<(), CodexSharedError>,
+        publication: Option<&crate::manager::RegistrationPublicationState>,
     ) -> Result<CodexSharedReceipt, CodexSharedError>
     where
         F: FnMut() -> Fut,
@@ -532,10 +597,14 @@ impl NativeDeliveryBroker {
         let _gate = gate.lock().await;
         let owner = self.shared_codex(agent_id, generation).await?;
         let result = async {
-            let response = owner.finalize_interactive(tui_alive).await?;
-            let id = response["thread"]["id"]
-                .as_str()
-                .ok_or_else(|| CodexSharedError::unsupported("attachment identity absent"))?;
+            if publication.is_some_and(|state| state.is_recovery())
+                && owner.client.attached_receipt().is_ok()
+            {
+                return Err(CodexSharedError::unsupported(
+                    "interactive attachment requires an unbound fresh owner",
+                ));
+            }
+            let response = owner.finalize_interactive(tui_alive, publication).await?;
             let mut sessions = self.sessions.lock().await;
             let handle = sessions
                 .get_mut(agent_id)
@@ -547,25 +616,14 @@ impl NativeDeliveryBroker {
                             .is_some_and(|current| Arc::ptr_eq(current, &owner))
                 })
                 .ok_or_else(|| CodexSharedError::unsupported("attachment owner changed"))?;
-            publish_identity(id)?;
-            // No await between binding, persistence and capability publication.
-            owner.client.bind(&response)?;
-            let capabilities =
-                NativeProviderProtocol::CodexAppServer.capabilities(&owner.observed_version);
-            let binding = NativeSessionBinding {
-                target_agent_id: agent_id.to_owned(),
-                generation,
-                provider: "codex".into(),
-                transport: "codex_app_server_ws".into(),
-                provider_session_id: Some(id.to_owned()),
-                capabilities: capabilities.clone(),
-                observed_at: now(),
-            };
-            wardian_core::db::upsert_native_session_binding(&binding).map_err(|_| {
-                CodexSharedError::unsupported("cannot persist attached native owner binding")
-            })?;
-            handle.capabilities = capabilities;
-            owner.client.receipt("owner_ready")
+            publish_codex_tui_binding(
+                &owner.client,
+                &owner.observed_version,
+                &mut handle.capabilities,
+                &response,
+                publish_identity,
+                publication,
+            )
         }
         .await;
         if result.is_err() {
@@ -574,6 +632,43 @@ impl NativeDeliveryBroker {
             owner.client.close().await;
         }
         result
+    }
+
+    /// Pin the still-current native binding while the captured TUI and input
+    /// generation publish readiness after durable recovery registration.
+    pub(crate) async fn lock_recovery_codex_input(
+        &self,
+        agent_id: &str,
+        provider_generation: u64,
+        runtime_generation: u64,
+        native_id: &str,
+    ) -> Result<
+        (
+            tokio::sync::OwnedMutexGuard<()>,
+            Arc<crate::delivery::codex_shared::CodexSharedClient>,
+        ),
+        String,
+    > {
+        let gate = self.owner_gate(agent_id).await.lock_owned().await;
+        let sessions = self.sessions.lock().await;
+        let client = sessions
+            .get(agent_id)
+            .filter(|handle| {
+                handle.generation == provider_generation
+                    && handle.provider == "codex"
+                    && handle.codex_tui_runtime_generation == Some(runtime_generation)
+            })
+            .and_then(|handle| handle.shared_codex.as_ref())
+            .map(|owner| owner.client.clone())
+            .filter(|client| {
+                client.attached_receipt().is_ok_and(|binding| {
+                    binding.wardian_agent_id == agent_id
+                        && binding.generation == provider_generation
+                        && binding.provider_session_id == native_id
+                })
+            })
+            .ok_or("Captured Codex native input owner changed after registration")?;
+        Ok((gate, client))
     }
 
     async fn shared_codex(
@@ -615,6 +710,38 @@ impl NativeDeliveryBroker {
             .client
             .receipt("owner_ready")
             .map_err(shared_error)
+    }
+
+    /// Pins the exact already-bound idle owner for metadata finalization. Uses
+    /// retained observations only and sends no command to Codex.
+    pub(crate) async fn lock_codex_registration_for_recovery(
+        &self,
+        agent_id: &str,
+        terminal_generation: u64,
+        session: &str,
+        model: &str,
+    ) -> Option<(
+        tokio::sync::OwnedMutexGuard<()>,
+        Arc<crate::delivery::codex_shared::CodexSharedClient>,
+        u64,
+    )> {
+        // Recovery already owns the roster barrier. A busy native owner may
+        // be publishing into that roster, so fail closed without waiting.
+        let gate = self.owner_gate(agent_id).await.try_lock_owned().ok()?;
+        let handle = self.sessions.lock().await.get(agent_id)?.clone();
+        let owner = handle.shared_codex?;
+        let receipt = owner.client.receipt("owner_ready").ok()?;
+        if handle.provider != "codex"
+            || handle.codex_tui_runtime_generation != Some(terminal_generation)
+            || receipt.wardian_agent_id != agent_id
+            || receipt.generation != handle.generation
+            || receipt.provider_session_id != session
+            || owner.attachment.model_override.as_deref() != Some(model)
+            || !owner.client.recovery_thread_is_idle(session)
+        {
+            return None;
+        }
+        Some((gate, owner.client.clone(), handle.generation))
     }
 
     /// Clone the current generation's exact client without retaining AppState or
@@ -1042,6 +1169,287 @@ mod lifecycle_tests;
 mod tests {
     use super::*;
 
+    impl NativeDeliveryBroker {
+        pub(crate) async fn install_recovery_cleanup_fixture(&self, id: &str, generation: u64) {
+            self.install_observed_recovery_cleanup_fixture(id, generation, || {})
+                .await;
+        }
+
+        pub(crate) async fn install_observed_recovery_cleanup_fixture(
+            &self,
+            id: &str,
+            generation: u64,
+            on_shutdown: impl FnOnce() + Send + 'static,
+        ) {
+            let (tx, mut incoming) = mpsc::channel(1);
+            let (stopped, observed) = tokio::sync::watch::channel(false);
+            self.sessions.lock().await.insert(
+                id.to_owned(),
+                NativeSessionHandle {
+                    generation,
+                    provider: "codex".into(),
+                    capabilities: NativeTransportCapabilities::degraded(
+                        "codex",
+                        "codex_app_server_ws",
+                    ),
+                    tx,
+                    shared_codex: None,
+                    codex_tui_runtime_generation: None,
+                    stopped: Some(observed),
+                },
+            );
+            tokio::spawn(async move {
+                assert!(matches!(
+                    incoming.recv().await,
+                    Some(SessionCommand::Shutdown)
+                ));
+                on_shutdown();
+                stopped.send_replace(true);
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_recovery_attachment_publication_requires_live_exact_lease() {
+        exercise_recovery_attachment_publication(AttachmentCase::ExpireBeforeAttachment).await;
+    }
+
+    #[tokio::test]
+    async fn codex_recovery_attachment_keeps_native_input_closed_before_commit() {
+        exercise_recovery_attachment_publication(AttachmentCase::Normal).await;
+    }
+
+    #[tokio::test]
+    async fn codex_recovery_attachment_leaves_superseded_input_closed_after_commit() {
+        exercise_recovery_attachment_publication(AttachmentCase::SupersedeInput).await;
+    }
+
+    #[tokio::test]
+    async fn codex_recovery_renews_after_commit_and_refuses_activation_under_replacement_lease() {
+        exercise_recovery_attachment_publication(AttachmentCase::ReacquireBeforeActivation).await;
+    }
+
+    #[derive(PartialEq, Eq)]
+    enum AttachmentCase {
+        ExpireBeforeAttachment,
+        Normal,
+        SupersedeInput,
+        ReacquireBeforeActivation,
+    }
+
+    async fn exercise_recovery_attachment_publication(case: AttachmentCase) {
+        use crate::manager::codex_onboarding::publish_recovery_readiness;
+        use wardian_core::control::ProviderInputReadiness;
+        use wardian_core::conversation_lease::{self, CodexRecoveryLeaseScope};
+
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        let native_id = uuid::Uuid::new_v4().to_string();
+        let state = crate::state::AppState::new();
+        let input = state
+            .interactions
+            .start_provider_input_generation(&agent_id, ProviderInputReadiness::Booting, None)
+            .await;
+        let lease = crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+            &agent_id,
+            "attachment",
+            "codex",
+            "",
+            "fixture",
+        )
+        .unwrap();
+        assert!(conversation_lease::refresh_codex_recovery_lease_persisted(
+            lease.owner(),
+            chrono::Duration::minutes(20),
+            CodexRecoveryLeaseScope::Attach {
+                agent_id: &agent_id,
+                native_id: &native_id
+            },
+        )
+        .unwrap());
+        let publication = crate::manager::RegistrationPublicationState::for_recovery(
+            lease.owner().clone(),
+            agent_id.clone(),
+            native_id.clone(),
+        );
+        let (client, _peer) =
+            crate::delivery::codex_shared::CodexSharedClient::unbound_input_test_client(
+                &agent_id,
+                input.generation,
+            )
+            .await;
+        let response = serde_json::json!({
+            "thread": {"id": native_id, "canAcceptDirectInput": true, "status": {"type":"idle"}}
+        });
+        let mut capabilities =
+            NativeTransportCapabilities::degraded("codex", "codex_app_server_ws");
+        let before = capabilities.clone();
+        let mut published_identity = None;
+        if case == AttachmentCase::ExpireBeforeAttachment {
+            let mut leases = conversation_lease::load_leases_checked().unwrap();
+            let exact = leases
+                .iter_mut()
+                .find(|entry| entry.owner() == *lease.owner())
+                .unwrap();
+            exact.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+            conversation_lease::save_leases(&leases).unwrap();
+        }
+        assert!(!publication.recovery_lease_lost());
+        let result = publish_codex_tui_binding(
+            &client,
+            "0.154.0",
+            &mut capabilities,
+            &response,
+            |id| {
+                published_identity = Some(id.to_owned());
+                Ok(())
+            },
+            Some(&publication),
+        );
+        let binding = wardian_core::db::latest_native_session_binding(&agent_id).unwrap();
+        if case == AttachmentCase::ExpireBeforeAttachment {
+            assert!(
+                result.is_err(),
+                "an unsignaled expiry must prevent binding publication"
+            );
+            assert!(publication.recovery_lease_lost());
+            assert!(binding.is_none());
+            assert!(published_identity.is_none());
+            assert_eq!(capabilities, before);
+        } else {
+            assert_eq!(result.unwrap().provider_session_id, native_id);
+            assert_eq!(
+                binding.unwrap().provider_session_id.as_deref(),
+                Some(native_id.as_str())
+            );
+            assert_eq!(published_identity.as_deref(), Some(native_id.as_str()));
+            assert_ne!(capabilities, before);
+        }
+        assert!(
+            client.receipt("owner_ready").is_err(),
+            "native input must stay gated until the durable commit"
+        );
+        if case == AttachmentCase::ExpireBeforeAttachment {
+            return;
+        }
+        assert!(client.settings_binding().is_err());
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(500),
+            client.push(serde_json::json!({"fixture":"blocked before send"})),
+        )
+        .await
+        .expect("pending input must fail before the protocol boundary")
+        .unwrap_err();
+        assert!(!blocked.provider_boundary_crossed);
+        let mut status = "Booting";
+        assert!(publish_recovery_readiness(
+            &state,
+            &agent_id,
+            input.generation,
+            &client,
+            &publication,
+            || {
+                status = "Idle";
+                Ok(())
+            },
+        )
+        .await
+        .is_err());
+        assert_eq!(status, "Booting");
+        assert_eq!(
+            state.interactions.provider_input_state(&agent_id).await,
+            Some(input.clone())
+        );
+
+        // Durable commit itself is covered by the worker fixtures. Exercise
+        // only the input step at that established publication state.
+        publication.mark_recovery_committed_for_test();
+        let pause = if case == AttachmentCase::ReacquireBeforeActivation {
+            let set_expiry = |delta: chrono::Duration| {
+                let mut leases = conversation_lease::load_leases_checked().unwrap();
+                leases
+                    .iter_mut()
+                    .find(|entry| entry.owner() == *lease.owner())
+                    .unwrap()
+                    .expires_at = (chrono::Utc::now() + delta).to_rfc3339();
+                conversation_lease::save_leases(&leases).unwrap();
+            };
+            set_expiry(chrono::Duration::minutes(1));
+            publication.renew_recovery_lease().unwrap();
+            let refreshed = conversation_lease::load_leases_checked().unwrap();
+            let expiry = &refreshed
+                .iter()
+                .find(|entry| entry.owner() == *lease.owner())
+                .unwrap()
+                .expires_at;
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(expiry).unwrap()
+                    > (chrono::Utc::now() + chrono::Duration::minutes(2))
+            );
+            set_expiry(-chrono::Duration::seconds(1));
+            Some(
+                crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+                    &agent_id,
+                    "attachment",
+                    "codex",
+                    &native_id,
+                    "pause",
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        let expected = if case == AttachmentCase::SupersedeInput {
+            state
+                .interactions
+                .start_provider_input_generation(&agent_id, ProviderInputReadiness::Booting, None)
+                .await
+        } else {
+            input.clone()
+        };
+        let published = publish_recovery_readiness(
+            &state,
+            &agent_id,
+            input.generation,
+            &client,
+            &publication,
+            || {
+                status = "Idle";
+                Ok(())
+            },
+        )
+        .await;
+        if case != AttachmentCase::Normal {
+            assert!(published.is_err());
+            assert_eq!(status, "Booting");
+            assert_eq!(
+                state.interactions.provider_input_state(&agent_id).await,
+                Some(expected)
+            );
+            assert!(client.receipt("owner_ready").is_err());
+            if let Some(pause) = pause {
+                assert_ne!(pause.owner(), lease.owner());
+                assert!(publication.recovery_lease_lost());
+                assert!(publication.committed_recovery_native_id(&agent_id).is_ok());
+            }
+        } else {
+            published.unwrap();
+            assert_eq!(status, "Idle");
+            let current = state
+                .interactions
+                .provider_input_state(&agent_id)
+                .await
+                .unwrap();
+            assert_eq!(current.generation, input.generation);
+            assert_eq!(current.state, ProviderInputReadiness::Ready);
+            assert_eq!(
+                client.receipt("owner_ready").unwrap().provider_session_id,
+                native_id
+            );
+        }
+    }
+
     #[test]
     fn proven_stale_steer_maps_to_failed_before_submit_only_without_crossed_boundary() {
         for (code, crossed, expected) in [
@@ -1087,6 +1495,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_recovery_lease_gates_parked_detached_first_start() {
+        use std::sync::atomic::Ordering;
+        use wardian_core::conversation_lease::{self, CodexRecoveryLeaseScope};
+
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        for phase in ["live", "expired", "replaced"] {
+            let broker = Arc::new(NativeDeliveryBroker::new());
+            let config = AgentConfig {
+                session_id: uuid::Uuid::new_v4().to_string(),
+                session_name: format!("parked-{phase}"),
+                provider: "codex".into(),
+                resume_session: Some(uuid::Uuid::new_v4().to_string()),
+                ..Default::default()
+            };
+            let mut lease =
+                crate::commands::agent::acquire_agent_lifecycle_transition_lease_for_identity(
+                    &config.session_id,
+                    &config.session_name,
+                    "codex",
+                    "",
+                    "fixture",
+                )
+                .unwrap();
+            let original_owner = lease.owner().clone();
+            lease.retain_on_drop();
+            let heartbeat = Arc::new(
+                crate::commands::agent::LifecycleLeaseHeartbeat::start_codex_recovery(
+                    original_owner.clone(),
+                ),
+            );
+            heartbeat
+                .ensure_codex_recovery_scope(
+                    "retarget fixture",
+                    CodexRecoveryLeaseScope::Attach {
+                        agent_id: &config.session_id,
+                        native_id: config.resume_session.as_deref().unwrap(),
+                    },
+                )
+                .unwrap();
+            let parked = Arc::new(CodexCreationTestBarrier::default());
+            broker
+                .codex_creation_test
+                .before_gate
+                .lock()
+                .unwrap()
+                .insert(1, parked.clone());
+            broker
+                .codex_creation_test
+                .reject_start
+                .store(true, Ordering::Release);
+            let agent_id = config.session_id.clone();
+            let weak = Arc::downgrade(&heartbeat);
+            let pending = {
+                let broker = broker.clone();
+                tokio::spawn(async move {
+                    broker
+                        .prepare_codex_tui(
+                            NativeSessionSpec {
+                                target_agent_id: config.session_id.clone(),
+                                provider: "codex".into(),
+                                generation: 1,
+                                workspace: PathBuf::new(),
+                                config,
+                            },
+                            None,
+                            Some(heartbeat),
+                        )
+                        .await
+                })
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), parked.reached.notified())
+                .await
+                .unwrap();
+            assert!(weak.upgrade().is_some());
+            let mut leases = conversation_lease::load_leases_checked().unwrap();
+            let entry = leases
+                .iter_mut()
+                .find(|entry| entry.owner() == original_owner)
+                .unwrap();
+            if phase == "expired" {
+                entry.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+            } else if phase == "replaced" {
+                entry.acquisition_id = uuid::Uuid::new_v4().to_string();
+            }
+            let expected = entry.clone();
+            conversation_lease::save_leases(&leases).unwrap();
+            parked.release.notify_one();
+            let error = pending.await.unwrap().err().unwrap();
+            assert!(!error.provider_boundary_crossed);
+            assert!(!broker.has_agent_owner(&agent_id).await.unwrap());
+            if phase == "live" {
+                assert!(error.message.contains("owner-start sentinel"));
+                assert_eq!(
+                    broker
+                        .codex_creation_test
+                        .start_attempts
+                        .load(Ordering::Acquire),
+                    1
+                );
+                lease.release().unwrap();
+            } else {
+                assert!(error
+                    .message
+                    .contains("lifecycle conversation lease was lost"));
+                assert_eq!(
+                    broker
+                        .codex_creation_test
+                        .start_attempts
+                        .load(Ordering::Acquire),
+                    0
+                );
+                assert!(conversation_lease::load_leases_checked()
+                    .unwrap()
+                    .contains(&expected));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn app_shutdown_fences_startup_still_waiting_to_register() {
         let broker = Arc::new(NativeDeliveryBroker::new());
         let gate = broker.owner_gate("late").await.lock_owned().await;
@@ -1105,6 +1632,7 @@ mod tests {
                                 ..Default::default()
                             },
                         },
+                        None,
                         None,
                         std::future::pending(),
                         broker.codex_creations.register("late", 1).unwrap(),

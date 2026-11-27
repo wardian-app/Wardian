@@ -387,11 +387,34 @@ impl std::fmt::Debug for CodexSharedOwner {
     }
 }
 
+pub(crate) fn spawn_codex_owner_at_lease_boundary<T>(
+    spec: &NativeSessionSpec,
+    heartbeat: Option<&crate::commands::agent::LifecycleLeaseHeartbeat>,
+    spawn: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if let Some(heartbeat) = heartbeat {
+        let native_id = spec
+            .config
+            .resume_session
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or("Codex recovery has no retargeted native identity")?;
+        return heartbeat.with_exact_codex_recovery_effect(
+            "start Codex recovery owner",
+            &spec.target_agent_id,
+            native_id,
+            spawn,
+        )?;
+    }
+    spawn()
+}
+
 impl CodexSharedOwner {
     /// Caller holds the agent lifecycle/ownership gate. No process is started by push.
     pub(crate) async fn start(
         spec: &NativeSessionSpec,
         codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+        recovery_heartbeat: Option<&crate::commands::agent::LifecycleLeaseHeartbeat>,
         cancelled: impl std::future::Future<Output = ()>,
     ) -> Result<Arc<Self>, CodexSharedError> {
         if spec.provider != "codex" || spec.target_agent_id != spec.config.session_id {
@@ -520,11 +543,16 @@ impl CodexSharedOwner {
         let backfill_home =
             startup_backfill::cold_home(&wardian_home, &spec.target_agent_id, &codex_home);
         let child_spawn_at = std::time::Instant::now();
-        #[cfg(windows)]
-        let spawned =
-            crate::utils::process::OwnedBootstrapChild::spawn_contained_runtime(&mut command);
-        #[cfg(not(windows))]
-        let spawned = command.spawn().map_err(|error| error.to_string());
+        let spawned = spawn_codex_owner_at_lease_boundary(spec, recovery_heartbeat, || {
+            #[cfg(windows)]
+            {
+                crate::utils::process::OwnedBootstrapChild::spawn_contained_runtime(&mut command)
+            }
+            #[cfg(not(windows))]
+            {
+                command.spawn().map_err(|error| error.to_string())
+            }
+        });
         let spawned = match spawned {
             Ok(child) => child,
             Err(error) => {
@@ -598,7 +626,8 @@ impl CodexSharedOwner {
             }
             let proxy_connect_at = std::time::Instant::now();
             let client = CodexSharedClient::connect_proxy(
-                spec.target_agent_id.clone(), spec.generation, proxy_command, &socket, &mut cancelled,
+                spec.target_agent_id.clone(), spec.generation, proxy_command, &socket,
+                recovery_heartbeat.is_some(), &mut cancelled,
             ).await?;
             timings.proxy_connect = proxy_connect_at.elapsed();
             connected = Some(client.clone());
@@ -659,6 +688,7 @@ impl CodexSharedOwner {
                         &mut || attachment::child_alive(&mut child),
                         initialization_deadline,
                         &observed_version,
+                        recovery_heartbeat.map(RecoveryRequestLease::Preparing),
                     ).await;
                     timings.reviewer_checkpoint = checkpoint_at.elapsed();
                     result?;
@@ -767,6 +797,7 @@ impl CodexSharedOwner {
     pub(crate) async fn finalize_interactive<F, Fut>(
         &self,
         mut tui_alive: F,
+        publication: Option<&crate::manager::RegistrationPublicationState>,
     ) -> Result<Value, CodexSharedError>
     where
         F: FnMut() -> Fut,
@@ -799,10 +830,23 @@ impl CodexSharedOwner {
             }
             attachment::child_alive(child)?;
             tui_alive().await?;
-            attachment::inject_initial_context(&self.client, &id, &self.initial_context).await?;
+            let lease = publication
+                .filter(|state| state.is_recovery())
+                .map(RecoveryRequestLease::Attaching);
+            attachment::inject_initial_context(&self.client, &id, &self.initial_context, lease)
+                .await?;
             attachment::child_alive(child)?;
             tui_alive().await?;
-            let response = self.client.resume_metadata(json!({"threadId":id})).await?;
+            let response = self
+                .client
+                .attachment_request(
+                    "thread/resume",
+                    json!({"threadId":id,"excludeTurns":true}),
+                    &id,
+                    lease,
+                    None,
+                )
+                .await?;
             if response["thread"]["id"].as_str() != Some(id.as_str()) {
                 return Err(CodexSharedError::unsupported(
                     "attachment resume changed thread identity",

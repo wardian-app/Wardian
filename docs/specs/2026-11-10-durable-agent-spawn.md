@@ -129,6 +129,36 @@ check the ledger. Queued, preparing, launching, and unknown planned Wardian
 IDs are excluded. A registered ledger row does not create a roster entry if the
 saved roster is absent or incompatible.
 
+The worker marks a fully prepared Codex attempt when it persists its launch
+descriptor. Exclusive startup can seal an exact preparation witness while
+that attempt is still `preparing`. Startup writes the witness and quarantines
+the operation in the same transaction. The witness establishes the old
+attempt's pre-effect boundary. Launch still requires separate vacancy and
+ownership evidence spanning bootstrap and registration. Explicit recovery
+claims one new unqueued attempt and records the effective model and original
+attempt in the same transaction. Status and wait expose the current attempt ID.
+An identical request for a committed acceptance returns its audit receipt before
+worker admission. The same lifecycle acquisition covers local
+rollout materialization and is retargeted by provisional registration. Recovery
+renews the exact acquisition through detached owner preparation and verifies it
+at rollout materialization and provider start. The readiness watcher renews the
+acquisition before acknowledging handoff. Recovery bootstrap uses local
+materialization only. Startup never queues work from a witness or replays an
+interrupted recovery attempt.
+
+After handoff the watcher signals lease loss to provisional attachment. The
+broker checks the exact acquisition for the attachment writes and when it
+publishes the verified native binding and capabilities. The ledger checks the
+same acquisition and native identity through the registration and name-claim
+commit. The watcher renews the acquisition until activation qualifies the exact
+current runtime and input owner. Only that activation publishes input readiness,
+Idle status, and the captured PID. Activation also disarms captured cleanup and
+permits the watcher to release. A failed registration leaves the accepted attempt
+consumed and quarantined. Failed activation after commit preserves the registered
+operation and saved identity. Cleanup starts the retained TUI stop before waiting
+for the lifecycle lock and disposes the exact daemon after the TUI joins. A failed
+join retains both for explicit retry. Failure retains the acquisition until expiry.
+
 ## Codex launch authority
 
 The worker selects current Codex policy and provider source during `preparing`,

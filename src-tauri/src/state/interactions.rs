@@ -731,6 +731,43 @@ impl InteractionState {
         self.provider_inputs.lock().await.get(session_id).cloned()
     }
 
+    /// Activate the committed recovery under both generation and lease fences.
+    pub(crate) async fn publish_recovery_provider_input_ready(
+        &self,
+        session_id: &str,
+        generation: u64,
+        publication: &crate::manager::RegistrationPublicationState,
+        publish: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (_mutation, _, current) = self
+            .lock_mutation_and_provider_generation(session_id, false)
+            .await;
+        if current.as_deref().copied().flatten() != Some(generation)
+            || self.deleted_sessions.lock().await.contains(session_id)
+        {
+            return Err("Captured Codex input generation is no longer current".into());
+        }
+        let mut inputs = self.provider_inputs.lock().await;
+        let ready = ProviderInputReadiness::Ready;
+        let existing = inputs
+            .get(session_id)
+            .filter(|input| input.generation == generation)
+            .ok_or("Captured Codex input state is unavailable")?;
+        let keep = keep_existing_provider_input_state(existing, generation, ready, None);
+        if keep && existing.state != ready {
+            return Err("Captured Codex input is no longer eligible for readiness".into());
+        }
+        publication.with_recovery_activation(|| {
+            publish()?;
+            if !keep {
+                let record = provider_input_state_record(session_id, generation, ready, None);
+                inputs.insert(session_id.to_string(), record.clone());
+                let _ = wardian_core::db::upsert_provider_input_state(&record);
+            }
+            Ok(())
+        })
+    }
+
     pub async fn start_provider_input_generation(
         &self,
         session_id: &str,

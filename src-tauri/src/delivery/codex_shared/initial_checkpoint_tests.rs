@@ -1,5 +1,6 @@
 //! Wardian protocol regressions; synthetic transport is not stock persistence proof.
 use super::*;
+use crate::delivery::codex_shared::STARTUP_TIMEOUT;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,8 +19,65 @@ async fn prepare_saved_resume(
         alive,
         tokio::time::Instant::now() + STARTUP_TIMEOUT,
         "0.160.0",
+        None,
     )
     .await
+}
+
+#[tokio::test]
+async fn recovery_checkpoint_does_not_preload_after_losing_preparation_lease() {
+    use crate::commands::agent::{
+        acquire_agent_lifecycle_transition_lease_for_identity, LifecycleLeaseHeartbeat,
+    };
+    use wardian_core::conversation_lease::{self, CodexRecoveryLeaseScope};
+
+    let _home = crate::control::test_support::TestWardianHome::new_async().await;
+    let (client, requests, server) = fixture(Case::Auto).await;
+    let (agent_id, _) = client.identity();
+    let lease = acquire_agent_lifecycle_transition_lease_for_identity(
+        agent_id,
+        "checkpoint",
+        "codex",
+        "",
+        "fixture",
+    )
+    .unwrap();
+    assert!(conversation_lease::refresh_codex_recovery_lease_persisted(
+        lease.owner(),
+        chrono::Duration::minutes(20),
+        CodexRecoveryLeaseScope::Attach {
+            agent_id,
+            native_id: "saved"
+        },
+    )
+    .unwrap());
+    let heartbeat = LifecycleLeaseHeartbeat::start_codex_recovery(lease.owner().clone());
+    let writer = client.writer.lock().await;
+    let policy = policy();
+    let mut alive = || Ok(());
+    let checkpoint = super::prepare_saved_resume(
+        &client,
+        &policy,
+        "saved",
+        &mut alive,
+        tokio::time::Instant::now() + STARTUP_TIMEOUT,
+        "0.160.0",
+        Some(RecoveryRequestLease::Preparing(&heartbeat)),
+    );
+    tokio::pin!(checkpoint);
+    assert!(futures_util::poll!(&mut checkpoint).is_pending());
+    let mut leases = conversation_lease::load_leases_checked().unwrap();
+    leases
+        .iter_mut()
+        .find(|entry| entry.owner() == *lease.owner())
+        .unwrap()
+        .expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+    conversation_lease::save_leases(&leases).unwrap();
+    drop(writer);
+    assert!(!checkpoint.await.unwrap_err().provider_boundary_crossed);
+    client.close().await;
+    server.await.unwrap();
+    assert!(requests.lock().unwrap().is_empty());
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,6 +407,7 @@ async fn submitted_only_wrong_or_missing_events_and_conflicts_do_not_complete_pr
             } else {
                 Duration::from_secs(5)
             },
+            None,
         )
         .await
         .unwrap_err();
@@ -452,6 +511,7 @@ async fn ineligible_version_or_expired_deadline_rejects_before_preload() {
             &mut || Ok(()),
             tokio::time::Instant::now() + STARTUP_TIMEOUT,
             version,
+            None,
         )
         .await
         .unwrap_err();
@@ -468,6 +528,7 @@ async fn ineligible_version_or_expired_deadline_rejects_before_preload() {
         &mut || Ok(()),
         tokio::time::Instant::now(),
         "0.160.0",
+        None,
     )
     .await
     .unwrap_err();

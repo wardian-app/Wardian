@@ -160,7 +160,7 @@ async fn unsupported_reviewer_is_rejected_before_owner_home_preparation() {
         workspace: fixture.workspace.clone(),
         config,
     };
-    let error = super::CodexSharedOwner::start(&spec, None, std::future::pending())
+    let error = super::CodexSharedOwner::start(&spec, None, None, std::future::pending())
         .await
         .unwrap_err();
     assert_eq!(error.code, "unsupported");

@@ -1,9 +1,10 @@
 use super::agent_lifecycle::PendingRuntime;
 use crate::manager;
+use crate::manager::codex_onboarding::CapturedRecoveryRuntime;
 use crate::state::{ActiveAgent, AppState};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use wardian_core::models::AgentConfig;
 
 #[cfg(test)]
@@ -18,6 +19,86 @@ pub(crate) struct RegisteredAgentSpawn {
     pub(crate) config: AgentConfig,
     pub(crate) config_handle: Arc<std::sync::Mutex<AgentConfig>>,
     pub(crate) runtime_generation: Option<u64>,
+    pub(crate) recovery: Option<RecoveryPendingRegistration>,
+}
+
+pub(crate) struct RecoveryPendingRegistration {
+    publication: RegistrationPublicationAttempt,
+    completion: Option<manager::CodexAttachmentCompletion>,
+    #[cfg(test)]
+    fixture_capture: Option<(
+        manager::codex_onboarding::RecoveryRuntimeCleanup<tauri::test::MockRuntime>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
+}
+
+impl RecoveryPendingRegistration {
+    pub(crate) fn publication(&self) -> &Arc<manager::RegistrationPublicationState> {
+        &self.publication.0
+    }
+
+    pub(crate) async fn publish_input_after_commit(self) {
+        if let Some(mut completion) = self.completion {
+            if let Err(error) = completion
+                .publish_recovery_input_after_commit(&self.publication.0)
+                .await
+            {
+                let error = completion.rollback_after_failure(error, true).await;
+                manager::log_debug(&format!(
+                    "[WARDIAN] Codex recovery input activation failed: {error}"
+                ));
+            }
+        }
+        #[cfg(test)]
+        if let Some((cleanup, reader_alive)) = self.fixture_capture {
+            match self.publication.0.with_recovery_activation(|| {
+                manager::codex_onboarding::require_recovery_reader_alive(&reader_alive)
+            }) {
+                Ok(()) => cleanup.disarm(),
+                Err(error) => {
+                    cleanup.finish(error).await;
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn cleanup_after_failed_registration(self) {
+        let failure = if self.publication().recovery_lease_lost() {
+            "Codex recovery lost its exact registration lease"
+        } else {
+            "Codex recovery did not commit durable registration"
+        };
+        if let Some(completion) = self.completion {
+            let error = completion
+                .rollback_after_failure(failure.into(), true)
+                .await;
+            manager::log_debug(&format!("[WARDIAN] {error}"));
+        }
+        #[cfg(test)]
+        if let Some((cleanup, _)) = self.fixture_capture {
+            cleanup.finish(failure.into()).await;
+        }
+    }
+}
+
+#[cfg(test)]
+impl RecoveryPendingRegistration {
+    pub(crate) fn fixture(publication: Arc<manager::RegistrationPublicationState>) -> Self {
+        Self {
+            publication: RegistrationPublicationAttempt(publication),
+            completion: None,
+            fixture_capture: None,
+        }
+    }
+
+    pub(crate) fn with_fixture_capture(
+        mut self,
+        cleanup: manager::codex_onboarding::RecoveryRuntimeCleanup<tauri::test::MockRuntime>,
+        reader_alive: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.fixture_capture = Some((cleanup, reader_alive));
+        self
+    }
 }
 
 impl RegisteredAgentSpawn {
@@ -65,6 +146,7 @@ pub(super) async fn register_new_agent(
     app: &AppHandle,
     options: super::AgentRegistrationOptions<'_>,
     codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+    inherited_lease: Option<super::RecoveryRegistrationLease>,
 ) -> Result<RegisteredAgentSpawn, String> {
     let session_id = config.session_id.clone();
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
@@ -73,15 +155,45 @@ pub(super) async fn register_new_agent(
     ));
     let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
     let publication =
-        RegistrationPublicationAttempt(Arc::new(manager::RegistrationPublicationState::default()));
-    let (active_agent, mut completion) = spawn_for_registration(
+        RegistrationPublicationAttempt(Arc::new(if let Some(lease) = &inherited_lease {
+            let native_id = config
+                .resume_session
+                .clone()
+                .filter(|id| !id.is_empty())
+                .ok_or("Codex recovery registration needs an exact native identity")?;
+            manager::RegistrationPublicationState::for_recovery(
+                lease.lease.owner().clone(),
+                session_id.clone(),
+                native_id,
+            )
+        } else {
+            manager::RegistrationPublicationState::default()
+        }));
+    let (mut active_agent, mut completion) = spawn_for_registration(
         pending,
         app,
         &config,
         publication.0.clone(),
         codex_launch_context,
+        inherited_lease,
     )
     .await?;
+    if publication.0.is_recovery() {
+        let Some(completion) = completion.as_mut() else {
+            publication.0.fail();
+            return Err(stop_uncommitted_agent(
+                None,
+                active_agent,
+                "Codex recovery has no captured attachment".into(),
+            )
+            .await);
+        };
+        completion.retain_recovery_publication(publication.0.clone());
+        active_agent.retain_recovery_owner(
+            state.native_delivery.clone(),
+            completion.transfer_recovery_owner_to_stop(),
+        );
+    }
     let registered_config = active_agent.config.clone();
     let registered_generation = active_agent.runtime_generation;
     // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
@@ -174,15 +286,26 @@ pub(super) async fn register_new_agent(
         let _ = app.emit("agents-updated", ());
     }
 
-    await_completion(
-        start_completion(completion),
+    let completion = await_completion(
+        start_completion(completion, publication.0.clone()),
         state,
         &session_id,
         &mut config,
+        &publication.0,
     )
     .await?;
 
-    publication.0.commit();
+    let recovery = if publication.0.is_recovery() {
+        Some(RecoveryPendingRegistration {
+            publication,
+            completion,
+            #[cfg(test)]
+            fixture_capture: None,
+        })
+    } else {
+        publication.0.commit();
+        None
+    };
     if let Some(owner_id) = options.name_claim_owner_id {
         finish_name_ownership(
             state,
@@ -198,6 +321,7 @@ pub(super) async fn register_new_agent(
         config,
         config_handle: registered_config,
         runtime_generation: registered_generation,
+        recovery,
     })
 }
 
@@ -259,6 +383,7 @@ pub(super) async fn spawn_for_registration(
     config: &AgentConfig,
     publication: Arc<manager::RegistrationPublicationState>,
     codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+    inherited_lease: Option<super::RecoveryRegistrationLease>,
 ) -> Result<(PendingRuntime, Option<manager::CodexAttachmentCompletion>), String> {
     if manager::should_publish_provisionally(&config.provider, false) {
         let spawned = manager::spawn::spawn_agent_provisionally_with_codex_context(
@@ -268,10 +393,14 @@ pub(super) async fn spawn_for_registration(
             None,
             publication,
             codex_launch_context,
+            inherited_lease,
         )
         .await?;
         Ok((pending.attach(spawned.active), spawned.completion))
     } else {
+        if inherited_lease.is_some() {
+            return Err("A recovery lease requires provisional Codex registration".into());
+        }
         let active = manager::spawn::spawn_agent_for_registration_with_codex_context(
             app.clone(),
             config.clone(),
@@ -300,7 +429,16 @@ pub(super) async fn commit_registered_agent(
     let lifecycle = state.lock_agent_lifecycle(session_id).await;
     let mut agents = state.agents.lock().await;
     let mut order = state.agent_order.lock().await;
-    let pending = install_registered_agent(&mut agents, &mut order, session_id, pending, placement);
+    let mut pending =
+        install_registered_agent(&mut agents, &mut order, session_id, pending, placement);
+    let recovery = completion
+        .as_ref()
+        .is_some_and(|completion| completion.recovery_is_pending());
+    if let Some(completion) = completion.as_mut().filter(|_| recovery) {
+        // The roster now owns the TUI. Its cleanup token must survive even
+        // if the first persistence attempt fails or the future is dropped.
+        completion.set_stop_registration(pending.take_registration());
+    }
     drop(order);
     drop(agents);
 
@@ -312,6 +450,7 @@ pub(super) async fn commit_registered_agent(
     };
     let mut pending = match persisted {
         Ok(()) => pending,
+        Err(error) if recovery => return Err((pending, error)),
         Err(error) => {
             let pending = if let Some(runtime_generation) = codex_runtime_generation {
                 rollback_failed_provisional_codex_install(
@@ -347,7 +486,7 @@ pub(super) async fn commit_registered_agent(
                 "provisional Codex runtime became stale before publication".into(),
             ));
         }
-        if let Some(completion) = completion.as_mut() {
+        if let Some(completion) = completion.as_mut().filter(|_| !recovery) {
             completion.set_stop_registration(pending.take_registration());
         }
         drop(lifecycle);
@@ -430,22 +569,29 @@ pub(super) fn install_registered_agent(
 
 pub(super) fn start_completion(
     completion: Option<manager::CodexAttachmentCompletion>,
-) -> Option<tauri::async_runtime::JoinHandle<Result<(), String>>> {
-    completion.map(|completion| tauri::async_runtime::spawn(completion.run()))
+    publication: Arc<manager::RegistrationPublicationState>,
+) -> Option<tauri::async_runtime::JoinHandle<Result<manager::CodexAttachmentCompletion, String>>> {
+    completion.map(|completion| tauri::async_runtime::spawn(completion.run(publication)))
 }
 
 pub(super) async fn await_completion(
-    completion: Option<tauri::async_runtime::JoinHandle<Result<(), String>>>,
+    completion: Option<
+        tauri::async_runtime::JoinHandle<Result<manager::CodexAttachmentCompletion, String>>,
+    >,
     state: &AppState,
     session_id: &str,
     config: &mut AgentConfig,
-) -> Result<(), String> {
+    publication: &manager::RegistrationPublicationState,
+) -> Result<Option<manager::CodexAttachmentCompletion>, String> {
     let Some(completion) = completion else {
-        return Ok(());
+        return Ok(None);
     };
-    completion
+    let completed = completion
         .await
         .map_err(|error| format!("Codex attachment task failed: {error}"))??;
+    if let Err(error) = publication.with_recovery_publication(|| ()) {
+        return Err(completed.rollback_after_failure(error, true).await);
+    }
     *config = {
         let agents = state.agents.lock().await;
         let cloned = agents
@@ -457,7 +603,7 @@ pub(super) async fn await_completion(
             .clone();
         cloned
     };
-    Ok(())
+    Ok(Some(completed))
 }
 
 pub(super) async fn stop_uncommitted_agent(
@@ -483,6 +629,7 @@ pub(crate) async fn rollback_provisional_codex(
     runtime_generation: u64,
     registration: Option<crate::manager::codex_stop::StopRegistration>,
     failure: &str,
+    captured_only: bool,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let Some(registration) = registration else {
@@ -527,23 +674,26 @@ pub(crate) async fn rollback_provisional_codex(
         }
     };
 
-    if let Err(error) = state
-        .interactions
-        .delete_agent_durable_state(session_id)
-        .await
-    {
-        return retain_failed_detached_codex(
-            app,
-            &state,
-            session_id,
-            provider_generation,
-            format!("{failure}; failed to delete provisional interaction state: {error}"),
-            detached,
-        )
-        .await;
+    // Recovery can have lost authoritativeness for this Wardian identity.
+    // Stop only the captured generation and preserve session-wide evidence.
+    if !captured_only {
+        if let Err(error) = state
+            .interactions
+            .delete_agent_durable_state(session_id)
+            .await
+        {
+            return retain_failed_detached_codex(
+                app,
+                &state,
+                session_id,
+                provider_generation,
+                format!("{failure}; failed to delete provisional interaction state: {error}"),
+                detached,
+            )
+            .await;
+        }
+        state.remove_agent_delivery_state(session_id).await;
     }
-
-    state.remove_agent_delivery_state(session_id).await;
     let terminal_error = if let Some(generation) = detached.generation {
         state
             .terminal_sessions
@@ -603,6 +753,17 @@ async fn detach_provisional_codex(
     runtime_generation: u64,
     registration: crate::manager::codex_stop::StopRegistration,
 ) -> Result<Option<DetachedProvisionalCodex>, DetachProvisionalError> {
+    detach_matching_codex(state, session_id, runtime_generation, registration, None).await
+}
+
+#[allow(clippy::result_large_err)]
+async fn detach_matching_codex(
+    state: &AppState,
+    session_id: &str,
+    runtime_generation: u64,
+    registration: crate::manager::codex_stop::StopRegistration,
+    recovery: Option<&CapturedRecoveryRuntime>,
+) -> Result<Option<DetachedProvisionalCodex>, DetachProvisionalError> {
     let mut registration = Some(registration);
     loop {
         let lifecycle = state.lock_agent_lifecycle(session_id).await;
@@ -627,10 +788,39 @@ async fn detach_provisional_codex(
                         manager::codex_onboarding::exact_runtime_generation_matches(
                             agent.runtime_generation,
                             runtime_generation,
-                        )
+                        ) && recovery
+                            .is_none_or(|capture| Arc::ptr_eq(&agent.config, &capture.config))
                     });
                     if !current {
                         (false, Ok(None))
+                    } else if recovery.is_some_and(|capture| {
+                        capture
+                            .publication
+                            .committed_recovery_native_id(session_id)
+                            .is_ok()
+                    }) {
+                        // The operation and saved identity are already durable.
+                        // Retain that identity and fence late status from the
+                        // stopped runtime by replacing its status incarnation.
+                        let mut agents = agents;
+                        let agent = agents
+                            .get_mut(session_id)
+                            .expect("checked captured recovery");
+                        let runtime = super::take_agent_runtime_for_termination(agent);
+                        super::replace_agent_status_incarnation(agent, "Error");
+                        let generation = runtime.runtime_generation;
+                        (
+                            false,
+                            Ok(Some(DetachedProvisionalCodex {
+                                shell: None,
+                                stop_guard: registration
+                                    .take()
+                                    .expect("retained captured stop")
+                                    .capture(runtime),
+                                generation,
+                                order_index: 0,
+                            })),
+                        )
                     } else {
                         let mut agents = agents;
                         let mut order = order;
@@ -682,6 +872,112 @@ async fn detach_provisional_codex(
             });
         }
     }
+}
+
+pub(crate) async fn rollback_captured_recovery<R: Runtime>(
+    app: &AppHandle<R>,
+    capture: &CapturedRecoveryRuntime,
+    registration: crate::manager::codex_stop::StopRegistration,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let id = &capture.session_id;
+    let (stop, roster_error) = match detach_matching_codex(
+        &state,
+        id,
+        capture.runtime_generation,
+        registration.without_terminal_cleanup(),
+        Some(capture),
+    )
+    .await
+    {
+        Ok(detached) => (
+            detached.map(|detached| detached.stop_guard.begin_stop()),
+            None,
+        ),
+        Err(DetachProvisionalError::Persistence { detached, error }) => {
+            let DetachedProvisionalCodex {
+                mut shell,
+                stop_guard,
+                order_index,
+                ..
+            } = detached;
+            let stop = stop_guard.begin_stop();
+            if let Some(shell) = shell.as_mut() {
+                super::replace_agent_status_incarnation(shell, "Error");
+            }
+            let retained = retain_failed_detached_roster(&state, id, &mut shell, order_index)
+                .await
+                .err();
+            let error = retained.map_or(error.clone(), |retained| format!("{error}; {retained}"));
+            (Some(stop), Some(error))
+        }
+        Err(DetachProvisionalError::Infrastructure {
+            registration,
+            error,
+        }) => {
+            let _lifecycle = state.lock_agent_lifecycle(id).await;
+            let mut agents = state.agents.lock().await;
+            let stop = agents
+                .get_mut(id)
+                .filter(|agent| {
+                    agent.runtime_generation == Some(capture.runtime_generation)
+                        && Arc::ptr_eq(&agent.config, &capture.config)
+                })
+                .map(|agent| {
+                    let runtime = super::take_agent_runtime_for_termination(agent);
+                    super::replace_agent_status_incarnation(agent, "Error");
+                    registration.capture(runtime).begin_stop()
+                });
+            (stop, Some(error))
+        }
+    };
+    let (terminal_error, stop_error) =
+        finish_captured_recovery_stop(app, &state, id, capture.runtime_generation, stop).await;
+    if roster_error.is_none() && terminal_error.is_none() && stop_error.is_none() {
+        Ok(())
+    } else {
+        Err(manager::codex_onboarding::format_cleanup_errors(
+            "Codex recovery runtime cleanup",
+            roster_error,
+            terminal_error,
+            stop_error,
+        ))
+    }
+}
+
+async fn finish_captured_recovery_stop<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    id: &str,
+    generation: u64,
+    stop: Option<crate::manager::codex_stop::StopHandle>,
+) -> (Option<String>, Option<String>) {
+    // Pause can hold lifecycle while awaiting this stop. Start the retained
+    // worker before taking lifecycle again to remove only our terminal.
+    use crate::state::terminal_session::TerminalBrokerError;
+    let terminal_error = {
+        let _lifecycle = state.lock_agent_lifecycle(id).await;
+        match state
+            .terminal_sessions
+            .terminate_and_remove_runtime(id, generation)
+            .await
+        {
+            Ok(())
+            | Err(
+                TerminalBrokerError::SessionNotFound
+                | TerminalBrokerError::StaleRuntimeGeneration { .. },
+            ) => None,
+            Err(error) => Some(error.to_string()),
+        }
+    };
+    let stop_error = if let Some(stop) = stop {
+        let result = stop.wait().await.err();
+        let _ = app.emit("agents-updated", ());
+        result
+    } else {
+        None
+    };
+    (terminal_error, stop_error)
 }
 
 async fn persist_current_provisional_roster(state: &AppState) -> Result<(), String> {
@@ -768,9 +1064,10 @@ async fn retain_failed_detached_codex(
         .map(|shell| shell.current_status.clone())
         .ok_or_else(|| "failed Codex roster shell was already retained".to_string())?;
     manager::set_agent_status(app, session_id, &status, "Error");
-    let roster_error = retain_failed_detached_roster(state, session_id, &mut detached)
-        .await
-        .err();
+    let roster_error =
+        retain_failed_detached_roster(state, session_id, &mut detached.shell, detached.order_index)
+            .await
+            .err();
     state
         .interactions
         .record_provider_input_state(
@@ -803,7 +1100,8 @@ async fn retain_failed_detached_codex(
 async fn retain_failed_detached_roster(
     state: &AppState,
     session_id: &str,
-    detached: &mut DetachedProvisionalCodex,
+    shell: &mut Option<ActiveAgent>,
+    order_index: usize,
 ) -> Result<(), String> {
     loop {
         let _lifecycle = state.lock_agent_lifecycle(session_id).await;
@@ -815,12 +1113,9 @@ async fn retain_failed_detached_roster(
                     let mut agents = state.agents.lock().await;
                     let mut order = state.agent_order.lock().await;
                     if !agents.contains_key(session_id) {
-                        let shell = detached
-                            .shell
-                            .take()
-                            .expect("checked detached provisional shell");
+                        let shell = shell.take().expect("checked detached provisional shell");
                         agents.insert(session_id.to_string(), shell);
-                        let index = detached.order_index.min(order.len());
+                        let index = order_index.min(order.len());
                         order.insert(index, session_id.to_string());
                     }
                     let snapshot = manager::state_configs_snapshot(&agents, &order);

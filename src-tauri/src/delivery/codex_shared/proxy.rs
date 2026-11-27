@@ -7,6 +7,7 @@ use std::process::Stdio;
 
 use tokio::process::{Child, Command};
 
+use super::proxy_input::GuardedProxyInput;
 use super::*;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -27,6 +28,7 @@ impl CodexSharedClient {
         generation: u64,
         command: Command,
         private_socket: &Path,
+        recovery: bool,
         cancelled: impl Future<Output = ()>,
     ) -> Result<Arc<Self>, CodexSharedError> {
         if !private_socket.is_absolute() {
@@ -41,7 +43,7 @@ impl CodexSharedClient {
             _ = &mut cancelled => return Err(cancelled_error()),
             _ = std::future::ready(()) => {}
         }
-        let (proxy, stream, setup_error) = OwnedProxy::spawn(command, private_socket)?;
+        let (proxy, stream, setup_error) = OwnedProxy::spawn(command, private_socket, recovery)?;
         if let Some(error) = setup_error {
             proxy.close().await;
             return Err(error);
@@ -87,12 +89,14 @@ fn cancelled_error() -> CodexSharedError {
     CodexSharedError::unsupported("Codex proxy connection cancelled; no RPC was submitted")
 }
 
-type ProxyStream = tokio::io::Join<tokio::process::ChildStdout, tokio::process::ChildStdin>;
+type ProxyInput = Box<dyn AsyncWrite + Unpin + Send>;
+type ProxyStream = tokio::io::Join<tokio::process::ChildStdout, ProxyInput>;
 
 /// A non-cancellable supervisor retains the Child until exit has been observed.
 /// The handle stays in its slot across cancelled and concurrent close calls.
 pub(super) struct OwnedProxy {
     stop: watch::Sender<bool>,
+    pub(super) recovery_writer: bool,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -100,15 +104,17 @@ impl OwnedProxy {
     fn spawn(
         mut command: Command,
         private_socket: &Path,
+        recovery: bool,
     ) -> Result<(Self, ProxyStream, Option<CodexSharedError>), CodexSharedError> {
         command
             .args(["app-server", "proxy", "--sock"])
             .arg(private_socket);
-        Self::spawn_prepared(command)
+        Self::spawn_prepared(command, recovery)
     }
 
     fn spawn_prepared(
         mut command: Command,
+        recovery: bool,
     ) -> Result<(Self, ProxyStream, Option<CodexSharedError>), CodexSharedError> {
         command
             .stdin(Stdio::piped())
@@ -116,6 +122,16 @@ impl OwnedProxy {
             // Never leave an undrained stderr pipe capable of blocking the proxy.
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        let guarded_input = if recovery {
+            let (reader, writer) = std::io::pipe()
+                .map_err(|_| CodexSharedError::unsupported("could not open guarded proxy stdin"))?;
+            command.stdin(Stdio::from(reader));
+            Some(GuardedProxyInput::new(writer).map_err(|_| {
+                CodexSharedError::unsupported("could not make proxy stdin nonblocking")
+            })?)
+        } else {
+            None
+        };
         #[cfg(windows)]
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         #[cfg(windows)]
@@ -139,7 +155,10 @@ impl OwnedProxy {
             .stdout
             .take()
             .expect("proxy stdout configured as piped");
-        let stdin = child.stdin.take().expect("proxy stdin configured as piped");
+        let stdin: ProxyInput = match guarded_input {
+            Some(guarded) => Box::new(guarded),
+            None => Box::new(child.stdin.take().expect("proxy stdin configured as piped")),
+        };
         let stream = tokio::io::join(stdout, stdin);
         let (stop, mut stopped) = watch::channel(false);
         let supervisor = tokio::spawn(async move {
@@ -166,6 +185,7 @@ impl OwnedProxy {
         Ok((
             Self {
                 stop,
+                recovery_writer: recovery,
                 supervisor: Mutex::new(Some(supervisor)),
             },
             stream,
@@ -353,6 +373,7 @@ mod tests {
             7,
             Command::new("missing-proxy-executable"),
             Path::new("relative.sock"),
+            false,
             std::future::pending(),
         )
         .await
@@ -369,6 +390,7 @@ mod tests {
             7,
             Command::new("missing-proxy-executable"),
             &socket,
+            false,
             std::future::ready(()),
         )
         .await
@@ -403,7 +425,8 @@ mod tests {
                         "--nocapture",
                     ])
                     .env("WARDIAN_PROXY_UNIT_CHILD_MARKER", &marker);
-                let (proxy, _stream, setup_error) = OwnedProxy::spawn_prepared(command).unwrap();
+                let (proxy, _stream, setup_error) =
+                    OwnedProxy::spawn_prepared(command, false).unwrap();
                 if let Some(error) = setup_error {
                     proxy.close().await;
                     panic!("{error}");

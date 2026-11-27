@@ -1,5 +1,8 @@
+use crate::commands::agent::{PreparedAgentSpawn, RecoveryBootstrap, RegisteredAgentSpawn};
 use crate::state::AppState;
 use tauri::{AppHandle, Manager};
+
+pub(crate) mod recovery;
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -63,6 +66,43 @@ pub(crate) fn schedule(app: AppHandle, operation_id: String) {
         };
         run_operation(app, operation_id).await;
     });
+}
+
+/// Detach authorization and dispatch together from the control request. A
+/// lost response must not cancel a committed attempt or authorize another.
+pub(crate) async fn recover_launch(
+    app: AppHandle,
+    request: wardian_core::agent_spawn::recovery::Request,
+) -> Result<
+    wardian_core::agent_spawn::recovery::LaunchAccepted,
+    wardian_core::agent_spawn::recovery::Blocker,
+> {
+    use wardian_core::agent_spawn::recovery::Blocker;
+    tauri::async_runtime::spawn(async move {
+        let slots = app.state::<AppState>().spawn_operation_slots.clone();
+        recovery::replay_or_admit_launch(slots, request, |permit, request| async move {
+            let state = app.state::<AppState>();
+            let (receipt, prepared, bootstrap) = recovery::admit_launch(&state, request).await?;
+            let outcome = WorkerOutcomeGuard {
+                operation_id: receipt.operation_id.clone(),
+                attempt_id: receipt.accepted_attempt_id.clone(),
+                terminal: false,
+            };
+            tauri::async_runtime::spawn(async move {
+                let _permit = permit;
+                launch_operation(app, outcome, prepared, Some(bootstrap)).await;
+            });
+            Ok(receipt)
+        })
+        .await
+    })
+    .await
+    .map_err(|_| {
+        Blocker::new(
+            "spawn_recovery_worker_unavailable",
+            "The guarded spawn worker could not be reached.",
+        )
+    })?
 }
 
 pub(crate) async fn wait_for_operation(
@@ -217,7 +257,48 @@ async fn run_operation(app: AppHandle, operation_id: String) {
             return;
         }
     };
+    launch_operation(app, outcome_guard, prepared, None).await;
+}
 
+async fn launch_operation(
+    app: AppHandle,
+    outcome: WorkerOutcomeGuard,
+    prepared: PreparedAgentSpawn,
+    recovery: Option<RecoveryBootstrap>,
+) {
+    let state = app.state::<AppState>();
+    finish_prepared_operation(
+        state.inner(),
+        outcome,
+        prepared,
+        recovery,
+        |prepared, recovery, keys| {
+            crate::commands::agent::launch_prepared_agent_spawn(
+                prepared,
+                state.inner(),
+                &app,
+                None,
+                Some(keys),
+                recovery,
+            )
+        },
+    )
+    .await;
+}
+
+async fn finish_prepared_operation<F>(
+    state: &AppState,
+    mut outcome_guard: WorkerOutcomeGuard,
+    prepared: PreparedAgentSpawn,
+    recovery: Option<RecoveryBootstrap>,
+    launch: impl FnOnce(PreparedAgentSpawn, Option<RecoveryBootstrap>, (String, String)) -> F,
+) where
+    F: std::future::Future<Output = Result<RegisteredAgentSpawn, String>>,
+{
+    let operation_id = &outcome_guard.operation_id;
+    let attempt_id = &outcome_guard.attempt_id;
+    let guarded = recovery.is_some();
+    let recovery_model = recovery.as_ref().and(prepared.config.model.clone());
     let operation_key = operation_id.clone();
     let attempt_key = attempt_id.clone();
     match tokio::task::spawn_blocking(move || {
@@ -241,14 +322,10 @@ async fn run_operation(app: AppHandle, operation_id: String) {
         }
     }
 
-    let state = app.state::<AppState>();
-    let durable_operation = Some((operation_id.clone(), attempt_id.clone()));
-    let agent = crate::commands::agent::launch_prepared_agent_spawn(
+    let agent = launch(
         prepared,
-        state.inner(),
-        &app,
-        None,
-        durable_operation,
+        recovery,
+        (operation_id.clone(), attempt_id.clone()),
     )
     .await;
     let registration = match agent {
@@ -272,21 +349,48 @@ async fn run_operation(app: AppHandle, operation_id: String) {
             return;
         }
     };
+    if guarded == registration.recovery.is_some()
+        && commit_spawn_registration(
+            state,
+            &registration,
+            recovery_model,
+            operation_id,
+            attempt_id,
+        )
+        .await
+    {
+        outcome_guard.terminal = true;
+        if let Some(recovery) = registration.recovery {
+            recovery.publish_input_after_commit().await;
+        }
+    } else if let Some(recovery) = registration.recovery {
+        // Registration verification releases the lifecycle and roster guards
+        // before exact rollback can reacquire them.
+        recovery.cleanup_after_failed_registration().await;
+    }
+}
+
+async fn commit_spawn_registration(
+    state: &AppState,
+    registration: &RegisteredAgentSpawn,
+    recovery_model: Option<String>,
+    operation_id: &str,
+    attempt_id: &str,
+) -> bool {
     let agent = &registration.config;
 
-    let state = app.state::<AppState>();
     let _lifecycle = state.lock_agent_lifecycle(&agent.session_id).await;
     let _roster = match crate::manager::roster_io::acquire_roster_barrier().await {
         Ok(barrier) => barrier,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let agent = {
         let agents = state.agents.lock().await;
         let Some(active) = agents.get(&agent.session_id) else {
-            return;
+            return false;
         };
         if !registration.matches(active) {
-            return;
+            return false;
         }
         let config = active
             .config
@@ -296,8 +400,13 @@ async fn run_operation(app: AppHandle, operation_id: String) {
         drop(agents);
         config
     };
+    if recovery_model.as_ref().is_some_and(|model| {
+        agent.model.as_ref() != Some(model) || registration.config.model.as_ref() != Some(model)
+    }) {
+        return false;
+    }
     let Some(home) = crate::utils::fs::get_wardian_home() else {
-        return;
+        return false;
     };
     let state_path = home.join("settings").join("state.json");
     let expected_session_id = agent.session_id.clone();
@@ -307,6 +416,7 @@ async fn run_operation(app: AppHandle, operation_id: String) {
     let expected_folder = agent.folder.clone();
     let expected_resume = agent.resume_session.clone();
     let expected_fresh = agent.fresh_provider_session_id.clone();
+    let saved_model = recovery_model.clone();
     let saved = tokio::task::spawn_blocking(move || {
         std::fs::read_to_string(state_path)
             .ok()
@@ -321,44 +431,67 @@ async fn run_operation(app: AppHandle, operation_id: String) {
                         && config.agent_class == expected_class
                         && config.folder == expected_folder
                         && config.resume_session == expected_resume
-                        && config.fresh_provider_session_id == expected_fresh
+                        && match &saved_model {
+                            // Codex's fresh marker is runtime-only. Exact
+                            // saved resume and model prove this recovery row.
+                            Some(model) => config.model.as_ref() == Some(model),
+                            None => config.fresh_provider_session_id == expected_fresh,
+                        }
                 })
             })
     })
     .await
     .unwrap_or(false);
     if !saved {
-        return;
+        return false;
     }
     let current = {
         let agents = state.agents.lock().await;
-        agents
-            .get(&agent.session_id)
-            .is_some_and(|active| registration.matches(active))
+        agents.get(&agent.session_id).is_some_and(|active| {
+            registration.matches(active)
+                && recovery_model.as_ref().is_none_or(|model| {
+                    active
+                        .config
+                        .lock()
+                        .is_ok_and(|config| config.model.as_ref() == Some(model))
+                })
+        })
     };
     if !current {
-        return;
+        return false;
     }
-    let operation_key = operation_id.clone();
-    let attempt_key = attempt_id.clone();
+    let operation_key = operation_id.to_owned();
+    let attempt_key = attempt_id.to_owned();
     let provider_session_id = agent
         .resume_session
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .or(agent.fresh_provider_session_id.as_deref())
         .map(str::to_string);
+    let recovery_publication = registration
+        .recovery
+        .as_ref()
+        .map(|recovery| recovery.publication().clone());
     match tokio::task::spawn_blocking(move || {
         let _lifecycle = _lifecycle;
         let _roster = _roster;
-        wardian_core::agent_spawn::mark_registered(
-            &operation_key,
-            &attempt_key,
-            provider_session_id.as_deref(),
-        )
+        if let Some(publication) = recovery_publication {
+            publication.commit_recovery_registration(
+                &operation_key,
+                &attempt_key,
+                provider_session_id.as_deref(),
+            )
+        } else {
+            wardian_core::agent_spawn::mark_registered(
+                &operation_key,
+                &attempt_key,
+                provider_session_id.as_deref(),
+            )
+        }
     })
     .await
     {
-        Ok(Ok(true)) => outcome_guard.terminal = true,
+        Ok(Ok(true)) => return true,
         Ok(Ok(false)) => crate::manager::log_debug(&format!(
             "[WARDIAN] spawn operation {operation_id} registration did not match its durable plan"
         )),
@@ -369,6 +502,7 @@ async fn run_operation(app: AppHandle, operation_id: String) {
             "[WARDIAN] spawn operation {operation_id} registration worker failed: {error}"
         )),
     }
+    false
 }
 
 fn safe_preflight_error(error: &str) -> (&'static str, &'static str) {

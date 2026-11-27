@@ -9,6 +9,10 @@ use wardian_core::models::AgentConfig;
 
 use super::codex_shared::CodexAttachGuard;
 
+#[path = "codex_onboarding/recovery_cleanup.rs"]
+mod recovery_cleanup;
+pub(crate) use recovery_cleanup::{CapturedRecoveryRuntime, RecoveryRuntimeCleanup};
+
 #[cfg(test)]
 #[path = "codex_onboarding_tests.rs"]
 mod tests;
@@ -29,6 +33,7 @@ pub(super) struct CodexAttachmentCompletionContext {
     pub(super) session_id: String,
     pub(super) provider_generation: u64,
     pub(super) runtime_generation: u64,
+    pub(super) process_id: Option<u32>,
     pub(super) config_lock: Arc<std::sync::Mutex<AgentConfig>>,
     pub(super) current_status: Arc<std::sync::Mutex<String>>,
     pub(super) watch_state: Arc<std::sync::Mutex<AgentWatchState>>,
@@ -212,6 +217,7 @@ pub(crate) struct CodexAttachmentCompletion {
     session_id: String,
     provider_generation: u64,
     runtime_generation: u64,
+    process_id: Option<u32>,
     config_lock: Arc<std::sync::Mutex<AgentConfig>>,
     current_status: Arc<std::sync::Mutex<String>>,
     watch_state: Arc<std::sync::Mutex<AgentWatchState>>,
@@ -220,6 +226,8 @@ pub(crate) struct CodexAttachmentCompletion {
     codex_reader_alive: Arc<AtomicBool>,
     cleanup_guard: Option<CodexAttachGuard>,
     stop_registration: Option<crate::manager::codex_stop::StopRegistration>,
+    recovery_publication: Option<Arc<super::RegistrationPublicationState>>,
+    recovery_cleanup: Option<RecoveryRuntimeCleanup>,
 }
 
 impl SpawnedAgent {
@@ -238,6 +246,7 @@ impl CodexAttachmentCompletion {
             session_id: context.session_id,
             provider_generation: context.provider_generation,
             runtime_generation: context.runtime_generation,
+            process_id: context.process_id,
             config_lock: context.config_lock,
             current_status: context.current_status,
             watch_state: context.watch_state,
@@ -246,19 +255,72 @@ impl CodexAttachmentCompletion {
             codex_reader_alive: context.codex_reader_alive,
             cleanup_guard: context.cleanup_guard,
             stop_registration: None,
+            recovery_publication: None,
+            recovery_cleanup: None,
         }
+    }
+
+    pub(crate) fn retain_recovery_publication(
+        &mut self,
+        publication: Arc<super::RegistrationPublicationState>,
+    ) {
+        self.recovery_publication = Some(publication);
+    }
+
+    pub(crate) fn recovery_is_pending(&self) -> bool {
+        self.recovery_publication.is_some()
+    }
+
+    /// The pending TUI stop owns this exact daemon from before installation.
+    pub(crate) fn transfer_recovery_owner_to_stop(&mut self) -> u64 {
+        if let Some(mut guard) = self.cleanup_guard.take() {
+            guard.attached();
+        }
+        self.provider_generation
     }
 
     pub(crate) fn set_stop_registration(
         &mut self,
         registration: Option<crate::manager::codex_stop::StopRegistration>,
     ) {
-        self.stop_registration = registration;
+        match (self.recovery_publication.take(), registration) {
+            (Some(publication), Some(registration)) => {
+                let identity = CapturedRecoveryRuntime::from_completion(self, publication);
+                self.recovery_cleanup = Some(RecoveryRuntimeCleanup::new(
+                    self.app.clone(),
+                    identity,
+                    registration,
+                ));
+            }
+            (_, registration) => self.stop_registration = registration,
+        }
     }
 
-    pub(crate) async fn run(mut self) -> Result<(), String> {
-        let state_app = self.app.clone();
-        let state = state_app.state::<AppState>();
+    pub(crate) async fn run(
+        mut self,
+        publication: Arc<super::RegistrationPublicationState>,
+    ) -> Result<Self, String> {
+        let result = if publication.is_recovery() {
+            tokio::select! {
+                biased;
+                _ = publication.wait_for_recovery_lease_loss() => Err("Codex recovery lost its exact registration lease".into()),
+                result = self.attach(&publication) => result,
+            }
+        } else {
+            self.attach(&publication).await
+        };
+        match result {
+            Ok(()) => Ok(self),
+            Err(error) => Err(self
+                .rollback_after_failure(error, publication.is_recovery())
+                .await),
+        }
+    }
+
+    async fn attach(
+        &mut self,
+        publication: &super::RegistrationPublicationState,
+    ) -> Result<(), String> {
         let liveness_app = self.app.clone();
         let liveness_session = self.session_id.clone();
         let liveness_runtime_generation = self.runtime_generation;
@@ -322,11 +384,12 @@ impl CodexAttachmentCompletion {
                         .map(|_| ())
                         .map_err(crate::delivery::codex_shared::CodexSharedError::unsupported)
                 },
+                Some(publication),
             )
             .await;
         if let Err(error) = finalized {
             let failure = format_codex_attachment_error(error.to_string(), &self.watch_state);
-            return self.fail_with_rollback(failure).await;
+            return Err(failure);
         }
 
         if !self.codex_reader_alive.load(Ordering::Acquire) {
@@ -334,40 +397,44 @@ impl CodexAttachmentCompletion {
                 "captured Codex PTY reader exited during finalization",
                 &self.watch_state,
             );
-            return self.fail_with_rollback(failure).await;
+            return Err(failure);
         }
 
-        let observations = match self
-            .native_delivery
-            .codex_observations(&self.session_id, self.provider_generation)
-            .await
-        {
-            Ok(observations) => observations,
-            Err(error) => {
-                let failure = format_codex_attachment_error(error.to_string(), &self.watch_state);
-                return self.fail_with_rollback(failure).await;
-            }
+        let observations = if publication.is_recovery() {
+            None
+        } else {
+            Some(
+                self.native_delivery
+                    .codex_observations(&self.session_id, self.provider_generation)
+                    .await
+                    .map_err(|error| {
+                        format_codex_attachment_error(error.to_string(), &self.watch_state)
+                    })?,
+            )
         };
 
-        if let Err(error) = self.promote_after_attachment(&state).await {
+        let state_app = self.app.clone();
+        let state = state_app.state::<AppState>();
+        if let Err(error) = self.promote_after_attachment(&state, publication).await {
             let failure = format_codex_attachment_error(error, &self.watch_state);
-            return self.fail_with_rollback(failure).await;
+            return Err(failure);
         }
-        super::codex_shared::observe_turn_activity(
-            self.app.clone(),
-            self.session_id.clone(),
-            self.runtime_generation,
-            self.current_status.clone(),
-            observations,
-        );
+        if let Some(observations) = observations {
+            self.observe_turn_activity(observations);
+        }
         Ok(())
     }
 
-    async fn promote_after_attachment(&mut self, state: &AppState) -> Result<(), String> {
+    async fn promote_after_attachment(
+        &mut self,
+        state: &AppState,
+        publication: &super::RegistrationPublicationState,
+    ) -> Result<(), String> {
         let _lifecycle = state.lock_agent_lifecycle(&self.session_id).await;
         if !self.codex_reader_alive.load(Ordering::Acquire) {
             return Err("captured Codex PTY reader exited during finalization".into());
         }
+        publication.with_recovery_publication(|| ())?;
         persist_codex_identity(
             state,
             &self.session_id,
@@ -383,6 +450,19 @@ impl CodexAttachmentCompletion {
         )
         .await?;
 
+        if !publication.is_recovery() {
+            self.publish_ordinary_input(state).await?;
+            if let Some(guard) = self.cleanup_guard.as_mut() {
+                guard.attached();
+            }
+            self.cleanup_guard.take();
+        } else if self.recovery_cleanup.is_none() {
+            return Err("Codex recovery lost its captured cleanup token".into());
+        }
+        Ok(())
+    }
+
+    async fn publish_ordinary_input(&self, state: &AppState) -> Result<(), String> {
         let readiness = state
             .interactions
             .record_provider_input_state(
@@ -413,18 +493,7 @@ impl CodexAttachmentCompletion {
             &self.config_lock,
         )
         .await?;
-        let mut promotion_generation = Some(self.runtime_generation);
-        let app = self.app.clone();
-        let session_id = self.session_id.clone();
-        let current_status = self.current_status.clone();
-        complete_codex_attachment(
-            &mut promotion_generation,
-            self.runtime_generation,
-            &self.codex_attachment_ready,
-            &self.codex_reader_alive,
-            |_| Ok(()),
-            || super::set_agent_status(&app, &session_id, &current_status, "Idle"),
-        )?;
+        self.publish_ready_status()?;
         assert_live_codex_incarnation(
             state,
             &self.session_id,
@@ -432,14 +501,96 @@ impl CodexAttachmentCompletion {
             &self.config_lock,
         )
         .await?;
-        if let Some(guard) = self.cleanup_guard.as_mut() {
-            guard.attached();
-        }
-        self.cleanup_guard.take();
         Ok(())
     }
 
-    async fn fail_with_rollback(mut self, error: String) -> Result<(), String> {
+    fn publish_ready_status(&self) -> Result<(), String> {
+        let mut generation = Some(self.runtime_generation);
+        complete_codex_attachment(
+            &mut generation,
+            self.runtime_generation,
+            &self.codex_attachment_ready,
+            &self.codex_reader_alive,
+            |_| Ok(()),
+            || super::set_agent_status(&self.app, &self.session_id, &self.current_status, "Idle"),
+        )
+    }
+
+    fn observe_turn_activity(
+        &self,
+        observations: tokio::sync::watch::Receiver<crate::delivery::codex_shared::Observation>,
+    ) {
+        super::codex_shared::observe_turn_activity(
+            self.app.clone(),
+            self.session_id.clone(),
+            self.runtime_generation,
+            self.current_status.clone(),
+            observations,
+        );
+    }
+
+    pub(crate) async fn publish_recovery_input_after_commit(
+        &mut self,
+        publication: &super::RegistrationPublicationState,
+    ) -> Result<(), String> {
+        require_recovery_reader_alive(&self.codex_reader_alive)?;
+        if self.recovery_cleanup.is_none() {
+            return Err("Codex recovery lost its captured cleanup token".into());
+        }
+        let native_id = publication.committed_recovery_native_id(&self.session_id)?;
+        let state = self.app.state::<AppState>();
+        let _lifecycle = state.lock_agent_lifecycle(&self.session_id).await;
+        let (_owner, client) = self
+            .native_delivery
+            .lock_recovery_codex_input(
+                &self.session_id,
+                self.provider_generation,
+                self.runtime_generation,
+                native_id,
+            )
+            .await?;
+        assert_live_codex_incarnation(
+            &state,
+            &self.session_id,
+            self.runtime_generation,
+            &self.config_lock,
+        )
+        .await?;
+        publish_recovery_readiness(
+            &state,
+            &self.session_id,
+            self.provider_generation,
+            &client,
+            publication,
+            || {
+                self.publish_ready_status()?;
+                // The captured PID becomes durable only when the exact
+                // committed generation is cleared for provider input.
+                let _ = wardian_core::db::update_agent_status(
+                    &self.session_id,
+                    "Idle",
+                    self.process_id,
+                );
+                Ok(())
+            },
+        )
+        .await?;
+        self.observe_turn_activity(client.observations());
+        self.recovery_cleanup
+            .take()
+            .expect("captured through activation")
+            .disarm();
+        Ok(())
+    }
+
+    pub(crate) async fn rollback_after_failure(
+        mut self,
+        error: String,
+        captured_only: bool,
+    ) -> String {
+        if let Some(recovery) = self.recovery_cleanup.take() {
+            return recovery.finish(error).await;
+        }
         self.codex_attachment_ready.store(false, Ordering::Release);
         let owner_cleanup = self.dispose_owner().await.err();
         let registration = self.stop_registration.take();
@@ -450,6 +601,7 @@ impl CodexAttachmentCompletion {
             self.runtime_generation,
             registration,
             &error,
+            captured_only,
         )
         .await
         .err();
@@ -460,7 +612,7 @@ impl CodexAttachmentCompletion {
         if let Some(rollback) = rollback {
             message.push_str(&format!("; provisional rollback failed: {rollback}"));
         }
-        Err(message)
+        message
     }
 
     async fn dispose_owner(&mut self) -> Result<(), String> {
@@ -475,6 +627,14 @@ impl CodexAttachmentCompletion {
     }
 
     pub(crate) async fn cancel(mut self) -> Result<(), String> {
+        if let Some(cleanup) = self.recovery_cleanup.take() {
+            return cleanup.cancel().await;
+        }
+        if self.recovery_is_pending() {
+            // Installation did not happen. PendingRuntime joins the child
+            // and disposes this daemon through its own stop registration.
+            return Ok(());
+        }
         let owner_cleanup = self.dispose_owner().await.err();
         let rollback = cancellation_requires_rollback(self.stop_registration.is_some())
             .then(|| {
@@ -490,6 +650,7 @@ impl CodexAttachmentCompletion {
                     self.runtime_generation,
                     Some(registration),
                     "Codex onboarding cancelled",
+                    false,
                 )
                 .await
             });
@@ -511,6 +672,30 @@ impl CodexAttachmentCompletion {
             }
         }
     }
+}
+
+pub(crate) fn require_recovery_reader_alive(reader_alive: &AtomicBool) -> Result<(), String> {
+    if reader_alive.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        Err("Captured Codex PTY reader exited before recovery activation".into())
+    }
+}
+
+pub(crate) async fn publish_recovery_readiness(
+    state: &AppState,
+    session_id: &str,
+    generation: u64,
+    client: &crate::delivery::codex_shared::CodexSharedClient,
+    publication: &super::RegistrationPublicationState,
+    publish_status: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    state
+        .interactions
+        .publish_recovery_provider_input_ready(session_id, generation, publication, || {
+            client.activate_recovery_input(publication, publish_status)
+        })
+        .await
 }
 
 pub(super) struct SynchronousCodexFinalizationContext<'a> {
@@ -563,6 +748,7 @@ pub(super) async fn finalize_synchronous_codex(
                     .map(|_| ())
                     .map_err(crate::delivery::codex_shared::CodexSharedError::unsupported)
             },
+            None,
         )
         .await;
     if let Err(error) = finalized {
