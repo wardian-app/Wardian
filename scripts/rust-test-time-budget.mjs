@@ -54,6 +54,21 @@ export function overBudget(durations, budget) {
   return over.sort((a, b) => b.seconds - a.seconds);
 }
 
+/**
+ * Hosted runners stall: one Windows run measured a 0.4 s test at 9 s. A test
+ * over budget is re-timed alone, and only a test that is over again (or that
+ * the retry did not run) fails.
+ */
+export function confirmOverBudget(over, retried, budget) {
+  return overBudget(new Map(over.map(({ name, seconds }) => [name, retried.get(name) ?? seconds])), budget);
+}
+
+/** Re-run only the named tests, exactly, keeping the original cargo selection. */
+export function retryArgs(args, names) {
+  const separator = args.indexOf('--');
+  return [...args.slice(0, separator), '--', '--exact', '--test-threads=1', ...names];
+}
+
 export function requireSerial(args) {
   const separator = args.indexOf('--');
   const testArgs = separator < 0 ? [] : args.slice(separator + 1);
@@ -87,6 +102,22 @@ export async function main(argv = process.argv.slice(2)) {
   const args = argv.slice(1);
   requireSerial(args);
   const budget = JSON.parse(readFileSync(BUDGET_PATH, 'utf8'));
+  const { status, durations } = await timedRun(args);
+  // Timing depends on the machine, so local runs only warn. CI enforces.
+  const enforce = process.env.CI === 'true' || process.env.WARDIAN_TEST_TIME_BUDGET === 'enforce';
+  let over = overBudget(durations, budget);
+  if (status === 0 && enforce && over.length > 0) {
+    console.log(`\nRe-timing ${over.length} test(s) over budget alone to rule out a runner stall.`);
+    const retry = await timedRun(retryArgs(args, over.map(({ name }) => name)));
+    if (retry.status !== 0) return retry.status;
+    over = confirmOverBudget(over, retry.durations, budget);
+  }
+  report(durations, over, enforce);
+  if (status !== 0) return status;
+  return enforce && over.length > 0 ? 1 : 0;
+}
+
+async function timedRun(args) {
   const run = invocation(args);
   const timer = new TestTimer();
   const child = spawn(run.program, run.args, { cwd: run.cwd, env: run.env, stdio: ['inherit', 'pipe', 'pipe'], windowsHide: true });
@@ -99,12 +130,7 @@ export async function main(argv = process.argv.slice(2)) {
     child.on('error', fail);
     child.on('close', (code) => done(code ?? 1));
   });
-  // Timing depends on the machine, so local runs only warn. CI enforces.
-  const enforce = process.env.CI === 'true' || process.env.WARDIAN_TEST_TIME_BUDGET === 'enforce';
-  const over = overBudget(timer.durations, budget);
-  report(timer.durations, over, enforce);
-  if (status !== 0) return status;
-  return enforce && over.length > 0 ? 1 : 0;
+  return { status, durations: timer.durations };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

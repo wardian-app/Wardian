@@ -32,7 +32,9 @@ not include them. `src/config/ciWorkflow.test.ts` pins the backend command list;
 `scripts/rust-test-time-budget.mjs` wraps the serial workspace test step. It
 times each test from its result line and fails CI when a test exceeds its entry
 in `scripts/rust-test-time-budget.json`: the default, or an allowlisted ceiling
-for an existing slow test. Ceilings only go down. A local run prints the slowest
+for an existing slow test. Hosted runners stall, so a test over budget is
+re-timed alone first, and only a test that is over again fails. Ceilings only
+go down. A local run prints the slowest
 tests and any overruns but does not fail, because timing depends on the machine;
 set `WARDIAN_TEST_TIME_BUDGET=enforce` to fail locally too.
 

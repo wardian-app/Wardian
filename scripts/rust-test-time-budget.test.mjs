@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { TestTimer, overBudget, requireSerial } from './rust-test-time-budget.mjs';
+import { TestTimer, confirmOverBudget, overBudget, requireSerial, retryArgs } from './rust-test-time-budget.mjs';
 
 function clock(times) {
   let index = 0;
@@ -50,6 +50,23 @@ test('allowlisted tests use their own ceiling and others the default', () => {
   const durations = new Map([['a::slow', 40], ['a::listed', 40], ['a::fast', 1]]);
   const over = overBudget(durations, { default_seconds: 10, allow: { 'a::listed': 60 } });
   assert.deepEqual(over, [{ name: 'a::slow', seconds: 40, limit: 10 }]);
+});
+
+test('only a test that is over budget again when re-timed alone fails', () => {
+  const budget = { default_seconds: 10, allow: {} };
+  const over = [{ name: 'a::stalled', seconds: 12, limit: 10 }, { name: 'a::slow', seconds: 70, limit: 10 }, { name: 'a::unretried', seconds: 11, limit: 10 }];
+  const retried = new Map([['a::stalled', 0.4], ['a::slow', 68]]);
+  assert.deepEqual(confirmOverBudget(over, retried, budget), [
+    { name: 'a::slow', seconds: 68, limit: 10 },
+    { name: 'a::unretried', seconds: 11, limit: 10 },
+  ]);
+});
+
+test('the retry keeps the cargo selection and runs only the named tests exactly', () => {
+  assert.deepEqual(
+    retryArgs(['test', '--workspace', '--all-targets', '--', '--test-threads=1'], ['a::slow', 'b']),
+    ['test', '--workspace', '--all-targets', '--', '--exact', '--test-threads=1', 'a::slow', 'b'],
+  );
 });
 
 test('parallel test runs are rejected because they cannot be timed per test', () => {
