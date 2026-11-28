@@ -158,7 +158,11 @@ fn output_failure_ends_the_direct_server_while_stdin_remains_open() {
     write_rpc(&mut stdin, &handshake()[1]);
     write_rpc(&mut stdin, &json!({"jsonrpc":"2.0","id":2,"method":"ping"}));
 
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // The property is that the server exits instead of waiting on open stdin,
+    // not how fast. Under `cargo llvm-cov` the child also writes its coverage
+    // profile while exiting, which can take seconds on a loaded runner, so this
+    // uses the same bound as the other process-exit waits in this file.
+    let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
