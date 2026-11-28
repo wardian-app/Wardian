@@ -18,6 +18,7 @@ import {
 } from "./useAgentTelemetryStore";
 import { resetAgentRosterStore, useAgentRosterStore } from "./useAgentRosterStore";
 import { normalizeAgentConfig, normalizeAgentConfigs } from "./configUtils";
+import { publishAgentNames } from "./useAgentNameStore";
 
 export type AgentStatusTransitionSource = "metrics" | "status_event";
 
@@ -201,6 +202,7 @@ export function useAgentResourceController(
   const commitAgents = useCallback((next_agents: AgentConfig[]) => {
     agents_ref.current = next_agents;
     setAgents(next_agents);
+    publishAgentNames(next_agents);
     setOffAgentIds(new Set(
       next_agents
         .filter((agent) => agent.is_off)

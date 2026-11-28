@@ -41,6 +41,8 @@ Chat mode shows normalized user, assistant, status, tool, approval, and terminal
 
 Chat text and attachments remain editable while an agent is processing. With content in the composer, the action submits a queueable message and is labeled **Queue message**; with an empty composer, it remains **Interrupt agent**.
 
+Messages that Wardian delivers to an agent from another agent appear as **Message from** or **Reply from** that agent, showing only the message body, rather than as your own prompt. Claude Code background-task notices and continued-session summaries appear as one muted line that expands to the full notice.
+
 Work logs show tool names and short descriptions. Expand a work log to inspect
 each item, then use **Show output** or that item's **Show full details** to read
 its output. Collapsing the work log hides its details. Structured tool output

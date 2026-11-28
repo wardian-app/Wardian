@@ -3,6 +3,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type { AgentChatDetail, AgentChatEvent, AgentChatRole, ChatStepDetail } from "../../types";
 import { CommittedTurn } from "./CommittedTurn";
+import { InboundMessageRow } from "./InboundMessageRow";
+import { inboundMessage } from "./inboundMessages";
 import { utf8Window } from "./chatReadState";
 import {
   classifyActivityLanguage,
@@ -264,6 +266,8 @@ export function MessageRow({
   onLoadDetail?: ChatDetailLoader;
 }) {
   const role = event.role ?? "assistant";
+  const inbound = role === "user" ? inboundMessage(event.text) : null;
+  if (inbound) return <InboundMessageRow message={inbound} linkHandling={linkHandling} />;
   const text = event.text?.trimEnd() || event.title || "";
   const isAssistant = role === "assistant";
   const isCardRole = role === "system" || role === "tool";
