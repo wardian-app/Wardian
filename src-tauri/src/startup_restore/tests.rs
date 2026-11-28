@@ -5,6 +5,8 @@ use std::task::Poll;
 use tauri::Manager;
 use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride, ProviderConfig};
 
+mod clear_retry;
+
 /// Writes one launch whose single Stop round settled per Claude's
 /// telemetry, plus a legacy unverified Stop outbox record.
 fn write_settled_launch(home: &std::path::Path, config: &AgentConfig) -> (String, String) {
@@ -1484,6 +1486,14 @@ fn restore_retry_is_scheduled_only_for_the_reported_active_lifecycle_lease() {
         Some(provider_spawn)
     );
 
+    let mut clear = lease.clone();
+    clear.owner_id = format!("clear:{}", uuid::Uuid::new_v4());
+    assert_eq!(
+        super::retryable_lifecycle_restore_lease(&config, &clear),
+        Some(clear),
+        "a retained clear acquisition for the saved session must schedule an ordinary restore"
+    );
+
     let mut pause = lease.clone();
     pause.owner_id = "pause:operation".into();
     assert!(
@@ -1821,6 +1831,7 @@ async fn restore_retry_hands_its_exact_provider_spawn_lease_to_launch() {
             let lease = crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
                 std::slice::from_ref(&retry_config),
                 &retry_config,
+                None,
             )
             .map_err(|error| error.to_string())?
             .expect("saved config still permits retry");
@@ -1875,6 +1886,7 @@ async fn restore_retry_does_not_resurrect_a_cross_process_removed_agent() {
                 let lease = crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
                     std::slice::from_ref(&check_config),
                     &check_config,
+                    None,
                 )
                 .expect("roster and provider lease check succeeds");
                 drop(publication);
@@ -1933,6 +1945,7 @@ async fn restore_retry_does_not_override_a_cross_process_config_edit_or_pause() 
                 let lease = crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
                     std::slice::from_ref(&check_config),
                     &check_config,
+                    None,
                 )
                 .expect("roster and provider lease check succeeds");
                 drop(publication);
@@ -1973,6 +1986,7 @@ async fn restore_retry_does_not_override_a_cross_process_config_edit_or_pause() 
     let no_spawn_lease = crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
         std::slice::from_ref(&config),
         &config,
+        None,
     )
     .expect("read paused config");
     assert!(no_spawn_lease.is_none());
@@ -2586,6 +2600,7 @@ async fn headless_startup_retry_waits_for_renewal_then_admits_once_after_exact_r
                     crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
                         std::slice::from_ref(&attempt_config),
                         &attempt_config,
+                        None,
                     )
                     .expect("the latest saved roster still allows admission")
                     .expect("the ordinary provider-spawn lease is acquired");
@@ -2749,6 +2764,7 @@ async fn headless_retry_rechecks_owner_at_admission_after_release_race() {
             let admission = crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
                 std::slice::from_ref(&task_config),
                 &task_config,
+                None,
             );
             let error = admission.expect_err("new ownership wins the admission race");
             assert_eq!(

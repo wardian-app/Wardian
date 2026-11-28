@@ -3,29 +3,21 @@
 use crate::state::{ActiveAgent, AppState};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
+use wardian_core::conversation_lease::{find_changed_lifecycle_acquisition, ConversationLease};
 
 pub(crate) mod prior_holds;
 
 /// Returns the exact lifecycle-transition lease that caused the failed restore
-/// attempt. Only resume operations and provider-spawn owners schedule the
-/// guarded retry; pause, removal, clear, and uncertain-provider ownership keep
-/// their existing handling.
+/// attempt. A clear transition must identify the concrete saved conversation,
+/// because clear may retarget its acquisition during replacement.
 pub(crate) fn retryable_lifecycle_restore_lease(
     config: &wardian_core::models::AgentConfig,
     lease: &wardian_core::conversation_lease::ConversationLease,
 ) -> Option<wardian_core::conversation_lease::ConversationLease> {
-    let resume_session = config
-        .resume_session
-        .as_deref()
-        .filter(|session| !session.trim().is_empty())
-        .or_else(|| {
-            config
-                .fresh_provider_session_id
-                .as_deref()
-                .filter(|session| !session.trim().is_empty())
-        })
-        .unwrap_or_default()
-        .trim();
+    if is_clear_restore_owner(lease) {
+        return matching_clear_restore_lease(config, lease).then(|| lease.clone());
+    }
+    let resume_session = provider_restore_session_identity(config);
     if !is_retryable_restore_owner(lease)
         || lease.mode != "lifecycle_transition"
         || (lease.agent_id != config.session_id
@@ -35,6 +27,29 @@ pub(crate) fn retryable_lifecycle_restore_lease(
     }
     chrono::DateTime::parse_from_rfc3339(&lease.expires_at).ok()?;
     Some(lease.clone())
+}
+
+pub(crate) fn is_clear_restore_owner(lease: &ConversationLease) -> bool {
+    lease.owner_kind == "agent_lifecycle" && lease.owner_id.starts_with("clear:")
+}
+
+pub(crate) fn matching_clear_restore_lease(
+    config: &wardian_core::models::AgentConfig,
+    lease: &ConversationLease,
+) -> bool {
+    let resume_session = provider_restore_session_identity(config);
+    is_clear_restore_owner(lease)
+        && uuid::Uuid::parse_str(&lease.owner_id["clear:".len()..]).is_ok()
+        && lease.mode == "lifecycle_transition"
+        && !lease.acquisition_id.trim().is_empty()
+        && lease.owner_node_id.is_none()
+        && chrono::DateTime::parse_from_rfc3339(&lease.started_at).is_ok()
+        && chrono::DateTime::parse_from_rfc3339(&lease.expires_at).is_ok()
+        && !config.is_off
+        && config.session_id == lease.agent_id
+        && config.provider == lease.provider
+        && !resume_session.is_empty()
+        && resume_session == lease.resume_session
 }
 
 pub(crate) fn retryable_headless_execution_restore_lease(
@@ -84,6 +99,11 @@ pub(crate) async fn wait_for_lifecycle_restore_lease(
         -> Result<Vec<wardian_core::conversation_lease::ConversationLease>, String>,
     now: impl Fn() -> chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, String> {
+    if is_clear_restore_owner(expected_lease)
+        && !matching_clear_restore_lease(config, expected_lease)
+    {
+        return Ok(false);
+    }
     wait_for_restore_lease_clear(
         config,
         expected_lease,
@@ -130,6 +150,11 @@ async fn wait_for_restore_lease_clear(
     loop {
         let now = now();
         let leases = load_leases()?;
+        if is_clear_restore_owner(expected_lease)
+            && find_changed_lifecycle_acquisition(&leases, expected_lease).is_some()
+        {
+            return Ok(false);
+        }
         let now_rfc3339 = now.to_rfc3339();
         let active_conflicts = leases
             .iter()
@@ -194,16 +219,8 @@ fn same_retryable_lease_generation(
     current: &wardian_core::conversation_lease::ConversationLease,
     expected: &wardian_core::conversation_lease::ConversationLease,
 ) -> bool {
-    is_retryable_restore_owner(current)
-        && current.mode == "lifecycle_transition"
-        && current.owner_kind == expected.owner_kind
-        && current.owner_id == expected.owner_id
-        && current.acquisition_id == expected.acquisition_id
-        && current.started_at == expected.started_at
-        && current.agent_id == expected.agent_id
-        && current.provider == expected.provider
-        && current.resume_session == expected.resume_session
-        && current.owner_node_id == expected.owner_node_id
+    (is_retryable_restore_owner(current) || is_clear_restore_owner(current))
+        && current.same_lifecycle_transition_acquisition(expected)
 }
 
 fn same_headless_execution_lease_generation(

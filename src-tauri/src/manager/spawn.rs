@@ -1922,6 +1922,7 @@ fn acquire_provider_spawn_lease_for_startup(
     acquire_provider_spawn_lease_with_candidate_check_at_typed(
         config,
         chrono::Utc::now(),
+        None,
         check_provider_spawn_candidates,
     )
 }
@@ -1929,6 +1930,7 @@ fn acquire_provider_spawn_lease_for_startup(
 fn acquire_provider_spawn_lease_with_candidate_check_at_typed(
     config: &AgentConfig,
     now: chrono::DateTime<chrono::Utc>,
+    expected_clear: Option<&wardian_core::conversation_lease::ConversationLease>,
     check_candidates: impl FnOnce(&AgentConfig) -> Result<(), String>,
 ) -> Result<
     wardian_core::conversation_lease::PersistedConversationLeaseGuard,
@@ -1949,13 +1951,21 @@ fn acquire_provider_spawn_lease_with_candidate_check_at_typed(
         expires_at: (now + PROVIDER_SPAWN_LEASE_DURATION).to_rfc3339(),
     };
 
-    match wardian_core::conversation_lease::try_acquire_lease(lease.clone(), &now_rfc3339)
-        .map_err(|error| {
-            StartupRestoreSpawnError::Other(format!(
-                "provider startup was withheld because conversation ownership could not be verified: {error}"
-            ))
-        })?
-    {
+    let acquisition = match expected_clear {
+        Some(expected) => {
+            wardian_core::conversation_lease::try_acquire_lease_after_lifecycle_transition(
+                lease.clone(),
+                &now_rfc3339,
+                expected,
+            )
+        }
+        None => wardian_core::conversation_lease::try_acquire_lease(lease.clone(), &now_rfc3339),
+    };
+    match acquisition.map_err(|error| {
+        StartupRestoreSpawnError::Other(format!(
+            "provider startup was withheld because conversation ownership could not be verified: {error}"
+        ))
+    })? {
         wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Acquired => {
             let guard =
                 wardian_core::conversation_lease::PersistedConversationLeaseGuard::new(&lease);
@@ -2062,11 +2072,12 @@ pub(crate) fn provider_spawn_lease_for_startup(
 pub(crate) fn acquire_restore_retry_spawn_lease_for_startup(
     expected_saved_configs: &[AgentConfig],
     launch_config: &AgentConfig,
+    expected_clear: Option<&wardian_core::conversation_lease::ConversationLease>,
 ) -> Result<
     Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
     StartupRestoreSpawnError,
 > {
-    let _roster = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+    let roster = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
         .map_err(|error| StartupRestoreSpawnError::Other(error.to_string()))?
         .ok_or_else(|| {
             StartupRestoreSpawnError::Other("Agent roster barrier is unavailable".to_string())
@@ -2101,7 +2112,24 @@ pub(crate) fn acquire_restore_retry_spawn_lease_for_startup(
         return Ok(None);
     }
 
-    provider_spawn_lease_for_startup(launch_config, None).map(Some)
+    if let Some(expected) = expected_clear {
+        if !crate::startup_restore::matching_clear_restore_lease(current_saved_config, expected)
+            || !crate::startup_restore::matching_clear_restore_lease(launch_config, expected)
+            || roster
+                .has_pending_replacement_for(&launch_config.session_id)
+                .map_err(|error| StartupRestoreSpawnError::Other(error.to_string()))?
+        {
+            return Ok(None);
+        }
+    }
+
+    acquire_provider_spawn_lease_with_candidate_check_at_typed(
+        launch_config,
+        chrono::Utc::now(),
+        expected_clear,
+        check_provider_spawn_candidates,
+    )
+    .map(Some)
 }
 
 /// Persist a successful delayed restore only while its saved configuration is
@@ -6175,6 +6203,7 @@ mod tests {
         let error = acquire_provider_spawn_lease_with_candidate_check_at_typed(
             &config,
             chrono::Utc::now(),
+            None,
             |checked_config| {
                 assert_eq!(checked_config.session_id, config.session_id);
                 candidate_check_ran.store(true, std::sync::atomic::Ordering::Release);
@@ -6261,6 +6290,7 @@ mod tests {
         let conflict = acquire_provider_spawn_lease_with_candidate_check_at_typed(
             &config,
             now,
+            None,
             check_provider_spawn_candidates,
         )
         .expect_err("the active lifecycle lease must block the first restore attempt");
@@ -6298,6 +6328,7 @@ mod tests {
                     let acquired = acquire_provider_spawn_lease_with_candidate_check_at_typed(
                         &task_config,
                         retry_now,
+                        None,
                         check_provider_spawn_candidates,
                     );
                     drop(publication);
@@ -6323,7 +6354,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn restore_retry_candidate_check_still_blocks_after_the_wait() {
+    async fn clear_restore_retry_candidate_check_still_blocks_after_the_wait() {
         let _home = crate::control::test_support::TestWardianHome::new_async().await;
         let config = AgentConfig {
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -6333,7 +6364,8 @@ mod tests {
         };
         let now = chrono::Utc::now();
         let expires_at = now + chrono::Duration::seconds(60);
-        let initial_lease = lifecycle_restore_lease(&config, now, expires_at);
+        let mut initial_lease = lifecycle_restore_lease(&config, now, expires_at);
+        initial_lease.owner_id = format!("clear:{}", uuid::Uuid::new_v4());
         wardian_core::conversation_lease::try_acquire_lease(
             initial_lease.clone(),
             &now.to_rfc3339(),
@@ -6342,6 +6374,7 @@ mod tests {
         let retry_lease =
             crate::startup_restore::retryable_lifecycle_restore_lease(&config, &initial_lease)
                 .expect("active lifecycle lease schedules the retry");
+        let released_owner = retry_lease.owner();
         let state = std::sync::Arc::new(crate::state::AppState::new());
         let expected_status = failed_restore_placeholder(&state, &config).await;
         let expected_config = config.clone();
@@ -6358,7 +6391,7 @@ mod tests {
                 &task_status,
                 move || async move {
                     wardian_core::conversation_lease::release_lease_owner_persisted(
-                        &retry_lease.owner(),
+                        &released_owner,
                     )
                     .expect("release the previous lifecycle operation");
                     true
@@ -6369,6 +6402,7 @@ mod tests {
                     let error = acquire_provider_spawn_lease_with_candidate_check_at_typed(
                         &task_config,
                         retry_now,
+                        Some(&retry_lease),
                         |_| {
                             Err("provider startup was withheld because a matching provider process candidate already exists (PID 42)".into())
                         },
