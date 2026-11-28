@@ -49,6 +49,7 @@ import {
   type StoredRemoteDeviceIdentity,
 } from "./remoteIdentity";
 import { remoteClient, RemoteChatBodyError, RemoteChatTimeoutError, RemoteRequestError, RemoteTransportError } from "./remoteClient";
+import { publishAgentNames } from "../agents/useAgentNameStore";
 
 type RemoteStatus =
   | "loading"
@@ -668,6 +669,7 @@ const ensureStatusStream = async (set: RemoteSet, get: RemoteGet) => {
           retireActiveChatReads();
           chatRefreshRequestSerial += 1;
         }
+        publishAgentNames(agents);
         set((state) => ({
           agents,
           status: "ready",
@@ -919,6 +921,7 @@ const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
       ? remoteWatchlists.prefs.collapsed_team_ids
       : [],
   };
+  publishAgentNames(agents);
   set((state) => {
     const liveAgentIds = new Set(agents.map((agent) => agent.session_id));
     const activeAgentId = state.activeAgentId && liveAgentIds.has(state.activeAgentId) ? state.activeAgentId : null;
