@@ -413,15 +413,12 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn parse_output(&self, line: &str) -> Option<AgentEvent> {
-        let trimmed = line.trim();
-        if trimmed.contains("Do you want to proceed?")
-            || trimmed.contains("Allow reading from")
-            || trimmed.contains("requires approval")
-        {
-            return Some(AgentEvent::ActionRequired { message: "".into() });
-        }
-
-        let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
+        // Transcript records carry permission requests as structured events, and
+        // their text is the agent's own content, which can quote a prompt.
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
+            return is_permission_prompt_line(line)
+                .then(|| AgentEvent::ActionRequired { message: "".into() });
+        };
         let msg_type = parsed.get("type")?.as_str()?;
 
         // Example Claude stream-json mapping:
@@ -513,6 +510,17 @@ pub(crate) fn claude_output_has_bypass_permissions_consent_prompt(output: &str) 
     compact.contains("claudecoderunninginbypasspermissionsmode")
         && compact.contains("byproceedingyouacceptallresponsibility")
         && compact.contains("yesiaccept")
+}
+
+/// A terminal line that is Claude Code's own permission prompt, not content
+/// that mentions one. The prompt renders alone on its line, inside a box.
+/// This is a fallback: the `PermissionRequest` hook reports real prompts.
+fn is_permission_prompt_line(line: &str) -> bool {
+    let line = crate::utils::strip_ansi_controls(line);
+    let text = line.trim_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '┃' | '║' | '|'));
+    text == "Do you want to proceed?"
+        || (text.starts_with("Allow reading from ") && text.ends_with('?'))
+        || (text.starts_with("This command requires approval") && !text.contains(['"', '`', '=']))
 }
 
 #[cfg(test)]
@@ -633,6 +641,43 @@ SET dp0=%~dp0
                 session_id: "abc-123".into(),
                 timestamp: Some("2026-01-01T00:00:00Z".into()),
             }
+        );
+    }
+
+    #[test]
+    fn permission_prompt_text_is_recognized_only_as_the_prompt_line() {
+        let p = make_provider();
+        for line in [
+            "Do you want to proceed?",
+            "│ Do you want to proceed?                │",
+            "\u{1b}[1m Do you want to proceed?\u{1b}[22m",
+            "  Allow reading from D:/workspace/other?",
+            "This command requires approval",
+        ] {
+            assert_eq!(
+                p.parse_output(line),
+                Some(AgentEvent::ActionRequired { message: "".into() }),
+                "{line}"
+            );
+        }
+        for line in [
+            "$ python - <<'EOF' ... text: \"Do you want to proceed?\",",
+            "  1828   text: \"Do you want to proceed?\",",
+            "The test asserts the card shows Do you want to proceed? before expansion.",
+        ] {
+            assert_eq!(p.parse_output(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn transcript_records_quoting_a_prompt_are_not_permission_requests() {
+        let p = make_provider();
+        let line = serde_json::json!({ "type": "assistant", "message": { "role": "assistant", "content": [
+            { "type": "tool_use", "name": "Bash", "input": { "command": "echo 'Do you want to proceed? requires approval'" } }
+        ] } }).to_string();
+        assert_ne!(
+            p.parse_output(&line),
+            Some(AgentEvent::ActionRequired { message: "".into() })
         );
     }
 
