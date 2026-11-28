@@ -1483,11 +1483,22 @@ Visible second line`, exit_code: 0 });
     const answer = scroll.querySelector<HTMLElement>('[data-chat-row-key="answer"]')!;
     expect(workRow).toHaveTextContent("2 steps");
     expect(screen.queryByText(/Full output visible-one/)).toBeNull();
+    fireEvent.click(within(workRow).getByRole("button", { name: /Earlier work/ }));
+    expect(await within(workRow).findByText(/Full output visible-one/)).toBeVisible();
+    scroll.getBoundingClientRect = () => new DOMRect(0, 0, 300, 600);
+    scroll.querySelectorAll<HTMLElement>("[data-chat-row-key], [data-chat-inner-row-key]").forEach((element, index) => {
+      element.getBoundingClientRect = () => new DOMRect(0, 20 + index * 40, 300, 40);
+    });
+    // The older page reveals this turn's prompt, which would otherwise rekey the row.
     fireEvent.scroll(scroll);
-    await act(async () => pending.resolve(olderReadPage({ events: [work("older", 1)], progress: "ready", next_before: null })));
+    await act(async () => pending.resolve(olderReadPage({ events: [event({ id: "prompt", sequence: 0, role: "user", text: "Run the checks" }), work("older", 1)],
+      progress: "ready", next_before: null })));
+    expect(screen.getByText("Run the checks")).toBeInTheDocument();
     expect(scroll.querySelector('[data-chat-row-key="turn-work:visible-two"]')).toBe(workRow);
     expect(scroll.querySelector('[data-chat-row-key="answer"]')).toBe(answer);
     expect(workRow).toHaveTextContent("3 steps");
+    expect(within(workRow).getByRole("button", { name: /Worked · 3 steps/ })).toHaveAttribute("aria-expanded", "true");
+    expect(within(workRow).getByText(/Full output visible-one/)).toBeVisible();
   });
 
   it.each([true, false])("preserves the answer through backfill and follows new tail only at bottom (%s)", async (atBottom) => {
@@ -1845,6 +1856,10 @@ Visible second line`, exit_code: 0 });
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    // The live permission request is visible before any work is expanded.
+    expect(await screen.findByText("Approval required")).toBeVisible();
+    expect(screen.getByText("Do you want to proceed?")).toBeVisible();
+    expect(screen.queryByText("Prepare command")).not.toBeInTheDocument();
     await expandTurnWork();
 
     expect(await screen.findByText("Approval required")).toBeInTheDocument();

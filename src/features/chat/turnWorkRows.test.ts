@@ -1,8 +1,9 @@
+import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { AgentChatEvent } from "../../types";
 import { derivePresentedChatRows } from "../grid/workLogPresentation";
 import type { ChatTranscriptRowModel, TurnWorkRow } from "./chatTurns";
-import { markTrailingTurnWork, withCollapsedTurnWork } from "./turnWorkRows";
+import { markTrailingTurnWork, useStableTurnWorkIds, withCollapsedTurnWork } from "./turnWorkRows";
 
 let sequence = 0;
 function event(fields: Partial<AgentChatEvent> & Pick<AgentChatEvent, "id" | "kind">): AgentChatEvent {
@@ -46,5 +47,42 @@ describe("withCollapsedTurnWork", () => {
     const result = rows([run("s1"), say("a1"), prompt("p2"), say("a2")], true);
     expect(work(result)[0]).toMatchObject({ leading: true, id: "turn-work:s1" });
     expect(rows([run("s1"), say("a1")], false).filter((row) => row.kind === "turn_work")[0]).toMatchObject({ leading: false });
+  });
+
+  it("keeps a live permission request visible outside collapsed work", () => {
+    const result = rows([prompt("p1"), run("s1"), run("ask", { status: "action_required" })]);
+    expect(shape(result)).toEqual(["p1", "turn_work", "ask"]);
+  });
+
+  it("keeps the answer and a trailing failure notice visible", () => {
+    const failed = event({ id: "failed", kind: "status", status: "failed", text: "Turn failed" });
+    const result = rows([prompt("p1"), run("s1"), say("a1"), failed]);
+    expect(shape(result)).toEqual(["p1", "turn_work", "a1", "failed"]);
+    expect(work(result)[0]).toMatchObject({ answered: true });
+  });
+});
+
+describe("useStableTurnWorkIds", () => {
+  it("keeps a turn's row identity as steps arrive and when its prompt loads", () => {
+    const tool = run("tool");
+    const next = run("next");
+    const head = prompt("prompt");
+    const { result, rerender } = renderHook(({ events }) => useStableTurnWorkIds(rows(events, true), "scope"),
+      { initialProps: { events: [tool] } });
+    const id = work(result.current)[0].id;
+    rerender({ events: [tool, next] });
+    expect(work(result.current)[0].id).toBe(id);
+    rerender({ events: [head, tool, next] });
+    expect(work(result.current)[0].id).toBe(id);
+  });
+
+  it("forgets identities when the transcript scope changes and never reuses one twice", () => {
+    const { result, rerender } = renderHook(({ events, scope }) => useStableTurnWorkIds(rows(events), scope),
+      { initialProps: { events: [run("a1")], scope: "one" } });
+    const first = work(result.current)[0].id;
+    rerender({ events: [prompt("p"), run("a1"), say("x"), prompt("q"), run("b1")], scope: "two" });
+    const ids = work(result.current).map((row) => row.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids[0]).not.toBe(first);
   });
 });

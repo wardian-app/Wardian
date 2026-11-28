@@ -30,9 +30,10 @@ export function TurnWork({ row, ...props }: Omit<ChatTranscriptRowProps, "row"> 
       {running && row.latest_step ? <span className="min-w-0 truncate" title={row.latest_step}>· {row.latest_step}</span> : null}
     </button>
     {open ? <div id={id} className="mt-1 max-h-[min(32rem,60vh)] min-w-0 space-y-2 overflow-auto overscroll-contain">
-      {row.rows.map((inner) => inner.kind === "event" && inner.event.kind === "message"
-        ? <div key={chatTranscriptRowKey(inner)} className="chat-turn-narration"><ChatTranscriptRow {...props} row={inner} /></div>
-        : <ChatTranscriptRow key={chatTranscriptRowKey(inner)} {...props} row={inner} />)}
+      {row.rows.map((inner) => <div key={chatTranscriptRowKey(inner)} data-chat-inner-row-key={chatTranscriptRowKey(inner)}
+        className={inner.kind === "event" && inner.event.kind === "message" ? "chat-turn-narration" : undefined}>
+        <ChatTranscriptRow {...props} row={inner} />
+      </div>)}
     </div> : null}
   </section>;
 }

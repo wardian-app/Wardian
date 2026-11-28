@@ -21,13 +21,15 @@ export function visibleChatPresentationBoundaries(
   scroll: HTMLElement,
 ): ReadonlyMap<string, ChatPresentationBoundary> {
   const viewport = scroll.getBoundingClientRect();
-  const visible = new Set(Array.from(scroll.querySelectorAll<HTMLElement>("[data-chat-row-key]"))
+  // Rows inside an open turn summary carry their own key, so they keep their
+  // presentation when older work arrives just like top-level rows.
+  const visible = new Set(Array.from(scroll.querySelectorAll<HTMLElement>("[data-chat-row-key], [data-chat-inner-row-key]"))
     .filter((element) => {
       const rect = element.getBoundingClientRect();
       return rect.bottom > viewport.top && rect.top < viewport.bottom;
-    }).map((element) => element.dataset.chatRowKey));
+    }).map((element) => element.dataset.chatRowKey ?? element.dataset.chatInnerRowKey));
   const result = new Map<string, ChatPresentationBoundary>();
-  for (const row of rows) {
+  for (const row of rows.flatMap((row) => row.kind === "turn_work" ? row.rows : [row])) {
     if (!visible.has(chatTranscriptRowKey(row))) continue;
     if (row.kind === "event" && isWorkEvent(row.event)) {
       const key = chatEventDisplayKey(row.event);

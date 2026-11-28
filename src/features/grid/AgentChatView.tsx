@@ -32,6 +32,7 @@ import {
 } from "../chat/chatPresentation";
 import { chatTranscriptRowKey, type ChatTranscriptRowModel } from "../chat/chatTurns";
 import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
+import { useStableTurnWorkIds } from "../chat/turnWorkRows";
 import { useChatPresentationScope } from "../chat/chatPreviewIdentity";
 import { useAppShellWorkbenchNavigation } from "../../layout/AppShell";
 import { openFileWithSettings } from "../files/fileOpenRouting";
@@ -182,10 +183,11 @@ export function AgentChatView({
   const presentationScope = useChatPresentationScope(page, sessionId, provider ?? agent?.provider, events);
   const readingPresentation = useChatReadingPresentation(presentationScope, displayEvents, page !== null);
   const committedPresentation = useCommittedChatPresentation(page, events);
-  const chatRows = useMemo<ChatTranscriptRowModel[]>(
+  const derivedChatRows = useMemo<ChatTranscriptRowModel[]>(
     () => deriveCommittedChatRows(displayEvents, committedPresentation, readingPresentation.boundaries, Boolean(page?.next_before)),
     [displayEvents, committedPresentation, readingPresentation.boundaries, page?.next_before],
   );
+  const chatRows = useStableTurnWorkIds(derivedChatRows, presentationScope);
   const visibleChatRows = chatRows;
   const progressText = page ? chatReadProgress(page.progress, visibleChatRows.length > 0) : null;
   const scrollScope = {

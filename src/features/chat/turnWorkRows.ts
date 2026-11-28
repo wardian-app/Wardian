@@ -1,8 +1,9 @@
+import { useMemo, useRef } from "react";
 import type { AgentChatEvent } from "../../types";
 import type { PresentedChatRow } from "../grid/workLogPresentation";
 import type { ChatTranscriptRowModel, TurnWorkRow } from "./chatTurns";
 import { chatEventDisplayKey } from "./chatEventIdentity";
-import { isThinkingIndicator } from "./chatPresentation";
+import { isApprovalEvent, isThinkingIndicator } from "./chatPresentation";
 
 type EventRow = Extract<PresentedChatRow, { kind: "event" }>;
 
@@ -10,9 +11,11 @@ const isEventRow = (row: ChatTranscriptRowModel): row is EventRow => row.kind ==
 const isPrompt = (row: ChatTranscriptRowModel) => isEventRow(row) && row.event.kind === "message" && row.event.role === "user";
 const isAssistantMessage = (row: ChatTranscriptRowModel) =>
   isEventRow(row) && row.event.kind === "message" && row.event.role === "assistant";
-/** Rows a reader must see without expanding work: approvals and the live thinking indicator. */
+/** A turn-ending failure or cancellation notice, which must not hide behind collapsed work. */
+const isEndingNotice = (event: AgentChatEvent) => event.kind === "status" && (event.status === "failed" || event.status === "cancelled");
+/** Rows a reader must see without expanding work: permission requests, ending notices and the live thinking indicator. */
 const staysVisible = (row: ChatTranscriptRowModel) => row.kind === "turn_change_summary" || row.kind === "committed_turn"
-  || row.kind === "turn_work" || (isEventRow(row) && (row.event.kind === "approval" || isThinkingIndicator(row.event)));
+  || row.kind === "turn_work" || (isEventRow(row) && (isApprovalEvent(row.event) || isEndingNotice(row.event) || isThinkingIndicator(row.event)));
 
 function rowEvents(row: ChatTranscriptRowModel): AgentChatEvent[] {
   if (row.kind === "event") return [row.event, ...(row.entry?.merged_result_events ?? [])];
@@ -61,8 +64,14 @@ export function withCollapsedTurnWork(rows: ChatTranscriptRowModel[], options: {
   const flush = () => {
     if (segment.length === 0) return;
     const content = segment.filter((row) => !staysVisible(row));
-    const lastContent = content[content.length - 1];
-    const answer = lastContent && isAssistantMessage(lastContent) ? lastContent : null;
+    // The answer is the last assistant message with no step after it; trailing
+    // status rows carry no steps and do not disqualify it.
+    let lastStep = -1;
+    content.forEach((row, index) => { if (steps(row).count > 0) lastStep = index; });
+    let answer: ChatTranscriptRowModel | null = null;
+    for (let index = content.length - 1; index > lastStep; index -= 1) {
+      if (isAssistantMessage(content[index])) { answer = content[index]; break; }
+    }
     const work = content.filter((row) => row !== answer);
     const tally = work.map(steps);
     const stepCount = tally.reduce((total, step) => total + step.count, 0);
@@ -120,4 +129,29 @@ export function markTrailingTurnWork(rows: ChatTranscriptRowModel[]): ChatTransc
     }
   }
   return rows;
+}
+
+/**
+ * Keep each collapsed turn's row identity while its events stay on screen. A
+ * turn whose prompt is off-page is keyed by its latest step, which changes as
+ * steps arrive and when an older page reveals the prompt; reusing the identity
+ * of any overlapping event keeps the row mounted, so its open state and
+ * scroll position survive.
+ */
+export function useStableTurnWorkIds(rows: ChatTranscriptRowModel[], scope: string): ChatTranscriptRowModel[] {
+  const memory = useRef<{ scope: string; ids: Map<string, string> }>({ scope, ids: new Map() });
+  return useMemo(() => {
+    if (memory.current.scope !== scope) memory.current = { scope, ids: new Map() };
+    const ids = memory.current.ids;
+    const used = new Set<string>();
+    return rows.map((row) => {
+      if (row.kind !== "turn_work") return row;
+      const keys = turnWorkAnchorKeys(row);
+      const known = keys.map((key) => ids.get(key)).find((id): id is string => id !== undefined && !used.has(id));
+      const id = known ?? (used.has(row.id) ? `${row.id}:${used.size}` : row.id);
+      used.add(id);
+      for (const key of keys) ids.set(key, id);
+      return id === row.id ? row : { ...row, id };
+    });
+  }, [rows, scope]);
 }

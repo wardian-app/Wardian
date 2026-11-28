@@ -26,6 +26,7 @@ import {
 } from "../chat/chatPresentation";
 import { chatTranscriptRowKey } from "../chat/chatTurns";
 import { deriveCommittedChatRows, useCommittedChatPresentation } from "../chat/committedChatPresentation";
+import { useStableTurnWorkIds } from "../chat/turnWorkRows";
 import { qualifiedChatPreviewBridge, useChatPresentationScope } from "../chat/chatPreviewIdentity";
 import { useChatHandoffAnchor } from "../chat/chatScrollAnchor";
 import { RemoteAttachmentComposer } from "./RemoteAttachmentComposer";
@@ -1066,12 +1067,13 @@ function ChatPane({
     }
   }, [loadingOlder, visibleEvents, settledPrepend]);
   const progressText = chatReadProgress(progress, visibleEvents.some(shouldShowChatEvent));
-  const rows = useMemo(
+  const derivedRows = useMemo(
     () =>
       deriveCommittedChatRows(visibleEvents, committedPresentation,
         readingPresentation.boundaries, hasOlder),
     [hasOlder, visibleEvents, committedPresentation, readingPresentation.boundaries],
   );
+  const rows = useStableTurnWorkIds(derivedRows, presentationScope);
   useChatHandoffAnchor(scrollRef, presentationScope, JSON.stringify(rows.map((row) => [row.kind, chatTranscriptRowKey(row)])),
     qualifiedChatPreviewBridge(presentationPage) ? presentationPage?.generation : undefined);
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
