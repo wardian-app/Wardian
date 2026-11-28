@@ -143,7 +143,7 @@ function hasChatBodyDetails(event: AgentChatEvent): boolean {
   return typeof event.metadata.chat_detail_ref === "string" || event.metadata.chat_body_pending === true || event.metadata.chat_body_unavailable === true;
 }
 
-function ChatEventDetails({ events, load }: { events: AgentChatEvent[]; load?: ChatDetailLoader }) {
+export function ChatEventDetails({ events, load }: { events: AgentChatEvent[]; load?: ChatDetailLoader }) {
   return <>
     {events.filter(hasChatBodyDetails).map((event) => {
       const displayKey = typeof event.metadata.chat_display_key === "string" ? event.metadata.chat_display_key : event.id;
@@ -270,8 +270,9 @@ export function MessageRow({
   onLoadDetail?: ChatDetailLoader;
 }) {
   const role = event.role ?? "assistant";
-  const inbound = role === "user" ? inboundMessage(event.text) : null;
-  if (inbound) return <InboundMessageRow message={inbound} linkHandling={linkHandling} />;
+  // A clipped preview with saved detail can still be a delivery; its full text decides.
+  const inbound = role === "user" ? inboundMessage(event.text, hasChatBodyDetails(event)) : null;
+  if (inbound) return <InboundMessageRow event={event} message={inbound} linkHandling={linkHandling} onLoadDetail={onLoadDetail} />;
   const text = event.text?.trimEnd() || event.title || "";
   const isAssistant = role === "assistant";
   const isCardRole = role === "system" || role === "tool";
