@@ -370,6 +370,9 @@ test("shows the actual command for a lifecycle-labelled tool call", async ({ pag
 
   await page.goto("/", { waitUntil: "domcontentloaded" });
   const card = page.getByTestId("agent-card");
+  // The step sits inside the turn's collapsed work summary until opened. At this
+  // phone width the workbench sidebars overlay the card, so click it directly.
+  await card.getByTestId("chat-turn-work-summary").getByRole("button").evaluate((button: HTMLButtonElement) => button.click());
   const summary = card.getByTestId("chat-tool-call-summary");
   await expect(summary).toBeVisible();
   await expect(summary).toContainText("$ npm test -- chat");
