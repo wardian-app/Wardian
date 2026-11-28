@@ -56,11 +56,13 @@ export function overBudget(durations, budget) {
 
 /**
  * Hosted runners stall: one Windows run measured a 0.4 s test at 9 s. A test
- * over budget is re-timed alone, and only a test that is over again (or that
- * the retry did not run) fails.
+ * over budget is re-timed alone, and its faster sample counts. The retry is not
+ * the better sample: one test took 21 s in the full run and 88 s alone. Only a
+ * test over budget in both samples fails; a test the retry did not run keeps
+ * its first sample.
  */
 export function confirmOverBudget(over, retried, budget) {
-  return overBudget(new Map(over.map(({ name, seconds }) => [name, retried.get(name) ?? seconds])), budget);
+  return overBudget(new Map(over.map(({ name, seconds }) => [name, Math.min(seconds, retried.get(name) ?? seconds)])), budget);
 }
 
 /** Re-run only the named tests, exactly, keeping the original cargo selection. */
