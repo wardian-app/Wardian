@@ -72,6 +72,8 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     await expect(paragraph).toHaveCount(1);
     captured = true;
     await expect(page.getByText("The file reports that the audit is complete.", { exact: true })).toBeVisible();
+    // Once captured, the narration belongs to the turn's collapsed work.
+    await page.getByTestId("chat-turn-work-summary").getByRole("button").click();
     await expect(paragraph).toHaveCount(1);
     await page.getByRole("button", { name: "Show output", exact: true }).click();
     await expect(page.getByText("Audit complete.", { exact: true })).toBeVisible();

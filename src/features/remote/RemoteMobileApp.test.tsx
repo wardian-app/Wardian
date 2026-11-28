@@ -19,6 +19,15 @@ import { RemoteWatchlistView } from "./RemoteWatchlistView";
 import { useRemoteStore } from "./useRemoteStore";
 import { useSettingsStore } from "../../store/useSettingsStore";
 
+/** Opens every collapsed turn-work summary so its step rows render. */
+async function expandTurnWork() {
+  await waitFor(() => expect(document.querySelector('[data-testid="chat-turn-work-summary"]')).not.toBeNull());
+  for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-testid="chat-turn-work-summary"] > button[aria-expanded="false"]'))) {
+    fireEvent.click(button);
+  }
+}
+
+
 vi.mock("./remoteIdentity", () => ({
   createRemoteDeviceKeyPair: vi.fn(),
   defaultRemoteDeviceLabel: vi.fn(),
@@ -2007,10 +2016,11 @@ describe("RemoteMobileApp", () => {
     expect(await screen.findByText("No chat transcript yet.")).toBeVisible();
   });
 
-  it("retains visible full tool output when an older mobile page crosses the work-group threshold", async () => {
+  it("keeps a turn's collapsed work and its answer in place when an older mobile page loads", async () => {
     const chatEvents: AgentChatEvent[] = Array.from({ length: 45 }, (_, i) => ({
       id: `row-${i + 1}`, session_id: "agent-1", provider: "codex", kind: i >= 4 && i <= 6 ? "tool_result" : "message",
-      role: i >= 4 && i <= 6 ? "tool" : "assistant", text: i >= 4 && i <= 6 ? `Full output ${i + 1}\nVisible second line` : `Message ${i + 1}`,
+      role: i >= 4 && i <= 6 ? "tool" : "assistant", text: i >= 4 && i <= 6 ? `Full output ${i + 1}
+Visible second line` : `Message ${i + 1}`,
       title: null, status: "succeeded", turn_id: `turn-${i}`, source: "provider_log", command: null,
       exit_code: 0, path: null, language: null, created_at: null, sequence: i + 1, metadata: {},
     }));
@@ -2019,19 +2029,14 @@ describe("RemoteMobileApp", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
     await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
     await screen.findByText("Message 45");
-    const first = document.querySelector<HTMLElement>('[data-chat-row-key="row-6"]')!;
-    const second = document.querySelector<HTMLElement>('[data-chat-row-key="row-7"]')!;
-    const scroll = first.closest("section")!;
-    scroll.getBoundingClientRect = () => new DOMRect(0, 0, 390, 600);
-    first.getBoundingClientRect = () => new DOMRect(0, 20, 390, 294);
-    second.getBoundingClientRect = () => new DOMRect(0, 320, 390, 40);
-    const originalContent = first.textContent;
+    const workRow = document.querySelector<HTMLElement>('[data-chat-row-key="turn-work:row-44"]')!;
+    const answer = document.querySelector<HTMLElement>('[data-chat-row-key="row-45"]')!;
+    expect(workRow).toHaveTextContent("Earlier work · 2 steps");
+    expect(screen.queryByText(/Full output 6/)).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Load older transcript" }));
-    await screen.findByText("Message 1");
-    expect(document.querySelector('[data-chat-row-key="row-6"]')).toBe(first);
-    expect(first.textContent).toBe(originalContent);
-    expect(first.getBoundingClientRect().height).toBe(294);
-    expect(screen.queryByTestId("chat-work-group")).not.toBeInTheDocument();
+    await waitFor(() => expect(workRow).toHaveTextContent("Worked · 3 steps"));
+    expect(document.querySelector('[data-chat-row-key="turn-work:row-44"]')).toBe(workRow);
+    expect(document.querySelector('[data-chat-row-key="row-45"]')).toBe(answer);
   });
 
   it("loads older remote chat pages from the latest transcript window", async () => {
@@ -2100,6 +2105,7 @@ describe("RemoteMobileApp", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
     await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+    await expandTurnWork();
 
     const row = await screen.findByTestId("terminal-fallback-row");
     expect(row).toHaveTextContent("terminal line 1");
@@ -2306,6 +2312,7 @@ describe("RemoteMobileApp", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
     await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+    await expandTurnWork();
 
     const group = await screen.findByText("Work log");
     const article = group.closest("article") as HTMLElement;
@@ -2366,6 +2373,7 @@ describe("RemoteMobileApp", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
     await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+    await expandTurnWork();
 
     const summary = await screen.findByTestId("chat-tool-call-summary");
     expect(summary).toHaveTextContent("$ npm test -- chat");
@@ -2422,6 +2430,7 @@ describe("RemoteMobileApp", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
     await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+    await expandTurnWork();
 
     expect(await screen.findByTestId("tool-diff-panel")).toHaveTextContent("1 file");
     expect(screen.getByTestId("tool-diff-panel")).toHaveTextContent("+1");
@@ -2516,6 +2525,7 @@ describe("RemoteMobileApp", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
     await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+    await expandTurnWork();
 
     const group = (await screen.findByText("Work log")).closest("article") as HTMLElement;
     await userEvent.click(within(group).getByRole("button", { name: "Show all" }));

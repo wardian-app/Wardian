@@ -258,6 +258,8 @@ for (const surface of ["desktop", "remote"] as const) {
     };
     const turn = page.getByTestId("chat-committed-turn");
     const legacy = page.getByTestId("chat-work-group");
+    // The legacy work sits inside the turn's collapsed work summary until opened.
+    await page.getByTestId("chat-turn-work-summary").getByRole("button").first().click({ timeout: 15_000 });
     await expect(legacy).toBeVisible({ timeout: 15_000 });
     await expect(turn).toHaveCount(0);
     await legacy.getByTitle("Show all work").click();
@@ -290,6 +292,7 @@ for (const surface of ["desktop", "remote"] as const) {
     await capture("running");
     const certifiedKeys = await turn.locator("[data-step-key]").evaluateAll((elements) => elements.map((element) => element.getAttribute("data-step-key")));
     await advance("extension");
+    await page.getByTestId("chat-turn-work-summary").getByRole("button").first().click({ timeout: 15_000 });
     await expect(legacy).toBeVisible({ timeout: 15_000 });
     expect(await turn.evaluate((element, original) => element === original, shared)).toBe(true);
     await expect(turn.getByRole("button", { name: /Incomplete.*Incomplete history/ })).toHaveAttribute("aria-expanded", "true");

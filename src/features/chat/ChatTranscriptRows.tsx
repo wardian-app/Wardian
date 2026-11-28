@@ -5,6 +5,7 @@ import type { AgentChatDetail, AgentChatEvent, AgentChatRole, ChatStepDetail } f
 import { CommittedTurn } from "./CommittedTurn";
 import { InboundMessageRow } from "./InboundMessageRow";
 import { inboundMessage } from "./inboundMessages";
+import { TurnWork } from "./TurnWork";
 import { utf8Window } from "./chatReadState";
 import {
   classifyActivityLanguage,
@@ -115,6 +116,9 @@ export function ChatTranscriptRow({
   const onLoadDetail = detailsDisabled ? undefined : requestedDetail;
   const onLoadStepDetail = detailsDisabled ? undefined : requestedStepDetail;
   if (row.kind === "committed_turn") return <CommittedTurn row={row} agentIsWorking={agentIsWorking} isSubmitting={isSubmitting}
+    linkHandling={linkHandling} onApprovalSubmit={onApprovalSubmit} onOpenFile={onOpenFile} liveApprovalId={liveApprovalId}
+    onLoadDetail={onLoadDetail} onLoadStepDetail={onLoadStepDetail} workExpansion={workExpansion} detailsDisabled={detailsDisabled} />;
+  if (row.kind === "turn_work") return <TurnWork row={row} agentIsWorking={agentIsWorking} isSubmitting={isSubmitting}
     linkHandling={linkHandling} onApprovalSubmit={onApprovalSubmit} onOpenFile={onOpenFile} liveApprovalId={liveApprovalId}
     onLoadDetail={onLoadDetail} onLoadStepDetail={onLoadStepDetail} workExpansion={workExpansion} detailsDisabled={detailsDisabled} />;
   if (row.kind === "turn_change_summary") return <TurnChangeCard onOpenFile={onOpenFile} row={row} />;

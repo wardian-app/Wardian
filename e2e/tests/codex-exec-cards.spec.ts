@@ -48,6 +48,7 @@ test("Codex custom exec calls retain their input details beside output", async (
   });
   await page.goto("/remote", { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: "Open Codex Work details" }).click();
+  await page.getByTestId("chat-turn-work-summary").getByRole("button").click();
   await expect(page.getByText("exec", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Show output", exact: true }).click();
   await expect(page.getByText(result.text!, { exact: true })).toBeVisible();

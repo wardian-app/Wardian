@@ -12,7 +12,8 @@ export function useChatWorkExpansion(scope: string, events: readonly AgentChatEv
   const saved = useRef({ scope, open: new Set<string>() });
   if (saved.current.scope !== scope) saved.current = { scope, open: new Set() };
   const live = new Set(events.map(chatEventDisplayKey));
-  for (const key of saved.current.open) if (!live.has(key)) saved.current.open.delete(key);
+  // Turn-level keys carry a prefix so they never open the work groups inside a turn.
+  for (const key of saved.current.open) if (!live.has(key.replace(/^turn-work:/, ""))) saved.current.open.delete(key);
   return {
     isOpen: (keys) => keys.some((key) => saved.current.open.has(key)),
     setOpen: (keys, open) => { for (const key of keys) { if (open) saved.current.open.add(key); else saved.current.open.delete(key); } },

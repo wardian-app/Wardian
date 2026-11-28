@@ -16,6 +16,22 @@ import { chatPageInvokeFixture } from "../../test/chatPageTestFixture";
 import { actualProducerBatch, actualProducerPage } from "../../test/chatRevalidationTestFixture";
 import { coldSourcePreviewIdentityFixture, previewGenerationRolloverFixture, previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
 
+/** Opens collapsed turn-work summaries already rendered; safe under fake timers. */
+function openTurnWork() {
+  for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-testid="chat-turn-work-summary"] > button[aria-expanded="false"]'))) {
+    fireEvent.click(button);
+  }
+}
+
+/** Opens every collapsed turn-work summary so its step rows render. */
+async function expandTurnWork() {
+  await waitFor(() => expect(document.querySelector('[data-testid="chat-turn-work-summary"]')).not.toBeNull());
+  for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-testid="chat-turn-work-summary"] > button[aria-expanded="false"]'))) {
+    fireEvent.click(button);
+  }
+}
+
+
 const markdownWork = vi.hoisted(() => vi.fn());
 vi.mock("react-markdown", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-markdown")>();
@@ -145,6 +161,7 @@ describe("AgentChatView", () => {
     const geometry = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
     try {
       await act(async () => {});
+      openTurnWork();
       expect(screen.queryByTestId("chat-committed-turn")).toBeNull();
       fireEvent.click(screen.getByTitle("Show all work"));
 
@@ -199,6 +216,7 @@ describe("AgentChatView", () => {
     };
     try {
       await act(async () => {});
+      openTurnWork();
       expect(screen.queryByTestId("chat-committed-turn")).toBeNull();
       expect(screen.getByTestId("chat-work-group")).toBeVisible();
 
@@ -398,6 +416,7 @@ describe("AgentChatView", () => {
         status="Processing"
       />,
     );
+    await expandTurnWork();
 
     expect(await screen.findByText("Summarize the failing test.")).toBeInTheDocument();
     expect(screen.getByText("expect(result).toBe(true);")).toBeInTheDocument();
@@ -743,6 +762,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" status="Processing" />);
+    await expandTurnWork();
 
     expect(await screen.findByText("Run command")).toBeInTheDocument();
     expect(screen.getByText("Working...")).toBeInTheDocument();
@@ -788,6 +808,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     expect(await screen.findByText("shell command")).toBeInTheDocument();
     expect(screen.getByText("running")).toBeInTheDocument();
@@ -951,6 +972,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     expect(await screen.findByText("Edit file")).toBeInTheDocument();
     expect(screen.queryByText("Work log")).not.toBeInTheDocument();
@@ -970,6 +992,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const group = await screen.findByText("Work log");
     const article = group.closest("article") as HTMLElement;
@@ -996,6 +1019,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const summary = await screen.findByTestId("chat-tool-call-summary");
     expect(summary).toHaveTextContent("$ npm test -- chat");
@@ -1044,6 +1068,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const group = await screen.findByText("Work log");
     const article = group.closest("article") as HTMLElement;
@@ -1066,6 +1091,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const group = await screen.findByText("Work log");
     const article = group.closest("article") as HTMLElement;
@@ -1103,6 +1129,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const activityArticle = (await screen.findByText("git status --short --branch")).closest("article") as HTMLElement;
     fireEvent.click(within(activityArticle).getByRole("button", { name: "Copy activity output" }));
@@ -1141,6 +1168,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const diffPanel = await screen.findByTestId("tool-diff-panel");
     expect(diffPanel).toHaveTextContent("1 file");
@@ -1175,6 +1203,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const panel = await screen.findByTestId("tool-structured-edit");
     expect(panel).toHaveTextContent("Before/after");
@@ -1367,6 +1396,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const panel = await screen.findByTestId("tool-structured-edit");
     expect(panel).toHaveTextContent("New contents");
@@ -1400,6 +1430,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const panel = await screen.findByTestId("tool-diff-panel");
     expect(panel).toHaveTextContent("2 files");
@@ -1437,34 +1468,37 @@ describe("AgentChatView", () => {
     expect(await screen.findByText("message 1")).toBeInTheDocument();
   });
 
-  it("preserves a visible full tool row and following answer when older work crosses the group threshold", async () => {
+  it("keeps a turn's collapsed work and its answer in place when older steps of that turn load", async () => {
     const pending = deferred<AgentChatPage>();
     const work = (id: string, sequence: number) => event({ id, sequence, kind: "tool_result", role: "tool",
-      title: "Tool result", status: "succeeded", text: `Full output ${id}\nVisible second line`, exit_code: 0 });
+      title: "Tool result", status: "succeeded", text: `Full output ${id}
+Visible second line`, exit_code: 0 });
     const current = [work("visible-one", 2), work("visible-two", 3), event({ id: "answer", sequence: 4, text: "Following answer" })];
     invokeMock.mockImplementation((command, args) => command !== "load_agent_chat_page" ? Promise.resolve(undefined)
       : (args as Record<string, unknown> | undefined)?.cursor ? pending.promise : Promise.resolve(olderReadPage({ events: current, progress: "ready" })));
     render(<AgentChatView sessionId="agent-1" refreshIntervalMs={60000} />);
     await screen.findByText("Following answer");
     const scroll = screen.getByTestId("agent-chat-scroll-region");
-    scroll.getBoundingClientRect = () => new DOMRect(0, 0, 300, 600);
-    Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1800 });
-    const first = scroll.querySelector<HTMLElement>('[data-chat-row-key="visible-one"]')!;
-    const second = scroll.querySelector<HTMLElement>('[data-chat-row-key="visible-two"]')!;
+    const workRow = scroll.querySelector<HTMLElement>('[data-chat-row-key="turn-work:visible-two"]')!;
     const answer = scroll.querySelector<HTMLElement>('[data-chat-row-key="answer"]')!;
-    first.getBoundingClientRect = () => new DOMRect(0, 20 + (screen.queryByText(/Full output older/) ? 100 : 0), 300, 294);
-    second.getBoundingClientRect = () => new DOMRect(0, 320, 300, 40);
-    answer.getBoundingClientRect = () => new DOMRect(0, 366, 300, 40);
-    const firstContent = first.textContent;
-    scroll.scrollTop = 100;
+    expect(workRow).toHaveTextContent("2 steps");
+    expect(screen.queryByText(/Full output visible-one/)).toBeNull();
+    fireEvent.click(within(workRow).getByRole("button", { name: /Earlier work/ }));
+    expect(await within(workRow).findByText(/Full output visible-one/)).toBeVisible();
+    scroll.getBoundingClientRect = () => new DOMRect(0, 0, 300, 600);
+    scroll.querySelectorAll<HTMLElement>("[data-chat-row-key], [data-chat-inner-row-key]").forEach((element, index) => {
+      element.getBoundingClientRect = () => new DOMRect(0, 20 + index * 40, 300, 40);
+    });
+    // The older page reveals this turn's prompt, which would otherwise rekey the row.
     fireEvent.scroll(scroll);
-    await act(async () => pending.resolve(olderReadPage({ events: [work("older", 1)], progress: "ready", next_before: null })));
-    expect(scroll.querySelector('[data-chat-row-key="visible-one"]')).toBe(first);
+    await act(async () => pending.resolve(olderReadPage({ events: [event({ id: "prompt", sequence: 0, role: "user", text: "Run the checks" }), work("older", 1)],
+      progress: "ready", next_before: null })));
+    expect(screen.getByText("Run the checks")).toBeInTheDocument();
+    expect(scroll.querySelector('[data-chat-row-key="turn-work:visible-two"]')).toBe(workRow);
     expect(scroll.querySelector('[data-chat-row-key="answer"]')).toBe(answer);
-    expect(first.textContent).toBe(firstContent);
-    expect(first.getBoundingClientRect().height).toBe(294);
-    expect(scroll.scrollTop).toBe(200);
-    expect(screen.queryByTestId("chat-work-group")).not.toBeInTheDocument();
+    expect(workRow).toHaveTextContent("3 steps");
+    expect(within(workRow).getByRole("button", { name: /Worked · 3 steps/ })).toHaveAttribute("aria-expanded", "true");
+    expect(within(workRow).getByText(/Full output visible-one/)).toBeVisible();
   });
 
   it.each([true, false])("preserves the answer through backfill and follows new tail only at bottom (%s)", async (atBottom) => {
@@ -1782,6 +1816,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     expect(await screen.findByText("Approval required")).toBeInTheDocument();
     expect(screen.queryByText("Work log")).not.toBeInTheDocument();
@@ -1821,6 +1856,11 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    // The live permission request is visible before any work is expanded.
+    expect(await screen.findByText("Approval required")).toBeVisible();
+    expect(screen.getByText("Do you want to proceed?")).toBeVisible();
+    expect(screen.queryByText("Prepare command")).not.toBeInTheDocument();
+    await expandTurnWork();
 
     expect(await screen.findByText("Approval required")).toBeInTheDocument();
     expect(screen.queryByText("Work log needs attention")).not.toBeInTheDocument();
@@ -1842,6 +1882,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const block = await screen.findByText("Long terminal output");
     const activity = block.closest("article");
@@ -1867,6 +1908,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const row = await screen.findByTestId("terminal-fallback-row");
     expect(within(row).getByText("Terminal fallback")).toBeInTheDocument();
@@ -2001,6 +2043,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     expect(await screen.findByText("Tool result")).toBeInTheDocument();
     expect(screen.getByText("Changed files")).toBeInTheDocument();
@@ -2127,6 +2170,7 @@ describe("AgentChatView", () => {
     ]);
 
     render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const message = await screen.findByText("Copy this message.");
     const messageArticle = message.closest("article") as HTMLElement;
@@ -2183,6 +2227,7 @@ describe("AgentChatView", () => {
     ]);
 
     const { container } = render(<AgentChatView sessionId="agent-1" />);
+    await expandTurnWork();
 
     const jsonRow = (await screen.findByText("JSON output")).closest("article") as HTMLElement;
     expect(container.querySelector('[data-token="json-key"]')).toBeNull();

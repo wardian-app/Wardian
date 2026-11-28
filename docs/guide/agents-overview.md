@@ -97,9 +97,14 @@ by the final answer, in both desktop and Remote Chat. Open the summary to see
 ordered steps and muted narration, then **Show output** on a step to inspect
 its input and retained output. JSON is formatted only inside that detail.
 Long output stays in a bounded scrolling area; **Earlier output not shown**
-marks a clipped tail. Counts marked **at least** are incomplete. Older history,
-unproven turn membership, other providers, and previews without a proven saved
-conversation retain the existing Work log presentation.
+marks a clipped tail. Counts marked **at least** are incomplete.
+
+Every other turn reads the same way: your message, one collapsed
+**Worked · N steps** line, then the agent's last message as the answer. Open
+that line to see the turn's steps, Work logs and muted narration in order.
+**Working** marks a turn whose latest row is still a step. **Earlier work**
+marks steps whose prompt is on an older page. Approvals stay visible outside
+the summary.
 
 Chat opens with the available recent messages while turn qualification runs
 later. Running agents keep the composer available before the turn view appears.
