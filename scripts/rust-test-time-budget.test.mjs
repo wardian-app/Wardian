@@ -52,6 +52,13 @@ test('allowlisted tests use their own ceiling and others the default', () => {
   assert.deepEqual(over, [{ name: 'a::slow', seconds: 40, limit: 10 }]);
 });
 
+test('the faster of the two samples decides, so a slower retry alone cannot fail a test', () => {
+  const budget = { default_seconds: 10, allow: { 'a::warmed': 40 } };
+  const over = [{ name: 'a::warmed', seconds: 21, limit: 10 }];
+  assert.deepEqual(confirmOverBudget(over, new Map([['a::warmed', 88]]), { default_seconds: 10, allow: {} }), [{ name: 'a::warmed', seconds: 21, limit: 10 }]);
+  assert.deepEqual(confirmOverBudget(over, new Map([['a::warmed', 88]]), budget), []);
+});
+
 test('only a test that is over budget again when re-timed alone fails', () => {
   const budget = { default_seconds: 10, allow: {} };
   const over = [{ name: 'a::stalled', seconds: 12, limit: 10 }, { name: 'a::slow', seconds: 70, limit: 10 }, { name: 'a::unretried', seconds: 11, limit: 10 }];
