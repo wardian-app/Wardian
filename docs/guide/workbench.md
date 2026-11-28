@@ -36,6 +36,9 @@ history browsing and disable message, approval, interrupt, and model changes.
 The history model picker and an Off agent's configuration show the saved model
 or provider default until you choose **Choose model**. That explicit action
 discovers available models; opening history or selecting an Off agent does not.
+When you activate **Choose model** with the keyboard, focus moves to the model
+selector once discovery finishes. If you move elsewhere while it loads, your
+new focus stays where you left it.
 
 ## Work with Tabs and Panes
 
