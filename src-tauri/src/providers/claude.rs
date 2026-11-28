@@ -413,12 +413,11 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn parse_output(&self, line: &str) -> Option<AgentEvent> {
-        // Transcript records carry permission requests as structured events, and
-        // their text is the agent's own content, which can quote a prompt.
-        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
-            return is_permission_prompt_line(line)
-                .then(|| AgentEvent::ActionRequired { message: "".into() });
-        };
+        // Permission prompts arrive as structured `permission_request` records
+        // and through the PermissionRequest hook every interactive Claude spawn
+        // installs. Terminal text is the agent's own output, which can quote or
+        // paraphrase a prompt, so it never marks action required.
+        let parsed = serde_json::from_str::<serde_json::Value>(line).ok()?;
         let msg_type = parsed.get("type")?.as_str()?;
 
         // Example Claude stream-json mapping:
@@ -510,17 +509,6 @@ pub(crate) fn claude_output_has_bypass_permissions_consent_prompt(output: &str) 
     compact.contains("claudecoderunninginbypasspermissionsmode")
         && compact.contains("byproceedingyouacceptallresponsibility")
         && compact.contains("yesiaccept")
-}
-
-/// A terminal line that is Claude Code's own permission prompt, not content
-/// that mentions one. The prompt renders alone on its line, inside a box.
-/// This is a fallback: the `PermissionRequest` hook reports real prompts.
-fn is_permission_prompt_line(line: &str) -> bool {
-    let line = crate::utils::strip_ansi_controls(line);
-    let text = line.trim_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '┃' | '║' | '|'));
-    text == "Do you want to proceed?"
-        || (text.starts_with("Allow reading from ") && text.ends_with('?'))
-        || (text.starts_with("This command requires approval") && !text.contains(['"', '`', '=']))
 }
 
 #[cfg(test)]
@@ -645,25 +633,15 @@ SET dp0=%~dp0
     }
 
     #[test]
-    fn permission_prompt_text_is_recognized_only_as_the_prompt_line() {
+    fn terminal_text_never_marks_action_required() {
         let p = make_provider();
         for line in [
             "Do you want to proceed?",
             "│ Do you want to proceed?                │",
-            "\u{1b}[1m Do you want to proceed?\u{1b}[22m",
-            "  Allow reading from D:/workspace/other?",
+            "This command requires approval before it can run, so I used a read-only check.",
             "This command requires approval",
-        ] {
-            assert_eq!(
-                p.parse_output(line),
-                Some(AgentEvent::ActionRequired { message: "".into() }),
-                "{line}"
-            );
-        }
-        for line in [
+            "  Allow reading from D:/workspace/other?",
             "$ python - <<'EOF' ... text: \"Do you want to proceed?\",",
-            "  1828   text: \"Do you want to proceed?\",",
-            "The test asserts the card shows Do you want to proceed? before expansion.",
         ] {
             assert_eq!(p.parse_output(line), None, "{line}");
         }
