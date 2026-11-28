@@ -53,7 +53,27 @@ export interface TurnChangeSummaryRow {
   scope: "turn" | "whole_history";
 }
 
-export type ChatTranscriptRowModel = PresentedChatRow | TurnChangeSummaryRow | CommittedTurnRow;
+/**
+ * A turn's work (steps and narration) collapsed into one summary row, so the
+ * prompt and the answer read as a conversation. The wrapped rows render
+ * unchanged when it is expanded.
+ */
+export interface TurnWorkRow {
+  kind: "turn_work";
+  id: string;
+  rows: ChatTranscriptRowModel[];
+  step_count: number;
+  failed_step_count: number;
+  latest_step: string | null;
+  /** An answer follows this work in the same turn. */
+  answered: boolean;
+  /** The turn's prompt is not loaded, so this is only its later work. */
+  leading: boolean;
+  /** No later turn follows on this page, so the turn may still be running. */
+  trailing: boolean;
+}
+
+export type ChatTranscriptRowModel = PresentedChatRow | TurnChangeSummaryRow | CommittedTurnRow | TurnWorkRow;
 
 /** One tool action: the call plus whatever results were merged into it. */
 type ChatAction = AgentChatEvent[];

@@ -4,6 +4,7 @@ import { derivePresentedChatRows, type ChatPresentationBoundary } from "../grid/
 import { withTurnChangeSummaries, type ChatTranscriptRowModel } from "./chatTurns";
 import { isThinkingIndicator, shouldShowChatEvent } from "./chatPresentation";
 import { chatPresentationPayload, qualifiedChatPreviewBridge } from "./chatPreviewIdentity";
+import { markTrailingTurnWork, withCollapsedTurnWork } from "./turnWorkRows";
 
 export interface CommittedTurnRow {
   kind: "committed_turn";
@@ -84,8 +85,10 @@ export function deriveCommittedChatRows(
   events: AgentChatEvent[], presentation: ChatPresentationV1 | null,
   boundaries?: ReadonlyMap<string, ChatPresentationBoundary>, hasOlder = false,
 ): ChatTranscriptRowModel[] {
-  const legacy = (rows: AgentChatEvent[]) => withTurnChangeSummaries(derivePresentedChatRows(rows.filter(shouldShowChatEvent), boundaries), { has_older_events: hasOlder });
-  if (!presentation) return legacy(events);
+  const legacy = (rows: AgentChatEvent[], leading = true) => withCollapsedTurnWork(
+    withTurnChangeSummaries(derivePresentedChatRows(rows.filter(shouldShowChatEvent), boundaries), { has_older_events: hasOlder }),
+    { has_older_events: hasOlder && leading });
+  if (!presentation) return markTrailingTurnWork(legacy(events));
   const byId = new Map(events.map((event) => [event.id, event]));
   const owners = new Map<string, CommittedTurnRow>();
   for (const turn of presentation.turns) {
@@ -115,7 +118,7 @@ export function deriveCommittedChatRows(
   const result: ChatTranscriptRowModel[] = [];
   const emitted = new Set<string>();
   let pending: AgentChatEvent[] = [];
-  const flush = () => { result.push(...legacy(pending)); pending = []; };
+  const flush = () => { result.push(...legacy(pending, result.length === 0)); pending = []; };
   for (const event of events) {
     const owner = owners.get(event.id);
     if (!owner) { pending.push(event); continue; }
@@ -125,5 +128,5 @@ export function deriveCommittedChatRows(
   const last = result[result.length - 1];
   if (last?.kind === "committed_turn" && last.turn.status === "running" && pending.every(isThinkingIndicator)) pending = [];
   flush();
-  return result;
+  return markTrailingTurnWork(result);
 }

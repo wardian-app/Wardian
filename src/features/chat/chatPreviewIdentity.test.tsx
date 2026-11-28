@@ -1,4 +1,4 @@
-import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useRef } from "react";
 import type { AgentChatPage } from "../../types";
@@ -16,6 +16,15 @@ import { useChatHandoffAnchor } from "./chatScrollAnchor";
 import { committedChatFixture } from "../../test/committedChatFixture";
 import { remoteClient } from "../remote/remoteClient";
 import { useRemoteStore } from "../remote/useRemoteStore";
+
+/** Opens every collapsed turn-work summary so its step rows render. */
+async function expandTurnWork() {
+  await waitFor(() => expect(document.querySelector('[data-testid="chat-turn-work-summary"]')).not.toBeNull());
+  for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-testid="chat-turn-work-summary"] > button[aria-expanded="false"]'))) {
+    fireEvent.click(button);
+  }
+}
+
 
 afterEach(() => vi.useRealTimers());
 
@@ -420,14 +429,14 @@ describe("exact producer preview identity", () => {
     expect(qualifiedChatPreviewBridge(initial)).not.toBeNull();
   });
 
-  it("admits a disjoint same-source provisional partition, and upgrades only N+1 in source order", () => {
+  it("admits a disjoint same-source provisional partition, and upgrades only N+1 in source order", async () => {
     const { mixed, upgraded, legacyRefs } = partitionedPreviewIdentityFixture();
     expect(qualifiedChatPreviewBridge(mixed)).not.toBeNull();
     expect(chatPageScopeRelation(mixed, upgraded)).toBe("bridge");
     expect(chatPresentationScope(mixed, mixed.session_id)).toBe(chatPresentationScope(upgraded, mixed.session_id));
     const initialEvents = applyChatPage([], mixed, "recent");
     const initialRows = deriveCommittedChatRows(initialEvents, chatPresentationV1(mixed));
-    expect(initialRows.map((row) => row.kind)).toEqual(["committed_turn", "event", "work_group"]);
+    expect(initialRows.map((row) => row.kind)).toEqual(["committed_turn", "event", "turn_work"]);
     const nextEvents = applyChatPage(initialEvents, upgraded, "recent");
     expect(nextEvents.map(chatEventDisplayKey)).toEqual(initialEvents.map(chatEventDisplayKey));
     expect(nextEvents.slice(-legacyRefs.length).map(chatEventDisplayKey)).toEqual(legacyRefs);
@@ -445,7 +454,7 @@ describe("exact producer preview identity", () => {
     expect(deriveCommittedChatRows(unbound.events, chatPresentationV1(unbound)).every((row) => row.kind !== "committed_turn")).toBe(true);
   });
 
-  it.each(["next-turn", "cold-native"] as const)("preserves existing turns and restores the exact work anchor/expansion for %s qualification", (source) => {
+  it.each(["next-turn", "cold-native"] as const)("preserves existing turns and restores the exact work anchor/expansion for %s qualification", async (source) => {
     const partition = partitionedPreviewIdentityFixture();
     const native = coldSourcePreviewIdentityFixture();
     const { mixed, upgraded, legacyRefs } = source === "next-turn" ? partition
@@ -453,7 +462,7 @@ describe("exact producer preview identity", () => {
     const load = vi.fn();
     let phase = "mixed";
     let events = applyChatPage([], mixed, "recent");
-    const legacyWork = deriveCommittedChatRows(events, chatPresentationV1(mixed)).find((row) => row.kind === "work_group")!;
+    const legacyWork = deriveCommittedChatRows(events, chatPresentationV1(mixed)).find((row) => row.kind === "turn_work")!;
     const legacyWorkKey = chatTranscriptRowKey(legacyWork);
     const geometry = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       if (this.dataset.testid === "partition-scroll") return new DOMRect(0, 0, 400, 200);
@@ -478,6 +487,7 @@ describe("exact producer preview identity", () => {
       </div>)}</div>;
     }
     const view = render(<Transcript page={mixed} />);
+    await expandTurnWork();
     try {
       const firstTurn = screen.queryByTestId("chat-committed-turn");
       if (firstTurn) fireEvent.click(screen.getByRole("button", { name: /Working.*In progress/ }));
@@ -620,7 +630,7 @@ describe("exact producer preview identity", () => {
     expect(screen.getByRole("button", { name: "Past approval choice 1: Yes" })).toBeDisabled();
   });
 
-  it("transfers an expanded legacy work group by event alias, then closes the same shared turn without an early answer", () => {
+  it("transfers an expanded legacy work group by event alias, then closes the same shared turn without an early answer", async () => {
     const { legacy, provisional, canonical, closed } = previewIdentityFixture();
     const load = vi.fn();
     function Transcript({ page, events }: { page: AgentChatPage; events: AgentChatPage["events"] }) {
@@ -630,6 +640,7 @@ describe("exact producer preview identity", () => {
     }
     let events = applyChatPage([], legacy, "recent");
     const view = render(<Transcript page={legacy} events={events} />);
+    await expandTurnWork();
     fireEvent.click(screen.getAllByTitle("Show all work")[0]);
     events = applyChatPage(events, provisional, "recent");
     view.rerender(<Transcript page={provisional} events={events} />);

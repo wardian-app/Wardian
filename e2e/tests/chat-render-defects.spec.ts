@@ -76,6 +76,8 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     await page.goto("/remote", { waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: "Open Rendering Fixture details" }).click();
     await expect(page.getByText(prompt, { exact: true })).toHaveCount(1);
+    // A turn's work starts collapsed into one summary; its step rows render when opened.
+    await page.getByTestId("chat-turn-work-summary").getByRole("button", { name: /Worked/ }).click();
     const group = page.getByTestId("chat-work-group");
     const screenshotDir = process.env.WARDIAN_CHAT_RENDER_SCREENSHOT_DIR;
     const capture = async (state: string) => {

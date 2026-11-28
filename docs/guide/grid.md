@@ -43,9 +43,11 @@ Chat text and attachments remain editable while an agent is processing. With con
 
 Messages that Wardian delivers to an agent from another agent appear as **Message from** or **Reply from** that agent, showing only the message body, rather than as your own prompt. Claude Code background-task notices and continued-session summaries appear as one muted line that expands to the full notice.
 
-Work logs show tool names and short descriptions. Expand a work log to inspect
-each item, then use **Show output** or that item's **Show full details** to read
-its output. Collapsing the work log hides its details. Structured tool output
+Each turn shows your message, one collapsed **Worked · N steps** line, and the
+agent's answer. Open that line to see the turn's steps and narration. Work logs
+inside it show tool names and short descriptions; expand one to inspect each
+item, then use **Show output** or that item's **Show full details** to read its
+output. Collapsing the work log hides its details. Structured tool output
 stays inside the item instead of becoming the work-log title.
 
 Accepted prompts appear once their conversation row is available. When delivery

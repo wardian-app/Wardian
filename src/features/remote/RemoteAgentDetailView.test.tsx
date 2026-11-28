@@ -10,6 +10,15 @@ import { committedChatFixture } from "../../test/committedChatFixture";
 import { previewIdentityFixture } from "../../../e2e/fixtures/chatPreviewIdentity";
 import { applyChatPage } from "../chat/chatReadState";
 
+/** Opens every collapsed turn-work summary so its step rows render. */
+async function expandTurnWork() {
+  await waitFor(() => expect(document.querySelector('[data-testid="chat-turn-work-summary"]')).not.toBeNull());
+  for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-testid="chat-turn-work-summary"] > button[aria-expanded="false"]'))) {
+    fireEvent.click(button);
+  }
+}
+
+
 const agent: RemoteAgentSummary = {
   session_id: "agent-1",
   session_name: "Coder",
@@ -205,11 +214,12 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     expect(load.mock.calls[0].slice(0, 4)).toEqual([agent.session_id, undefined, undefined, "step:read"]);
   });
 
-  it("hands off the same admission to one shared turn with its legacy work expansion intact", () => {
+  it("hands off the same admission to one shared turn with its legacy work expansion intact", async () => {
     const { legacy, provisional, canonical, closed } = previewIdentityFixture(agent.session_id);
     let events = applyChatPage([], legacy, "recent");
     useRemoteStore.setState({ activeAgentViewMode: "chat", chatEvents: events, chatPage: legacy, chatPresentationPage: legacy });
     render(<RemoteAgentDetailView agent={agent} />);
+    await expandTurnWork();
     fireEvent.click(screen.getByTitle("Show all work"));
     let section: HTMLElement | null = null;
     for (const page of [provisional, canonical, closed]) {

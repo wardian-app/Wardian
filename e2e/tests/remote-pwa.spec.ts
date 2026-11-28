@@ -799,6 +799,7 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
     }),
   );
   await page.getByRole("button", { name: "Chat", exact: true }).click();
+  await page.getByTestId("chat-turn-work-summary").getByRole("button", { name: /Worked|Working/ }).click();
   await expect(page.getByText("exec starting", { exact: true })).toHaveCount(0);
   await expect(page.getByText("exec running", { exact: true })).toHaveCount(0);
   await expect(page.getByText("exec", { exact: true })).toHaveCount(0);

@@ -183,8 +183,8 @@ export function AgentChatView({
   const readingPresentation = useChatReadingPresentation(presentationScope, displayEvents, page !== null);
   const committedPresentation = useCommittedChatPresentation(page, events);
   const chatRows = useMemo<ChatTranscriptRowModel[]>(
-    () => deriveCommittedChatRows(displayEvents, committedPresentation, readingPresentation.boundaries),
-    [displayEvents, committedPresentation, readingPresentation.boundaries],
+    () => deriveCommittedChatRows(displayEvents, committedPresentation, readingPresentation.boundaries, Boolean(page?.next_before)),
+    [displayEvents, committedPresentation, readingPresentation.boundaries, page?.next_before],
   );
   const visibleChatRows = chatRows;
   const progressText = page ? chatReadProgress(page.progress, visibleChatRows.length > 0) : null;
