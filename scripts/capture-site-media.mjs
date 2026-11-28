@@ -462,10 +462,9 @@ async function pushPty(page, sessionId, chunk) {
 /**
  * Strings that look like a real path but are not.
  *
- * `C:/projects/my-app` is the spawn form's own placeholder text, shipped in the
- * app, and `<absolute-workspace-path>` is the fixture placeholder.
+ * `<absolute-workspace-path>` is the sanitized fixture placeholder.
  */
-const ALLOWED_PATH_LIKE = ["C:/projects/my-app", "<absolute-workspace-path>"];
+const ALLOWED_PATH_LIKE = ["<absolute-workspace-path>"];
 
 /**
  * Fail if anything path-shaped reached the screen.
