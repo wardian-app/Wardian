@@ -1,8 +1,19 @@
 import { ChevronRight, Circle } from "lucide-react";
 import { useId, useState } from "react";
 import { ChatTranscriptRow, type ChatTranscriptRowProps } from "./ChatTranscriptRows";
-import { chatTranscriptRowKey, type TurnWorkRow } from "./chatTurns";
+import { chatEventDisplayKey } from "./chatEventIdentity";
+import { chatTranscriptRowKey, type ChatTranscriptRowModel, type TurnWorkRow } from "./chatTurns";
 import { turnWorkAnchorKeys } from "./turnWorkRows";
+
+/**
+ * A Work log's own id names its first and last step, so it changes as steps
+ * arrive. Inside an open turn it is keyed by its first step, which stays put,
+ * so the log and any output opened in it stay mounted.
+ */
+function innerRowKey(row: ChatTranscriptRowModel): string {
+  const first = row.kind === "work_group" ? row.entries[0]?.primary_event : undefined;
+  return first ? `work-group:${chatEventDisplayKey(first)}` : chatTranscriptRowKey(row);
+}
 
 /**
  * One quiet, collapsed line for a turn's steps and narration. The answer stays
@@ -30,7 +41,7 @@ export function TurnWork({ row, ...props }: Omit<ChatTranscriptRowProps, "row"> 
       {running && row.latest_step ? <span className="min-w-0 truncate" title={row.latest_step}>· {row.latest_step}</span> : null}
     </button>
     {open ? <div id={id} className="mt-1 max-h-[min(32rem,60vh)] min-w-0 space-y-2 overflow-auto overscroll-contain">
-      {row.rows.map((inner) => <div key={chatTranscriptRowKey(inner)} data-chat-inner-row-key={chatTranscriptRowKey(inner)}
+      {row.rows.map((inner) => <div key={innerRowKey(inner)} data-chat-inner-row-key={chatTranscriptRowKey(inner)}
         className={inner.kind === "event" && inner.event.kind === "message" ? "chat-turn-narration" : undefined}>
         <ChatTranscriptRow {...props} row={inner} />
       </div>)}

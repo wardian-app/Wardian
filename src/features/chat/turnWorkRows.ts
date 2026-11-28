@@ -139,19 +139,23 @@ export function markTrailingTurnWork(rows: ChatTranscriptRowModel[]): ChatTransc
  * scroll position survive.
  */
 export function useStableTurnWorkIds(rows: ChatTranscriptRowModel[], scope: string): ChatTranscriptRowModel[] {
-  const memory = useRef<{ scope: string; ids: Map<string, string> }>({ scope, ids: new Map() });
+  const memory = useRef<{ scope: string; ids: ReadonlyMap<string, string> }>({ scope, ids: new Map() });
   return useMemo(() => {
-    if (memory.current.scope !== scope) memory.current = { scope, ids: new Map() };
-    const ids = memory.current.ids;
+    const previous = memory.current.scope === scope ? memory.current.ids : new Map<string, string>();
+    // Rebuilt every pass from the rows on screen, so it stays within the
+    // transcript's bounded window instead of growing with the conversation.
+    const next = new Map<string, string>();
     const used = new Set<string>();
-    return rows.map((row) => {
+    const result = rows.map((row) => {
       if (row.kind !== "turn_work") return row;
       const keys = turnWorkAnchorKeys(row);
-      const known = keys.map((key) => ids.get(key)).find((id): id is string => id !== undefined && !used.has(id));
+      const known = keys.map((key) => previous.get(key)).find((id): id is string => id !== undefined && !used.has(id));
       const id = known ?? (used.has(row.id) ? `${row.id}:${used.size}` : row.id);
       used.add(id);
-      for (const key of keys) ids.set(key, id);
+      for (const key of keys) next.set(key, id);
       return id === row.id ? row : { ...row, id };
     });
+    memory.current = { scope, ids: next };
+    return result;
   }, [rows, scope]);
 }

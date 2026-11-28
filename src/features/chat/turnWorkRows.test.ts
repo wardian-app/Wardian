@@ -85,4 +85,15 @@ describe("useStableTurnWorkIds", () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids[0]).not.toBe(first);
   });
+
+  it("forgets events that left the window, so a later turn never inherits a stale identity", () => {
+    const x = run("x");
+    const y = run("y");
+    const { result, rerender } = renderHook(({ events }) => useStableTurnWorkIds(rows(events, true), "scope"),
+      { initialProps: { events: [x, y] } });
+    expect(work(result.current)[0].id).toBe("turn-work:y");
+    rerender({ events: [run("later")] });
+    rerender({ events: [prompt("p"), x, run("z")] });
+    expect(work(result.current)[0].id).toBe("turn-work:p");
+  });
 });
